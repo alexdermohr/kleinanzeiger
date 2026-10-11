@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import patch
 
 from mark_api.storage import SnapshotStore
+from mark_api.results import ReadResult
 from mark_api.storage_owner import (
     StorageOwnerClient, StorageOwnerError, StorageOwnerServer, main,
     _attested_database, _record_from_json, _VERSION,
@@ -378,6 +379,126 @@ class StorageOwnerUnitTests(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertEqual(record.state, "in_progress")
         self.assertIsNotNone(record.execution_started_at)
+
+    def test_clearance_lookup_is_exact_and_cannot_mint_recovery_authority(self) -> None:
+        service = self.make_service()
+        claim = {"version": 1, "op": "claim", "key": "ui:clearance:1",
+                 "sha": SHA, "owner": "runtime:one", "at": NOW.isoformat()}
+        service.dispatch(claim)
+        service.dispatch(dict(claim, op="begin"))
+        query = {"version": 1, "op": "has_clearance", "key": "ui:clearance:1",
+                 "sha": SHA}
+        self.assertEqual(service.dispatch(query), {"cleared": False})
+        # Synthetic operator-side setup, NOT independent platform evidence.
+        trusted = SnapshotStore(self.database, create_if_missing=False)
+        trusted.record_write_recovery_clearance(
+            idempotency_key="ui:clearance:1", request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic-test-only", observed_at=NOW,
+        )
+        service.runtime_uid = os.geteuid()  # Framing-only, no OS UID proof.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertTrue(client.has_write_recovery_clearance(
+            idempotency_key="ui:clearance:1", request_sha256=SHA,
+        ))
+        self.assertFalse(client.has_write_recovery_clearance(
+            idempotency_key="ui:clearance:1", request_sha256="b" * 64,
+        ))
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch(dict(query, verification_kind="operator_verified_postread"))
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch(dict(query, op="record_write_recovery_clearance"))
+
+    def test_clearance_lookup_rejects_forged_response_without_retry(self) -> None:
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        for result in ({"cleared": 1}, {"cleared": None},
+                       {"cleared": True, "evidence": "forged"}, {}):
+            with self.subTest(result=result), patch.object(
+                client, "_call", return_value=result,
+            ), self.assertRaises(StorageOwnerError):
+                client.has_write_recovery_clearance(
+                    idempotency_key="ui:clearance:1", request_sha256=SHA,
+                )
+
+    def test_sync_status_exact_readback_without_recovery_mutation(self) -> None:
+        # The broker must expose the real sync journal, not infer success
+        # from last-known ad snapshots or synthesize a successful attempt.
+        service = self.make_service()
+        empty = service.dispatch({"version": 1, "op": "sync_status"})
+        self.assertEqual(empty, {"sync_status": {
+            "state": "never_attempted", "latest_attempt": None,
+            "last_successful_attempt": None,
+        }})
+        store = SnapshotStore(self.database, create_if_missing=False)
+        attempt = store.begin_sync_attempt(source="private_web_inventory", started_at=NOW)
+        failed = service.dispatch({"version": 1, "op": "sync_status"})
+        self.assertEqual(failed["sync_status"], store.sync_status())
+        self.assertEqual(failed["sync_status"]["state"], "in_progress")
+        store.fail_sync_attempt(
+            attempt, source="private_web_inventory", completed_at=NOW,
+            error_kind="transport_error",
+        )
+        service.runtime_uid = os.geteuid()  # Same-UID framing only.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.sync_status(), store.sync_status())
+        self.assertEqual(client.sync_status()["state"], "failed")
+        self.assertIsNone(client.sync_status()["last_successful_attempt"])
+        success_id = store.begin_sync_attempt(
+            source="private_web_inventory", started_at=NOW,
+        )
+        self.assertEqual(store.append_inventory_result(
+            ReadResult.success_empty(()), observed_at=NOW,
+            source="private_web_inventory", attempt_id=success_id,
+            completed_at=NOW,
+        ), 0)
+        self.assertEqual(client.sync_status()["state"], "success_empty")
+        self.assertEqual(
+            client.sync_status()["last_successful_attempt"]["id"], success_id,
+        )
+        failure_id = store.begin_sync_attempt(
+            source="private_web_inventory", started_at=NOW,
+        )
+        store.fail_sync_attempt(
+            failure_id, source="private_web_inventory", completed_at=NOW,
+            error_kind="transport_error",
+        )
+        status = client.sync_status()
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["last_successful_attempt"]["id"], success_id)
+        for fields in ({"sql": "DELETE FROM write_recovery_clearances"},
+                       {"filename": str(self.database)}, {"success": True}):
+            with self.subTest(fields=fields), self.assertRaises(StorageOwnerError):
+                service.dispatch({"version": 1, "op": "sync_status", **fields})
+
+    def test_sync_status_client_rejects_forged_or_inconsistent_status(self) -> None:
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        malformed = [
+            {"state": "success_empty", "latest_attempt": None,
+             "last_successful_attempt": None},
+            {"state": "never_attempted", "latest_attempt": None,
+             "last_successful_attempt": {"id": 1}},
+            {"state": "success_empty", "latest_attempt": {
+                "id": 1, "source": "private_web_inventory",
+                "started_at": NOW.isoformat(), "completed_at": NOW.isoformat(),
+                "outcome": "success_empty", "error_kind": None,
+                "snapshot_count": 0,
+            }, "last_successful_attempt": None},
+            {"state": "failed", "latest_attempt": {
+                "id": 1, "source": "private_web_inventory",
+                "started_at": NOW.isoformat(), "completed_at": NOW.isoformat(),
+                "outcome": "success_empty", "error_kind": None,
+                "snapshot_count": 0,
+            }, "last_successful_attempt": None},
+            {"state": "never_attempted", "latest_attempt": None,
+             "last_successful_attempt": None, "sql": "SELECT *"},
+        ]
+        for result in malformed:
+            with self.subTest(result=result), patch.object(
+                client, "_call", return_value={"sync_status": result},
+            ), self.assertRaises(StorageOwnerError):
+                client.sync_status()
 
     def test_container_draft_denies_direct_python_main_before_argparse(self) -> None:
         with patch("mark_api.storage_owner.container_draft_denied", return_value=True):

@@ -76,15 +76,27 @@ from mark_api.storage import WriteApiRequestRecord
 import json, socket, time
 client=StorageOwnerClient(Path('/rpc/owner.sock'),expected_owner_uid=50046)
 assert client.ready()
+assert client.sync_status()=={
+    'state':'never_attempted',
+    'latest_attempt':None,
+    'last_successful_attempt':None,
+}
+assert not client.has_write_recovery_clearance(
+    idempotency_key='uid:test:1', request_sha256='a'*64)
 assert client.read_request('uid:test:1') is None
 now=datetime(2026,10,11,12,0,tzinfo=timezone.utc)
 request=client.claim(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
 assert request.created and isinstance(request.record,WriteApiRequestRecord)
 started=client.begin(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
 assert started.state=='in_progress' and started.execution_started_at is not None
+assert not client.has_write_recovery_clearance(
+    idempotency_key='uid:test:1',request_sha256='a'*64)
 assert client.create_pending(exclude_key='uid:test:next',owner='runtime:one') is True
 # Typed RPC must not be a SQL, arbitrary method, completion or clearance broker.
-for operation in ('clearance','complete','SQL','execute','restore','delete'):
+for operation in (
+    'clearance','record_write_recovery_clearance',
+    'complete','SQL','execute','restore','delete',
+):
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
         sock.settimeout(4)
         sock.connect('/rpc/owner.sock')

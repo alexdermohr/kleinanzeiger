@@ -2,9 +2,11 @@
 
 This is a deliberately *incomplete* storage-authority slice, NOT a product
 runtime switch. The browser UID must have neither SQLite mounts nor inherited
-writable descriptors before this can protect real Write flows. Only a bounded
-typed request-claim/start/read interface is exposed here. There is NO SQL,
-completion, clearance, file, migration, backup or general method-dispatch RPC.
+writable descriptors before this can protect real Write flows. Only bounded
+typed request-claim/start/read and read-only sync-journal/clearance lookups
+are exposed. There is NO SQL, completion, clearance issuance, file,
+migration, backup or general method-dispatch RPC. A clearance lookup is
+never an authorization to manufacture independent recovery evidence.
 
 A lost acknowledgement of claim/start is UNKNOWN: inspect the persisted key
 and independent witness before deciding what happened, never blindly retry.
@@ -33,7 +35,8 @@ from .fence_witness import (
     _canonical_json, _file_identity, _private_directory,
     _strict_json, FenceWitnessError,
 )
-from .storage import SnapshotStore, WriteApiRequestClaim, WriteApiRequestRecord
+from .storage import (SnapshotStore, WriteApiRequestClaim, WriteApiRequestRecord,
+                      _SYNC_ERROR_KINDS)
 
 
 class StorageOwnerError(RuntimeError):
@@ -128,6 +131,80 @@ def _record_from_json(value: object) -> WriteApiRequestRecord:
         claim_owner=claimed, execution_started_at=started, completed_at=completed,
         response_status=status, response_json=response_json,
     )
+
+
+def _sync_status_from_json(value: object) -> dict[str, object]:
+    """Validate the exact persisted journal projection, never invent freshness.
+
+    The independent owner is trusted for storage integrity only after UID and
+    inode attestation. Its replies must still be schema- and state-consistent.
+    In particular, no successful sync may be inferred from absent attempts.
+    """
+    if type(value) is not dict or set(value) != {
+        "state", "latest_attempt", "last_successful_attempt",
+    }:
+        raise StorageOwnerError("storage sync status reply schema invalid")
+
+    def checked_attempt(row: object) -> dict[str, object] | None:
+        if row is None:
+            return None
+        if type(row) is not dict or set(row) != {
+            "id", "source", "started_at", "completed_at",
+            "outcome", "error_kind", "snapshot_count",
+        }:
+            raise StorageOwnerError("storage sync attempt reply schema invalid")
+        if (
+            type(row["id"]) is not int or row["id"] < 1
+            or type(row["source"]) is not str
+            or not row["source"].strip() or len(row["source"]) > 1024
+        ):
+            raise StorageOwnerError("storage sync attempt identity invalid")
+        started = _timestamp(row["started_at"])
+        completed = row["completed_at"]
+        if completed is not None:
+            completed = _timestamp(completed)
+            if completed < started:
+                raise StorageOwnerError("storage sync completion predates start")
+        outcome, error, count = (row["outcome"], row["error_kind"],
+                                 row["snapshot_count"])
+        if outcome == "in_progress":
+            valid = completed is None and error is None and count is None
+        elif outcome == "failed":
+            valid = completed is not None and type(error) is str \
+                and error in _SYNC_ERROR_KINDS and count is None
+        elif outcome == "success_empty":
+            valid = completed is not None and error is None \
+                and type(count) is int and count == 0
+        elif outcome == "success_nonempty":
+            valid = completed is not None and error is None \
+                and type(count) is int and count > 0
+        else:
+            valid = False
+        if not valid:
+            raise StorageOwnerError("storage sync attempt transition invalid")
+        return row
+
+    latest = checked_attempt(value["latest_attempt"])
+    success = checked_attempt(value["last_successful_attempt"])
+    if latest is None:
+        if value["state"] != "never_attempted" or success is not None:
+            raise StorageOwnerError("storage sync never-attempted state invalid")
+    else:
+        if value["state"] != latest["outcome"]:
+            raise StorageOwnerError("storage sync latest state mismatch")
+        if (
+            latest["outcome"] in {"success_empty", "success_nonempty"}
+            and success != latest
+        ):
+            raise StorageOwnerError("storage latest success is not the last success")
+        if success is not None:
+            if (
+                success["outcome"] not in {"success_empty", "success_nonempty"}
+                or success["id"] > latest["id"]
+                or (success["id"] == latest["id"] and success != latest)
+            ):
+                raise StorageOwnerError("storage last-success binding invalid")
+    return value
 
 
 def _attested_database(path: Path, uid: int) -> tuple[int, int, int, int]:
@@ -295,6 +372,16 @@ class StorageOwnerServer(
         op = request.get("op")
         if op == "ready" and set(request) == {"version", "op"}:
             return {"ready": self.store.is_ready()}
+        if op == "sync_status" and set(request) == {"version", "op"}:
+            return {"sync_status": self.store.sync_status()}
+        if op == "has_clearance" and set(request) == {
+            "version", "op", "key", "sha",
+        }:
+            key = _validated(request["key"], _KEY)
+            sha = _validated(request["sha"], _SHA)
+            return {"cleared": self.store.has_write_recovery_clearance(
+                idempotency_key=key, request_sha256=sha,
+            )}
         if op == "read_request" and set(request) == {"version", "op", "key"}:
             key = _validated(request["key"], _KEY)
             rec = self.store.write_api_request(key)
@@ -409,6 +496,24 @@ class StorageOwnerClient:
         if set(answer) != {"ready"} or type(answer["ready"]) is not bool:
             raise StorageOwnerError("storage readiness reply invalid")
         return answer["ready"]
+
+    def sync_status(self) -> dict[str, object]:
+        answer = self._call("sync_status")
+        if set(answer) != {"sync_status"}:
+            raise StorageOwnerError("storage sync status reply invalid")
+        return _sync_status_from_json(answer["sync_status"])
+
+    def has_write_recovery_clearance(
+        self, *, idempotency_key: str, request_sha256: str,
+    ) -> bool:
+        """Read one exact persisted clearance; never issue or imply one."""
+        answer = self._call(
+            "has_clearance", key=_validated(idempotency_key, _KEY),
+            sha=_validated(request_sha256, _SHA),
+        )
+        if set(answer) != {"cleared"} or type(answer["cleared"]) is not bool:
+            raise StorageOwnerError("storage clearance lookup reply invalid")
+        return answer["cleared"]
 
     def read_request(self, key: str) -> WriteApiRequestRecord | None:
         answer = self._call("read_request", key=_validated(key, _KEY))
