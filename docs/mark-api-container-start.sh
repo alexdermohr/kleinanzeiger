@@ -9,4 +9,6 @@ umask 077
 # No write-disable flags: mark-api-launch intentionally composes Writes default-on.
 exec /opt/mark-api/venv/bin/python -I -m mark_api.launcher \
     --db /var/lib/mark-api/mark.sqlite \
-    --cdp-port 9222 --dashboard-port 8875 --write-port 8876 > /run/mark-api/launcher.log
+    --cdp-port 9222 --dashboard-port 8875 --write-port 8876 \
+    --witness-socket /run/mark-api-witness/runtime.sock \
+    --witness-owner-uid 50043 > /run/mark-api/launcher.log

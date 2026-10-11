@@ -6,13 +6,16 @@ services:
     image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
     profiles: ["live"]
     user: "50042:50042"
-    network_mode: host  # Required for already-authenticated loopback CDP :9222.
+    network_mode: host  # CDP bypass remains a release blocker until isolated.
+    depends_on:
+      mark-api-witness:
+        condition: service_healthy
     read_only: true
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     restart: "no"
-    stop_grace_period: 30s
+    stop_grace_period: 60s
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=134217728,mode=1777
       - /run/mark-api:rw,nosuid,nodev,noexec,size=1048576,uid=50042,gid=50042,mode=0700
@@ -24,6 +27,46 @@ services:
         source: mark_backups
         target: /var/lib/mark-api-backups
         read_only: true
+      - type: volume
+        source: mark_fence_runtime_socket
+        target: /run/mark-api-witness
+        read_only: true
+  mark-api-witness:
+    image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
+    profiles: ["live"]
+    # Must be reserved on the rootful host and distinct from Mark UID 50042.
+    user: "50043:50043"
+    network_mode: none
+    entrypoint: ["/opt/mark-api/venv/bin/python", "-I", "-m", "mark_api.fence_witness"]
+    command: ["--ledger", "/var/lib/mark-fence/ledger.sqlite",
+              "--runtime-socket", "/run/mark-api-witness/runtime.sock",
+              "--operator-socket", "/run/mark-fence-operator/operator.sock",
+              "--runtime-uid", "50042", "--runtime-gid", "50042",
+              "--operator-uid", "0"]
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    restart: "no"
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16777216,mode=1777
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-ec", "test -S /run/mark-api-witness/runtime.sock && test -S /run/mark-fence-operator/operator.sock"]
+      interval: 2s
+      timeout: 1s
+      retries: 5
+      start_period: 2s
+    volumes:
+      - type: volume
+        source: mark_fence_ledger
+        target: /var/lib/mark-fence
+      - type: volume
+        source: mark_fence_runtime_socket
+        target: /run/mark-api-witness
+      - type: volume
+        source: mark_fence_operator_socket
+        target: /run/mark-fence-operator
   mark-api-backup:
     image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
     profiles: ["backup"]
@@ -53,3 +96,12 @@ volumes:
   mark_backups:
     external: true
     name: mark-api-backups-v1
+  mark_fence_ledger:
+    external: true
+    name: mark-api-fence-ledger-v1
+  mark_fence_runtime_socket:
+    external: true
+    name: mark-api-fence-runtime-socket-v1
+  mark_fence_operator_socket:
+    external: true
+    name: mark-api-fence-operator-socket-v1

@@ -514,32 +514,40 @@ definieren eine opt-in-Produktkomposition:
   `mark_api.launcher` ohne `--init-db` auf. Bestätigungen, Bearer,
   Ownership-, Idempotenz- und Recovery-Fences bleiben erhalten.
 - Das Produktprofil ist ausdrücklich `live`, das Backup `backup`.
-  Ohne diese expliziten Compose-Profile entsteht kein Dienst. Beide verwenden
-  ein nur lesbares Root-Dateisystem, keine Linux-Capabilities, `no-new-privileges`
-  und begrenzte PIDs. Volumes sind `external: true`; Compose erstellt
-  sie nicht stillschweigend und weist bestehenden Daten keinen neuen Owner zu.
-  Backups haben `network_mode: none` und verwenden einen zulässigen einzelnen
-  Instanznamen als create-only-Ziel.
-- Der Launcher benötigt `network_mode: host`, um eine separat autorisierte,
-  bereits angemeldete Browser-CDP-Sitzung auf **127.0.0.1:9222** zu erreichen.
-  Das ist eine bewusste Abschwächung ausschließlich der **Netzwerk-Namespace**-
-  Trennung, nicht der Dateirechte oder Write-Fences. Dashboard/Write-API
-  binden nur Loopback `8875/8876`. Die sensible Dashboard-URL und der
-  prozessgebundene Bearer stehen nur in `/run/mark-api/launcher.log` auf
-  einem privaten temporären `0700`-Dateisystem, nicht im Docker-STDOUT.
-  Andere Host-Loopback-Dienste bleiben durch Host-Networking erreichbar;
-  diese Trust-Boundary vor der Produktivnutzung ausdrücklich prüfen.
+  Das Draft-Produktprofil enthält `mark-api` (UID 50042) und
+  `mark-api-witness` (UID 50043), das Backup-Profil den separaten
+  `mark-api-backup` (UID 50042). Ohne explizite Compose-Profile startet
+  kein Produktdienst. Alle drei Dienste besitzen ein nur lesbares Root-Dateisystem,
+  keine Linux-Capabilities, `no-new-privileges` und begrenzte PIDs.
+  Alle fünf Volumes sind `external: true`; Compose darf sie weder selbst
+  erzeugen noch bestehende Daten unbemerkt umwidmen.
+  Backup und Witness verwenden `network_mode: none`.
+  Der Witness startet ohne `--init-ledger`; eine verlorene oder fehlende
+  Ledger-Datei blockiert den normalen Start.
+- Der aktuelle Produkt-Launcher verwendet weiterhin `network_mode: host`
+  zur schon authentifizierten Chrome/CDP-Sitzung auf **127.0.0.1:9222**.
+  **Unveränderter materieller P1:** Eine als UID 50042 kompromittierte Runtime
+  kann CDP direkt erreichen und Kleinanzeigen-Writes ohne den Witness ausführen.
+  Der getrennte UID-50043-Witness schützt die Ledger-Historie, ist aber noch
+  keine erzwungene Browser-/Write-Executor-Grenze. Ohne unabhängigen Broker/
+  Executor mit tatsächlich entzogener direkter CDP-Berechtigung keine
+  Freigabe für `live` oder Merge. Dashboard/Write-API binden im alten
+  Pfad nur Loopback `8875/8876`; sensible Startausgaben stehen in
+  `/run/mark-api/launcher.log` unter UID 50042 und Modus 0700 des
+  Elternverzeichnisses, nicht im Docker-STDOUT.
 
 **Kritische Host-UID-Grenze:** Der vorhandene Docker-Daemon ist rootful
 und hat kein User-Namespace-Remapping. Container-UIDs entsprechen damit
 numerisch Host-UIDs. Auf dem aktuell geprüften Host ist **UID 999 schon
 für Caddy sowie Redis-/MongoDB-/PostgreSQL-Prozesse in Benutzung**.
 Die synthetische Container-UID 999 darf daher nicht übernommen werden!
-Die alternative Image-/Compose-Konfiguration wählt stattdessen bewusst
-`50042:50042` außerhalb von systemds üblichem DynamicUser-Bereich.
+Die alternative Image-/Compose-Konfiguration wählt dafür bewusst
+`50042:50042` für die Runtime und `50043:50043` für den Witness,
+beide außerhalb von systemds üblichem DynamicUser-Bereich.
 Das ist **keine automatische UID-Exklusivität**: Vor einer echten
-Produktinstallation muss root diese UID/GID systemweit eindeutig dem
-nicht-interaktiven `mark-api`-Dienst zuweisen/reservieren und überprüfen,
+Produktinstallation muss root beide Identitäten nach Inventur systemweit
+eindeutig den nicht-interaktiven Diensten `mark-api` und
+`mark-api-witness` zuweisen/reservieren und überprüfen,
 dass keine fremden Host- oder Containerprozesse dieselbe numerische UID
 besitzen, vorher besessen haben oder schreibbare Mappings der betroffenen
 DB-, WAL- oder SHM-Inodes halten. Die Registrierung, die aktive Prozess-
@@ -572,20 +580,42 @@ die Buildabhängigkeiten nicht vertrauenswürdig/verfügbar sind, nicht
 auf einen ungescannten Benutzer-Python-Importpfad ausweichen.
 
 **Vor einem kontrollierten Start müssen zusätzlich** alle folgenden
-Bedingungen nachgewiesen sein: Dedizierte und reservierte UID/GID
-`50042:50042`; keine fremden Prozesse oder offenen beschreibbaren
-Mappings unter dieser Identität; geprüfte neue oder offline sicher
-übertragene Datenbank mit vollständigen Recovery-Tabellen und
-`0600`-Datei/Sidecars in einem privaten `0700`-Volume; ausschließlich
-vertrauenswürdig neu provisioniertes `mark-api-data-v1` und
-`mark-api-backups-v1` mit passenden Rechten, ohne andere Container-Mounts;
-gültige bereits angemeldete und zulässige CDP-Sitzung; freie Ports
-`8875/8876`; kein paralleler Writer und frische Release-/Review-Evidenz.
-**Keine automatische Datenbankinitialisierung oder chown bestehender
-Datenbanken!** Die tatsächliche Datenübernahme braucht ihren eigenen
-Stop-/Hash-/Snapshot-/Mapping-/Recovery-Nachweis.
+Bedingungen nachgewiesen sein: Dedizierte und reservierte Host-UID/GID
+`50042:50042` (Runtime) und `50043:50043` (Witness), ohne fremde
+gleichberechtigte Prozesse, alte DB-/WAL-/SHM-FDs oder schreibbare
+Mappings; kein Docker-UserNS-Remap oder Rootless-Daemon; eine offline
+attestierte vollständige SQLite-v2-Datenbank mit `0600`-Datei/Sidecars;
+alle fünf unveränderlichen externen Volumes
+`mark-api-data-v1`, `mark-api-backups-v1`,
+`mark-api-fence-ledger-v1`, `mark-api-fence-runtime-socket-v1`,
+`mark-api-fence-operator-socket-v1`.
+Das Ledger-Verzeichnis gehört nur UID/GID 50043 mit Modus `0700`;
+das Runtime-Socket-Verzeichnis UID 50043, Gruppe 50042, Modus `2710`,
+das Operator-Socket-Verzeichnis UID/GID 50043, Modus `0700`.
+Nur der kontrollierte **einmalige Offline-Cutover** darf nach
+historischer Fence-Inventur ein neues Ledger erzeugen; `live` nie.
+UID 50042 darf weder Ledger- noch Operator-Socket öffnen.
+Zusätzlich erforderlich: ein authentifizierter zulässiger CDP-Zugang,
+freie Ports `8875/8876`, unabhängige CDP-Bypass-Abwehr, kein
+paralleler Writer und aktuelle SHA-gebundene Review-/Release-Evidenz.
+**Keine automatische Datenbankinitialisierung, Ledger-Neuanlage oder
+chown bestehender Daten!** Ein kontrollierter Restore benötigt einen
+zusammengehörigen, überprüften Ledger-/SQLite-Cutover; die jetzige
+Backup-CLI sichert nur SQLite und ist **keine** vollständige
+Witness-Backup-/Restore-Lösung.
 
-Erst nach diesen Gates darf der Operator die **einzige unterstützte**
+**Stand PR #78 (Draft):** Der offizielle Guard lehnt die Aktion
+`live` derzeit auch bei anderweitig erfolgreichen Prüfungen ausdrücklich
+mit `unmediated host CDP bypass blocks product live deployment` ab,
+**bevor** ein Witness- oder Produktcontainer gestartet wird.
+Dies ist eine notwendige Sicherheitsblockade, keine fehlende manuelle
+Benutzerfreigabe. Erst ein unabhängig überprüfter Browser-/Capability-
+Executor ohne direkten Runtime-CDP-Zugriff darf diesen Gate entfernen.
+`verify` bleibt für die unveränderliche Image-Identität verfügbar;
+`backup` sichert derzeit weiterhin nur SQLite, nicht das Witness-Ledger.
+
+Erst nach Schließung dieser P1 und sämtlicher übrigen Gates darf der
+Operator die **einzige unterstützte**
 Image-/Startkontrolle `docs/mark-api-container-control.sh` verwenden:
 
 ~~~bash
@@ -605,9 +635,17 @@ Der Guard übergibt der Compose-Konfiguration ausschließlich die vollständig
 geprüfte unveränderliche `sha256:...`-Image-ID und kontrolliert das
 `org.opencontainers.image.revision`-Label **unmittelbar vor dem Aufruf**.
 Mutable Tags wie `latest` oder `mark-api:pr75-...` sowie unvollständige
-Image-IDs werden verweigert. Der Start verlangt außerdem die explizite
-root-verwaltete Registrierung von Host-UID/-GID `50042:50042` als
-`mark-api` und zwei bereits existierende externe Volumes.
+Image-IDs werden verweigert. Der **vorbereitete, gegenwärtig durch die CDP-P1-Sperre unerreichbare**
+Startzweig verlangt eine root-verwaltete Registrierung der Host-UID/-GID
+`50042:50042` als `mark-api` sowie `50043:50043` als
+`mark-api-witness` und fünf bereits existierende externe Volumes.
+**Erst nachdem** die unabhängige Browser-/CDP-Ausführungsgrenze
+implementiert, getestet und freigegeben wurde, darf dieser Zweig
+Witness vor Runtime starten und die konfigurierte UID, Image-ID,
+Docker-Health sowie den Runtime-UID-/Image-/Running-Readback prüfen.
+Heute wird keiner dieser Live-Starts ausgeführt. Selbst nach späterer
+Aktivierung ist ein grüner Socket-Healthcheck **keine** unabhängige
+Protokoll-, Storage- oder CDP-Abnahme.
 **Direktes `docker compose up/run` mit manuell gesetztem `MARK_API_IMAGE`
 umgeht diesen Guard und ist kein freigegebener Betriebsweg.** Auch der Guard
 beweist keine Mapping-Isolation, Volume-Eigentümerschaft oder Kontoberechtigung;
@@ -616,15 +654,17 @@ diese separaten Gates bleiben Pflicht. Ohne sie wird kein `live` oder
 eine grüne `docker compose config` sind keine erfolgreiche Host-Installation.
 Keine Wiederholung einer unklaren Backup- oder Plattformmutation ohne Readback.
 
-**Angreifermodell und Merge-Gate:** Eine verlässlich exklusive UID mit
-frischen privaten DB-/WAL-/SHM-Inodes verhindert den gewöhnlichen
-unprivilegierten *fremden* Same-UID-Prozesszugriff, sobald die
-tatsächliche Host- und Docker-Konfiguration das belegt. Das schützt
-weder gegen root-/Docker-Gruppen-Kompromittierung noch gegen böswilligen
-Code, der bereits als der vertraute Mark-Dienst ausgeführt wird. Falls
-auch dieser Angreifer abgewehrt werden muss, ist eine unabhängig
-durchgesetzte Storage-Snapshot-/Integrity-Grenze erforderlich.
-Die drei bestehenden `MAP_SHARED`-P2 sind bis zu einer neuen unabhängigen
-Live-Attestation und entsprechendem head-bound High-Critical-/Captain-Gate
-**weiterhin blockierend**. Keine reale Kleinanzeigenmutation zu Testzwecken
-ohne nachgewiesene Kontoberechtigung und zulässigen Integrationsweg.
+**Angreifermodell und Merge-Gate:** Der aktuelle Draft-Witness
+persistiert begonnene Operationen außerhalb der Runtime-UID und kann
+historisch offene Fences nach einem SQLite-Rollback im ehrlichen
+Write-Pfad verweigern. Das ist **kein** Schutz gegen einen kompromittierten
+Host-Root-/Docker-Daemon oder gegen direkte Browser-/CDP-Writes der
+kompromittierten Runtime-UID. Ebenso ist die Echtheit einer von der Runtime
+behaupteten externen Completion nicht unabhängig verifiziert.
+Das gesonderte Ledger wird weder von der heutigen Backup-CLI mitsamt
+SQLite atomar gesichert noch von einem Release-Restore verifiziert.
+Die drei `MAP_SHARED`-P2, der CDP-Bypass und die Recovery-Cutover-Grenze
+bleiben bis zu tatsächlichen Multi-UID-/Prozess-/SQLite-/WAL-/SHM-Nachweisen
+und SHA-gebundenen unabhängigen Sicherheits-/Captain-Gates
+**weiterhin blockierend**. Kein PR-Merge und keine reale
+Kleinanzeigenmutation zu Testzwecken ohne nachgewiesene Berechtigung.

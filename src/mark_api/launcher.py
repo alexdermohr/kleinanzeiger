@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import secrets
 import signal
 import sys
@@ -20,6 +21,7 @@ from .analytics import (
 from .dashboard import DashboardWriteProxy, LoopbackDashboardServer, create_server
 from .domain import AdSnapshot
 from .email_import import EmailImportReport, import_kleinanzeigen_email_files
+from .fence_witness import FenceWitnessClient, FenceWitnessError
 from .private_web import PrivateWebSubmitUnknownError
 from .private_web_runtime import (
     PrivateWebRuntimeDependencyError,
@@ -28,11 +30,11 @@ from .private_web_runtime import (
 )
 from .results import ReadResult, ReadStatus
 from .storage import SnapshotStore
-from .write_api import WriteApiAccess, WriteCapability
+from .write_api import WriteApiAccess, WriteCapability, _WriteFence
 
 
 _LAUNCHER_SOURCE = "private-web-product-launcher"
-_SHUTDOWN_MEDIA_RECONCILE_SECONDS = 8.0
+_SHUTDOWN_MEDIA_RECONCILE_SECONDS = 25.0
 
 
 class ProductLauncherError(RuntimeError):
@@ -337,6 +339,7 @@ def build_product_launcher(
     email_importer: _EmailImporter = import_kleinanzeigen_email_files,
     runtime_factory: _RuntimeFactory = build_private_web_inventory_runtime,
     write_runtime_factory: _WriteRuntimeFactory | None = None,
+    fence_witness: _WriteFence | None = None,
     dashboard_factory: _DashboardFactory = create_server,
     store_factory: _StoreFactory = SnapshotStore,
     initialize_db: bool = False,
@@ -349,6 +352,8 @@ def build_product_launcher(
     Authentication and browser lifecycle remain caller-owned. This launcher
     consumes only an already-running loopback CDP endpoint. Product writes are
     composed by default through the existing authenticated/idempotent Write API.
+    An explicitly supplied independent witness is borrowed for the entire
+    runtime lifetime; the caller owns and closes its connection after shutdown.
     """
 
     if not isinstance(db_path, Path):
@@ -520,6 +525,7 @@ def build_product_launcher(
             port=write_port,
             timeout_seconds=timeout,
             clock=clock,
+            **({"fence_witness": fence_witness} if fence_witness is not None else {}),
         )
         write_runtime.start()
         write_host, write_actual_port = write_runtime.server_address
@@ -673,11 +679,26 @@ def _parser() -> argparse.ArgumentParser:
             "unset by default."
         ),
     )
+    parser.add_argument(
+        "--witness-socket", type=Path, default=None,
+        help="Authenticated runtime socket of an independent recovery witness.",
+    )
+    parser.add_argument(
+        "--witness-owner-uid", type=int, default=None,
+        help="Distinct numeric owner UID, required together with --witness-socket.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if (
+        (args.witness_socket is None) != (args.witness_owner_uid is None)
+        or (args.witness_owner_uid is not None
+            and args.witness_owner_uid == os.geteuid())
+    ):
+        print("mark-api-launch: invalid independent witness configuration", file=sys.stderr)
+        return 2
     contract = AnalyticsContract(
         reaction_metric=args.reaction_metric,
         objective_metric=args.objective_metric,
@@ -689,6 +710,9 @@ def main(argv: list[str] | None = None) -> int:
     shutdown_requested = False
     serving = False
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
+    witness: FenceWitnessClient | None = None
+    settle_thread: Thread | None = None
 
     def _on_sigterm(_signum: int, _frame: object) -> None:
         nonlocal shutdown_requested, serving
@@ -698,9 +722,22 @@ def main(argv: list[str] | None = None) -> int:
             raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_sigterm)
+    signal.signal(signal.SIGINT, _on_sigterm)
     try:
 
         try:
+            if args.witness_socket is not None:
+                try:
+                    witness = FenceWitnessClient(
+                        args.witness_socket,
+                        expected_owner_uid=args.witness_owner_uid,
+                    )
+                except (FenceWitnessError, OSError):
+                    print(
+                        "mark-api-launch: independent recovery witness unavailable",
+                        file=sys.stderr,
+                    )
+                    return 2
             launcher = build_product_launcher(
                 db_path=args.db,
                 initialize_db=args.init_db,
@@ -710,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_seconds=args.timeout_seconds,
                 analytics_contract=contract,
                 email_paths=tuple(args.email_paths),
+                **({"fence_witness": witness} if witness is not None else {}),
             )
         except (ProductLauncherError, PrivateWebRuntimeDependencyError) as exc:
             print(f"mark-api-launch: {exc}", file=sys.stderr)
@@ -765,36 +803,34 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 launcher.close()
             except PrivateWebSubmitUnknownError:
-                # On SIGTERM, an unavailable CDP peer must not hold PID 1
-                # past Docker's stop deadline. The durable in-progress media
-                # fence forbids blind retry after this process exits.
-                if shutdown_requested:
-                    reconciled: list[bool] = []
+                # Every shutdown path, including SIGINT and an unexpected
+                # dashboard stop, has a finite media settlement deadline.
+                # Any timeout is UNKNOWN and retains the durable recovery
+                # fence; never automatically re-submit to the platform.
+                reconciled: list[bool] = []
 
-                    def _settle_before_stop() -> None:
-                        try:
-                            launcher.reconcile_media_submit()
-                            launcher.close()
-                        except Exception:
-                            return
-                        reconciled.append(True)
-
-                    settle_thread = Thread(
-                        target=_settle_before_stop,
-                        daemon=True,
-                        name="mark-media-stop-reconciliation",
-                    )
-                    settle_thread.start()
-                    settle_thread.join(_SHUTDOWN_MEDIA_RECONCILE_SECONDS)
-                    media_settled = not settle_thread.is_alive() and bool(reconciled)
-                else:
+                def _settle_before_stop() -> None:
                     try:
                         launcher.reconcile_media_submit()
                         launcher.close()
                     except Exception:
-                        media_settled = False
+                        return
                     else:
-                        media_settled = True
+                        reconciled.append(True)
+                    finally:
+                        # Keep the borrowed session alive while this worker
+                        # may still be issuing its operation-bound IPC.
+                        if witness is not None:
+                            witness.close()
+
+                settle_thread = Thread(
+                    target=_settle_before_stop,
+                    daemon=True,
+                    name="mark-media-stop-reconciliation",
+                )
+                settle_thread.start()
+                settle_thread.join(_SHUTDOWN_MEDIA_RECONCILE_SECONDS)
+                media_settled = not settle_thread.is_alive() and bool(reconciled)
                 if not media_settled:
                     print(
                         "mark-api-launch: media submit reconciliation required",
@@ -807,7 +843,21 @@ def main(argv: list[str] | None = None) -> int:
         return exit_code
 
     finally:
-        signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        try:
+            # A timed-out daemon settlement may still be reading/writing the
+            # witness. Never block PID 1 on its IPC guard or poison the
+            # in-flight session; the worker closes it when it finishes.
+            # On hard process exit the kernel closes sockets and the ledger
+            # retains its durable unknown-outcome fence.
+            if witness is not None and (
+                settle_thread is None or not settle_thread.is_alive()
+            ):
+                witness.close()
+        finally:
+            try:
+                signal.signal(signal.SIGINT, previous_sigint_handler)
+            finally:
+                signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 if __name__ == "__main__":
     raise SystemExit(main())

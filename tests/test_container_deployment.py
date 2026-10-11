@@ -100,13 +100,13 @@ class ContainerDeploymentTests(unittest.TestCase):
     def test_compose_requires_preexisting_private_volumes_and_does_not_autostart(self) -> None:
         compose = _read("mark-api-container.compose.yaml")
         self.assertIn("MARK_API_IMAGE_DIGEST:?Verified immutable image digest required", compose)
-        self.assertEqual(compose.count("image: sha256:"), 2)
+        self.assertEqual(compose.count("image: sha256:"), 3)
         self.assertNotIn("image: ${MARK_API_IMAGE:", compose)
         self.assertEqual(compose.count('user: "50042:50042"'), 2)
-        self.assertEqual(compose.count("read_only: true\n    cap_drop:"), 2)
-        self.assertEqual(compose.count('cap_drop: ["ALL"]'), 2)
-        self.assertEqual(compose.count('security_opt: ["no-new-privileges:true"]'), 2)
-        self.assertEqual(compose.count('restart: "no"'), 2)
+        self.assertEqual(compose.count("read_only: true\n    cap_drop:"), 3)
+        self.assertEqual(compose.count('cap_drop: ["ALL"]'), 3)
+        self.assertEqual(compose.count('security_opt: ["no-new-privileges:true"]'), 3)
+        self.assertEqual(compose.count('restart: "no"'), 3)
         self.assertIn('profiles: ["live"]', compose)
         self.assertIn('profiles: ["backup"]', compose)
         self.assertIn('network_mode: host', compose)
@@ -115,10 +115,98 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn('target: /var/lib/mark-api-backups', compose)
         self.assertIn('read_only: true', compose)
         self.assertIn("/run/mark-api:rw,nosuid,nodev,noexec", compose)
-        self.assertEqual(compose.count("external: true"), 2)
+        self.assertEqual(compose.count("external: true"), 5)
         self.assertNotIn("privileged: true", compose)
         self.assertNotIn("pid: host", compose)
         self.assertNotIn("userns_mode: host", compose)
+
+
+    def test_witness_service_is_separate_uid_and_fail_closed_on_absent_ledger(self) -> None:
+        compose = _read("mark-api-container.compose.yaml")
+        start = _read("mark-api-container-start.sh")
+        self.assertEqual(compose.count("image: sha256:"), 3)
+        self.assertIn('  mark-api-witness:', compose)
+        witness = compose.split('  mark-api-witness:', 1)[1].split('  mark-api-backup:', 1)[0]
+        self.assertIn('user: "50043:50043"', witness)
+        self.assertIn('network_mode: none', witness)
+        self.assertIn('cap_drop: ["ALL"]', witness)
+        self.assertIn('no-new-privileges:true', witness)
+        self.assertIn('--runtime-uid', witness)
+        self.assertIn('50042', witness)
+        self.assertIn('--runtime-gid', witness)
+        self.assertIn('--ledger', witness)
+        self.assertIn('--runtime-socket', witness)
+        self.assertIn('--operator-socket', witness)
+        self.assertNotIn('--init-ledger', witness)
+        self.assertIn('mark_fence_ledger:', compose)
+        self.assertIn('mark_fence_runtime_socket:', compose)
+        self.assertIn('mark_fence_operator_socket:', compose)
+        self.assertIn('--witness-socket /run/mark-api-witness/runtime.sock', start)
+        self.assertIn('--witness-owner-uid 50043', start)
+        self.assertIn("No write-disable flags", start)
+        self.assertNotIn("--disable-writes", start)
+
+    def test_planned_live_release_sequence_requires_witness_first_after_cdp_gate(self) -> None:
+        # Static future ordering only; live currently fails before both starts.
+        control = _read("mark-api-container-control.sh")
+        self.assertIn('getent passwd 50043', control)
+        self.assertIn('getent group 50043', control)
+        self.assertIn('mark-api-fence-ledger-v1', control)
+        self.assertIn('mark-api-fence-runtime-socket-v1', control)
+        self.assertIn('mark-api-fence-operator-socket-v1', control)
+        self.assertLess(control.index('up --no-deps --no-build --pull never --detach mark-api-witness'),
+                        control.index('up --no-deps --no-build --pull never --detach mark-api ||'))
+        self.assertIn('Health.Status', control)
+        self.assertNotIn('--init-ledger', control)
+
+
+    def test_release_guard_rejects_userns_remapping_and_attests_product_identity(self) -> None:
+        control = _read("mark-api-container-control.sh")
+        self.assertIn("docker_cli info --format '{{json .SecurityOptions}}'", control)
+        self.assertIn("name=userns", control)
+        self.assertIn("name=rootless", control)
+        self.assertIn("product_id=$(docker_cli compose", control)
+        self.assertIn("observed_product_user=", control)
+        self.assertIn("observed_product_image=", control)
+        self.assertIn("observed_product_running=", control)
+        self.assertIn("'50042:50042'", control)
+        self.assertIn("{{.State.Running}}", control)
+        self.assertLess(control.index("observed_user="),
+                        control.index("observed_product_user="))
+        self.assertIn("stop_grace_period: 60s",
+                      _read("mark-api-container.compose.yaml"))
+
+
+    def test_live_guard_attests_existing_volume_directory_and_ledger_identity(self) -> None:
+        control = _read("mark-api-container-control.sh")
+        self.assertIn("attest_existing_volume() {", control)
+        self.assertIn("--mount \"type=volume,source=${volume_name},target=/volume,readonly,volume-nocopy\"", control)
+        self.assertIn("--entrypoint /usr/bin/stat", control)
+        self.assertIn("-c '%u:%g:%a'", control)
+        for item in (
+            "attest_existing_volume mark-api-data-v1 50042:50042:700",
+            "attest_existing_volume mark-api-backups-v1 50042:50042:700",
+            "attest_existing_volume mark-api-fence-ledger-v1 50043:50043:700",
+            "attest_existing_volume mark-api-fence-runtime-socket-v1 50043:50042:2710",
+            "attest_existing_volume mark-api-fence-operator-socket-v1 50043:50043:700",
+            "/volume/ledger.sqlite",
+            "50043:50043:600:1",
+        ):
+            self.assertIn(item, control)
+
+
+    def test_live_guard_blocks_unmediated_runtime_cdp_bypass(self) -> None:
+        control = _read("mark-api-container-control.sh")
+        # Until the independent trusted browser executor actually exists,
+        # successful string/health checks cannot authorize compromised UID
+        # 50042's unrestricted direct Chrome/CDP writes.
+        stop = "fail 'unmediated host CDP bypass blocks product live deployment'"
+        self.assertIn(stop, control)
+        self.assertLess(control.index(stop),
+                        control.index("up --no-deps --no-build --pull never --detach mark-api-witness"))
+        compose = _read("mark-api-container.compose.yaml")
+        runtime = compose.split("  mark-api:", 1)[1].split("  mark-api-witness:", 1)[0]
+        self.assertIn("network_mode: host", runtime)
 
     def test_release_image_build_uses_only_exact_committed_archive(self) -> None:
         build = _read("mark-api-container-build.sh")
@@ -657,9 +745,9 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn("--project-name mark-api", control)
         self.assertNotIn('exec "$docker"', control)
         self.assertIn(
-            "up --no-deps --no-build --pull never --detach mark-api\n"
-            "            exit 0\n"
-            "        fi",
+            "up --no-deps --no-build --pull never --detach mark-api ||\n"
+            "                fail 'product runtime failed to start'\n"
+            "            product_id=$(docker_cli compose",
             control,
         )
 

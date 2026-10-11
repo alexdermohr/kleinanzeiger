@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import json
 import signal
 import sqlite3
@@ -367,6 +368,30 @@ class ProductLauncherTests(unittest.TestCase):
             "http://127.0.0.1:18765/"
             f"#write_token={self.DASHBOARD_TOKEN}",
         )
+
+    def test_product_launcher_forwards_witness_without_disabling_default_writes(self) -> None:
+        _tmp, db = self.make_db()
+        inventory = InventoryRuntime(ReadResult.success_empty(()))
+        witness = object()  # Factory seam only; not proof of a trusted process.
+        server = DashboardServer()
+        launcher = build_product_launcher(
+            db_path=db,
+            cdp_port=9222,
+            dashboard_port=0,
+            write_port=0,
+            runtime_factory=lambda **kwargs: inventory,
+            dashboard_factory=lambda *args, **kwargs: server,
+            fence_witness=witness,
+            clock=lambda: NOW,
+        )
+        self.addCleanup(launcher.close)
+        passed = self.write_factory.call_args.kwargs
+        self.assertIs(passed["fence_witness"], witness)
+        self.assertEqual(passed["access"].capabilities, frozenset(WriteCapability))
+        self.assertTrue(passed["access"].writes_enabled)
+        self.assertTrue(passed["core_writes_enabled"])
+        self.assertTrue(passed["media_writes_enabled"])
+        self.assertEqual(self.write_runtime.start_calls, 1)
 
     def test_dashboard_url_percent_encodes_write_token_fragment(self) -> None:
         _tmp, db = self.make_db()
@@ -1160,6 +1185,104 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertEqual(contract.reaction_metric, "conversation_count")
         self.assertEqual(contract.objective_metric, "views")
 
+    def test_main_attests_witness_before_product_and_closes_after_runtime(self) -> None:
+        events: list[str] = []
+        class Witness:
+            def close(self) -> None:
+                events.append("witness")
+
+        class Launcher:
+            dashboard_url = "http://127.0.0.1/#write_token=synthetic-test"
+            write_server_address = ("127.0.0.1", 18766)
+            write_bearer_token = "synthetic-bearer-token"
+            startup_inventory_count = 0
+            startup_persisted_count = 0
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def close(self) -> None:
+                events.append("launcher")
+
+        witness = Witness()
+        foreign_uid = os.geteuid() + 10000
+        with (
+            patch("mark_api.launcher.FenceWitnessClient", return_value=witness) as client,
+            patch("mark_api.launcher.build_product_launcher", return_value=Launcher()) as build,
+            patch("sys.stdout", io.StringIO()),
+        ):
+            code = main([
+                "--db", "/tmp/synthetic-mark.sqlite", "--cdp-port", "9222",
+                "--witness-socket", "/tmp/synthetic-witness.sock",
+                "--witness-owner-uid", str(foreign_uid),
+            ])
+        self.assertEqual(code, 0)
+        client.assert_called_once_with(
+            Path("/tmp/synthetic-witness.sock"), expected_owner_uid=foreign_uid,
+        )
+        self.assertIs(build.call_args.kwargs["fence_witness"], witness)
+        self.assertEqual(events, ["launcher", "witness"])
+
+    def test_main_rejects_unbound_or_same_uid_witness_configuration(self) -> None:
+        configs = (
+            ("--witness-socket", "/tmp/only-socket.sock"),
+            ("--witness-owner-uid", str(os.geteuid() + 10000)),
+            ("--witness-socket", "/tmp/untrusted.sock",
+             "--witness-owner-uid", str(os.geteuid())),
+        )
+        for config in configs:
+            with self.subTest(config=config):
+                with (
+                    patch("mark_api.launcher.build_product_launcher") as build,
+                    patch("mark_api.launcher.FenceWitnessClient") as connect,
+                    patch("sys.stderr", io.StringIO()),
+                ):
+                    status = main([
+                        "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                        *config,
+                    ])
+                self.assertEqual(status, 2)
+                build.assert_not_called()
+                connect.assert_not_called()
+
+    def test_main_startup_failure_closes_authenticated_witness(self) -> None:
+        closed: list[str] = []
+        class Witness:
+            def close(self) -> None:
+                closed.append("closed")
+
+        original = signal.getsignal(signal.SIGTERM)
+        with (
+            patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+            patch("mark_api.launcher.build_product_launcher",
+                  side_effect=ProductLauncherError("synthetic unavailable")),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            status = main([
+                "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                "--witness-socket", "/tmp/witness.sock",
+                "--witness-owner-uid", str(os.geteuid() + 10000),
+            ])
+        self.assertEqual(status, 2)
+        self.assertEqual(closed, ["closed"])
+        self.assertIs(signal.getsignal(signal.SIGTERM), original)
+
+    def test_main_unavailable_witness_fails_before_product_start(self) -> None:
+        with (
+            patch("mark_api.launcher.FenceWitnessClient",
+                  side_effect=OSError("sensitive host socket path")),
+            patch("mark_api.launcher.build_product_launcher") as build,
+            patch("sys.stderr", io.StringIO()) as stderr,
+        ):
+            code = main([
+                "--db", "/tmp/synthetic-mark.sqlite", "--cdp-port", "9222",
+                "--witness-socket", "/tmp/synthetic-witness.sock",
+                "--witness-owner-uid", str(os.geteuid() + 10000),
+            ])
+        self.assertEqual(code, 2)
+        build.assert_not_called()
+        self.assertNotIn("sensitive host socket path", stderr.getvalue())
+
     def test_main_reconciles_unknown_media_before_clean_exit(self) -> None:
         class Launcher:
             server_address = ("127.0.0.1", 18765)
@@ -1273,6 +1396,41 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIs(signal.getsignal(signal.SIGTERM), original)
 
+
+    def test_main_second_sigint_during_close_cannot_interrupt_cleanup(self) -> None:
+        original_sigint = signal.getsignal(signal.SIGINT)
+        original_sigterm = signal.getsignal(signal.SIGTERM)
+        events: list[str] = []
+
+        class Launcher:
+            dashboard_url = "http://127.0.0.1/#write_token=synthetic"
+            write_server_address = ("127.0.0.1", 18766)
+            write_bearer_token = "synthetic-bearer"
+            startup_inventory_count = 0
+            startup_persisted_count = 0
+
+            def serve_forever(self) -> None:
+                handler = signal.getsignal(signal.SIGINT)
+                assert callable(handler)
+                handler(signal.SIGINT, None)
+                self.fail = "unreachable"
+
+            def close(self) -> None:
+                handler = signal.getsignal(signal.SIGINT)
+                assert callable(handler)
+                handler(signal.SIGINT, None)
+                events.append("closed")
+
+        with (
+            patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            code = main(["--db", "/tmp/synthetic-mark.sqlite", "--cdp-port", "9222"])
+        self.assertEqual(code, 0)
+        self.assertEqual(events, ["closed"])
+        self.assertIs(signal.getsignal(signal.SIGINT), original_sigint)
+        self.assertIs(signal.getsignal(signal.SIGTERM), original_sigterm)
+
     def test_main_sigterm_runs_close_and_restores_signal_handler(self) -> None:
         original = signal.getsignal(signal.SIGTERM)
 
@@ -1365,6 +1523,122 @@ class ProductLauncherTests(unittest.TestCase):
             self.assertIn("media submit reconciliation required", stderr.getvalue())
         finally:
             runtime.release_reconciliation.set()
+
+
+    def test_sigterm_timeout_keeps_witness_until_media_worker_finishes(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+        events: list[str] = []
+
+        class Witness:
+            def close(self) -> None:
+                if not release.is_set():
+                    raise AssertionError("witness closed before media worker finished")
+                events.append("witness_closed")
+                closed.set()
+
+        class Launcher:
+            dashboard_url = "http://127.0.0.1/#write_token=synthetic"
+            write_server_address = ("127.0.0.1", 18766)
+            write_bearer_token = "synthetic-bearer"
+            startup_inventory_count = 0
+            startup_persisted_count = 0
+
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def serve_forever(self) -> None:
+                handler = signal.getsignal(signal.SIGTERM)
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+
+            def close(self) -> None:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise PrivateWebSubmitUnknownError("create_media_submit_settle")
+                events.append("launcher_closed")
+
+            def reconcile_media_submit(self) -> None:
+                entered.set()
+                release.wait(timeout=3)
+
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+                patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+                patch("mark_api.launcher._SHUTDOWN_MEDIA_RECONCILE_SECONDS", 0.05),
+                patch("sys.stdout", io.StringIO()),
+                patch("sys.stderr", io.StringIO()),
+            ):
+                started = monotonic()
+                status = main([
+                    "--db", "/tmp/synthetic-mark.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+                elapsed = monotonic() - started
+            self.assertEqual(status, 2)
+            self.assertLess(elapsed, 1.0)
+            self.assertTrue(entered.is_set())
+            self.assertFalse(closed.is_set())
+        finally:
+            release.set()
+        self.assertTrue(closed.wait(timeout=3))
+        self.assertEqual(events, ["launcher_closed", "witness_closed"])
+
+
+    def test_keyboard_interrupt_bounds_hung_media_reconciliation(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+
+        class Witness:
+            def close(self) -> None:
+                closed.set()
+
+        class Launcher:
+            dashboard_url = "http://127.0.0.1/#write_token=synthetic"
+            write_server_address = ("127.0.0.1", 18766)
+            write_bearer_token = "synthetic-bearer"
+            startup_inventory_count = 0
+            startup_persisted_count = 0
+            close_calls = 0
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def close(self) -> None:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise PrivateWebSubmitUnknownError("create_media_submit_settle")
+
+            def reconcile_media_submit(self) -> None:
+                entered.set()
+                release.wait(timeout=0.65)
+
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+                patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+                patch("mark_api.launcher._SHUTDOWN_MEDIA_RECONCILE_SECONDS", 0.05),
+                patch("sys.stdout", io.StringIO()),
+                patch("sys.stderr", io.StringIO()),
+            ):
+                start = monotonic()
+                result = main([
+                    "--db", "/tmp/synthetic-mark.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+                elapsed = monotonic() - start
+            self.assertEqual(result, 2)
+            self.assertLess(elapsed, 0.4)
+            self.assertTrue(entered.is_set())
+            self.assertFalse(closed.is_set())
+        finally:
+            release.set()
+        self.assertTrue(closed.wait(2))
 
     def test_main_sigterm_preserves_ambiguous_media_reconciliation(self) -> None:
         original = signal.getsignal(signal.SIGTERM)

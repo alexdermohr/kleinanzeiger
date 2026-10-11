@@ -161,6 +161,23 @@ docker_cli() {
         /usr/bin/docker --config "$attest_dir/docker-config" \
         --host unix:///var/run/docker.sock "$@"
 }
+# Use only the already-attested immutable image and isolated read-only Docker
+# one-shots. The volumes have been inspected by exact fixed name first.
+# Never chmod/chown or initialize an existing volume from this guard.
+attest_existing_volume() {
+    volume_name=$1
+    expected_identity=$2
+    inspection_user=${expected_identity%:*}
+    observed_identity=$(docker_cli run --rm --network none --read-only \
+        --cap-drop ALL --security-opt no-new-privileges:true \
+        --user "$inspection_user" \
+        --mount "type=volume,source=${volume_name},target=/volume,readonly,volume-nocopy" \
+        --entrypoint /usr/bin/stat "$image" -c '%u:%g:%a' /volume) ||
+        fail 'existing volume identity unavailable'
+    [ "$observed_identity" = "$expected_identity" ] ||
+        fail 'existing volume UID/GID or mode differs from pre-attested requirements'
+}
+
 # Fail closed if caller supplies an image ID not present on the local daemon.
 format_id='{{.Id}}'
 format_rev='{{index .Config.Labels "org.opencontainers.image.revision"}}'
@@ -183,20 +200,103 @@ case "$action" in
         printf '%s\n' "mark-api: immutable image and revision verified"
         ;;
     live|backup)
+        if [ "$action" = live ]; then
+            # This PR's Runtime UID 50042 still reaches Chrome/CDP directly.
+            # A voluntary Witness call cannot enforce external Writes on a
+            # compromised runtime. Never install an unsafe host-network path.
+            fail 'unmediated host CDP bypass blocks product live deployment'
+        fi
+        # Kernel numeric UID isolation is meaningful on the host only if the
+        # rootful daemon is not remapping container UIDs into a user namespace.
+        namespace_security=$(docker_cli info --format '{{json .SecurityOptions}}') ||
+            fail 'Docker identity mapping unavailable'
+        case "$namespace_security" in
+            *name=userns*|*name=rootless*) fail 'Docker UID remapping not attested' ;;
+        esac
         # These checks are necessary, but not sufficient: the operator must
         # independently attest existing storage inodes, mappings and CDP rights.
         passwd_name=$(/usr/bin/getent passwd 50042 | /usr/bin/cut -d: -f1)
         group_name=$(/usr/bin/getent group 50042 | /usr/bin/cut -d: -f1)
         [ "$passwd_name" = mark-api ] && [ "$group_name" = mark-api ] ||
             fail 'exclusive host service UID/GID 50042 not reserved'
-        for name in mark-api-data-v1 mark-api-backups-v1; do
+        # Backup/restore also require a retained independent ledger; it must
+        # never be silently reinitialized by the regular live/backup paths.
+        witness_passwd=$(/usr/bin/getent passwd 50043 | /usr/bin/cut -d: -f1)
+        witness_group=$(/usr/bin/getent group 50043 | /usr/bin/cut -d: -f1)
+        [ "$witness_passwd" = mark-api-witness ] &&
+            [ "$witness_group" = mark-api-witness ] ||
+            fail 'exclusive host witness UID/GID 50043 not reserved'
+        for name in mark-api-data-v1 mark-api-backups-v1 \
+            mark-api-fence-ledger-v1 mark-api-fence-runtime-socket-v1 \
+            mark-api-fence-operator-socket-v1; do
             found=$(docker_cli volume inspect --format '{{.Name}}' "$name") ||
                 fail 'required pre-attested external volume missing'
             [ "$found" = "$name" ] || fail 'volume identity changed'
         done
+        attest_existing_volume mark-api-data-v1 50042:50042:700
+        attest_existing_volume mark-api-backups-v1 50042:50042:700
+        attest_existing_volume mark-api-fence-ledger-v1 50043:50043:700
+        attest_existing_volume mark-api-fence-runtime-socket-v1 50043:50042:2710
+        attest_existing_volume mark-api-fence-operator-socket-v1 50043:50043:700
+        ledger_identity=$(docker_cli run --rm --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --user 50043:50043 \
+            --mount "type=volume,source=mark-api-fence-ledger-v1,target=/volume,readonly,volume-nocopy" \
+            --entrypoint /usr/bin/stat "$image" -c '%u:%g:%a:%h' /volume/ledger.sqlite) ||
+            fail 'previously initialized witness ledger unavailable'
+        [ "$ledger_identity" = 50043:50043:600:1 ] ||
+            fail 'ledger inode owner, mode or hardlink count unsafe'
         if [ "$action" = live ]; then
+            # Explicit witness-first start: --no-deps is safe only after
+            # positive health, UID and image-identity readback.
             docker_cli compose -f "$compose" --project-name mark-api --profile live \
-                up --no-deps --no-build --pull never --detach mark-api
+                up --no-deps --no-build --pull never --detach mark-api-witness ||
+                fail 'independent witness failed to start'
+            witness_id=$(docker_cli compose -f "$compose" --project-name mark-api \
+                --profile live ps -q mark-api-witness) ||
+                fail 'independent witness identity unavailable'
+            [ -n "$witness_id" ] ||
+                fail 'independent witness not running'
+            observed_user=$(docker_cli inspect --format '{{.Config.User}}' "$witness_id") ||
+                fail 'independent witness identity unavailable'
+            observed_image=$(docker_cli inspect --format '{{.Image}}' "$witness_id") ||
+                fail 'independent witness image unavailable'
+            [ "$observed_user" = '50043:50043' ] &&
+                [ "$observed_image" = "$image" ] ||
+                fail 'independent witness UID or image mismatch'
+            attempts=0
+            witness_health=starting
+            while [ "$attempts" -lt 20 ]; do
+                witness_health=$(docker_cli inspect --format '{{.State.Health.Status}}' "$witness_id") ||
+                    fail 'independent witness health unavailable'
+                case "$witness_health" in
+                    healthy) break ;;
+                    starting) : ;;
+                    *) fail 'independent witness not healthy' ;;
+                esac
+                attempts=$((attempts + 1))
+                /usr/bin/sleep 1
+            done
+            [ "$witness_health" = healthy ] ||
+                fail 'independent witness did not become healthy'
+            docker_cli compose -f "$compose" --project-name mark-api --profile live \
+                up --no-deps --no-build --pull never --detach mark-api ||
+                fail 'product runtime failed to start'
+            product_id=$(docker_cli compose -f "$compose" --project-name mark-api \
+                --profile live ps -q mark-api) ||
+                fail 'product runtime identity unavailable'
+            [ -n "$product_id" ] ||
+                fail 'product runtime not running'
+            observed_product_user=$(docker_cli inspect --format '{{.Config.User}}' "$product_id") ||
+                fail 'product UID unavailable'
+            observed_product_image=$(docker_cli inspect --format '{{.Image}}' "$product_id") ||
+                fail 'product image unavailable'
+            observed_product_running=$(docker_cli inspect --format '{{.State.Running}}' "$product_id") ||
+                fail 'product running state unavailable'
+            [ "$observed_product_user" = '50042:50042' ] &&
+                [ "$observed_product_image" = "$image" ] &&
+                [ "$observed_product_running" = true ] ||
+                fail 'product UID, image or running state mismatch'
             exit 0
         fi
         docker_cli compose -f "$compose" --project-name mark-api --profile backup \
