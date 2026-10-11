@@ -347,6 +347,28 @@ else:
             FenceLedger(unsafe_child / "must-not-be-created.sqlite", initialize=True)
         self.assertFalse(self.owner.fence_pending())
 
+    def test_runtime_cannot_clear_ambiguous_non_media_write(self) -> None:
+        """A compromised runtime must not self-release its other write types."""
+        session = self.owner.open_session()
+        self.owner.execution_started(
+            session, key="ambiguous-pause-no-self-clear", sha=_SHA, action="pause",
+        )
+        self.assertEqual(self.owner.execution_completed(
+            session, key="ambiguous-pause-no-self-clear", sha=_SHA,
+            response={"operation_receipt": {
+                "writer_invoked": True, "outcome": "ambiguous",
+            }},
+        ), "ambiguous")
+        with self.assertRaisesRegex(FenceWitnessError, "media"):
+            self.owner.runtime_clearance(
+                session, key="ambiguous-pause-no-self-clear", sha=_SHA,
+                evidence="self-claimed-runtime-observation",
+            )
+        self.assertTrue(self.owner.fence_pending())
+        self.assertFalse(self.owner.clearance_recorded(
+            key="ambiguous-pause-no-self-clear", sha=_SHA,
+        ))
+
     def test_pending_media_reconciles_only_exact_current_session(self) -> None:
         session = self.owner.open_session()
         self.owner.execution_started(session, key=_KEY, sha=_SHA, action="create_media")
@@ -486,6 +508,26 @@ else:
                 key="cleared-no-completion", sha=_SHA, response_sha=response_sha,
             ), "unverified",
         )
+
+    def test_runtime_clearance_readback_requires_exact_ambiguous_operation(self) -> None:
+        session = self.owner.open_session()
+        key = "media-ambiguous-clearance-readback"
+        self.owner.execution_started(session, key=key, sha=_SHA, action="create_media")
+        self.assertFalse(self.owner.clearance_recorded(key=key, sha=_SHA))
+        self.assertEqual(
+            self.owner.execution_completed(
+                session, key=key, sha=_SHA, response=_UNKNOWN_MEDIA,
+            ), "ambiguous",
+        )
+        self.assertFalse(self.owner.clearance_recorded(key=key, sha=_SHA))
+        self.owner.runtime_clearance(
+            session, key=key, sha=_SHA,
+            evidence="synthetic:verified-media-settlement",
+        )
+        self.assertTrue(self.owner.clearance_recorded(key=key, sha=_SHA))
+        self.assertFalse(self.owner.clearance_recorded(key=key, sha="f" * 64))
+        self.assertFalse(self.owner.clearance_recorded(key="another-key", sha=_SHA))
+        self.assertFalse(self.owner.fence_pending())
 
     def test_same_key_never_reexecutes_after_completed_response_or_lost_local_db(self) -> None:
         session = self.owner.open_session()
@@ -750,7 +792,7 @@ else:
         with FenceWitnessClient(
             runtime_dir / "runtime.sock", expected_owner_uid=os.geteuid(),
         ) as client:
-            client.started(key="live-ambiguous", sha=_SHA, action="pause")
+            client.started(key="live-ambiguous", sha=_SHA, action="create_media")
             self.assertEqual(
                 client.completed(
                     key="live-ambiguous", sha=_SHA, response=_UNKNOWN_MEDIA,
@@ -759,7 +801,7 @@ else:
             with self.assertRaises(FenceWitnessError):
                 client.started(key="known-refused-key", sha=_SHA, action="create")
             with self.assertRaisesRegex(FenceWitnessError, "already recorded"):
-                client.started(key="live-ambiguous", sha=_SHA, action="pause")
+                client.started(key="live-ambiguous", sha=_SHA, action="create_media")
             # A truly rejected request was not committed; the same connection
             # must still permit safe read and exact in-session clearance.
             self.assertTrue(client.pending())
@@ -767,6 +809,12 @@ else:
                 key="live-ambiguous", sha=_SHA,
                 evidence="synthetic:observed-existing-submit",
             )
+            self.assertTrue(client.clearance_recorded(
+                key="live-ambiguous", sha=_SHA,
+            ))
+            self.assertFalse(client.clearance_recorded(
+                key="live-ambiguous", sha="f" * 64,
+            ))
             self.assertFalse(client.pending())
             serialized = json.dumps(
                 _UNKNOWN_MEDIA, sort_keys=True, ensure_ascii=True,
@@ -783,8 +831,73 @@ else:
                     key="known-refused-key", sha=_SHA, response_sha=response_sha,
                 ), "never_started",
             )
+            client.close()
+            self.assertTrue(client.resume_from_verified_clearance(
+                key="live-ambiguous", sha=_SHA,
+            ))
+            self.assertFalse(client.pending())
             client.started(key="new-after-clearance", sha=_SHA, action="pause")
             self.assertTrue(client.pending())
+        server.close()
+
+    def test_lost_runtime_clear_ack_rebinds_only_after_durable_readback(self) -> None:
+        """A lost ACK poisons IPC; recovery uses a new authenticated socket."""
+        runtime_dir = self.root / "lost-clearance-runtime"
+        operator_dir = self.root / "lost-clearance-operator"
+        runtime_dir.mkdir(mode=0o700)
+        runtime_dir.chmod(0o2710)
+        operator_dir.mkdir(mode=0o700)
+        server = FenceWitnessServer(
+            ledger=self.owner,
+            runtime_socket=runtime_dir / "runtime.sock",
+            operator_socket=operator_dir / "operator.sock",
+            runtime_uid=os.geteuid() + 100000,
+            runtime_gid=os.getegid(), operator_uid=os.geteuid(),
+        )
+        self.addCleanup(server.close)
+        # Isolated synthetic server; production still requires distinct UIDs.
+        server._runtime.peer_uid = os.geteuid()
+        server.start()
+        with FenceWitnessClient(
+            runtime_dir / "runtime.sock", expected_owner_uid=os.geteuid(),
+        ) as client:
+            client.started(key="lost-clearance-ack", sha=_SHA, action="create_media")
+            self.assertEqual(client.completed(
+                key="lost-clearance-ack", sha=_SHA, response=_UNKNOWN_MEDIA,
+            ), "ambiguous")
+            receive = client._receive
+
+            def discard_durable_ack() -> dict[str, object]:
+                frame = receive()  # Server already committed before replying.
+                if frame == {"ok": True, "result": {"recorded": True}}:
+                    raise OSError("synthetic lost clearance response")
+                return frame
+
+            with patch.object(client, "_receive", side_effect=discard_durable_ack):
+                with self.assertRaisesRegex(
+                    FenceWitnessError, "outcome uncertain",
+                ):
+                    client.runtime_clear(
+                        key="lost-clearance-ack", sha=_SHA,
+                        evidence="synthetic:observed-existing-submit",
+                    )
+            self.assertTrue(self.owner.clearance_recorded(
+                key="lost-clearance-ack", sha=_SHA,
+            ))
+            self.assertIsNone(client._socket)
+            self.assertTrue(client.resume_from_verified_clearance(
+                key="lost-clearance-ack", sha=_SHA,
+            ))
+            self.assertFalse(client.pending())
+            # Never append a second clearance or resubmit anything external.
+            with self.assertRaises(FenceWitnessError):
+                client.runtime_clear(
+                    key="lost-clearance-ack", sha=_SHA,
+                    evidence="synthetic:repeat-clearance-not-allowed",
+                )
+            self.assertTrue(self.owner.clearance_recorded(
+                key="lost-clearance-ack", sha=_SHA,
+            ))
         server.close()
 
     def test_shutdown_does_not_block_on_continuous_runtime_session(self) -> None:

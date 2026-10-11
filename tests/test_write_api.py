@@ -25,7 +25,9 @@ from mark_api.domain import (
     OperationOutcome,
     OperationReceipt,
 )
-from mark_api.fence_witness import FenceWitnessAlreadyRecorded, FenceWitnessRejected
+from mark_api.fence_witness import (
+    FenceWitnessAlreadyRecorded, FenceWitnessError, FenceWitnessRejected,
+)
 from mark_api.storage import SnapshotStore
 from mark_api.write_api import (
     WriteApiAccess,
@@ -567,6 +569,50 @@ class WriteApiTests(unittest.TestCase):
         self.assertEqual(service.calls, [])
         self.assertEqual(witness.completions, [])
 
+    def test_offline_witness_rejects_write_before_local_claim(self) -> None:
+        class ClosedWitness(_RecordingFenceWitness):
+            def pending(self) -> bool:
+                raise FenceWitnessError("witness connection is closed")
+
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                raise AssertionError("should never call started on dead witness")
+
+        witness = ClosedWitness(self.store)
+        service = FakeWriteService()
+        key = "no-local-claim-when-witness-offline"
+        with self.server(service, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+        self.assertEqual(status, 503, response)
+        self.assertEqual(response["error"], "witness_outcome_uncertain")
+        self.assertFalse(response["platform_retry_authorized"])
+        self.assertEqual(service.calls, [])
+        self.assertIsNone(self.store.write_api_request(key))
+
+    def test_lost_witness_start_ack_preserves_unexecuted_unknown_claim(self) -> None:
+        class LostStartAcknowledgement(_RecordingFenceWitness):
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                super().started(key=key, sha=sha, action=action)
+                raise FenceWitnessError("synthetic durable start ACK lost")
+
+        witness = LostStartAcknowledgement(self.store)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="witness-start-ack-unknown",
+            )
+        self.assertEqual(status, 503, response)
+        self.assertEqual(response["error"], "witness_outcome_uncertain")
+        self.assertFalse(response["platform_retry_authorized"])
+        self.assertEqual(service.calls, [])
+        record = self.store.write_api_request("witness-start-ack-unknown")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.state, "in_progress")
+        self.assertIsNotNone(record.execution_started_at)
+
     def test_witness_lost_completion_ack_does_not_claim_success(self) -> None:
         witness = _RecordingFenceWitness(self.store, fail_complete=True)
         service = FakeWriteService()
@@ -605,8 +651,10 @@ class WriteApiTests(unittest.TestCase):
                 server, "POST", "/api/write/ads/1234567890/pause",
                 idempotency_key="witness-new-key-bypass",
             )
-        self.assertEqual(denied, 500, blocked)
+        self.assertEqual(denied, 503, blocked)
+        self.assertEqual(blocked["error"], "witness_recovery_pending")
         self.assertFalse(blocked["platform_retry_authorized"])
+        self.assertIsNone(self.store.write_api_request("witness-new-key-bypass"))
         self.assertEqual(len(media.calls), 1)
         self.assertEqual(service.calls, [])
         self.assertEqual(len(witness.starts), 1)
@@ -704,7 +752,9 @@ class WriteApiTests(unittest.TestCase):
                 server, "POST", "/api/write/ads/1234567890/activate",
                 idempotency_key="different-after-writer-noattempt",
             )
-        self.assertEqual(second, 500, blocked)
+        self.assertEqual(second, 503, blocked)
+        self.assertEqual(blocked["error"], "witness_recovery_pending")
+        self.assertIsNone(self.store.write_api_request("different-after-writer-noattempt"))
         self.assertEqual(len(service.calls), 1)
         self.assertEqual(len(witness.starts), 1)
         record = self.store.write_api_request("writer-not-attempted")

@@ -27,7 +27,9 @@ from .domain import (
     OperationOutcome,
     OperationReceipt,
 )
-from .fence_witness import FenceWitnessAlreadyRecorded, FenceWitnessRejected
+from .fence_witness import (
+    FenceWitnessAlreadyRecorded, FenceWitnessError, FenceWitnessRejected,
+)
 from .storage import SnapshotStore
 
 
@@ -52,6 +54,10 @@ class _WitnessStartRejectedError(RuntimeError):
 
 class _WitnessPriorOperationError(RuntimeError):
     """Same key may have previously reached the external platform."""
+
+
+class _WitnessStartOutcomeUncertainError(RuntimeError):
+    """No browser call made; the independent start ACK is unknown."""
 
 
 def _utc_now() -> datetime:
@@ -438,6 +444,12 @@ class _WriteFence(Protocol):
     def pending(self) -> bool: ...
 
     def replay_status(self, *, key: str, sha: str, response_sha: str) -> str: ...
+
+    def clearance_recorded(self, *, key: str, sha: str) -> bool: ...
+
+    def resume_from_verified_clearance(self, *, key: str, sha: str) -> bool: ...
+
+    def runtime_clear(self, *, key: str, sha: str, evidence: str) -> None: ...
 
     def started(self, *, key: str, sha: str, action: str) -> None: ...
 
@@ -891,6 +903,25 @@ def _handler_factory(
                     platform_retry_authorized=False,
                 )
                 return
+            # An unavailable or still-pending independent witness must not
+            # consume a fresh local idempotency key before any browser call.
+            # This authenticated status read does NOT establish that an older
+            # external submission under the same key never happened.
+            if fence_witness is not None:
+                try:
+                    has_independent_pending = fence_witness.pending()
+                except Exception:
+                    self._error(
+                        503, "witness_outcome_uncertain",
+                        platform_retry_authorized=False,
+                    )
+                    return
+                if has_independent_pending:
+                    self._error(
+                        503, "witness_recovery_pending",
+                        platform_retry_authorized=False,
+                    )
+                    return
             try:
                 claim = store.claim_write_api_request(
                     idempotency_key=idempotency_key,
@@ -1067,6 +1098,8 @@ def _handler_factory(
                             raise _WitnessPriorOperationError() from exc
                         except FenceWitnessRejected as exc:
                             raise _WitnessStartRejectedError() from exc
+                        except FenceWitnessError as exc:
+                            raise _WitnessStartOutcomeUncertainError() from exc
                         witness_started = True
                     if action in {"create", "create_media"}:
                         assert create_request is not None
@@ -1082,13 +1115,16 @@ def _handler_factory(
                                 # but forget a newer, already executed K.
                                 # Before calling K 'never executed', ask the
                                 # independent witness about K specifically.
-                                if fence_witness is not None and (
-                                    fence_witness.replay_status(
-                                        key=idempotency_key, sha=fingerprint,
-                                        response_sha="0" * 64,
-                                    ) != "never_started"
-                                ):
-                                    raise _WitnessPriorOperationError()
+                                if fence_witness is not None:
+                                    try:
+                                        status_of_key = fence_witness.replay_status(
+                                            key=idempotency_key, sha=fingerprint,
+                                            response_sha="0" * 64,
+                                        )
+                                    except FenceWitnessError as exc:
+                                        raise _WitnessStartOutcomeUncertainError() from exc
+                                    if status_of_key != "never_started":
+                                        raise _WitnessPriorOperationError()
                                 raise _CreateRecoveryPendingError()
                             # For Create, check historical local recovery BEFORE
                             # starting a new independent fence. Then retain the
@@ -1102,6 +1138,8 @@ def _handler_factory(
                                     raise _WitnessPriorOperationError() from exc
                                 except FenceWitnessRejected as exc:
                                     raise _WitnessStartRejectedError() from exc
+                                except FenceWitnessError as exc:
+                                    raise _WitnessStartOutcomeUncertainError() from exc
                                 witness_started = True
                             if action == "create":
                                 create_receipt = service.create(
@@ -1268,6 +1306,16 @@ def _handler_factory(
                         "idempotency_key": idempotency_key,
                         "platform_retry_authorized": False,
                     }
+                except _WitnessStartOutcomeUncertainError:
+                    # The service has not been invoked. Keep the local claim
+                    # in_progress, because the independent start may already
+                    # have committed despite its lost acknowledgement.
+                    # There is no safe automatic retry or success receipt.
+                    self._error(
+                        503, "witness_outcome_uncertain",
+                        platform_retry_authorized=False,
+                    )
+                    return
                 except Exception:
                     status = 500
                     response = {

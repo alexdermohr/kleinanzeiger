@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .application import MarkService
+from .fence_witness import FenceWitnessError
 from .adapters.management import (
     DEFAULT_SOURCE as MANAGEMENT_SOURCE,
     MANAGEMENT_URL,
@@ -75,6 +76,7 @@ from .write_api import (
     WriteApiAccess,
     WriteCapability,
     _WriteApiStoreLock,
+    _WriteFence,
     acquire_write_api_store_lock,
     create_write_api_server,
 )
@@ -1115,6 +1117,7 @@ class PrivateWebWriteApiRuntime:
         media_service: PrivateWebMediaCreateService | None,
         media_handle_store: PrivateWebMediaHandleStore | None,
         operation_lock: Lock,
+        fence_witness: _WriteFence | None = None,
     ) -> None:
         self._server = server
         self._store = store
@@ -1125,6 +1128,9 @@ class PrivateWebWriteApiRuntime:
         self._media_service = media_service
         self._media_handle_store = media_handle_store
         self._operation_lock = operation_lock
+        # Borrowed connection: the outer launcher/owner closes it only after
+        # all handler and reconciliation operations have fully drained.
+        self._fence_witness = fence_witness
         self._state_lock = Lock()
         self._close_lock = Lock()
         self._server_thread: Thread | None = None
@@ -1186,6 +1192,10 @@ class PrivateWebWriteApiRuntime:
 
             def _persist_verified_settlement() -> None:
                 if operation_reference is None:
+                    if self._fence_witness is not None:
+                        raise PrivateWebRuntimeSetupError(
+                            "witness media recovery lacks original operation binding"
+                        )
                     return
                 if not operation_reference.startswith("write-api:"):
                     raise PrivateWebRuntimeSetupError(
@@ -1210,6 +1220,33 @@ class PrivateWebWriteApiRuntime:
                         evidence_reference="private-web:observation-only-submit-settlement",
                         observed_at=_utc_now(),
                     )
+                if self._fence_witness is not None:
+                    # A local durable clearance alone cannot release the
+                    # independent fence after mapped/rolled-back SQLite.
+                    # Read the exact historical witness clearance before any
+                    # append to handle an ACK lost *after* its durable commit.
+                    # A failed/unverified IPC read retains the original page
+                    # and forbids another browser submit or guessed retry.
+                    try:
+                        already_cleared = self._fence_witness.clearance_recorded(
+                            key=key, sha=record.request_sha256,
+                        )
+                    except FenceWitnessError:
+                        # Only on a LATER explicit reconciliation call: an
+                        # uncertain clearance ACK poisoned the old session.
+                        # Open a fresh SO_PEERCRED-authenticated session only
+                        # after an exact durable clearance readback. This is
+                        # not a repeat of runtime_clear or any browser input.
+                        already_cleared = (
+                            self._fence_witness.resume_from_verified_clearance(
+                                key=key, sha=record.request_sha256,
+                            )
+                        )
+                    if not already_cleared:
+                        self._fence_witness.runtime_clear(
+                            key=key, sha=record.request_sha256,
+                            evidence="private-web:observation-only-submit-settlement",
+                        )
                 self._server.clear_verified_create_recovery(
                     key, record.request_sha256,
                 )
@@ -1403,6 +1440,7 @@ def compose_private_web_write_api_runtime(
     port: int = 0,
     clock: Callable[[], datetime] | None = None,
     _store_lock: _WriteApiStoreLock | None = None,
+    fence_witness: _WriteFence | None = None,
 ) -> PrivateWebWriteApiRuntime:
     """Compose already-built PrivateWeb runtimes behind one loopback Write API.
 
@@ -1504,6 +1542,7 @@ def compose_private_web_write_api_runtime(
         clock=runtime_clock,
         execution_lock=operation_lock,
         _store_lock=_store_lock,
+        fence_witness=fence_witness,
     )
     # This composition owns state beyond the HTTP server. Keep the exclusive
     # store lease across server_close() until owned runtimes are fully settled
@@ -1525,6 +1564,7 @@ def compose_private_web_write_api_runtime(
             media_service=media_service,
             media_handle_store=media_handle_store,
             operation_lock=operation_lock,
+            fence_witness=fence_witness,
         )
     except Exception:
         try:
@@ -1552,6 +1592,7 @@ def build_private_web_write_api_runtime(
     port: int = 0,
     timeout_seconds: float = 5.0,
     clock: Callable[[], datetime] | None = None,
+    fence_witness: _WriteFence | None = None,
 ) -> PrivateWebWriteApiRuntime:
     """Build a loopback-only PrivateWeb write runtime for an existing CDP worker.
 
@@ -1672,6 +1713,7 @@ def build_private_web_write_api_runtime(
             port=port,
             clock=clock,
             _store_lock=store_lock,
+            fence_witness=fence_witness,
         )
         store_lock = None
         return runtime

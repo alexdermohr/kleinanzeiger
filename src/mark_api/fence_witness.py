@@ -623,6 +623,27 @@ class FenceLedger:
                 return "unverified"
             return completed[3]
 
+    def clearance_recorded(self, *, key: str, sha: str) -> bool:
+        """Prove a durable clearance for this exact original operation.
+
+        This read cannot create, change, or clear a fence. In particular,
+        global pending=False is not evidence that THIS key was cleared.
+        """
+        key = _required_string(key, _KEY, "idempotency key")
+        sha = _required_string(sha, _SHA, "request SHA-256")
+        self._ensure_owner_pid()
+        with self._guard, closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT 1 FROM events AS start JOIN events AS clear "
+                "ON start.request_key=clear.request_key "
+                "AND start.session_id=clear.session_id "
+                "AND start.request_sha256=clear.request_sha256 "
+                "WHERE start.kind='started' AND start.request_key=? "
+                "AND start.request_sha256=? "
+                "AND clear.kind IN ('runtime_cleared','operator_cleared') "
+                "LIMIT 1", (key, sha),
+            ).fetchone() is not None
+
     def runtime_clearance(
         self, session: str, *, key: str, sha: str, evidence: str,
     ) -> None:
@@ -644,11 +665,16 @@ class FenceLedger:
                 if not operator:
                     self._require_active(conn, session)
                 start = conn.execute(
-                    "SELECT session_id,request_sha256 FROM events "
+                    "SELECT session_id,request_sha256,action FROM events "
                     "WHERE kind='started' AND request_key=?", (key,),
                 ).fetchone()
                 if start is None or start[1] != sha:
                     raise FenceWitnessError("clearance is not operation-bound")
+                # Runtime only performs the in-process media submit observation.
+                # All other ambiguous browser mutations require an independently
+                # authorized operator clearance after the source session seals.
+                if not operator and start[2] != "create_media":
+                    raise FenceWitnessError("runtime clearance requires media create")
                 if not operator and start[0] != session:
                     raise FenceWitnessError("runtime cannot clear another session")
                 if operator:
@@ -785,6 +811,12 @@ class _WitnessUnixHandler(socketserver.StreamRequestHandler):
                 return {"outcome": server.ledger.replay_status(
                     key=request["key"], sha=request["sha"],
                     response_sha=request["response_sha"],
+                )}
+            if op == "clearance_recorded" and set(request) == {
+                "version", "op", "key", "sha",
+            }:
+                return {"cleared": server.ledger.clearance_recorded(
+                    key=request["key"], sha=request["sha"],
                 )}
             if op == "started" and set(request) == {
                 "version", "op", "key", "sha", "action",
@@ -984,6 +1016,9 @@ class FenceWitnessClient:
         if not hasattr(socket, "SO_PEERCRED"):
             raise FenceWitnessError("kernel peer credentials are unavailable")
         self._guard = RLock()
+        self._socket_path = socket_path
+        self._expected_owner_uid = expected_owner_uid
+        self._timeout_seconds = timeout_seconds
         self._socket: socket.socket | None = None
         self._stream: Any = None
         peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1093,6 +1128,40 @@ class FenceWitnessClient:
             self.close()
             raise FenceWitnessError("witness completion acknowledgement is invalid")
         return value
+
+    def clearance_recorded(self, *, key: str, sha: str) -> bool:
+        result = self._call("clearance_recorded", key=key, sha=sha)
+        if set(result) != {"cleared"} or type(result["cleared"]) is not bool:
+            self.close()
+            raise FenceWitnessError("witness clearance status is invalid")
+        return result["cleared"]
+
+    def resume_from_verified_clearance(self, *, key: str, sha: str) -> bool:
+        """Explicit recovery only; never retry an ambiguous ledger mutation.
+
+        After the old session is sealed, open a new SO_PEERCRED-attested
+        session solely to verify the original operation's durable clearance.
+        A failed/absent clearance leaves this client closed. A successful
+        readback transfers the new session for subsequent fenced operations.
+        No execution_started, completed or runtime_clear is retried here.
+        """
+        with self._guard:
+            if self._socket is not None or self._stream is not None:
+                raise FenceWitnessError("recovery readback requires closed session")
+            replacement = FenceWitnessClient(
+                self._socket_path, expected_owner_uid=self._expected_owner_uid,
+                timeout_seconds=self._timeout_seconds,
+            )
+            try:
+                if not replacement.clearance_recorded(key=key, sha=sha):
+                    raise FenceWitnessError(
+                        "independent operation clearance not durably verified"
+                    )
+                self._socket, self._stream = replacement._socket, replacement._stream
+                replacement._socket, replacement._stream = None, None
+            finally:
+                replacement.close()
+            return True
 
     def runtime_clear(self, *, key: str, sha: str, evidence: str) -> None:
         if self._call(
