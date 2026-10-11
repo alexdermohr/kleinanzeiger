@@ -394,10 +394,15 @@ definieren eine opt-in-Produktkomposition:
   synthetisches TCP, nach Landlock und `execv` verweigertes IPv4-/IPv6-
   TCP-CONNECT, erlaubtes ausschließliches Port-Binden und funktionierendes
   `AF_UNIX`. **Keine echte Chrome-Verbindung** wurde dabei aufgebaut.
-  Die Landlock-Netzwerkregeln blockieren **nicht UDP**; sie sperren nur
-  TCP-Bind/Connect des eingeschränkten Ingress-Prozessbaums. Andere vorher
-  bereits laufende Prozesse derselben Host-UID oder ein privilegierter
-  Docker-/Root-Operator sind durch diese Prozessregel nicht geschützt.
+  Landlock-Netzwerkregeln prüfen **nur die TCP-Portnummer**, nicht die
+  Bindadresse: Auch ein kompromittierter Ingress könnte nach Schließen des
+  regulären Listeners versuchen, Port 8875 an eine Nicht-Loopback-Adresse
+  zu binden. Das eigentliche Produkt verwendet `127.0.0.1`; eine
+  unabhängige Host-Firewall-/Port- und Prozess-Attestation ist trotzdem
+  weiter notwendig. Landlock blockiert **nicht UDP** und schützt nur den
+  eingeschränkten Ingress-Prozessbaum. Andere vorher bereits laufende
+  Prozesse derselben Host-UID oder ein privilegierter Docker-/Root-Operator
+  sind durch diese Prozessregel nicht geschützt.
   Darum bleiben UID-50045-Exklusivität, sicherer OS-Cutover, sämtliche
   Prozess-/Socket-FDs sowie tatsächliche finale Produktimage-Negativtests
   gesonderte Gates. Ein fremder UID-Prozess kann den
@@ -407,8 +412,15 @@ definieren eine opt-in-Produktkomposition:
 - **Teilnachweis:** Der real ausgeführte ausschließlich synthetische
   Rootful-Docker-Mehr-UID-Test `tests/test_dashboard_relay_netless_multiuid.py`
   beweist die tatsächliche UDS/TCP-Weiterleitung über UID 50045 → 50042 →
-  50044, nicht erreichbare Host-TCP-Ziele aus `network:none`, verweigerte
-  fremde Socket-UID und blockierten Neustart nach verwaistem Socket.
+  50044 **auch mit bereits im Ingress installierter Landlock-TCP-Policy**:
+  Noch im eingeschränkten UID-50045-Prozess wird der direkte Versuch zum
+  synthetischen Host-Owner-TCP-Port mit `PermissionError` abgewiesen,
+  während `GET /readyz` und die erwartete 404-Antwort über den gesamten
+  UID-geprüften Unix-Socket-HTTP-Pfad funktionieren. Zusätzlich sind Host-
+  TCP-Ziele aus `network:none` unerreichbar, fremde Socket-UIDs werden
+  verweigert und Neustarts nach verwaistem Socket bleiben blockiert.
+  Dieser E2E-Test erzeugt keine Chrome-Verbindung und nutzt weiterhin ein
+  vorhandenes synthetisches Docker-Testimage, kein attestiertes Releaseimage.
   Das ist weder ein finales Produktimage noch eine Attestation historischer
   Host-UID-/FD-/Mapping-Rechte oder der Autorität eines kompromittierten
   UID-50044-Executors. Auch UID 50045 muss im echten Hostprozess- und

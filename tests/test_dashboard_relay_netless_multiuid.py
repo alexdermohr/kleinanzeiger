@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -74,12 +75,29 @@ while True:time.sleep(2)
 """
 
 _INGRESS = r"""
-from mark_api.dashboard_relay import TrustedDashboardPublicIngress
+# Apply the very same trusted bootloader before importing Mark or opening TCP.
+import importlib.util,os,socket,time
 from pathlib import Path
-import time
+port=int(os.environ['MARK_ALLOWED_PORT'])
+owner_port=int(os.environ['MARK_OWNER_PORT'])
+spec=importlib.util.spec_from_file_location('guard','/src/ingress-landlock.py')
+guard=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+guard.install_tcp_ingress_policy(bind_port=port)
+from mark_api.dashboard_relay import TrustedDashboardPublicIngress
+# Host TCP owner/CDP is reachable before policy on this host-network topology,
+# but must be forbidden *inside this very restricted ingress process*.
+probe=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+try:
+    probe.connect(('127.0.0.1',owner_port))
+except PermissionError:
+    print('INGRESS_OWNER_TCP_LANDLOCK_DENIED',flush=True)
+else:
+    raise AssertionError('trusted ingress bypassed Landlock to owner TCP')
+finally:probe.close()
 relay=TrustedDashboardPublicIngress(
     socket_path=Path('/ingress/frontend.sock'),frontend_uid=50042,
-    listen_host='127.0.0.1',listen_port=0)
+    listen_host='127.0.0.1',listen_port=port)
 relay.start()
 print('INGRESS_READY',relay.server_address[1],flush=True)
 while True:time.sleep(2)
@@ -140,6 +158,10 @@ class NetlessMultiUidDockerTests(unittest.TestCase):
                 REPO / "src" / "mark_api", code / "mark_api",
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
+            shutil.copyfile(
+                REPO / "docs" / "mark-api-container-ingress-landlock.py",
+                code / "ingress-landlock.py",
+            )
             for directory in (root, code, *(x for x in code.rglob("*") if x.is_dir())):
                 directory.chmod(0o755)
             for regular in code.rglob("*"):
@@ -187,14 +209,21 @@ class NetlessMultiUidDockerTests(unittest.TestCase):
                 _docker("run", "-d", "--name", frontend, *front_args)
                 names.append(frontend)
                 self._ready(frontend, r"NETLESS_READY")
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+                    held.bind(("127.0.0.1", 0))
+                    allowed_port = held.getsockname()[1]
                 _docker(
                     "run", "-d", "--name", ingress, "--network", "host",
                     "--user", "50045:50045", *base,
                     "--mount", f"type=volume,source={ingress_volume},target=/ingress,readonly",
+                    "-e", f"MARK_ALLOWED_PORT={allowed_port}",
+                    "-e", f"MARK_OWNER_PORT={owner_port}",
                     IMAGE, "-B", "-c", _INGRESS,
                 )
                 names.append(ingress)
+                self._ready(ingress, r"INGRESS_OWNER_TCP_LANDLOCK_DENIED")
                 port = int(self._ready(ingress, r"INGRESS_READY (\d+)").group(1))
+                self.assertEqual(port, allowed_port)
                 self.assertEqual(
                     _docker("inspect", "-f", "{{.HostConfig.NetworkMode}}", frontend
                     ).stdout.strip(), "none",
