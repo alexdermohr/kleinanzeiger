@@ -168,6 +168,54 @@ Medien-/Browserprofile sind getrennte Betreiberaufgaben. Persistente
 SQLite-Daten allein stellen keine CDP-Sitzung und keine opaken
 temporären Media-Staging-Handles wieder her.
 
+## Unabhängiger SQLite-Owner – geprüfter, noch nicht integrierter Slice
+
+`src/mark_api/storage_owner.py` implementiert einen ersten **separat
+UID-geschützten und streng typisierten** AF_UNIX-Datenbankzugang. Vorgesehene
+Storage-Besitzer-UID ist **50046**, Client-UID **50044**; beide dürfen weder
+root noch dieselbe numerische UID sein. Die bereits vorhandene Datenbank
+muss als Schema-v2 unter einem privaten 50046-Verzeichnis (0700) mit
+Dateimodus 0600 und ohne Symlink-/Hardlink-Alias existieren. Vorhandene
+WAL-/SHM-/Journal-Sidecars unterliegen derselben Inode-/UID-/Mode-Prüfung.
+Der UDS-Ordner benötigt 50046:50044/2710, der Socket 50046:50044/0660.
+Der Client attestiert per Kernel-`SO_PEERCRED` die echte Owner-UID. Eine
+verwaiste Socket-Inode verhindert den Neustart; keine automatische Löschung,
+Schema-Neuanlage oder Historienmigration.
+
+Erlaubt sind ausschließlich typisierte `ready`, `read_request`,
+`create_pending`, `claim` und `begin`. Der persistente Request-Hash,
+Owner und Idempotency-Key sind gebunden; ein bereits gestarteter Write
+bleibt auch bei verlorenem ACK, SIGKILL oder verweigerter SQL-/Clearance-
+Anfrage erhalten. **Keine** allgemeine SQL-/Datei-/RPC-Methodendispatch-
+Schnittstelle, beliebige `complete`-, `clearance`-, Operator-Clear-,
+Restore- oder Backup-Operation. Antworten/Transportfehler dürfen eine
+unklare Persistenz niemals als sichere Ablehnung interpretieren. Ein
+unbekannter ACK wird erst beobachtend aufgelöst und nie blind wiederholt.
+
+**Strikter Status: Integrationsprototyp, keine Produktfreigabe.** Die
+Produkt-Compose mountet SQLite nach wie vor bei UID 50044. Der bestehende
+`SnapshotStore` und die sechs default-on-Produkt-Writes benutzen diesen
+Broker noch **nicht**. Auch kann der Broker für vollständige Write-
+Completion, Analytics, Sync und sichere unabhängige Clearances noch
+nicht verwendet werden. Der privilegierte Storage-Owner muss später erst
+nach vollständigem, offline nachgewiesenem Cutover unter getrennter
+root-verwalteter UID in die reale Komposition aufgenommen werden.
+Alt geöffnete writable FDs und `MAP_SHARED`-Mappings werden durch
+`chown`, einen neu laufenden Prozess oder diesen isolierten Test **nicht
+entzogen**. Erst danach darf eine echte kompromittierte UID-50044-
+Negativprobe alle drei #76/#77-Exploits einschließlich gemeinsamem
+SQLite/Witness-Backup und Restore widerlegen. Bis dahin keine Mutation
+an installierten DBs/Volumes, keine Ersetzung des bisherigen Mounts,
+kein `live`-/`backup`-Start und kein Merge.
+
+Der optionale Rootful-Docker-Test
+`tests/test_storage_owner_multiuid.py` arbeitet ausschließlich mit
+eigens erzeugten synthetischen Volumes unter UID 50046/50044. Er überprüft
+genau diese Grenzen, darunter lost-ACK-Readback, fremden DB-FD-Zugriff,
+verweigerte Raw-SQL/Clearance-Anfragen, persistente offene Fences nach
+SIGKILL und blockierten Neustart mit altem Socket. Er ersetzt keine
+Produktinstallation und keine Prüfung historischer offener Mappings.
+
 ## Legacy-Systemdienst ist sicherheitshalber außer Betrieb
 
 **Die früheren systemd-Installations- und Betriebsbefehle sind nicht mehr zulässig.**

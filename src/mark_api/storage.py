@@ -314,9 +314,16 @@ def _validated_write_api_claim_owner(value: str) -> str:
 class SnapshotStore:
     """Append-only SQLite storage for normalized observations and write receipts."""
 
-    def __init__(self, path: str | Path, *, create_if_missing: bool = True) -> None:
+    def __init__(
+        self, path: str | Path, *, create_if_missing: bool = True,
+        require_existing_schema: bool = False,
+    ) -> None:
         if not isinstance(create_if_missing, bool):
             raise TypeError("create_if_missing must be bool")
+        if not isinstance(require_existing_schema, bool):
+            raise TypeError("require_existing_schema must be bool")
+        if require_existing_schema and create_if_missing:
+            raise ValueError("strict existing storage cannot initialize a database")
         self.path = Path(path)
         # Each post-start connection must refuse to create a replacement file
         # if the original store is unlinked or temporarily unavailable.
@@ -342,10 +349,15 @@ class SnapshotStore:
             # when the caller explicitly passed --init-db.
             with self._connect() as connection:
                 self._validate_store_schema(
-                    connection, allow_additive_migrations=True
+                    connection,
+                    allow_additive_migrations=not require_existing_schema,
                 )
         self._dashboard_pending_write_lock = RLock()
-        self._initialize()
+        # A separately owned, existing-only SQLite store must not run DDL
+        # (including silently recreating missing optional performance indexes).
+        # The default launcher and historical import paths remain unchanged.
+        if not require_existing_schema:
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._existing_uri, uri=True)
