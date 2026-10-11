@@ -138,7 +138,7 @@ class ContainerDeploymentTests(unittest.TestCase):
                     "mark-api-container-frontend.sh":
                         "exec /opt/mark-api/venv/bin/python -I -m mark_api.dashboard_relay",
                     "mark-api-container-ingress.sh":
-                        "exec /opt/mark-api/venv/bin/python -I -m mark_api.dashboard_relay",
+                        "exec /usr/bin/python3 -I -S /etc/mark-api/ingress-landlock.py",
                     "mark-api-container-backup.sh": "/bin/sh /etc/mark-api/bootstrap.sh",
                     "mark-api-container-witness.sh":
                         "exec /opt/mark-api/venv/bin/python -I -m mark_api.fence_witness",
@@ -397,7 +397,19 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn("mark-api-container-ingress.sh", dockerfile)
         self.assertIn("netless-frontend", frontend)
         self.assertIn("--ingress-uid 50045", frontend)
-        self.assertIn("public-ingress", _read("mark-api-container-ingress.sh"))
+        ingress = _read("mark-api-container-ingress.sh")
+        guard = _read("mark-api-container-ingress-landlock.py")
+        self.assertIn("ingress-landlock.py", ingress)
+        self.assertNotIn("-m mark_api.dashboard_relay", ingress)
+        self.assertIn("install_tcp_ingress_policy(bind_port=8875)", guard)
+        self.assertIn("public-ingress", guard)
+        self.assertIn("_LANDLOCK_ACCESS_NET_CONNECT_TCP", guard)
+        self.assertIn("mark-api-container-ingress-landlock.py", build)
+        self.assertIn("mark-api-container-ingress-landlock.py", dockerfile)
+        self.assertLess(
+            guard.index("install_tcp_ingress_policy(bind_port=8875)"),
+            guard.index("os.execv("),
+        )
 
     def test_release_backup_refuses_unpaired_sqlite_only_witness_state(self) -> None:
         control = _read("mark-api-container-control.sh")

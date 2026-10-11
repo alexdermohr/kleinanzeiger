@@ -364,14 +364,32 @@ definieren eine opt-in-Produktkomposition:
   Unix-Socket mit dem UID-50044-Dashboard-Relay, nicht mit TCP.
   Das Backend bindet weiterhin nur **127.0.0.1:18875/18876**.
   UID 50044 benötigt Chrome/CDP auf 127.0.0.1:9222.
-  **Auch der neue trusted UID-50045-Ingress hat einen Host-Netzwerk-Namespace**:
-  Seine fehlenden Datenbank-/CDP-Mounts verhindern keinen direkten TCP-Zugriff
-  auf Host-CDP, falls dieser separate Prozess kompromittiert wird. Er bleibt
-  daher Teil der sicherheitskritischen Trusted Computing Base. Vor einer
-  Produktfreigabe sind Host-CDP-Rechte, der UID-50045-Ausgangspfad und
-  sämtliche tatsächlichen Prozess-/Image-/Mount-Identitäten separat
-  nachzuweisen. Dieser Teilschritt beweist nur, dass UID 50042 keine
-  Netzumgehung besitzt. Ein fremder UID-Prozess kann den
+  **Kernel-TCP-Grenze für UID 50045:** Obwohl der Ingress seinen TCP-Port
+  im Host-Netzwerk bindet, führt sein unveränderbarer root-eigener
+  Container-Entrypoint ab diesem Draft einen minimalen Python-3.12-Start
+  mit `-I -S` aus. Bevor irgendein Mark-Modul importiert, ein TCP-Socket
+  geöffnet oder der Relay per `execv` gestartet wird, legt
+  `/etc/mark-api/ingress-landlock.py` eine Linux-Landlock-Regel ab ABI 4
+  an: `handled_access_net = BIND_TCP | CONNECT_TCP`,
+  **nur `BIND_TCP:8875` erlaubt, `CONNECT_TCP` für alle Ports verweigert**.
+  Diese irreversible Prozess-/Nachfahrenregel gilt für IPv4 und IPv6,
+  unabhängig von Chrome-Rebinding oder Startup-Proben. `AF_UNIX` für den
+  UID-geprüften Frontend-Socket bleibt funktionsfähig.
+  Fehlende ABI-/Seccomp-Unterstützung, falsche UID oder Fehler beim
+  Anwenden führen zum sicheren Startabbruch; der direkte Docker-Draft-
+  Entrypoint bleibt darüber hinaus vorab gesperrt.
+  Eine echte Rootful-Docker-Hostnetz-Gegenprobe
+  (`tests/test_ingress_landlock.py`) zeigte zunächst funktionierendes
+  synthetisches TCP, nach Landlock und `execv` verweigertes IPv4-/IPv6-
+  TCP-CONNECT, erlaubtes ausschließliches Port-Binden und funktionierendes
+  `AF_UNIX`. **Keine echte Chrome-Verbindung** wurde dabei aufgebaut.
+  Die Landlock-Netzwerkregeln blockieren **nicht UDP**; sie sperren nur
+  TCP-Bind/Connect des eingeschränkten Ingress-Prozessbaums. Andere vorher
+  bereits laufende Prozesse derselben Host-UID oder ein privilegierter
+  Docker-/Root-Operator sind durch diese Prozessregel nicht geschützt.
+  Darum bleiben UID-50045-Exklusivität, sicherer OS-Cutover, sämtliche
+  Prozess-/Socket-FDs sowie tatsächliche finale Produktimage-Negativtests
+  gesonderte Gates. Ein fremder UID-Prozess kann den
   Frontend-Ingress-Socket nicht öffnen. Alle fünf Entrypoints sind Draft-
   gesperrt. Der ältere Bridge-basierte TCP-Frontend-Pfad gehört nicht
   zum installierbaren Compose-Entwurf und ist kein Release-Nachweis.

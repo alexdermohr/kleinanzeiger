@@ -56,6 +56,7 @@ COPY --chmod=0644 mark-api-container-healthcheck.py /etc/mark-api/healthcheck.py
 COPY --chmod=0644 mark-api-container-start.sh /etc/mark-api/start.sh
 COPY --chmod=0644 mark-api-container-frontend.sh /etc/mark-api/frontend.sh
 COPY --chmod=0644 mark-api-container-ingress.sh /etc/mark-api/ingress.sh
+COPY --chmod=0644 mark-api-container-ingress-landlock.py /etc/mark-api/ingress-landlock.py
 COPY --chmod=0644 mark-api-container-witness.sh /etc/mark-api/witness.sh
 COPY --chmod=0644 mark-api-container-backup.sh /etc/mark-api/backup.sh
 
