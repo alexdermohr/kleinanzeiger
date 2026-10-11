@@ -192,6 +192,17 @@ Restore- oder Backup-Operation. Antworten/Transportfehler dürfen eine
 unklare Persistenz niemals als sichere Ablehnung interpretieren. Ein
 unbekannter ACK wird erst beobachtend aufgelöst und nie blind wiederholt.
 
+**Shutdown-Fence:** Angenommene RPC-Threads sind seit diesem Slice nicht
+mehr `daemon_threads`; ein kontrolliertes `stop()`/Socket-Close wartet
+bis zur wirklichen Beendigung aller bereits angenommenen Operationen.
+Ein vor der SQLite-Persistenz künstlich angehaltener `begin`-Request
+reproduzierte zuvor einen vorzeitig abgeschlossenen `stop()` mit
+weiterlebender Schreiboperation. Der neue Regressionstest erzwingt, dass
+vor Socket-Unlink und erneuter Autoritätsvergabe zuerst diese Operation
+abgeschlossen sein muss. Dies beweist keine atomare Wiederherstellung
+nach `SIGKILL`, bei ererbten Alt-FDs oder gegen defekte Hardware.
+In solchen Fällen bleibt der Store gesperrt bis zur Offline-Reconciliation.
+
 **Strikter Status: Integrationsprototyp, keine Produktfreigabe.** Die
 Produkt-Compose mountet SQLite nach wie vor bei UID 50044. Der bestehende
 `SnapshotStore` und die sechs default-on-Produkt-Writes benutzen diesen

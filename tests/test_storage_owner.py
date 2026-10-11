@@ -13,6 +13,7 @@ import os
 import socket
 import sqlite3
 import tempfile
+from threading import Event, Thread
 import unittest
 from unittest.mock import patch
 
@@ -308,6 +309,75 @@ class StorageOwnerUnitTests(unittest.TestCase):
         SnapshotStore(self.database)
         with self.assertRaisesRegex(StorageOwnerError, "replaced"):
             service.dispatch({"version": 1, "op": "ready"})
+
+    def test_stop_does_not_release_sqlite_owner_while_rpc_is_in_flight(self) -> None:
+        """A stopped authority must never publish a new generation early.
+
+        A real accepted RPC is held just before persistent BEGIN. Its Unix
+        connection must finish and the SQLite request must be committed
+        before stop() can return or remove the socket name.
+        """
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()  # Framing-only in-process seam.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        client.claim(key="ui:shutdown:1", sha=SHA, owner="runtime:one", at=NOW)
+        entered, release, stop_done = Event(), Event(), Event()
+        writes: list[object] = []
+        exceptions: list[BaseException] = []
+        begin = service.store.begin_write_api_request
+
+        def blocked_begin(**kw: object) -> object:
+            entered.set()
+            if not release.wait(timeout=6):
+                raise AssertionError("test blocked storage request was never released")
+            return begin(**kw)
+
+        def writer() -> None:
+            try:
+                writes.append(client.begin(
+                    key="ui:shutdown:1", sha=SHA, owner="runtime:one", at=NOW,
+                ))
+            except BaseException as exc:
+                exceptions.append(exc)
+
+        def shutdown() -> None:
+            try:
+                service.stop()
+            except BaseException as exc:
+                exceptions.append(exc)
+            finally:
+                stop_done.set()
+
+        with patch.object(
+            service.store, "begin_write_api_request", side_effect=blocked_begin,
+        ):
+            request = Thread(target=writer, daemon=True)
+            request.start()
+            self.assertTrue(entered.wait(timeout=3))
+            closing_thread = Thread(target=shutdown, daemon=True)
+            closing_thread.start()
+            try:
+                self.assertFalse(
+                    stop_done.wait(timeout=0.3),
+                    "storage owner stopped before an outstanding RPC completed",
+                )
+            finally:
+                release.set()
+                request.join(timeout=7)
+                closing_thread.join(timeout=7)
+        self.assertFalse(request.is_alive())
+        self.assertFalse(closing_thread.is_alive())
+        self.assertFalse(exceptions, exceptions)
+        self.assertTrue(stop_done.is_set())
+        self.assertEqual(len(writes), 1)
+        self.assertFalse(self.sock.exists())
+        record = SnapshotStore(self.database, create_if_missing=False).write_api_request(
+            "ui:shutdown:1",
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record.state, "in_progress")
+        self.assertIsNotNone(record.execution_started_at)
 
     def test_container_draft_denies_direct_python_main_before_argparse(self) -> None:
         with patch("mark_api.storage_owner.container_draft_denied", return_value=True):

@@ -202,8 +202,12 @@ class StorageOwnerServer(
     """Private UID-owned SQLite; only an exact distinct runtime UID can RPC."""
 
     allow_reuse_address = False
-    daemon_threads = True
-    block_on_close = False
+    # An accepted RPC may already have entered SQLite when SIGTERM arrives.
+    # Never unlink the public socket / report stop complete until all such
+    # operations have finished; else an old generation can commit *after*
+    # the operator believes its authority has been revoked.
+    daemon_threads = False
+    block_on_close = True
     request_queue_size = _MAX_PEERS
 
     def __init__(
