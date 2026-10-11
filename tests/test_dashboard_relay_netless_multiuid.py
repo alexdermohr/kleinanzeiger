@@ -212,6 +212,15 @@ class NetlessMultiUidDockerTests(unittest.TestCase):
                     self.assertEqual(response.read(), b'{"ready":true}')
                 finally:
                     connection.close()
+                # The ingress must not become a Chrome/CDP HTTP proxy.
+                connection = HTTPConnection("127.0.0.1", port, timeout=4)
+                try:
+                    connection.request("GET", "/json/version")
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 404)
+                    self.assertEqual(response.read(), b"not_found")
+                finally:
+                    connection.close()
                 denial = _docker(
                     "exec", "-u", "50042:50042", "-e",
                     f"MARK_INGRESS_PORT={port}", "-e",

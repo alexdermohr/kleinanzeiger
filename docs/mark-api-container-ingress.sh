@@ -1,6 +1,8 @@
 #!/bin/sh
 # UID 50045: trusted minimal host-loopback TCP ingress; no CDP, DB or owner
 # socket mounts, and no credentials. Untrusted frontend remains network:none.
+# As network_mode:host, UID50045 still has host CDP TCP reachability if
+# compromised. This distinct trusted ingress remains an independent P1 gate.
 set -eu
 umask 077
 [ "$#" -eq 0 ] || { printf '%s\n' 'mark-api: unexpected ingress arguments' >&2; exit 64; }

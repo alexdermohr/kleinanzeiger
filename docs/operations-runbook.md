@@ -315,8 +315,15 @@ definieren eine opt-in-Produktkomposition:
   Das netzlose Frontend verbindet sich ausschließlich per UID-geprüftem
   Unix-Socket mit dem UID-50044-Dashboard-Relay, nicht mit TCP.
   Das Backend bindet weiterhin nur **127.0.0.1:18875/18876**.
-  Nur UID 50044 benötigt Hostnetzwerk für eine bereits authentifizierte
-  Chrome-Sitzung auf 127.0.0.1:9222. Ein fremder UID-Prozess kann den
+  UID 50044 benötigt Chrome/CDP auf 127.0.0.1:9222.
+  **Auch der neue trusted UID-50045-Ingress hat einen Host-Netzwerk-Namespace**:
+  Seine fehlenden Datenbank-/CDP-Mounts verhindern keinen direkten TCP-Zugriff
+  auf Host-CDP, falls dieser separate Prozess kompromittiert wird. Er bleibt
+  daher Teil der sicherheitskritischen Trusted Computing Base. Vor einer
+  Produktfreigabe sind Host-CDP-Rechte, der UID-50045-Ausgangspfad und
+  sämtliche tatsächlichen Prozess-/Image-/Mount-Identitäten separat
+  nachzuweisen. Dieser Teilschritt beweist nur, dass UID 50042 keine
+  Netzumgehung besitzt. Ein fremder UID-Prozess kann den
   Frontend-Ingress-Socket nicht öffnen. Alle fünf Entrypoints sind Draft-
   gesperrt. Der ältere Bridge-basierte TCP-Frontend-Pfad gehört nicht
   zum installierbaren Compose-Entwurf und ist kein Release-Nachweis.
@@ -489,7 +496,7 @@ Heute wird keiner dieser Live-Starts ausgeführt. Selbst nach späterer
 Aktivierung ist ein grüner Socket-Healthcheck **keine** unabhängige
 Protokoll-, Storage- oder CDP-Abnahme.
 **Direktes `docker compose up/run` umgeht die Kontrollschnittstelle,
-aber alle vier Entrypoints und der Image-Default verweigern im Draft
+aber alle fünf Entrypoints und der Image-Default verweigern im Draft
 jeden Produktstart.** Ein manipulierter
 Entrypoint oder ein privilegierter Root-/Docker-Daemon-Operator liegt
 außerhalb dieser Grenze. Direkter Compose-Aufruf ist kein freigegebener
