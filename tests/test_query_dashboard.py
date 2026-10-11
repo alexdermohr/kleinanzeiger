@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from http.client import HTTPConnection
 import sqlite3
 import shutil
 import subprocess
@@ -319,6 +320,54 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
                     urlopen(invalid, timeout=2)
                 self.assertEqual(denied.exception.code, 403)
         self.assertEqual(len(self.backend.requests), 1)
+
+    def test_forwarded_public_host_is_allowed_without_dns_aliases(self) -> None:
+        public_port = 8875
+        proxied = create_server(self.store, port=0, public_origin_port=public_port)
+        thread = threading.Thread(target=proxied.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(proxied.server_close)
+        self.addCleanup(proxied.shutdown)
+        host, private_port = proxied.server_address
+        for forwarded_host, expected_status in (
+            (f"127.0.0.1:{public_port}", 200),
+            (f"127.0.0.1:{private_port}", 200),
+            (f"attacker.example:{public_port}", 421),
+            (f"localhost:{public_port}", 421),
+        ):
+            with self.subTest(host=forwarded_host):
+                connection = HTTPConnection(host, private_port, timeout=2)
+                try:
+                    connection.putrequest("GET", "/readyz", skip_host=True)
+                    connection.putheader("Host", forwarded_host)
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, expected_status)
+                    response.read()
+                finally:
+                    connection.close()
+
+    def test_proxy_rejects_foreign_host_before_write_forward(self) -> None:
+        host, port = self.server.server_address
+        payload = b'{"title":"New"}'
+        connection = HTTPConnection(host, port, timeout=2)
+        try:
+            connection.putrequest("PATCH", "/api/write/ads/2", skip_host=True)
+            connection.putheader("Host", "attacker.example")
+            for header, value in self.write_headers(
+                content_type="application/json",
+                idempotency_key="ui:foreign-host-denied",
+            ).items():
+                connection.putheader(header, value)
+            connection.putheader("Content-Length", str(len(payload)))
+            connection.endheaders(payload)
+            response = connection.getresponse()
+            self.assertEqual(response.status, 421)
+            response.read()
+        finally:
+            connection.close()
+        self.assertEqual(self.backend.requests, [])
 
     def test_proxy_requires_dashboard_secret_and_same_origin(self) -> None:
         body = b'{"title":"Neu"}'
@@ -1232,6 +1281,31 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
                 dict(response.headers.items()),
                 response.read(),
             )
+
+    def test_read_routes_deny_dns_rebinding_and_duplicate_host(self) -> None:
+        host, port = self.server.server_address
+        forbidden = (
+            ("foreign", ("attacker.example",)),
+            ("foreign-port", (f"attacker.example:{port}",)),
+            ("localhost-alias", (f"localhost:{port}",)),
+            ("wrong-port", ("127.0.0.1:1",)),
+            ("missing", ()),
+            ("duplicate", (f"127.0.0.1:{port}", "attacker.example")),
+        )
+        for label, hosts in forbidden:
+            with self.subTest(label=label):
+                connection = HTTPConnection(host, port, timeout=2)
+                try:
+                    connection.putrequest("GET", "/api/summary", skip_host=True)
+                    for value in hosts:
+                        connection.putheader("Host", value)
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 421)
+                    self.assertNotIn(b"tracked_ads", response.read())
+                finally:
+                    connection.close()
+        self.assertEqual(self.get("/api/summary")[0], 200)
 
     def test_standalone_dashboard_rejects_mistyped_database_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

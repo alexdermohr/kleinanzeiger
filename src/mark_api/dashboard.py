@@ -1914,6 +1914,31 @@ def _handler_factory(
         server_version = "mark-api-readonly/0.1"
         sys_version = ""
 
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            # The public frontend forwards an HTTP Host unchanged. Never
+            # trust DNS aliases or duplicate Host headers, even for GETs:
+            # a browser's Host must identify a literal loopback origin.
+            local_host, local_port = self.server.server_address
+            allowed_ports = {int(local_port)}
+            if public_origin_port is not None:
+                allowed_ports.add(public_origin_port)
+            allowed_hosts = {
+                _dashboard_http_origin("127.0.0.1", port).removeprefix("http://")
+                for port in allowed_ports
+            }
+            hosts = self.headers.get_all("Host") or []
+            if (
+                str(local_host) != "127.0.0.1"
+                or len(hosts) != 1
+                or hosts[0] not in allowed_hosts
+            ):
+                self.close_connection = True
+                self.send_error(421, "Misdirected Request")
+                return False
+            return True
+
         def log_message(self, format: str, *args: object) -> None:
             return
 
