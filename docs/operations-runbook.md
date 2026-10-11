@@ -168,190 +168,21 @@ Medien-/Browserprofile sind getrennte Betreiberaufgaben. Persistente
 SQLite-Daten allein stellen keine CDP-Sitzung und keine opaken
 temporären Media-Staging-Handles wieder her.
 
-## Isolierter Linux-Systemdienst: tatsächliche Vertrauensgrenze
+## Legacy-Systemdienst ist sicherheitshalber außer Betrieb
 
-**Vorlagen, keine laufende Installation:** `docs/mark-api.service`,
-`docs/mark-api-backup@.service`, `docs/mark-api-bootstrap.sh`,
-`docs/mark-api-preflight.py` und `docs/mark-api.sysusers.conf`
-beschreiben einen root-verwalteten, dedizierten `mark-api`-Unix-Nutzer ohne
-Login-Shell. Diese Dateien im Repository oder ein erfolgreicher Unit-Test
-beweisen **keine** tatsächlich eingerichtete, sichere Laufzeitidentität.
+**Die früheren systemd-Installations- und Betriebsbefehle sind nicht mehr zulässig.**
+Die Vorlagen `mark-api.service` und `mark-api-backup@.service` verweigern
+mit `ExecCondition=/usr/bin/false` bereits vor dem Bootstrap den Start;
+`ExecStart=/usr/bin/false` bleibt als zweite Sperre erhalten. Vorhandene
+alte, eventuell installierte Units sind separat auf dem Zielhost zu inventarisieren.
+UID 50042 darf keine Datenbank und WAL-/SHM-Dateien besitzen. Der installierte
+DB-Preflight akzeptiert nur den separaten Owner `mark-api-owner` (UID 50044).
 
-Ein Benutzerprozess, der dieselbe Unix-UID und Schreibrechte wie die
-SQLite-Dateien besitzt und böswillig über bereits writable `MAP_SHARED`
-gemappte Main-/WAL-/SHM-Seiten schreibt, kann die Inhalts-/Zeitpunktprüfungen
-der Backup-CLI umgehen und alte, scheinbar gültige Snapshots erzwingen.
-Weder `lstat`, Datei-Hashes, ein SQLite-Leselock noch die neue Rohseiten-
-Vergleichsfunktion sind dafür eine kontinuierliche Isolation. Der harte
-Betriebsrand ist deshalb: **Das Dienstkonto darf ausschließlich die
-vertrauenswürdige Mark-Laufzeit und ihre Backup-Aufgabe ausführen.** Alle
-anderen Desktop-/Browser-/Automation-Prozesse bleiben unter getrennten
-Unprivilegierten-UIDs; ausschließlich root darf die Unit oder ihre
-Programmdateien ändern. Direkte UID-Impersonation, eine kompromittierte
-Mark-Laufzeit oder root sind damit nicht als abgewehrte Angreifer
-modelliert. Gegen diese Bedrohungen braucht es zusätzliche, extern
-verifizierbare Integrität und/oder unabhängig isolierte Storage-Snapshots.
-
-Die Vorlage bewahrt die normale `mark-api-launch`-Komposition mit
-**default-on** Create-/Media-/Update-/Pause-/Delete-Write-Funktionen und
-sämtlichen existierenden Bestätigungs-, Ownership-, Idempotenz- und
-Recovery-Fences. Sie deaktiviert keine Produkt-Write-API. Der Browser
-läuft als **separater bereits authentifizierter Nutzerprozess** mit
-loopback-only CDP; das Dienstkonto greift über den lokalen TCP-Port zu,
-nicht durch Lesen des Browserprofils. Zum Hochladen von Bildern dient der
-vorhandene pfadfreie Media-Staging-Endpunkt. Das Dashboard und die
-Write-API bleiben loopback-only.
-
-### Einrichtung ausschließlich mit geprüftem Produkt-Release
-
-1. Vor Ausführung echte Backup-/Restore-Evidenz der vorhandenen Mark-Datenbank,
-   aktuelle offene Pending-Write-Fences und eine zulässige, bereits
-   authentifizierte CDP-Sitzung prüfen. Bestehende Daten **niemals**
-   mit `--init-db` neu anlegen oder blind durch ein Altbackup ersetzen.
-   Die Vorlage setzt ein root-owned, ausschließlich aus einem geprüften
-   Release **nicht-editierbar** installiertes `/opt/mark-api/venv` mit
-   Python 3.12+ und `mark-api[private-web]` voraus. Die komplette venv
-   einschließlich aller transitiven Abhängigkeiten, .pth-Dateien und
-   Console-Scripts muss root-owned sein, weder gruppen- noch weltweit
-   schreibbar, ohne nach Benutzer-Home oder andere untrusted Pfade zeigende
-   Imports/Symlinks. **Kein bestehendes user-owned Venv durch bloßes `chown`
-   umwidmen:** Bereits gehaltene writable Mappings könnten sonst weiter
-   auf seine Inodes wirken. Stattdessen ein neues, leeres root-owned Venv
-   aus geprüftem Release anlegen und dessen Pakete direkt dort installieren.
-   Der tatsächlich gestartete `/opt/mark-api/venv/bin/python` und seine
-   vorhandenen Python-Interpreter-Aliasse müssen Symlinks auf **dieselbe**
-   root-owned `/usr/bin/python3.X`-Datei sein, deren `X` dem einzigen
-   installierten Mark-Paketverzeichnis `lib/python3.X/site-packages` entspricht.
-   Kopierte Interpreter im Venv oder Links auf andere Minor-Versionen
-   werden abgelehnt, weil sie ungeprüfte Standardbibliotheken laden könnten.
-   Symlinks auf ein Benutzer-Home sind unzulässig.
-   Der Preflight lehnt zusätzlich .pth-Pfaderweiterungen außerhalb der
-   vollständig gescannten Venv, ungescannte Paket-Symlinks nach /usr und
-   `include-system-site-packages = true` ab. In `pyvenv.cfg` müssen
-   `include-system-site-packages = false` und exakt `home = /usr/bin`
-   enthalten. Andere Python-Basis-Pfade, auch scheinbar geschützte unter
-   `/usr/local`, werden abgewiesen. Der Preflight prüft zusätzlich den
-   vollständig erreichbaren OS-Standardbibliotheksbaum unter
-   `/usr/lib/pythonX.Y` (einschließlich Symlink-Zielen) und gegebenenfalls
-   `/usr/lib/pythonXY.zip` auf root-owned, nicht schreibbare Inhalte. Ein
-   OS-übliches Symlink auf eine externe **reguläre Datei** (etwa
-   `/etc/pythonX.Y/sitecustomize.py`) ist nur bei geschütztem Ziel und
-   geschützter gesamter Elternkette zulässig; externe Verzeichnis-Symlinks
-   bleiben gesperrt.
-   UTF-8-BOM in `.pth`-Dateien werden entsprechend CPythons `site.py`
-   vor der Importzeilenprüfung entfernt. Das normale Mark-Venv setzt somit
-   eine sicher installierte passende OS-Python-Version unter `/usr/bin`
-   voraus; das nur im Benutzer-Home vorhandene Python 3.12 genügt nicht
-   für die isolierte Produktions-Unit. Diese Vorgabe ersetzt keine Prüfung
-   der tatsächlichen Host- und Dienst-Identität.
-   Die OS-System-Python-Version darf älter sein. Ihr Importbaum wird **vor**
-   dem ersten Python-Aufruf durch das root-verwaltete native POSIX-Bootstrap-
-   Skript geprüft; nur danach startet es den isolierten Preflight mit `-I -S`.
-   Das eingesetzte `/bin/sh`, `/usr/bin/find`, `/usr/bin/readlink`, deren
-   nativer Loader und die root-verwaltete systemd-Unit sind ausdrücklich
-   Teil der zugrunde gelegten vertrauenswürdigen OS-Basis. Gegen deren
-   Kompromittierung schützt kein in derselben Unit ausgeführter Preflight.
-2. Vor dem ersten Start einmalig ein dediziertes, nicht interaktives
-   Systemkonto und geschützte Verzeichnisse vorbereiten:
-
-   ~~~bash
-   sudo install -D -o root -g root -m 0644 docs/mark-api.sysusers.conf /etc/sysusers.d/mark-api.conf
-   sudo systemd-sysusers /etc/sysusers.d/mark-api.conf
-   sudo install -d -o mark-api -g mark-api -m 0700 /var/lib/mark-api /var/lib/mark-api-backups
-   /opt/mark-api/venv/bin/python --version
-   ~~~
-
-   Nur bei **wirklich neuer**, nachweislich noch nicht vorhandener Datenbank
-   mit dem bereits geprüften installierten Paket initialisieren, ohne
-   Browser- oder Plattformzugriff:
-
-   ~~~bash
-   sudo -u mark-api /opt/mark-api/venv/bin/python -c "from mark_api.storage import SnapshotStore; SnapshotStore('/var/lib/mark-api/mark.sqlite', create_if_missing=True)"
-   ~~~
-
-   Bei bestehenden Mark-Stores stattdessen nur nach nachvollzogenem
-   Offline-Stop, unveränderter SHA-256-Quellprüfung und streng geprüftem
-   Backup/Restore den neuen Owner-Pfad vorbereiten. Keine automatische
-   Migration/Ownership-Änderung laufender Daten.
-   Die Systemd-Vorlagen verwenden ausdrücklich **kein** `StateDirectory=`,
-   da systemd ein bereits bestehendes Verzeichnis andernfalls automatisch
-   rekursiv umberechtigen könnte. Die Datenverzeichnisse müssen daher wie
-   oben **vorher** existieren, ohne dass der Dienststart sie neu erzeugt
-   oder fremde Daten automatisch übernimmt. `ReadWritePaths=` erlaubt nur
-   die benötigten bereits existierenden Pfade trotz `ProtectSystem=strict`.
-   `ExecCondition=` überprüft zuvor mit dem root-verwalteten nativen
-   `/usr/bin/find`, ob `/etc`, `/etc/mark-api` und das Bootstrap-Skript
-   root-owned, nicht gruppen-/weltweit beschreibbar und ohne Symlink auf
-   die erste ausführbare Scriptdatei verweisen. Ein Verstoß verhindert den
-   Dienststart, bevor ein Byte aus diesem Skript ausgeführt wird.
-   `ExecStartPre=` beginnt danach mit `/bin/sh /etc/mark-api/bootstrap.sh`. Diese
-   root-verwaltete, schreibfreie native Stufe prüft zunächst den **eigenen**
-   `/usr/bin/python3`-Interpreter samt tatsächlich zugehörigem
-   `/usr/lib/pythonX.Y`-Importbaum, Symlink-Zielen einschließlich ihrer
-   Elternverzeichnisse und optionalem Stdlib-ZIP auf root-Eigentum sowie
-   Nicht-Schreibbarkeit. Erst danach wird das getrennte root-owned
-   `/etc/mark-api/preflight.py` unter `/usr/bin/python3 -I -S` ausgeführt.
-   Dieser zweite schreibfreie Bootstrap prüft den vollständigen Installationsbaum
-   einschließlich Python-Code aller Mark-/Drittanbieter-Module, Binärmodule,
-   Skripte, Paket-Pfaddeklarationen und Symlink-Ziele auf root-Eigentum und
-   Nicht-Schreibbarkeit. Zugleich verifiziert er Dienst-UID/-GID, Nicht-Login-
-   Shell, `0700`-Verzeichnisse und `0600`-Datenbank/Sidecars. Unverifizierte
-   Installationen, schreibbare Fremdmodule und untrusted `.pth`-Imports
-   blockieren den Start. Der eigentliche Produktprozess benutzt anschließend
-   den isolierten Venv-Aufruf `python -I -m mark_api.launcher` und aktiviert
-   weiterhin sämtliche normalen Writes **default-on**. Ein Fehler startet
-   weder Launcher noch Backup und löst keinerlei Plattformaktion aus.
-   **Diese Prüfung erkennt keine fremden, bereits unter der kompromittierten
-   Dienst-UID laufenden Prozesse oder vorbestehende mmap-Schreibzugriffe.**
-3. Root-verwaltete Units installieren, aber erst nach verifiziertem
-   CDP-Endpunkt und sicherem DB-Eigentum starten:
-
-   ~~~bash
-   sudo install -d -o root -g root -m 0755 /etc/mark-api
-   sudo install -o root -g root -m 0644 docs/mark-api-bootstrap.sh /etc/mark-api/bootstrap.sh
-   sudo install -o root -g root -m 0644 docs/mark-api-preflight.py /etc/mark-api/preflight.py
-   sudo install -o root -g root -m 0644 docs/mark-api.service /etc/systemd/system/mark-api.service
-   sudo install -o root -g root -m 0644 'docs/mark-api-backup@.service' '/etc/systemd/system/mark-api-backup@.service'
-   sudo systemctl daemon-reload
-   sudo systemctl cat mark-api.service
-   sudo stat -c '%U:%G %a %n' /etc/mark-api /etc/mark-api/bootstrap.sh /etc/mark-api/preflight.py /var/lib/mark-api /var/lib/mark-api/mark.sqlite /var/lib/mark-api-backups
-   ~~~
-
-   Erwartet sind `root:root`, `0755` für `/etc/mark-api`, `0644` für
-   beide Preflight-Skripte sowie `mark-api:mark-api`, `0700` auf beiden
-   Datenverzeichnissen und `0600` auf der Quelldatei. Vor Livebetrieb prüfen, dass eine andere
-   nicht-root UID keinen Dateizugriff erhält und kein Fremdprozess unter der
-   Dienst-UID läuft. Der Browser und die lokalen CLI-Tools unter dem
-   Desktopkonto dürfen **nicht** mehr direkt in diese Datenbank schreiben.
-   Das Starten der Unit ohne authentifiziertes Loopback-CDP liefert
-   keine produktive Abnahme.
-4. Die Vorlage verwendet `--dashboard-port 8875 --write-port 8876`,
-   da die Standardports `8765/8766` auf dem überprüften Host von der
-   Audioverwaltung belegt waren. Ports unmittelbar vor Inbetriebnahme
-   erneut prüfen. Nach sicherem Start mit `sudo systemctl start mark-api.service`
-   erscheinen Dashboard-URL samt Fragment und prozesslokaler Bearer
-   **nicht im Journal**, sondern ausschließlich in
-   `/run/mark-api/launcher.log` innerhalb des `0700`-RuntimeDirectory.
-   Datei und Token nur über einen autorisierten Operator lesen, niemals
-   in öffentlich zugängliche Logs oder PR-Kommentare kopieren.
-5. Eine explizit benannte, eindeutige Backup-Instanz ausführen, etwa
-   `sudo systemctl start mark-api-backup@20261009T1700.service`. Die
-   Ausgabe enthält nur den sanitisierten Receipt. Wiederverwendung
-   derselben Instanz darf die existierende Datei **nicht** überschreiben;
-   bei unklarem Lauf-/Publikationsstatus Zielpfad und Hash zuerst prüfen,
-   kein blinder Retry. Der Dienst/Backup-Prozess benutzt dieselbe
-   **vertrauenswürdige** UID, während normale gleichberechtigte
-   SQLite-Anwendungen weiterhin über SQLite-Koordinierung laufen können.
-
-**Merge-/Produktabnahme:** Ein Unit-Template, statische Tests oder eine grüne
-CI ersetzen nicht die unabhängige Live-Prüfung der tatsächlich laufenden
-Prozess-UID, systemd-Sandbox, Besitzer-/Gruppen-/Modusrechte des Datenbank-
-und WAL-/SHM-Verzeichnisses, anderer Prozesse unter der Dienst-UID, des
-Installationspfads und des erfolgreichen Backups einer realen, vollständigen
-Write-/Sync-Recovery-Datenbank. Die offenen mmap-basierten Review-Befunde
-bleiben solange blockierend, bis eine für den realen Produktpfad wirksame
-Vertrauensgrenze nachgewiesen und der konkrete PR-Head unabhängig
-nachgeprüft ist.
+Ein eigener Unix-Besitzer, `chown`, Snapshot-Hash oder Docker-`pause`
+entziehen keine bereits offenen fremden FDs oder writable
+`MAP_SHARED`-Mappings. Die ursprüngliche SQLite-Backup-CLI bleibt für
+den unabhängigen Witness-/Owner-Betrieb ohne gemeinsamen
+Recovery-/Prozess-/Hostnachweis nicht produktionssicher.
 
 ## Wiederanlauf nach einem unklaren Write-/Media-Submit
 
@@ -390,78 +221,27 @@ Operator eine **manuelle**, exakt an den Request-Fingerprint gebundene
 Clearance attestieren. Sind Ausgang oder Accountrechte weiterhin unklar,
 **nicht quittieren und nicht erneut senden**.
 
-Nach unabhängig dokumentierter Einzelfallprüfung und nach geordnetem Stop
-aller Schreibdienste kann der vertrauenswürdige Host-/Dienstoperator die
-gezielte Clearance mit dem installierten Mark-Code erzeugen:
+Im getrennten UID-/Witness-Betrieb darf eine manuelle Clearance **nicht**
+durch einen SQLite-only Python-Aufruf erfolgen. Das würde die unabhängige
+Ledger-Autorität umgehen. Es fehlt noch ein gemeinsames
+operator-attestiertes Reconciliation-Protokoll, das nach frisch belegtem
+externem Plattformzustand an denselben Idempotency-Key, Request-Hash und
+Witness-Fence gebunden ist. Bis dahin: unbekannte Ergebnisse gesperrt
+lassen; weder Clearance noch externen Submit blind wiederholen.
 
-~~~bash
-# Platzhalter vor Ausführung durch exakt geprüfte lokale Werte ersetzen.
-sudo -u mark-api /opt/mark-api/venv/bin/python -I - \
-    /var/lib/mark-api/mark.sqlite \
-    'EXAKTER_IDEMPOTENCY_KEY' 'EXAKTER_REQUEST_SHA256' \
-    'REFERENZ_DER_UNABHAENGIGEN_POSTREADBACK_EVIDENZ' <<'PY'
-from datetime import datetime, timezone
-from pathlib import Path
-import sys
-from mark_api.storage import SnapshotStore
+## Restore – derzeit nur Offline-Diagnose, keine Produktfreigabe
 
-db, key, fingerprint, evidence = sys.argv[1:]
-store = SnapshotStore(Path(db), create_if_missing=False)
-record = store.write_api_request(key)
-if record is None or record.request_sha256 != fingerprint:
-    raise SystemExit("recovery operation mismatch")
-store.record_write_recovery_clearance(
-    idempotency_key=key,
-    request_sha256=fingerprint,
-    verification_kind="operator_verified_postread",
-    evidence_reference=evidence,
-    observed_at=datetime.now(timezone.utc),
-)
-print("operation-bound recovery clearance appended")
-PY
-~~~
+Ein einzelnes create-only SQLite-Backup ist kein vollständiger
+Recovery-Snapshot der neuen Architektur. Produktiver Restore bleibt
+gesperrt, bis atomar zusammengehörige Datenbank-/Witness-Sicherungen
+und Restore/Schema-/Fence-Readback unabhängig validiert sind.
 
-Dieser Aufruf ist ein **operatorverantwortetes Evidenz-Attest**, keine
-automatische oder kryptografische Bestätigung des externen Plattformzustands.
-Er ist keine öffentlich erreichbare API und darf niemals in eine generische
-Chat-/Dashboard-Write-Freigabeschaltfläche umgewandelt werden. Die
-SQLite-Version-2-Migration erstellt eine eigene append-only-Clearance-Tabelle
-erst nach Prüfung aller bisherigen Write-/Sync-Fences. Das Fehlen dieser
-Tabelle in einem bereits versionierten Version-2-Store blockiert den Start
-fail-closed; sie wird nicht stillschweigend neu angelegt.
-
-## Restore – ausschließlich in neue Datei
-
-1. Mark, Dashboard, Write-API und andere SQLite-Nutzer stoppen.
-   Zuvor offene oder unklare externe Write-Ausgänge separat
-   dokumentieren, ohne sie durch einen Retry zu verändern.
-2. SHA-256-Receipt, Backupzeitpunkt und alle möglichen späteren
-   Plattformwirkungen prüfen. Ein altes Backup ist kein Nachweis
-   eines aktuellen Besitzerzustands.
-3. Backup nur in einen **nicht existierenden** neuen Datenbankpfad
-   kopieren; weder Original noch Backup überschreiben. Die neue
-   Kopie auf 0600 setzen und ihren SHA-256 mit dem Receipt vergleichen.
-4. Den neuen Pfad vor produktiver Verwendung lokal prüfen:
-
-~~~bash
-python3.12 -c 'import sys; from mark_api.storage import SnapshotStore; s=SnapshotStore(sys.argv[1], create_if_missing=False); assert s.is_ready()' /neuer/pfad/restored-mark.sqlite
-~~~
-
-5. Letzten Sync, Anzeigenhistorie, offene Write-API-Requests und
-   Dashboard-Pending-Writes prüfen. Ein Sync in_progress bleibt
-   ungeklärt. Ein verlorenes versioniertes Sync-Journal oder
-   fehlende Write-Recovery-Tabellen blockieren den Neustart
-   fail-closed. Niemals Idempotency-/Recovery-Fences löschen
-   oder durch einen neuen Plattform-Key umgehen.
-6. Erst nach zulässiger tatsächlicher Owner-/Plattform-Reconciliation
-   den Launcher mit dem **neuen** DB-Pfad starten. Es gibt keinen
-   automatisch ausgelösten Submit-Retry.
-
-Für historische unvollständige Mark-Datenbanken ist ausschließlich der
-gesonderte bestätigungspflichtige Offline-Import
-**mark-api-migrate-legacy** vorgesehen. Das Backup-Tool ersetzt keine
-Recovery-Attestation. Fehlende historische Recovery-Tabellen beweisen
-nicht, dass früher nie Plattformwrites durchgeführt wurden.
+Eine isolierte Kopie zur forensischen Offline-Diagnostik darf nur in
+einen bisher nicht existierenden Pfad erfolgen. Sie darf nicht an
+Stelle des laufenden DB-/Witness-Paares treten. Integritäts- und
+SHA-Prüfungen ersetzen keine aktuelle externe Plattform-Reconciliation;
+historisch offene Fences bleiben offen. Niemals `--init-db`,
+automatische Ledger-Neuanlage oder Blind-Retry.
 
 ## Offene Produkt-Abnahme
 
@@ -485,7 +265,7 @@ für den heutigen vollständigen Live-Betrieb.
 
 Dieser alternative Installationsweg ist für Hosts ohne vertrauenswürdige
 System-Python-3.12-Installation (aktuell Pop!_OS 22.04) vorgesehen und **kein
-automatisches Betriebs-/Merge-Gate**. Die systemd-Vorlagen oben bleiben bestehen.
+automatisches Betriebs-/Merge-Gate**. Die Legacy-systemd-Vorlagen sind absichtlich deaktiviert.
 Die bereits ausgeführten Wegwerfcontainer haben eine root-eigene Ubuntu-24.04-
 Installation mit dedizierter UID, vollständigem Preflight sowie Backup und Restore
 mit allen drei offenen Recovery-Fences synthetisch nachgewiesen. Ein dauerhafter
@@ -514,40 +294,55 @@ definieren eine opt-in-Produktkomposition:
   `mark_api.launcher` ohne `--init-db` auf. Bestätigungen, Bearer,
   Ownership-, Idempotenz- und Recovery-Fences bleiben erhalten.
 - Das Produktprofil ist ausdrücklich `live`, das Backup `backup`.
-  Das Draft-Produktprofil enthält `mark-api` (UID 50042) und
-  `mark-api-witness` (UID 50043), das Backup-Profil den separaten
-  `mark-api-backup` (UID 50042). Ohne explizite Compose-Profile startet
-  kein Produktdienst. Alle drei Dienste besitzen ein nur lesbares Root-Dateisystem,
-  keine Linux-Capabilities, `no-new-privileges` und begrenzte PIDs.
-  Alle fünf Volumes sind `external: true`; Compose darf sie weder selbst
-  erzeugen noch bestehende Daten unbemerkt umwidmen.
-  Backup und Witness verwenden `network_mode: none`.
-  Der Witness startet ohne `--init-ledger`; eine verlorene oder fehlende
-  Ledger-Datei blockiert den normalen Start.
-- Der aktuelle Produkt-Launcher verwendet weiterhin `network_mode: host`
-  zur schon authentifizierten Chrome/CDP-Sitzung auf **127.0.0.1:9222**.
-  **Unveränderter materieller P1:** Eine als UID 50042 kompromittierte Runtime
-  kann CDP direkt erreichen und Kleinanzeigen-Writes ohne den Witness ausführen.
-  Der getrennte UID-50043-Witness schützt die Ledger-Historie, ist aber noch
-  keine erzwungene Browser-/Write-Executor-Grenze. Ohne unabhängigen Broker/
-  Executor mit tatsächlich entzogener direkter CDP-Berechtigung keine
-  Freigabe für `live` oder Merge. Dashboard/Write-API binden im alten
-  Pfad nur Loopback `8875/8876`; sensible Startausgaben stehen in
-  `/run/mark-api/launcher.log` unter UID 50042 und Modus 0700 des
-  Elternverzeichnisses, nicht im Docker-STDOUT.
+  Das weiterhin gesperrte Draft-Profil `live` enthält die HTTP-Frontend-UID
+  50042 (`mark-api`), den einzigen CDP-/SQLite-Executor unter UID 50044
+  (`mark-api-owner`) und den getrennten Ledger-Witness unter UID 50043
+  (`mark-api-witness`). `backup` verwendet UID 50044, nicht 50042.
+  Kein Produktdienst startet ohne explizites Profil. Alle vier Dienste haben
+  ein read-only Root-Dateisystem, keine Linux-Capabilities,
+  `no-new-privileges` und begrenzte PIDs. Alle **sechs** Volumes sind
+  `external: true`, und jeder Named-Volume-Mount setzt `nocopy: true`,
+  damit Docker keine leeren Volumes aus den Image-Verzeichnissen
+  vorbefüllen oder still umberechtigen kann.
+  Witness und Backup besitzen `network_mode: none`. Es gibt keine
+  automatische Ledger-Initialisierung im Normalbetrieb.
+- Nur der vertrauenswürdige UID-50044-Executor hat `network_mode: host`
+  für eine bereits authentifizierte Chrome/CDP-Sitzung auf
+  **127.0.0.1:9222** und Zugriff auf SQLite/WAL/SHM.
+  Dashboard-Backend und Write-API binden ausschließlich Owner-Loopback
+  **18875/18876**. Das UID-50042-Frontend besitzt keine Daten-/Witness-Mounts,
+  liegt in einem separaten Docker-Bridge-Netz und veröffentlicht nur
+  **127.0.0.1:8875**. Es verbindet sich per AF_UNIX/SO_PEERCRED mit dem
+  authentifizierten UID-50044-Dashboard-Relay. Default-on-Writes gehen
+  ausschließlich über die bestehende typisierte Write-API mit unabhängigen
+  Fences; der Relay ist **kein** CDP-Passthrough.
+  **Weiterhin offen:** Das Bridge-Netz ist keine Host-Firewall.
+  Der Frontend-Relay prüft beim Start auch die IPv4-Default-Gateways
+  auf CDP-Port 9222 und Owner-Ports 18875/18876 und bricht bei
+  fehlender Route oder erreichbarem Dienst ab. IPv6 ist im
+  Compose-Bridge-Netz deaktiviert. Das ist nur zusätzliche Abwehr.
+  Ein unabhängiger Root-/Host-Nachweis muss vor Livebetrieb die
+  dauerhafte nftables-/INPUT-Sperre für das gesamte Frontend-Bridge-Netz
+  gegen Host-CDP und Owner-Ports sowie die exklusive
+  127.0.0.1-CDP-Bindung bestätigen; Bindungswechsel dürfen nicht
+  nach dem einmaligen Probezeitpunkt einen Bypass eröffnen. Zusätzlich sind alter
+  FD-/MAP_SHARED-Zustand, paarweises Ledger-Backup/Restore und externe
+  Plattformberechtigungen nicht belegt. Keine Live-Freigabe.
+  Geheimnisse bleiben im UID-50044-Tmpfs `/run/mark-api/launcher.log`,
+  nicht im öffentlichen Frontend oder dessen Docker-STDOUT.
 
 **Kritische Host-UID-Grenze:** Der vorhandene Docker-Daemon ist rootful
 und hat kein User-Namespace-Remapping. Container-UIDs entsprechen damit
 numerisch Host-UIDs. Auf dem aktuell geprüften Host ist **UID 999 schon
 für Caddy sowie Redis-/MongoDB-/PostgreSQL-Prozesse in Benutzung**.
 Die synthetische Container-UID 999 darf daher nicht übernommen werden!
-Die alternative Image-/Compose-Konfiguration wählt dafür bewusst
-`50042:50042` für die Runtime und `50043:50043` für den Witness,
-beide außerhalb von systemds üblichem DynamicUser-Bereich.
-Das ist **keine automatische UID-Exklusivität**: Vor einer echten
-Produktinstallation muss root beide Identitäten nach Inventur systemweit
-eindeutig den nicht-interaktiven Diensten `mark-api` und
-`mark-api-witness` zuweisen/reservieren und überprüfen,
+Die neue Konfiguration verwendet numerische UID/GID **50042** für das
+unprivilegierte Frontend, **50043** für den Witness und **50044** für den
+Browser-/SQLite-Owner. Sie liegen außerhalb systemds üblichem
+DynamicUser-Bereich. Das ist **keine automatische UID-Exklusivität**:
+Vor einer echten Installation muss root alle drei Identitäten systemweit
+eindeutig den nicht-interaktiven Diensten `mark-api`,
+`mark-api-witness` und `mark-api-owner` zuweisen und nachweisen,
 dass keine fremden Host- oder Containerprozesse dieselbe numerische UID
 besitzen, vorher besessen haben oder schreibbare Mappings der betroffenen
 DB-, WAL- oder SHM-Inodes halten. Die Registrierung, die aktive Prozess-
@@ -580,39 +375,79 @@ die Buildabhängigkeiten nicht vertrauenswürdig/verfügbar sind, nicht
 auf einen ungescannten Benutzer-Python-Importpfad ausweichen.
 
 **Vor einem kontrollierten Start müssen zusätzlich** alle folgenden
-Bedingungen nachgewiesen sein: Dedizierte und reservierte Host-UID/GID
-`50042:50042` (Runtime) und `50043:50043` (Witness), ohne fremde
-gleichberechtigte Prozesse, alte DB-/WAL-/SHM-FDs oder schreibbare
-Mappings; kein Docker-UserNS-Remap oder Rootless-Daemon; eine offline
-attestierte vollständige SQLite-v2-Datenbank mit `0600`-Datei/Sidecars;
-alle fünf unveränderlichen externen Volumes
+Bedingungen nachgewiesen sein: dedizierte, reservierte Host-UID/GID
+**50042/50043/50044**, keine fremden Prozesse, alten DB-/WAL-/SHM-FDs
+oder writable MAP_SHARED-Inodes; kein Docker-UserNS-Remap oder
+Rootless-Daemon; eine offline attestierte vollständige SQLite-v2-DB samt
+`0600`-Sidecars unter **50044**; sechs unveränderliche externe Volumes
 `mark-api-data-v1`, `mark-api-backups-v1`,
 `mark-api-fence-ledger-v1`, `mark-api-fence-runtime-socket-v1`,
-`mark-api-fence-operator-socket-v1`.
-Das Ledger-Verzeichnis gehört nur UID/GID 50043 mit Modus `0700`;
-das Runtime-Socket-Verzeichnis UID 50043, Gruppe 50042, Modus `2710`,
-das Operator-Socket-Verzeichnis UID/GID 50043, Modus `0700`.
-Nur der kontrollierte **einmalige Offline-Cutover** darf nach
-historischer Fence-Inventur ein neues Ledger erzeugen; `live` nie.
-UID 50042 darf weder Ledger- noch Operator-Socket öffnen.
-Zusätzlich erforderlich: ein authentifizierter zulässiger CDP-Zugang,
-freie Ports `8875/8876`, unabhängige CDP-Bypass-Abwehr, kein
-paralleler Writer und aktuelle SHA-gebundene Review-/Release-Evidenz.
+`mark-api-fence-operator-socket-v1`, `mark-api-executor-socket-v1`.
+Ledger-Verzeichnis: **50043:50043 / 0700**;
+Witness-Runtime-Socket-Verzeichnis: **50043:50044 / 2710**;
+Operator-Socket-Verzeichnis: **50043:50043 / 0700**;
+Executor-Dashboard-Socket-Verzeichnis: **50044:50042 / 2710**.
+UID 50042 darf weder Daten/Sidecars noch Ledger- oder Operator-Socket
+öffnen. Nur ein kontrollierter **einmaliger Offline-Cutover** nach
+historischer Fence-Inventur darf das Ledger neu erzeugen; `live` nie.
+Erforderlich sind außerdem ein überprüftes ausschließliches Host-Loopback
+CDP-Binding, Abwehr möglicher Host-Gateway-CDP-Wege, freie Ports
+`8875/18875/18876/9222`, keine parallelen Writer, ein aus DB und Witness
+zusammengehöriger Restore sowie frische SHA-gebundene Sicherheitsreviews.
 **Keine automatische Datenbankinitialisierung, Ledger-Neuanlage oder
 chown bestehender Daten!** Ein kontrollierter Restore benötigt einen
 zusammengehörigen, überprüften Ledger-/SQLite-Cutover; die jetzige
 Backup-CLI sichert nur SQLite und ist **keine** vollständige
 Witness-Backup-/Restore-Lösung.
 
-**Stand PR #78 (Draft):** Der offizielle Guard lehnt die Aktion
-`live` derzeit auch bei anderweitig erfolgreichen Prüfungen ausdrücklich
-mit `unmediated host CDP bypass blocks product live deployment` ab,
-**bevor** ein Witness- oder Produktcontainer gestartet wird.
-Dies ist eine notwendige Sicherheitsblockade, keine fehlende manuelle
-Benutzerfreigabe. Erst ein unabhängig überprüfter Browser-/Capability-
-Executor ohne direkten Runtime-CDP-Zugriff darf diesen Gate entfernen.
-`verify` bleibt für die unveränderliche Image-Identität verfügbar;
-`backup` sichert derzeit weiterhin nur SQLite, nicht das Witness-Ledger.
+**Stand PR #78 (Draft):** Die geprüfte Kontrollschnittstelle sperrt
+`live` mit `unmediated host CDP bypass blocks product live deployment`
+und `backup` mit
+`independent witness ledger backup is not implemented`.
+**Zusätzlich** verweigern alle vier Entrypoints (Owner, Frontend,
+Witness und Backup) den direkten Compose-Start vor jeder sensiblen
+Operation, auch mit `--no-deps`. Das Image-Default ist
+`ENTRYPOINT ["/usr/bin/false"]`. Socket-Healthchecks verwenden echte
+AF_UNIX-Connects mit SO_PEERCRED statt nur `test -S`. Verwaiste Socket-
+Inodes werden nicht automatisch entfernt; sie verlangen eine gesicherte
+Offline-Prozess-/Inode-Prüfung.
+Das ist eine Sicherheitsblockade, keine künstliche Benutzerfreigabe.
+`verify` attestiert weiterhin nur Image-Identität/Revision/Compose,
+**nicht** die sichere Installation. Die Legacy-systemd-Units sind mit `ExecCondition=/usr/bin/false`
+**vor** dem Bootstrap und zusätzlich `ExecStart=/usr/bin/false` gesperrt.
+
+**Zusätzliche Draft-Image-Sperre:** Das gebaute Image enthält das
+root-eigene, für Laufzeit-UIDs nicht entfernbare
+`/etc/mark-api/UNATTESTED_DRAFT`. Alle zehn vorhandenen direkten
+Python-CLI-Einstiege prüfen es vor Argumentverarbeitung, DB-Zugriff,
+CDP oder Betrieb und verweigern den Start. Ein explizites
+`docker run --entrypoint python` hebt die Sperre daher nicht auf.
+Das ist ein Schutz vor unbeabsichtigtem Start des **neuen** Images,
+kein Schutz gegen einen privilegierten Docker-Administrator.
+
+**Alte Artefakte bleiben separat riskant:** Images und Container aus
+früheren Commits besitzen diese Sperren nicht. Ein alter Compose-Stand
+kann sie weiterhin starten. Vor einer Hostinstallation müssen Root bzw.
+der autorisierte Betreiber die tatsächlich vorhandenen alten
+Mark-Images, Container, Compose-/systemd-Startpfade und offenen Prozesse
+inventarisieren, kontrolliert außer Betrieb nehmen und die
+alten DB-/WAL-/SHM-Inodes inklusive alter schreibbarer FDs und
+`MAP_SHARED`-Zuordnungen sichern bzw. ausschließen. Das bestehende
+Legacy-Konto `mark-api` darf nicht aufgrund seines Namens als
+neuer unprivilegierter UID-50042-Frontend-Account vorausgesetzt werden.
+Ein bloßer `sysusers`-Eintrag migriert keine vorhandenen Rechte.
+Bei Unsicherheit bleibt der Start gesperrt.
+
+**Absturz mit verwaistem Frontend-Socket:** Der Executor prüft das
+vorhandene `dashboard.sock`-Inode bereits *vor* Aufbau einer
+Witness-Sitzung oder SQLite-/CDP-Zugriff und verweigert den Start.
+Er entfernt den Pfad nicht automatisch; erst die unabhängig
+geprüfte Offline-Prozess-/Inode-Reconciliation darf einen
+verwaisten Socket entfernen. Der spätere eigentliche Socket-Bind
+prüft nochmals, damit ein konkurrierender Pfadersatz nicht
+stillschweigend akzeptiert wird.
+Erst nach unabhängigem Host-/CDP-/Recovery-/Backup-Nachweis darf ein
+kontrollierter neues Release diese Stops ersetzen.
 
 Erst nach Schließung dieser P1 und sämtlicher übrigen Gates darf der
 Operator die **einzige unterstützte**
@@ -635,24 +470,33 @@ Der Guard übergibt der Compose-Konfiguration ausschließlich die vollständig
 geprüfte unveränderliche `sha256:...`-Image-ID und kontrolliert das
 `org.opencontainers.image.revision`-Label **unmittelbar vor dem Aufruf**.
 Mutable Tags wie `latest` oder `mark-api:pr75-...` sowie unvollständige
-Image-IDs werden verweigert. Der **vorbereitete, gegenwärtig durch die CDP-P1-Sperre unerreichbare**
-Startzweig verlangt eine root-verwaltete Registrierung der Host-UID/-GID
-`50042:50042` als `mark-api` sowie `50043:50043` als
-`mark-api-witness` und fünf bereits existierende externe Volumes.
-**Erst nachdem** die unabhängige Browser-/CDP-Ausführungsgrenze
-implementiert, getestet und freigegeben wurde, darf dieser Zweig
-Witness vor Runtime starten und die konfigurierte UID, Image-ID,
-Docker-Health sowie den Runtime-UID-/Image-/Running-Readback prüfen.
+Image-IDs werden verweigert. Der **vorbereitete, weiterhin durch die Host-/Recovery-Sperren unerreichbare**
+Startzweig verlangt root-verwaltete numerische Host-Identitäten
+**50042 (Frontend), 50043 (Witness), 50044 (Executor)** und alle sechs
+bereits existierenden, geprüften Volumes. Die vorgesehene Reihenfolge ist
+Witness → Executor → Frontend, jeweils mit numerischer UID-, Image- und
+Health-Attestation. Dies ist noch kein tatsächlich installierter Dienst.
 Heute wird keiner dieser Live-Starts ausgeführt. Selbst nach späterer
 Aktivierung ist ein grüner Socket-Healthcheck **keine** unabhängige
 Protokoll-, Storage- oder CDP-Abnahme.
-**Direktes `docker compose up/run` mit manuell gesetztem `MARK_API_IMAGE`
-umgeht diesen Guard und ist kein freigegebener Betriebsweg.** Auch der Guard
+**Direktes `docker compose up/run` umgeht die Kontrollschnittstelle,
+aber alle vier Entrypoints und der Image-Default verweigern im Draft
+jeden Produktstart.** Ein manipulierter
+Entrypoint oder ein privilegierter Root-/Docker-Daemon-Operator liegt
+außerhalb dieser Grenze. Direkter Compose-Aufruf ist kein freigegebener
+Betriebsweg. Auch der Guard
 beweist keine Mapping-Isolation, Volume-Eigentümerschaft oder Kontoberechtigung;
 diese separaten Gates bleiben Pflicht. Ohne sie wird kein `live` oder
 `backup` ausgeführt. Ein Image-Bau, ein erfolgreicher Guard-`verify` oder
 eine grüne `docker compose config` sind keine erfolgreiche Host-Installation.
 Keine Wiederholung einer unklaren Backup- oder Plattformmutation ohne Readback.
+
+**Frontend-Trust-Grenze:** Ein kompromittiertes UID-50042-Frontend
+kann den Dashboard-Token und Origin-Header sehen und eigene typisierte
+Write-API-Anfragen im Rahmen dieser Sitzung auslösen. Seine Trennung
+verhindert direkten CDP-/DB-/Witness-Zugriff, ist aber **keine**
+unabhängige Benutzerintention-Prüfung. Bearer, Confirmation, Ownership,
+Idempotenz und No-Blind-Retry bleiben weiterhin verbindlich.
 
 **Angreifermodell und Merge-Gate:** Der aktuelle Draft-Witness
 persistiert begonnene Operationen außerhalb der Runtime-UID und kann

@@ -54,25 +54,37 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
             (DOCS / "mark-api.sysusers.conf").read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
-        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(lines), 3)
         self.assertEqual(
             shlex.split(lines[0]),
-            ["u", "mark-api", "-", "Trusted Mark runtime owner",
+            ["u", "mark-api", "50042", "Isolated Mark dashboard frontend",
              "/var/lib/mark-api", "/usr/sbin/nologin"],
         )
 
-    def test_service_retains_normal_default_on_write_launcher(self) -> None:
+    def test_legacy_systemd_cannot_start_unwitnessed_cdp_runtime(self) -> None:
+        # The legacy UID 50042 path owned both host CDP and writable SQLite.
+        # Its old entrypoint must remain disabled until a separately attested
+        # witness+browser-owner installation replaces it.
         service = _unit("mark-api.service")["Service"]
         args = shlex.split(service["ExecStart"])
-        self.assertEqual(
-            args[:4],
-            ["/opt/mark-api/venv/bin/python", "-I", "-m", "mark_api.launcher"]
-        )
-        self.assertEqual(args[args.index("--db") + 1], SOURCE_DB)
-        self.assertNotIn("--init-db", args)
-        self.assertEqual(args[args.index("--dashboard-port") + 1], "8875")
-        self.assertEqual(args[args.index("--write-port") + 1], "8876")
-        self.assertEqual(args[args.index("--cdp-port") + 1], "9222")
+        self.assertEqual(args, ["/usr/bin/false"])
+        self.assertNotIn("mark_api.launcher", service["ExecStart"])
+        self.assertNotIn("9222", service["ExecStart"])
+        self.assertEqual(service["User"], "mark-api")
+        self.assertEqual(service["Restart"], "no")
+
+    def test_sysusers_define_distinct_nonlogin_runtime_witness_owner(self) -> None:
+        lines = [
+            shlex.split(line.strip())
+            for line in (DOCS / "mark-api.sysusers.conf").read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        accounts = {line[1]: line for line in lines}
+        self.assertEqual(set(accounts), {"mark-api", "mark-api-witness", "mark-api-owner"})
+        for name in accounts:
+            self.assertEqual(accounts[name][0], "u")
+            self.assertEqual(accounts[name][-1], "/usr/sbin/nologin")
+        self.assertEqual(len({line[2] for line in lines}), 3)
 
     def test_bearer_and_dashboard_url_do_not_enter_journal_stdout(self) -> None:
         service = _unit("mark-api.service")["Service"]
@@ -81,42 +93,29 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
         self.assertEqual(service["RuntimeDirectoryMode"], "0700")
         self.assertEqual(service["StandardError"], "journal")
 
-    def test_both_units_preflight_first_code_via_system_python_without_site(self) -> None:
+    def test_legacy_units_are_blocked_before_any_bootstrap(self) -> None:
         for filename in ("mark-api.service", "mark-api-backup@.service"):
             with self.subTest(filename=filename):
                 service = _unit(filename)["Service"]
-                # Validate the native shell file *before* it executes. A
-                # service-writable bootstrap must never become first code.
-                first = shlex.split(service["ExecCondition"])
-                self.assertEqual(first[:7], [
-                    "/usr/bin/find", "-P", "/", "/etc", "/etc/mark-api",
-                    "/etc/mark-api/bootstrap.sh", "-maxdepth",
-                ])
-                self.assertEqual(first[7:9], ["0", "("])
-                self.assertIn("-uid", first)
-                self.assertIn("-perm", first)
-                self.assertIn("-type", first)
-                self.assertEqual(first[-4:], ["-exec", "/usr/bin/false", "{}", "+"])
+                self.assertEqual(service["ExecCondition"], "/usr/bin/false")
                 self.assertEqual(
                     shlex.split(service["ExecStartPre"]),
                     ["/bin/sh", "/etc/mark-api/bootstrap.sh",
                      "--db", SOURCE_DB, "--backup-dir", BACKUP_DIR],
                 )
+                # systemd ExecCondition exits nonzero before ExecStartPre.
+                self.assertEqual(subprocess.run(
+                    shlex.split(service["ExecCondition"]), check=False,
+                ).returncode, 1)
                 self.assertNotIn("StateDirectory", service)
                 self.assertIn("/var/lib/mark-api", service["ReadWritePaths"])
                 for key, expected in (
-                    ("User", "mark-api"),
-                    ("Group", "mark-api"),
-                    ("NoNewPrivileges", "yes"),
-                    ("CapabilityBoundingSet", ""),
-                    ("AmbientCapabilities", ""),
-                    ("ProtectSystem", "strict"),
-                    ("ProtectHome", "yes"),
-                    ("PrivateTmp", "yes"),
-                    ("PrivateDevices", "yes"),
-                    ("RestrictNamespaces", "yes"),
-                    ("RestrictSUIDSGID", "yes"),
-                    ("UMask", "0077"),
+                    ("User", "mark-api"), ("Group", "mark-api"),
+                    ("NoNewPrivileges", "yes"), ("CapabilityBoundingSet", ""),
+                    ("AmbientCapabilities", ""), ("ProtectSystem", "strict"),
+                    ("ProtectHome", "yes"), ("PrivateTmp", "yes"),
+                    ("PrivateDevices", "yes"), ("RestrictNamespaces", "yes"),
+                    ("RestrictSUIDSGID", "yes"), ("UMask", "0077"),
                 ):
                     self.assertEqual(service[key], expected)
 
@@ -137,22 +136,14 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    def test_systemd_condition_rejects_untrusted_bootstrap_inode(self) -> None:
-        # Verify GNU find exit codes rather than assuming a warning or
-        # printed match will block systemd ExecStartPre.
-        guard = shlex.split(_unit("mark-api.service")["Service"]["ExecCondition"])
-        trusted = guard[:2] + ["/etc", "/usr", "/usr/bin/find"] + guard[6:]
-        ok = subprocess.run(trusted, text=True, capture_output=True, check=False)
-        self.assertEqual(ok.returncode, 0, ok.stderr)
-        with TemporaryDirectory() as tmp:
-            attacker = Path(tmp) / "bootstrap.sh"
-            attacker.write_text("# attacker-controlled bootstrap\\n")
-            attacker.chmod(0o666)
-            untrusted = guard[:2] + ["/etc", "/usr", str(attacker)] + guard[6:]
-            blocked = subprocess.run(
-                untrusted, text=True, capture_output=True, check=False
+    def test_legacy_systemd_denies_even_when_bootstrap_is_trusted(self) -> None:
+        for name in ("mark-api.service", "mark-api-backup@.service"):
+            command = shlex.split(_unit(name)["Service"]["ExecCondition"])
+            self.assertEqual(command, ["/usr/bin/false"])
+            self.assertNotEqual(
+                subprocess.run(command, text=True, capture_output=True,
+                               check=False).returncode, 0,
             )
-            self.assertNotEqual(blocked.returncode, 0)
 
     def test_native_stdlib_relative_link_requires_protected_transit(self) -> None:
         # Execute the exact production find -exec shell body with a synthetic
@@ -283,21 +274,12 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
             self.assertFalse(marker.exists(), proc.stdout + proc.stderr)
 
-    def test_backup_uses_create_only_isolated_package_module(self) -> None:
+    def test_legacy_systemd_cannot_create_sqlite_only_recovery_backup(self) -> None:
         service = _unit("mark-api-backup@.service")["Service"]
         args = shlex.split(service["ExecStart"])
         self.assertEqual(service["Type"], "oneshot")
-        self.assertEqual(
-            service["ReadWritePaths"],
-            "/var/lib/mark-api /var/lib/mark-api-backups",
-        )
-        self.assertEqual(
-            args[:4],
-            ["/opt/mark-api/venv/bin/python", "-I", "-m", "mark_api.backup_cli"],
-        )
-        self.assertEqual(args[args.index("--db") + 1], SOURCE_DB)
-        self.assertEqual(args[args.index("--backup") + 1],
-                         "/var/lib/mark-api-backups/mark-%i.sqlite")
+        self.assertEqual(args, ["/usr/bin/false"])
+        self.assertNotIn("mark_api.backup_cli", service["ExecStart"])
         self.assertEqual(service["RestrictAddressFamilies"], "AF_UNIX")
 
     def _trusted_paths(self, root: Path) -> tuple[Path, Path]:
@@ -320,6 +302,29 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
             patch.object(boundary.os, "getgroups", return_value=[os.getegid()]),
         ):
             yield
+
+    def test_separate_browser_owner_account_is_explicitly_allowlisted(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db, backups = self._trusted_paths(Path(tmp))
+            with self._trusted_identity():
+                boundary.check_deployment(
+                    db, backups, service_account="mark-api-owner",
+                )
+                boundary.pwd.getpwnam.assert_called_once_with("mark-api-owner")
+                with self.assertRaisesRegex(
+                    boundary.DeploymentBoundaryError,
+                    "unsupported service account",
+                ):
+                    boundary.check_deployment(
+                        db, backups, service_account="root",
+                    )
+                with self.assertRaisesRegex(
+                    boundary.DeploymentBoundaryError,
+                    "unsupported service account",
+                ):
+                    boundary.check_deployment(
+                        db, backups, service_account="mark-api",
+                    )
 
     def test_valid_private_store_preflight_does_not_modify_data(self) -> None:
         with TemporaryDirectory() as tmp:

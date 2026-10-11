@@ -29,6 +29,8 @@ class ContainerDeploymentTests(unittest.TestCase):
     def test_scripts_are_valid_posix_shell(self) -> None:
         for filename in (
             "mark-api-container-start.sh",
+            "mark-api-container-frontend.sh",
+            "mark-api-container-witness.sh",
             "mark-api-container-backup.sh",
             "mark-api-container-build.sh",
             "mark-api-container-control.sh",
@@ -47,14 +49,32 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn("RUN /usr/bin/python3.12 -m venv /opt/mark-api/venv", image)
         self.assertIn('COPY --chmod=0644 mark-api-bootstrap.sh', image)
         self.assertIn('COPY --chmod=0644 mark-api-preflight.py', image)
+        self.assertIn('COPY --chmod=0644 mark-api-container-healthcheck.py', image)
         self.assertIn('RUN /bin/sh /etc/mark-api/bootstrap.sh --help', image)
         self.assertIn('USER mark-api:mark-api', image)
+        self.assertIn('ENTRYPOINT ["/usr/bin/false"]', image)
         self.assertNotIn('USER root', image)
         self.assertIn('ARG MARK_UID=50042', image)
         self.assertIn('ARG MARK_GID=50042', image)
         self.assertIn('! getent passwd "$MARK_UID"', image)
         self.assertIn('! getent group "$MARK_GID"', image)
-        self.assertIn('install -d -o mark-api -g mark-api -m 0700', image)
+        self.assertIn('install -d -o mark-api-owner -g mark-api-owner -m 0700', image)
+
+    def test_trusted_browser_owner_and_backup_use_exact_owner_preflight(self) -> None:
+        dockerfile = _read("mark-api-container.Dockerfile")
+        start = _read("mark-api-container-start.sh")
+        backup = _read("mark-api-container-backup.sh")
+        preflight = _read("mark-api-preflight.py")
+        self.assertIn('! getent passwd 50044', dockerfile)
+        self.assertIn('! getent group 50044', dockerfile)
+        self.assertIn('groupadd --gid 50044 mark-api-owner', dockerfile)
+        self.assertIn('useradd --uid 50044 --gid 50044', dockerfile)
+        self.assertIn('--service-account mark-api-owner', start)
+        self.assertIn('--service-account mark-api-owner', backup)
+        self.assertIn('"mark-api-owner"', preflight)
+        self.assertIn('service_account != "mark-api-owner"', preflight)
+        self.assertNotIn('service_account not in ("mark-api", "mark-api-owner")', preflight)
+        self.assertNotIn('--service-account root', start + backup)
 
     def test_release_wheel_is_noneditable_and_deps_explicit(self) -> None:
         image = _read("mark-api-container.Dockerfile")
@@ -71,12 +91,60 @@ class ContainerDeploymentTests(unittest.TestCase):
         launcher = 'exec /opt/mark-api/venv/bin/python -I -m mark_api.launcher'
         self.assertLess(script.index(preflight), script.index(launcher))
         for flag in ("--db /var/lib/mark-api/mark.sqlite", "--cdp-port 9222",
-                     "--dashboard-port 8875", "--write-port 8876"):
+                     "--dashboard-port 18875", "--write-port 18876"):
             self.assertIn(flag, script)
         self.assertNotIn("--init-db", script)
         self.assertNotIn("--disable-writes", script)
         self.assertIn("> /run/mark-api/launcher.log", script)
         self.assertIn("umask 077", script)
+
+    def test_all_draft_entrypoints_refuse_direct_compose_even_with_no_deps(self) -> None:
+        # This is a Draft safety gate, not a production-ready deployment.
+        # Compose up bypasses control.sh; --no-deps bypasses service_healthy.
+        # Even the frontend alone must never serve HTTP.
+        # All image-owned entrypoints reject before any sensitive operation.
+        for filename, args, marker in (
+            (
+                "mark-api-container-start.sh",
+                (),
+                "mark-api: trusted browser executor live deployment not attested",
+            ),
+            (
+                "mark-api-container-frontend.sh",
+                (),
+                "mark-api: independent frontend live deployment not attested",
+            ),
+            (
+                "mark-api-container-backup.sh",
+                ("synthetic",),
+                "mark-api: independent witness ledger paired backup unavailable",
+            ),
+            (
+                "mark-api-container-witness.sh",
+                (),
+                "mark-api: independent witness live deployment not attested",
+            ),
+        ):
+            with self.subTest(filename=filename):
+                script = _read(filename)
+                first_sensitive_operation = {
+                    "mark-api-container-start.sh": "/bin/sh /etc/mark-api/bootstrap.sh",
+                    "mark-api-container-frontend.sh":
+                        "exec /opt/mark-api/venv/bin/python -I -m mark_api.dashboard_relay",
+                    "mark-api-container-backup.sh": "/bin/sh /etc/mark-api/bootstrap.sh",
+                    "mark-api-container-witness.sh":
+                        "exec /opt/mark-api/venv/bin/python -I -m mark_api.fence_witness",
+                }[filename]
+                self.assertLess(
+                    script.index(marker), script.index(first_sensitive_operation),
+                )
+                result = subprocess.run(
+                    ["/bin/sh", str(DOCS / filename), *args],
+                    capture_output=True, text=True, check=False, timeout=5,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(marker, result.stderr)
+                self.assertNotIn("/etc/mark-api/bootstrap.sh:", result.stderr)
 
     def test_backup_is_create_only_and_bounded_to_a_valid_instance(self) -> None:
         script = _read("mark-api-container-backup.sh")
@@ -97,25 +165,51 @@ class ContainerDeploymentTests(unittest.TestCase):
                 )
                 self.assertEqual(run.returncode, 64, run.stderr)
 
+    def test_attested_image_contains_draft_witness_entrpoint_guard(self) -> None:
+        compose = _read("mark-api-container.compose.yaml")
+        witness_service = compose.split("\n  mark-api-witness:\n",1)[1].split(
+            "\n  mark-api-backup:\n",1
+        )[0]
+        self.assertIn('entrypoint: ["/bin/sh", "/etc/mark-api/witness.sh"]', witness_service)
+        self.assertIn("COPY --chmod=0644 mark-api-container-witness.sh /etc/mark-api/witness.sh",
+                      _read("mark-api-container.Dockerfile"))
+        build = _read("mark-api-container-build.sh")
+        self.assertGreaterEqual(build.count("mark-api-container-witness.sh"), 2)
+        witness_guard = _read("mark-api-container-witness.sh")
+        self.assertNotIn("--init-ledger", witness_guard)
+        self.assertIn("exit 1", witness_guard)
+        self.assertLess(
+            witness_guard.index("exit 1"),
+            witness_guard.index("mark_api.fence_witness"),
+        )
+
     def test_compose_requires_preexisting_private_volumes_and_does_not_autostart(self) -> None:
         compose = _read("mark-api-container.compose.yaml")
         self.assertIn("MARK_API_IMAGE_DIGEST:?Verified immutable image digest required", compose)
-        self.assertEqual(compose.count("image: sha256:"), 3)
+        self.assertEqual(compose.count("image: sha256:"), 4)
         self.assertNotIn("image: ${MARK_API_IMAGE:", compose)
-        self.assertEqual(compose.count('user: "50042:50042"'), 2)
-        self.assertEqual(compose.count("read_only: true\n    cap_drop:"), 3)
-        self.assertEqual(compose.count('cap_drop: ["ALL"]'), 3)
-        self.assertEqual(compose.count('security_opt: ["no-new-privileges:true"]'), 3)
-        self.assertEqual(compose.count('restart: "no"'), 3)
+        self.assertEqual(compose.count('user: "50042:50042"'), 1)
+        self.assertEqual(compose.count('user: "50044:50044"'), 2)
+        self.assertEqual(compose.count("read_only: true\n    cap_drop:"), 4)
+        self.assertEqual(compose.count('cap_drop: ["ALL"]'), 4)
+        self.assertEqual(compose.count('security_opt: ["no-new-privileges:true"]'), 4)
+        self.assertEqual(compose.count('restart: "no"'), 4)
         self.assertIn('profiles: ["live"]', compose)
         self.assertIn('profiles: ["backup"]', compose)
+        # A socket file without a listening process cannot report healthy.
+        self.assertIn('/etc/mark-api/healthcheck.py", "owner"', compose)
+        self.assertIn('/etc/mark-api/healthcheck.py", "witness"', compose)
+        self.assertNotIn('test -S /run/mark-', compose)
         self.assertIn('network_mode: host', compose)
         self.assertIn('network_mode: none', compose)
         self.assertIn('target: /var/lib/mark-api', compose)
         self.assertIn('target: /var/lib/mark-api-backups', compose)
         self.assertIn('read_only: true', compose)
         self.assertIn("/run/mark-api:rw,nosuid,nodev,noexec", compose)
-        self.assertEqual(compose.count("external: true"), 5)
+        self.assertEqual(compose.count("external: true"), 6)
+        # Raw Compose must not seed an empty attested external volume.
+        self.assertEqual(compose.count("- type: volume"), 10)
+        self.assertEqual(compose.count("nocopy: true"), 10)
         self.assertNotIn("privileged: true", compose)
         self.assertNotIn("pid: host", compose)
         self.assertNotIn("userns_mode: host", compose)
@@ -124,7 +218,7 @@ class ContainerDeploymentTests(unittest.TestCase):
     def test_witness_service_is_separate_uid_and_fail_closed_on_absent_ledger(self) -> None:
         compose = _read("mark-api-container.compose.yaml")
         start = _read("mark-api-container-start.sh")
-        self.assertEqual(compose.count("image: sha256:"), 3)
+        self.assertEqual(compose.count("image: sha256:"), 4)
         self.assertIn('  mark-api-witness:', compose)
         witness = compose.split('  mark-api-witness:', 1)[1].split('  mark-api-backup:', 1)[0]
         self.assertIn('user: "50043:50043"', witness)
@@ -132,7 +226,7 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn('cap_drop: ["ALL"]', witness)
         self.assertIn('no-new-privileges:true', witness)
         self.assertIn('--runtime-uid', witness)
-        self.assertIn('50042', witness)
+        self.assertIn('50044', witness)
         self.assertIn('--runtime-gid', witness)
         self.assertIn('--ledger', witness)
         self.assertIn('--runtime-socket', witness)
@@ -151,10 +245,14 @@ class ContainerDeploymentTests(unittest.TestCase):
         control = _read("mark-api-container-control.sh")
         self.assertIn('getent passwd 50043', control)
         self.assertIn('getent group 50043', control)
+        self.assertIn('getent passwd 50044', control)
+        self.assertIn('getent group 50044', control)
         self.assertIn('mark-api-fence-ledger-v1', control)
         self.assertIn('mark-api-fence-runtime-socket-v1', control)
         self.assertIn('mark-api-fence-operator-socket-v1', control)
         self.assertLess(control.index('up --no-deps --no-build --pull never --detach mark-api-witness'),
+                        control.index('up --no-deps --no-build --pull never --detach mark-api-owner'))
+        self.assertLess(control.index('up --no-deps --no-build --pull never --detach mark-api-owner'),
                         control.index('up --no-deps --no-build --pull never --detach mark-api ||'))
         self.assertIn('Health.Status', control)
         self.assertNotIn('--init-ledger', control)
@@ -184,10 +282,11 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn("--entrypoint /usr/bin/stat", control)
         self.assertIn("-c '%u:%g:%a'", control)
         for item in (
-            "attest_existing_volume mark-api-data-v1 50042:50042:700",
-            "attest_existing_volume mark-api-backups-v1 50042:50042:700",
+            "attest_existing_volume mark-api-data-v1 50044:50044:700",
+            "attest_existing_volume mark-api-backups-v1 50044:50044:700",
             "attest_existing_volume mark-api-fence-ledger-v1 50043:50043:700",
-            "attest_existing_volume mark-api-fence-runtime-socket-v1 50043:50042:2710",
+            "attest_existing_volume mark-api-fence-runtime-socket-v1 50043:50044:2710",
+            "attest_existing_volume mark-api-executor-socket-v1 50044:50042:2710",
             "attest_existing_volume mark-api-fence-operator-socket-v1 50043:50043:700",
             "/volume/ledger.sqlite",
             "50043:50043:600:1",
@@ -197,16 +296,86 @@ class ContainerDeploymentTests(unittest.TestCase):
 
     def test_live_guard_blocks_unmediated_runtime_cdp_bypass(self) -> None:
         control = _read("mark-api-container-control.sh")
-        # Until the independent trusted browser executor actually exists,
-        # successful string/health checks cannot authorize compromised UID
-        # 50042's unrestricted direct Chrome/CDP writes.
+        # This draft separates the network and data authority but still
+        # lacks real UID/CDP/old-mapping/paired-ledger proof. Keep live gated.
         stop = "fail 'unmediated host CDP bypass blocks product live deployment'"
         self.assertIn(stop, control)
         self.assertLess(control.index(stop),
                         control.index("up --no-deps --no-build --pull never --detach mark-api-witness"))
         compose = _read("mark-api-container.compose.yaml")
-        runtime = compose.split("  mark-api:", 1)[1].split("  mark-api-witness:", 1)[0]
-        self.assertIn("network_mode: host", runtime)
+        runtime = compose.split("\n  mark-api:\n", 1)[1].split("\n  mark-api-owner:\n", 1)[0]
+        owner = compose.split("\n  mark-api-owner:\n", 1)[1].split("\n  mark-api-witness:\n", 1)[0]
+        self.assertNotIn("network_mode: host", runtime)
+        self.assertNotIn("source: mark_data", runtime)
+        self.assertIn("network_mode: host", owner)
+
+
+    def test_runtime_uid_has_only_dashboard_transport_without_cdp_or_sqlite(self) -> None:
+        compose = _read("mark-api-container.compose.yaml")
+        runtime = compose.split("\n  mark-api:\n", 1)[1].split("\n  mark-api-owner:\n", 1)[0]
+        owner = compose.split("\n  mark-api-owner:\n", 1)[1].split("\n  mark-api-witness:\n", 1)[0]
+        witness = compose.split("\n  mark-api-witness:\n", 1)[1].split("\n  mark-api-backup:\n", 1)[0]
+        self.assertIn('user: "50042:50042"', runtime)
+        self.assertIn("working_dir: /", runtime)
+        self.assertNotIn("network_mode: host", runtime)
+        self.assertNotIn("network_mode: container:", runtime)
+        self.assertNotIn("source: mark_data", runtime)
+        self.assertNotIn("source: mark_backups", runtime)
+        self.assertNotIn("source: mark_fence_ledger", runtime)
+        self.assertNotIn("source: mark_fence_runtime_socket", runtime)
+        self.assertNotIn("source: mark_fence_operator_socket", runtime)
+        self.assertIn("source: mark_executor_socket", runtime)
+        self.assertIn("read_only: true", runtime)
+        self.assertIn("127.0.0.1:8875:8875", runtime)
+        self.assertIn("frontend_isolated", runtime)
+        self.assertIn('user: "50044:50044"', owner)
+        self.assertIn('entrypoint: ["/bin/sh", "/etc/mark-api/start.sh"]', owner)
+        self.assertIn("network_mode: host", owner)
+        self.assertIn("source: mark_data", owner)
+        self.assertIn("source: mark_fence_runtime_socket", owner)
+        self.assertIn("source: mark_executor_socket", owner)
+        self.assertIn('network_mode: none', witness)
+        self.assertIn('"--runtime-uid", "50044"', witness)
+        self.assertIn('"--runtime-gid", "50044"', witness)
+        # Synthetic real Docker proved --internal suppresses localhost
+        # port publication on this daemon; a distinct bridge namespace
+        # is required. Host CDP stays bound to the owner's host-loopback.
+        self.assertIn("driver: bridge", compose)
+        self.assertIn("com.docker.network.bridge.enable_ip_masquerade", compose)
+        self.assertIn("com.docker.network.bridge.enable_icc", compose)
+        self.assertNotIn("internal: true", compose)
+        self.assertNotIn("privileged: true", compose)
+
+    def test_trusted_executor_and_frontend_use_only_bound_dashboard_ipc(self) -> None:
+        owner = _read("mark-api-container-start.sh")
+        frontend = _read("mark-api-container-frontend.sh")
+        build = _read("mark-api-container-build.sh")
+        dockerfile = _read("mark-api-container.Dockerfile")
+        self.assertIn("--frontend-socket /run/mark-api-executor/dashboard.sock", owner)
+        self.assertIn("--frontend-uid 50042", owner)
+        self.assertIn("--frontend-gid 50042", owner)
+        self.assertIn("--witness-owner-uid 50043", owner)
+        self.assertIn("--cdp-port 9222", owner)
+        self.assertIn("--dashboard-port 18875", owner)
+        self.assertIn("--write-port 18876", owner)
+        self.assertNotIn("--cdp-port", frontend)
+        self.assertNotIn("--db", frontend)
+        self.assertNotIn("--init-db", frontend)
+        self.assertNotIn("--witness", frontend)
+        self.assertIn("--expected-owner-uid 50044", frontend)
+        self.assertIn("mark-api-container-frontend.sh", build)
+        self.assertIn("mark-api-container-frontend.sh", dockerfile)
+
+    def test_release_backup_refuses_unpaired_sqlite_only_witness_state(self) -> None:
+        control = _read("mark-api-container-control.sh")
+        blocked = "fail 'independent witness ledger backup is not implemented'"
+        self.assertIn(blocked, control)
+        self.assertLess(
+            control.index(blocked),
+            control.index('docker_cli compose -f "$compose" --project-name mark-api --profile backup'),
+        )
+        # An operator cannot treat a valid SQLite snapshot as an independent
+        # recovery-fence snapshot or delete the original witness receipts.
 
     def test_release_image_build_uses_only_exact_committed_archive(self) -> None:
         build = _read("mark-api-container-build.sh")
@@ -215,6 +384,7 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn('status --porcelain --untracked-files=normal', build)
         self.assertNotIn('attested_git archive "$expected"', build)
         self.assertIn('private_git archive "$expected"', build)
+        self.assertIn("mark-api-container-healthcheck.py", build)
         self.assertIn('attested_git rev-list --objects --no-walk "$expected"', build)
         self.assertIn('private_git hash-object -t "$object_type" --stdin', build)
         self.assertIn('private_git hash-object -w -t "$object_type" --stdin', build)
@@ -359,7 +529,7 @@ class ContainerDeploymentTests(unittest.TestCase):
             root = Path(tmp)
             repo, expected = self._fake_git_repo(root)
             # Force a tracked-content refresh: fsmonitor is not called on a cache hit.
-            (repo / "README.md").write_text("dirty tracked content\\n")
+            (repo / "README.md").write_text("dirty tracked content\n")
             marker = root / "fsmonitor-executed"
             hook = root / "fsmonitor.sh"
             hook.write_text(
@@ -746,7 +916,7 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertNotIn('exec "$docker"', control)
         self.assertIn(
             "up --no-deps --no-build --pull never --detach mark-api ||\n"
-            "                fail 'product runtime failed to start'\n"
+            "                fail 'product frontend failed to start'\n"
             "            product_id=$(docker_cli compose",
             control,
         )
@@ -819,7 +989,7 @@ class ContainerDeploymentTests(unittest.TestCase):
             fake_docker = root / "docker-stub"
             fake_docker.write_text(
                 "#!/bin/sh\n"
-                + "printf '%s\\n' \"$DOCKER_CONFIG\" \"${DOCKER_HOST-unset}\" "
+                + "printf '%s\n' \"$DOCKER_CONFIG\" \"${DOCKER_HOST-unset}\" "
                 + "> " + str(observed) + "\n"
                 + 'if [ -x "$DOCKER_CONFIG/cli-plugins/docker-compose" ]; then\n'
                 + '  exec "$DOCKER_CONFIG/cli-plugins/docker-compose"\n'
@@ -849,48 +1019,3 @@ class ContainerDeploymentTests(unittest.TestCase):
                 observed.read_text(encoding="utf-8").splitlines(),
                 [str(private / "docker-config"), "unset"],
             )
-
-    def test_build_docker_cli_uses_private_configuration(self) -> None:
-        build = _read("mark-api-container-build.sh")
-        self.assertIn("docker_cli() {", build)
-        self.assertIn('DOCKER_CONFIG="$temp/docker-config"', build)
-        self.assertIn('/usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent', build)
-        self.assertNotIn('/usr/bin/docker --host unix:///var/run/docker.sock build', build)
-        self.assertNotIn('/usr/bin/docker --host unix:///var/run/docker.sock image', build)
-
-    def test_guard_rejects_mutable_image_refs_before_docker(self) -> None:
-        tool = str(DOCS / "mark-api-container-control.sh")
-        sha = "a" * 40
-        invalid_images = (
-            "latest", "mark-api:pr75-21eb0bee", "sha256:latest",
-            "sha256:" + "a" * 63,
-            "sha256:" + "g" * 64,
-            "sha256:" + "a" * 65,
-        )
-        for ref in invalid_images:
-            with self.subTest(image=ref):
-                p = subprocess.run(
-                    ["/bin/sh", tool, "verify", ref, sha],
-                    capture_output=True, text=True,
-                )
-                self.assertEqual(p.returncode, 64, p.stderr)
-                self.assertIn("immutable", p.stderr.lower())
-
-    def test_guard_rejects_unbound_commit_and_does_not_start_compose(self) -> None:
-        tool = str(DOCS / "mark-api-container-control.sh")
-        immutable = "sha256:" + "a" * 64
-        for ref in ("21eb0bee", "z" * 40, ""):
-            with self.subTest(commit=ref):
-                p = subprocess.run(
-                    ["/bin/sh", tool, "verify", immutable, ref],
-                    capture_output=True, text=True,
-                )
-                self.assertEqual(p.returncode, 64, p.stderr)
-        control = _read("mark-api-container-control.sh")
-        self.assertIn("image inspect", control)
-        self.assertIn("org.opencontainers.image.revision", control)
-        self.assertIn('MARK_API_IMAGE_DIGEST="$digest"', control)
-        self.assertIn("--pull never", control)
-
-if __name__ == "__main__":
-    unittest.main()

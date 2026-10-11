@@ -331,10 +331,14 @@ def _require_private_path(
         raise DeploymentBoundaryError("runtime path ownership, mode or inode is unsafe")
 
 
-def check_deployment(db: Path, backup_dir: Path) -> None:
-    """Check service identity and private DB/sidecars without opening SQLite."""
+def check_deployment(
+    db: Path, backup_dir: Path, *, service_account: str = "mark-api-owner",
+) -> None:
+    """Check exact allowed service identity and private DB before SQLite."""
+    if service_account != "mark-api-owner":
+        raise DeploymentBoundaryError("unsupported service account")
     try:
-        account = pwd.getpwnam("mark-api")
+        account = pwd.getpwnam(service_account)
     except KeyError as exc:
         raise DeploymentBoundaryError("dedicated mark-api account is absent") from exc
     if (
@@ -389,11 +393,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--db", required=True, type=Path)
     parser.add_argument("--backup-dir", required=True, type=Path)
+    parser.add_argument(
+        "--service-account", choices=("mark-api-owner",),
+        default="mark-api-owner",
+        help="Only the separately isolated browser/database owner UID 50044",
+    )
     args = parser.parse_args(argv)
     try:
         _check_bootstrap_installation()
         check_installed_code(_INSTALL_ROOT)
-        check_deployment(args.db, args.backup_dir)
+        check_deployment(
+            args.db, args.backup_dir, service_account=args.service_account,
+        )
     except DeploymentBoundaryError as exc:
         parser.error(str(exc))
     return 0

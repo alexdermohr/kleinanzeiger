@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 
+from .container_draft import container_draft_denied
 from .analytics import ANALYTICS_DIMENSIONS
 from .domain import AdClassification
 from .storage import SnapshotStore
@@ -120,6 +122,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints",
+              file=sys.stderr)
+        return 2
     parser = _parser()
     args = parser.parse_args(argv)
 

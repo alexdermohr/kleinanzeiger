@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import hmac
 import http.client
 import json
@@ -12,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .container_draft import container_draft_denied
 from .analytics import (
     ANALYTICS_DIMENSIONS,
     ANALYTICS_METRICS,
@@ -1905,6 +1907,8 @@ def _handler_factory(
     query: MarkQueryService,
     analytics: AnalyticsService,
     write_proxy: DashboardWriteProxy | None,
+    *,
+    public_origin_port: int | None = None,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "mark-api-readonly/0.1"
@@ -1993,12 +1997,12 @@ def _handler_factory(
                 origins = self.headers.get_all("Origin") or []
                 server_host, server_port = self.server.server_address
                 expected_origin = _dashboard_http_origin(
-                    str(server_host), int(server_port)
+                    str(server_host),
+                    int(server_port) if public_origin_port is None else public_origin_port,
                 )
                 if (
                     len(origins) != 1
-                    or not hmac.compare_digest(origins[0], expected_origin)
-                ):
+                    or not hmac.compare_digest(origins[0], expected_origin)                ):
                     return False
             fetch_sites = self.headers.get_all("Sec-Fetch-Site") or []
             if fetch_sites and (
@@ -2609,6 +2613,7 @@ def create_server(
     port: int = 8765,
     analytics_contract: AnalyticsContract | None = None,
     write_proxy: DashboardWriteProxy | None = None,
+    public_origin_port: int | None = None,
 ) -> LoopbackDashboardServer:
     if host != "127.0.0.1":
         raise ValueError("dashboard must bind to 127.0.0.1")
@@ -2618,16 +2623,28 @@ def create_server(
         or not 0 <= port <= 65535
     ):
         raise ValueError("port must be an integer between 0 and 65535")
+    if public_origin_port is not None and (
+        type(public_origin_port) is not int
+        or not 1 <= public_origin_port <= 65535
+    ):
+        raise ValueError("public_origin_port must be an integer between 1 and 65535")
 
     query = MarkQueryService(store)
     analytics = AnalyticsService(store, contract=analytics_contract)
     return LoopbackDashboardServer(
         (host, port),
-        _handler_factory(store, query, analytics, write_proxy),
+        _handler_factory(
+            store, query, analytics, write_proxy,
+            public_origin_port=public_origin_port,
+        ),
     )
 
 
 def main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints",
+              file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(
         description="Serve the local read-only mark-api dashboard.",
     )

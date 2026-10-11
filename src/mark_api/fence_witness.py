@@ -9,6 +9,8 @@ browser/runtime UID. A working unit test under one UID is not that OS proof.
 """
 from __future__ import annotations
 
+from .container_draft import container_draft_denied
+
 import argparse
 import fcntl
 from contextlib import closing
@@ -16,6 +18,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import re
 import secrets
@@ -1206,6 +1209,10 @@ def _positive_uid(value: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints",
+              file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(
         description="Separate-UID, append-only Mark write recovery fence witness"
     )

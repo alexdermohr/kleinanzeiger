@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import tempfile
 import threading
@@ -11,6 +12,7 @@ from typing import Callable, Protocol
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from .container_draft import container_draft_denied
 from .dashboard import create_server
 from .domain import AdSnapshot, LifecycleState
 from .private_web_runtime import build_private_web_inventory_runtime
@@ -607,6 +609,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints",
+              file=sys.stderr)
+        return 2
     parser = _parser()
     args = parser.parse_args(argv)
     try:

@@ -1,12 +1,42 @@
-# Explicit operator-only deployment. Volumes and immutable image ID must already
-# exist, be attested, and have a verified exclusive host UID/GID (50042).
-# Do not use 'up' on an existing database before offline ownership reconciliation.
+# Draft only: the attested operator control still denies live installation
+# until real multi-UID CDP, SQLite, Witness and backup/restore gates pass.
+# Each external volume must be provisioned and independently attested offline.
 services:
   mark-api:
     image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
     profiles: ["live"]
+    # Untrusted HTTP-only frontend; no browser, SQLite, or witness authority.
     user: "50042:50042"
-    network_mode: host  # CDP bypass remains a release blocker until isolated.
+    working_dir: /
+    entrypoint: ["/bin/sh", "/etc/mark-api/frontend.sh"]
+    networks: ["frontend_isolated"]
+    ports: ["127.0.0.1:8875:8875"]
+    depends_on:
+      mark-api-owner:
+        condition: service_healthy
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    restart: "no"
+    stop_grace_period: 60s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=33554432,mode=1777
+    volumes:
+      - type: volume
+        source: mark_executor_socket
+        target: /run/mark-api-executor
+        volume:
+          nocopy: true
+        read_only: true
+  mark-api-owner:
+    image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
+    profiles: ["live"]
+    # Only trusted executor UID has both CDP and SQLite access.
+    user: "50044:50044"
+    entrypoint: ["/bin/sh", "/etc/mark-api/start.sh"]
+    network_mode: host
+    working_dir: /
     depends_on:
       mark-api-witness:
         condition: service_healthy
@@ -18,41 +48,58 @@ services:
     stop_grace_period: 60s
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=134217728,mode=1777
-      - /run/mark-api:rw,nosuid,nodev,noexec,size=1048576,uid=50042,gid=50042,mode=0700
+      - /run/mark-api:rw,nosuid,nodev,noexec,size=1048576,uid=50044,gid=50044,mode=0700
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "-I", "-S", "/etc/mark-api/healthcheck.py", "owner"]
+      interval: 2s
+      timeout: 1s
+      retries: 5
+      start_period: 2s
     volumes:
       - type: volume
         source: mark_data
         target: /var/lib/mark-api
+        volume:
+          nocopy: true
       - type: volume
         source: mark_backups
         target: /var/lib/mark-api-backups
+        volume:
+          nocopy: true
         read_only: true
       - type: volume
         source: mark_fence_runtime_socket
         target: /run/mark-api-witness
+        volume:
+          nocopy: true
         read_only: true
+      - type: volume
+        source: mark_executor_socket
+        target: /run/mark-api-executor
+        volume:
+          nocopy: true
   mark-api-witness:
     image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
     profiles: ["live"]
-    # Must be reserved on the rootful host and distinct from Mark UID 50042.
     user: "50043:50043"
     network_mode: none
-    entrypoint: ["/opt/mark-api/venv/bin/python", "-I", "-m", "mark_api.fence_witness"]
+    working_dir: /
+    entrypoint: ["/bin/sh", "/etc/mark-api/witness.sh"]
     command: ["--ledger", "/var/lib/mark-fence/ledger.sqlite",
               "--runtime-socket", "/run/mark-api-witness/runtime.sock",
               "--operator-socket", "/run/mark-fence-operator/operator.sock",
-              "--runtime-uid", "50042", "--runtime-gid", "50042",
+              "--runtime-uid", "50044", "--runtime-gid", "50044",
               "--operator-uid", "0"]
     read_only: true
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 64
     restart: "no"
-    stop_grace_period: 30s
+    stop_grace_period: 90s
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=16777216,mode=1777
     healthcheck:
-      test: ["CMD", "/bin/sh", "-ec", "test -S /run/mark-api-witness/runtime.sock && test -S /run/mark-fence-operator/operator.sock"]
+      test: ["CMD", "/usr/bin/python3", "-I", "-S", "/etc/mark-api/healthcheck.py", "witness"]
       interval: 2s
       timeout: 1s
       retries: 5
@@ -61,16 +108,23 @@ services:
       - type: volume
         source: mark_fence_ledger
         target: /var/lib/mark-fence
+        volume:
+          nocopy: true
       - type: volume
         source: mark_fence_runtime_socket
         target: /run/mark-api-witness
+        volume:
+          nocopy: true
       - type: volume
         source: mark_fence_operator_socket
         target: /run/mark-fence-operator
+        volume:
+          nocopy: true
   mark-api-backup:
     image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
     profiles: ["backup"]
-    user: "50042:50042"
+    user: "50044:50044"
+    working_dir: /
     network_mode: none
     entrypoint: ["/bin/sh", "/etc/mark-api/backup.sh"]
     read_only: true
@@ -84,11 +138,15 @@ services:
       - type: volume
         source: mark_data
         target: /var/lib/mark-api
+        volume:
+          nocopy: true
       - type: volume
         source: mark_backups
         target: /var/lib/mark-api-backups
+        volume:
+          nocopy: true
 
-# External volumes prevent Compose from silently creating/reowning user data.
+# Never automatically create or re-own existing user-data volumes.
 volumes:
   mark_data:
     external: true
@@ -105,3 +163,19 @@ volumes:
   mark_fence_operator_socket:
     external: true
     name: mark-api-fence-operator-socket-v1
+  mark_executor_socket:
+    external: true
+    name: mark-api-executor-socket-v1
+
+networks:
+  frontend_isolated:
+    enable_ipv6: false
+    # Real rootful-Docker testing showed an internal bridge on this host
+    # does not publish the requested localhost port. A separate ordinary
+    # bridge namespace still prevents the frontend's 127.0.0.1 from being
+    # the host's Chrome/CDP :9222. Production live remains explicitly
+    # blocked until host gateway/CDP and credential boundaries are attested.
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+      com.docker.network.bridge.enable_icc: "false"

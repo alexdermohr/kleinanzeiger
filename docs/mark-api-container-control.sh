@@ -201,10 +201,17 @@ case "$action" in
         ;;
     live|backup)
         if [ "$action" = live ]; then
-            # This PR's Runtime UID 50042 still reaches Chrome/CDP directly.
-            # A voluntary Witness call cannot enforce external Writes on a
-            # compromised runtime. Never install an unsafe host-network path.
+            # The draft split now reserves CDP/SQLite only for UID 50044,
+            # but the real host/CDP/old-FD/MAP_SHARED/paired-ledger gates
+            # are not yet independently reproduced. Keep live disabled.
+            # Static Compose, CI and synthetic tests are not release proof.
             fail 'unmediated host CDP bypass blocks product live deployment'
+        fi
+        if [ "$action" = backup ]; then
+            # A SQLite-only backup omits the independent UID-50043 ledger.
+            # Until a crash-consistent paired backup/restore authority exists,
+            # never publish it as a safe recoverable product snapshot.
+            fail 'independent witness ledger backup is not implemented'
         fi
         # Kernel numeric UID isolation is meaningful on the host only if the
         # rootful daemon is not remapping container UIDs into a user namespace.
@@ -219,6 +226,11 @@ case "$action" in
         group_name=$(/usr/bin/getent group 50042 | /usr/bin/cut -d: -f1)
         [ "$passwd_name" = mark-api ] && [ "$group_name" = mark-api ] ||
             fail 'exclusive host service UID/GID 50042 not reserved'
+        owner_passwd=$(/usr/bin/getent passwd 50044 | /usr/bin/cut -d: -f1)
+        owner_group=$(/usr/bin/getent group 50044 | /usr/bin/cut -d: -f1)
+        [ "$owner_passwd" = mark-api-owner ] &&
+            [ "$owner_group" = mark-api-owner ] ||
+            fail 'exclusive browser executor UID/GID 50044 not reserved'
         # Backup/restore also require a retained independent ledger; it must
         # never be silently reinitialized by the regular live/backup paths.
         witness_passwd=$(/usr/bin/getent passwd 50043 | /usr/bin/cut -d: -f1)
@@ -228,16 +240,17 @@ case "$action" in
             fail 'exclusive host witness UID/GID 50043 not reserved'
         for name in mark-api-data-v1 mark-api-backups-v1 \
             mark-api-fence-ledger-v1 mark-api-fence-runtime-socket-v1 \
-            mark-api-fence-operator-socket-v1; do
+            mark-api-fence-operator-socket-v1 mark-api-executor-socket-v1; do
             found=$(docker_cli volume inspect --format '{{.Name}}' "$name") ||
                 fail 'required pre-attested external volume missing'
             [ "$found" = "$name" ] || fail 'volume identity changed'
         done
-        attest_existing_volume mark-api-data-v1 50042:50042:700
-        attest_existing_volume mark-api-backups-v1 50042:50042:700
+        attest_existing_volume mark-api-data-v1 50044:50044:700
+        attest_existing_volume mark-api-backups-v1 50044:50044:700
         attest_existing_volume mark-api-fence-ledger-v1 50043:50043:700
-        attest_existing_volume mark-api-fence-runtime-socket-v1 50043:50042:2710
+        attest_existing_volume mark-api-fence-runtime-socket-v1 50043:50044:2710
         attest_existing_volume mark-api-fence-operator-socket-v1 50043:50043:700
+        attest_existing_volume mark-api-executor-socket-v1 50044:50042:2710
         ledger_identity=$(docker_cli run --rm --network none --read-only \
             --cap-drop ALL --security-opt no-new-privileges:true \
             --user 50043:50043 \
@@ -247,56 +260,95 @@ case "$action" in
         [ "$ledger_identity" = 50043:50043:600:1 ] ||
             fail 'ledger inode owner, mode or hardlink count unsafe'
         if [ "$action" = live ]; then
-            # Explicit witness-first start: --no-deps is safe only after
-            # positive health, UID and image-identity readback.
+            # Future sequence only. The early unverified-CDP guard prevents
+            # this path from running until real host-bound evidence exists.
             docker_cli compose -f "$compose" --project-name mark-api --profile live \
                 up --no-deps --no-build --pull never --detach mark-api-witness ||
                 fail 'independent witness failed to start'
             witness_id=$(docker_cli compose -f "$compose" --project-name mark-api \
                 --profile live ps -q mark-api-witness) ||
                 fail 'independent witness identity unavailable'
-            [ -n "$witness_id" ] ||
-                fail 'independent witness not running'
+            [ -n "$witness_id" ] || fail 'independent witness not running'
             observed_user=$(docker_cli inspect --format '{{.Config.User}}' "$witness_id") ||
-                fail 'independent witness identity unavailable'
+                fail 'witness UID unavailable'
             observed_image=$(docker_cli inspect --format '{{.Image}}' "$witness_id") ||
-                fail 'independent witness image unavailable'
+                fail 'witness image unavailable'
             [ "$observed_user" = '50043:50043' ] &&
                 [ "$observed_image" = "$image" ] ||
-                fail 'independent witness UID or image mismatch'
-            attempts=0
+                fail 'witness identity mismatch'
             witness_health=starting
+            attempts=0
             while [ "$attempts" -lt 20 ]; do
                 witness_health=$(docker_cli inspect --format '{{.State.Health.Status}}' "$witness_id") ||
                     fail 'independent witness health unavailable'
-                case "$witness_health" in
-                    healthy) break ;;
-                    starting) : ;;
-                    *) fail 'independent witness not healthy' ;;
-                esac
+                [ "$witness_health" = healthy ] && break
+                [ "$witness_health" = starting ] ||
+                    fail 'independent witness not healthy'
                 attempts=$((attempts + 1))
                 /usr/bin/sleep 1
             done
             [ "$witness_health" = healthy ] ||
                 fail 'independent witness did not become healthy'
+
+            docker_cli compose -f "$compose" --project-name mark-api --profile live \
+                up --no-deps --no-build --pull never --detach mark-api-owner ||
+                fail 'browser executor failed to start'
+            owner_id=$(docker_cli compose -f "$compose" --project-name mark-api \
+                --profile live ps -q mark-api-owner) ||
+                fail 'browser executor identity unavailable'
+            [ -n "$owner_id" ] || fail 'browser executor not running'
+            observed_owner_user=$(docker_cli inspect --format '{{.Config.User}}' "$owner_id") ||
+                fail 'executor UID unavailable'
+            observed_owner_image=$(docker_cli inspect --format '{{.Image}}' "$owner_id") ||
+                fail 'executor image unavailable'
+            observed_owner_network=$(docker_cli inspect --format '{{.HostConfig.NetworkMode}}' "$owner_id") ||
+                fail 'executor network unavailable'
+            [ "$observed_owner_user" = '50044:50044' ] &&
+                [ "$observed_owner_image" = "$image" ] &&
+                [ "$observed_owner_network" = host ] ||
+                fail 'executor UID, image or host network mismatch'
+            owner_health=starting
+            attempts=0
+            while [ "$attempts" -lt 20 ]; do
+                owner_health=$(docker_cli inspect --format '{{.State.Health.Status}}' "$owner_id") ||
+                    fail 'executor health unavailable'
+                [ "$owner_health" = healthy ] && break
+                [ "$owner_health" = starting ] ||
+                    fail 'executor not healthy'
+                attempts=$((attempts + 1))
+                /usr/bin/sleep 1
+            done
+            [ "$owner_health" = healthy ] ||
+                fail 'executor did not become healthy'
+
             docker_cli compose -f "$compose" --project-name mark-api --profile live \
                 up --no-deps --no-build --pull never --detach mark-api ||
-                fail 'product runtime failed to start'
+                fail 'product frontend failed to start'
             product_id=$(docker_cli compose -f "$compose" --project-name mark-api \
                 --profile live ps -q mark-api) ||
-                fail 'product runtime identity unavailable'
-            [ -n "$product_id" ] ||
-                fail 'product runtime not running'
+                fail 'frontend identity unavailable'
+            [ -n "$product_id" ] || fail 'product frontend not running'
             observed_product_user=$(docker_cli inspect --format '{{.Config.User}}' "$product_id") ||
-                fail 'product UID unavailable'
+                fail 'frontend UID unavailable'
             observed_product_image=$(docker_cli inspect --format '{{.Image}}' "$product_id") ||
-                fail 'product image unavailable'
+                fail 'frontend image unavailable'
             observed_product_running=$(docker_cli inspect --format '{{.State.Running}}' "$product_id") ||
-                fail 'product running state unavailable'
+                fail 'frontend running state unavailable'
+            observed_product_network=$(docker_cli inspect --format '{{.HostConfig.NetworkMode}}' "$product_id") ||
+                fail 'frontend network unavailable'
+            observed_product_mounts=$(docker_cli inspect --format '{{range .Mounts}}{{.Name}};{{end}}' "$product_id") ||
+                fail 'frontend mount identities unavailable'
+            case "$observed_product_network" in
+                host|container:*|none) fail 'frontend network namespace unsafe' ;;
+            esac
+            case "$observed_product_mounts" in
+                *mark-api-data-v1*|*mark-api-backups-v1*|*mark-api-fence-*)
+                    fail 'frontend has forbidden recovery or data volume' ;;
+            esac
             [ "$observed_product_user" = '50042:50042' ] &&
                 [ "$observed_product_image" = "$image" ] &&
                 [ "$observed_product_running" = true ] ||
-                fail 'product UID, image or running state mismatch'
+                fail 'frontend UID, image or running state mismatch'
             exit 0
         fi
         docker_cli compose -f "$compose" --project-name mark-api --profile backup \

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .container_draft import container_draft_denied
+
 import argparse
 import math
 import os
@@ -20,6 +22,7 @@ from .analytics import (
 )
 from .dashboard import DashboardWriteProxy, LoopbackDashboardServer, create_server
 from .domain import AdSnapshot
+from .dashboard_relay import UnixDashboardRelay, DashboardRelayError
 from .email_import import EmailImportReport, import_kleinanzeigen_email_files
 from .fence_witness import FenceWitnessClient, FenceWitnessError
 from .private_web import PrivateWebSubmitUnknownError
@@ -161,12 +164,14 @@ class ProductLauncherRuntime:
         startup_inventory_count: int,
         startup_persisted_count: int,
         startup_email_import_report: EmailImportReport,
+        public_origin_port: int | None = None,
     ) -> None:
         self._inventory_runtime = inventory_runtime
         self._write_runtime = write_runtime
         self._write_access = write_access
         self._server = server
         self._dashboard_write_token = dashboard_write_token
+        self._public_origin_port = public_origin_port
         self._startup_inventory_count = startup_inventory_count
         self._startup_persisted_count = startup_persisted_count
         self._startup_email_import_report = startup_email_import_report
@@ -196,6 +201,8 @@ class ProductLauncherRuntime:
     @property
     def dashboard_url(self) -> str:
         host, port = self.server_address
+        if self._public_origin_port is not None:
+            port = self._public_origin_port
         encoded_write_token = quote(self._dashboard_write_token, safe="")
         return (
             f"http://{host}:{port}/"
@@ -340,6 +347,7 @@ def build_product_launcher(
     runtime_factory: _RuntimeFactory = build_private_web_inventory_runtime,
     write_runtime_factory: _WriteRuntimeFactory | None = None,
     fence_witness: _WriteFence | None = None,
+    public_origin_port: int | None = None,
     dashboard_factory: _DashboardFactory = create_server,
     store_factory: _StoreFactory = SnapshotStore,
     initialize_db: bool = False,
@@ -365,6 +373,10 @@ def build_product_launcher(
         allow_zero=True,
     )
     _validated_port(write_port, name="write_port", allow_zero=True)
+    if public_origin_port is not None:
+        _validated_port(
+            public_origin_port, name="public_origin_port", allow_zero=False,
+        )
     timeout = _validated_timeout(timeout_seconds)
     if analytics_contract is not None and not isinstance(
         analytics_contract,
@@ -543,6 +555,8 @@ def build_product_launcher(
             port=dashboard_port,
             analytics_contract=analytics_contract,
             write_proxy=write_proxy,
+            **({"public_origin_port": public_origin_port}
+               if public_origin_port is not None else {}),
         )
     except ProductLauncherError:
         if write_runtime is not None:
@@ -602,6 +616,7 @@ def build_product_launcher(
         startup_inventory_count=len(snapshots),
         startup_persisted_count=persisted,
         startup_email_import_report=email_report,
+        public_origin_port=public_origin_port,
     )
 
 
@@ -687,10 +702,26 @@ def _parser() -> argparse.ArgumentParser:
         "--witness-owner-uid", type=int, default=None,
         help="Distinct numeric owner UID, required together with --witness-socket.",
     )
+    parser.add_argument(
+        "--frontend-socket", type=Path, default=None,
+        help="Owner-only dashboard Unix socket; only a distinct frontend UID can connect.",
+    )
+    parser.add_argument(
+        "--frontend-uid", type=int, default=None,
+        help="Distinct numeric frontend peer UID (requires --frontend-socket).",
+    )
+    parser.add_argument(
+        "--frontend-gid", type=int, default=None,
+        help="Frontend socket traversal GID (requires --frontend-socket).",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints",
+              file=sys.stderr)
+        return 2
     args = _parser().parse_args(argv)
     if (
         (args.witness_socket is None) != (args.witness_owner_uid is None)
@@ -699,6 +730,48 @@ def main(argv: list[str] | None = None) -> int:
     ):
         print("mark-api-launch: invalid independent witness configuration", file=sys.stderr)
         return 2
+    frontend_settings = (
+        args.frontend_socket, args.frontend_uid, args.frontend_gid,
+    )
+    if any(value is not None for value in frontend_settings) and (
+        not all(value is not None for value in frontend_settings)
+        or args.witness_socket is None
+        or not args.frontend_socket.is_absolute()
+        or args.frontend_uid < 0
+        or args.frontend_gid < 0
+        or args.frontend_uid in (0, os.geteuid(), args.witness_owner_uid)
+        or args.frontend_gid in (0, os.getegid())
+    ):
+        print("mark-api-launch: independent frontend configuration invalid",
+              file=sys.stderr)
+        return 2
+    if args.frontend_socket is not None:
+        # A raw HTTP relay is never allowed to forward to the Chrome CDP
+        # endpoint (or to the Write API by accident). The installed owner
+        # deliberately uses three separate fixed ports.
+        ports = (args.cdp_port, args.dashboard_port, args.write_port, 8875)
+        if any(type(port) is not int or not 1 <= port <= 65535 for port in ports) \
+                or len(set(ports)) != len(ports):
+            print("mark-api-launch: invalid independent frontend ports",
+                  file=sys.stderr)
+            return 2
+    if args.frontend_socket is not None:
+        # Durable external volumes may retain this pathname after SIGKILL.
+        # Refuse a known stale inode BEFORE authenticating the witness or
+        # opening SQLite/CDP. Do not unlink: offline inode/process attestation
+        # is required. The later relay bind remains the final race check.
+        try:
+            args.frontend_socket.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            print("mark-api-launch: trusted dashboard socket unavailable",
+                  file=sys.stderr)
+            return 2
+        else:
+            print("mark-api-launch: trusted dashboard socket unavailable",
+                  file=sys.stderr)
+            return 2
     contract = AnalyticsContract(
         reaction_metric=args.reaction_metric,
         objective_metric=args.objective_metric,
@@ -712,6 +785,7 @@ def main(argv: list[str] | None = None) -> int:
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
     witness: FenceWitnessClient | None = None
+    frontend_relay: UnixDashboardRelay | None = None
     settle_thread: Thread | None = None
 
     def _on_sigterm(_signum: int, _frame: object) -> None:
@@ -748,6 +822,11 @@ def main(argv: list[str] | None = None) -> int:
                 analytics_contract=contract,
                 email_paths=tuple(args.email_paths),
                 **({"fence_witness": witness} if witness is not None else {}),
+                # The untrusted frontend publishes only :8875. The owner
+                # listens on :18875 and must still enforce that public Origin
+                # rather than weakening the same-origin dashboard gate.
+                **({"public_origin_port": 8875}
+                   if args.frontend_socket is not None else {}),
             )
         except (ProductLauncherError, PrivateWebRuntimeDependencyError) as exc:
             print(f"mark-api-launch: {exc}", file=sys.stderr)
@@ -755,6 +834,31 @@ def main(argv: list[str] | None = None) -> int:
         except (TypeError, ValueError):
             print("mark-api-launch: invalid startup configuration", file=sys.stderr)
             return 2
+
+        if args.frontend_socket is not None and not shutdown_requested:
+            try:
+                dashboard_host, dashboard_port = launcher.server_address
+                frontend_relay = UnixDashboardRelay(
+                    socket_path=args.frontend_socket,
+                    frontend_uid=args.frontend_uid,
+                    frontend_gid=args.frontend_gid,
+                    dashboard_host=dashboard_host,
+                    dashboard_port=dashboard_port,
+                )
+                frontend_relay.start()
+            except (OSError, DashboardRelayError, ValueError):
+                if frontend_relay is not None:
+                    try:
+                        frontend_relay.stop()
+                    except Exception:
+                        pass
+                try:
+                    launcher.close()
+                except Exception:
+                    pass
+                print("mark-api-launch: trusted dashboard transport unavailable",
+                      file=sys.stderr)
+                return 2
 
         if not shutdown_requested:
             write_host, write_port = launcher.write_server_address
@@ -800,6 +904,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             exit_code = 2
         finally:
+            # Stop accepting untrusted dashboard/HTTP traffic before the
+            # executor drains its witnessed write handlers and closes CDP.
+            if frontend_relay is not None:
+                try:
+                    relay_drained = frontend_relay.stop()
+                except Exception:
+                    relay_drained = False
+                if not relay_drained:
+                    print("mark-api-launch: frontend transport drain failed",
+                          file=sys.stderr)
+                    exit_code = 2
             try:
                 launcher.close()
             except PrivateWebSubmitUnknownError:

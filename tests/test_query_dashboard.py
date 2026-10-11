@@ -266,6 +266,60 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
             "http://127.0.0.1:8765",
         )
 
+    def test_explicit_frontend_origin_uses_public_port_not_owner_listener(self) -> None:
+        """A mediated browser Origin must be the frontend's 8875, not the owner's port."""
+        backend_host, backend_port = self.backend.server_address
+        public_port = 8875
+        proxied = create_server(
+            self.store,
+            port=0,
+            public_origin_port=public_port,
+            write_proxy=DashboardWriteProxy(
+                host=backend_host,
+                port=backend_port,
+                bearer_token=self.BACKEND_TOKEN,
+                ui_token=self.UI_TOKEN,
+            ),
+        )
+        thread = threading.Thread(target=proxied.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(proxied.server_close)
+        self.addCleanup(proxied.shutdown)
+        host, private_port = proxied.server_address
+        url = f"http://{host}:{private_port}/api/write/ads/2"
+        public_origin = f"http://127.0.0.1:{public_port}"
+
+        valid = Request(
+            url, data=b'{"title":"Neu"}', method="PATCH",
+            headers=self.write_headers(
+                content_type="application/json",
+                idempotency_key="ui:public-origin-8875",
+                origin=public_origin,
+            ),
+        )
+        with urlopen(valid, timeout=2) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(len(self.backend.requests), 1)
+        self.assertEqual(
+            self.backend.requests[0]["idempotency_key"], "ui:public-origin-8875",
+        )
+
+        for other_origin in (f"http://127.0.0.1:{private_port}", public_origin + "/"):
+            invalid = Request(
+                url, data=b'{"title":"Neu"}', method="PATCH",
+                headers=self.write_headers(
+                    content_type="application/json",
+                    idempotency_key="ui:forbidden-owner-origin",
+                    origin=other_origin,
+                ),
+            )
+            with self.subTest(origin=other_origin):
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(invalid, timeout=2)
+                self.assertEqual(denied.exception.code, 403)
+        self.assertEqual(len(self.backend.requests), 1)
+
     def test_proxy_requires_dashboard_secret_and_same_origin(self) -> None:
         body = b'{"title":"Neu"}'
         missing_secret = Request(
@@ -1998,7 +2052,6 @@ const visibleRanking = () => el("ranking-body").children[0]?.children[2]?.textCo
   assert.equal(visibleRanking(), "0");
   assert.equal(el("groups-body").children[0].children[2].textContent, "0");
   assert.equal(el("analytics-status").textContent, "");
-
   // Choosing no metric invalidates the previous result but issues no request.
   const count = requests.length;
   el("metric-select").value = "";
@@ -3997,8 +4050,7 @@ globalThis.fetch = async (path, options) => {
         self.assertEqual(
             completed.returncode,
             0,
-            msg=f"node stderr:\n{completed.stderr}\nnode stdout:\n{completed.stdout}",
-        )
+            msg=f"node stderr:\n{completed.stderr}\nnode stdout:\n{completed.stdout}",        )
 
     def test_write_runtime_omits_unknown_unchanged_content_fields(self) -> None:
         _, _, js_body = self.get("/dashboard.js")
