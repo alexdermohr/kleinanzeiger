@@ -61,6 +61,24 @@ def main(argv: list[str] | None = None) -> int:
                 owner_uid=50044, socket_mode=0o660,
             )
         ) else 1
+    if args == ["frontend"] and os.geteuid() == 50042:
+        return 0 if check_socket(
+            Path("/run/mark-api-ingress/frontend.sock"),
+            owner_uid=50042, socket_mode=0o660,
+        ) else 1
+    if args == ["ingress"] and os.geteuid() == 50045:
+        # Never ask the browser executor or witness for a liveness signal.
+        # Check both the fixed untrusted socket peer and local TCP listener.
+        if not check_socket(
+            Path("/run/mark-api-ingress/frontend.sock"),
+            owner_uid=50042, socket_mode=0o660,
+        ):
+            return 1
+        try:
+            with socket.create_connection(("127.0.0.1", 8875), timeout=0.25):
+                return 0
+        except OSError:
+            return 1
     if args == ["witness"] and os.geteuid() == 50043:
         return 0 if (
             check_socket(

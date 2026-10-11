@@ -38,6 +38,11 @@ RUN set -eu; \
     useradd --uid 50044 --gid 50044 --system \
       --home-dir /var/lib/mark-api --shell /usr/sbin/nologin \
       --no-create-home mark-api-owner; \
+    ! getent passwd 50045; ! getent group 50045; \
+    groupadd --gid 50045 mark-api-ingress; \
+    useradd --uid 50045 --gid 50045 --system \
+      --home-dir /nonexistent --shell /usr/sbin/nologin \
+      --no-create-home mark-api-ingress; \
     install -d -o root -g root -m 0755 /etc/mark-api; \
     install -d -o mark-api-owner -g mark-api-owner -m 0700 \
       /var/lib/mark-api /var/lib/mark-api-backups; \
@@ -50,6 +55,7 @@ COPY --chmod=0644 mark-api-preflight.py /etc/mark-api/preflight.py
 COPY --chmod=0644 mark-api-container-healthcheck.py /etc/mark-api/healthcheck.py
 COPY --chmod=0644 mark-api-container-start.sh /etc/mark-api/start.sh
 COPY --chmod=0644 mark-api-container-frontend.sh /etc/mark-api/frontend.sh
+COPY --chmod=0644 mark-api-container-ingress.sh /etc/mark-api/ingress.sh
 COPY --chmod=0644 mark-api-container-witness.sh /etc/mark-api/witness.sh
 COPY --chmod=0644 mark-api-container-backup.sh /etc/mark-api/backup.sh
 

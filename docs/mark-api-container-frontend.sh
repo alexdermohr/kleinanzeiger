@@ -9,5 +9,8 @@ umask 077
 printf '%s\n' 'mark-api: independent frontend live deployment not attested' >&2
 exit 1
 exec /opt/mark-api/venv/bin/python -I -m mark_api.dashboard_relay \
-    --socket /run/mark-api-executor/dashboard.sock \
-    --expected-owner-uid 50044 --port 8875
+    netless-frontend \
+    --backend-socket /run/mark-api-executor/dashboard.sock \
+    --expected-owner-uid 50044 \
+    --ingress-socket /run/mark-api-ingress/frontend.sock \
+    --ingress-uid 50045 --ingress-gid 50045

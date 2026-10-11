@@ -238,9 +238,15 @@ case "$action" in
         [ "$witness_passwd" = mark-api-witness ] &&
             [ "$witness_group" = mark-api-witness ] ||
             fail 'exclusive host witness UID/GID 50043 not reserved'
+        ingress_passwd=$(/usr/bin/getent passwd 50045 | /usr/bin/cut -d: -f1)
+        ingress_group=$(/usr/bin/getent group 50045 | /usr/bin/cut -d: -f1)
+        [ "$ingress_passwd" = mark-api-ingress ] &&
+            [ "$ingress_group" = mark-api-ingress ] ||
+            fail 'exclusive host ingress UID/GID 50045 not reserved'
         for name in mark-api-data-v1 mark-api-backups-v1 \
             mark-api-fence-ledger-v1 mark-api-fence-runtime-socket-v1 \
-            mark-api-fence-operator-socket-v1 mark-api-executor-socket-v1; do
+            mark-api-fence-operator-socket-v1 mark-api-executor-socket-v1 \
+            mark-api-ingress-socket-v1; do
             found=$(docker_cli volume inspect --format '{{.Name}}' "$name") ||
                 fail 'required pre-attested external volume missing'
             [ "$found" = "$name" ] || fail 'volume identity changed'
@@ -251,6 +257,7 @@ case "$action" in
         attest_existing_volume mark-api-fence-runtime-socket-v1 50043:50044:2710
         attest_existing_volume mark-api-fence-operator-socket-v1 50043:50043:700
         attest_existing_volume mark-api-executor-socket-v1 50044:50042:2710
+        attest_existing_volume mark-api-ingress-socket-v1 50042:50045:2710
         ledger_identity=$(docker_cli run --rm --network none --read-only \
             --cap-drop ALL --security-opt no-new-privileges:true \
             --user 50043:50043 \
@@ -338,9 +345,8 @@ case "$action" in
                 fail 'frontend network unavailable'
             observed_product_mounts=$(docker_cli inspect --format '{{range .Mounts}}{{.Name}};{{end}}' "$product_id") ||
                 fail 'frontend mount identities unavailable'
-            case "$observed_product_network" in
-                host|container:*|none) fail 'frontend network namespace unsafe' ;;
-            esac
+            [ "$observed_product_network" = none ] ||
+                fail 'frontend has IP-network/CDP authority'
             case "$observed_product_mounts" in
                 *mark-api-data-v1*|*mark-api-backups-v1*|*mark-api-fence-*)
                     fail 'frontend has forbidden recovery or data volume' ;;
@@ -349,6 +355,52 @@ case "$action" in
                 [ "$observed_product_image" = "$image" ] &&
                 [ "$observed_product_running" = true ] ||
                 fail 'frontend UID, image or running state mismatch'
+            product_health=$(docker_cli inspect --format '{{.State.Health.Status}}' "$product_id") ||
+                fail 'netless frontend health unavailable'
+            attempts=0
+            while [ "$product_health" = starting ] && [ "$attempts" -lt 20 ]; do
+                attempts=$((attempts + 1))
+                /usr/bin/sleep 1
+                product_health=$(docker_cli inspect --format '{{.State.Health.Status}}' "$product_id") ||
+                    fail 'netless frontend health unavailable'
+            done
+            [ "$product_health" = healthy ] ||
+                fail 'netless frontend Unix socket unavailable'
+
+            docker_cli compose -f "$compose" --project-name mark-api --profile live \
+                up --no-deps --no-build --pull never --detach mark-api-ingress ||
+                fail 'dashboard public ingress failed to start'
+            ingress_id=$(docker_cli compose -f "$compose" --project-name mark-api \
+                --profile live ps -q mark-api-ingress) ||
+                fail 'dashboard public ingress identity unavailable'
+            [ -n "$ingress_id" ] || fail 'dashboard public ingress not running'
+            ingress_user=$(docker_cli inspect --format '{{.Config.User}}' "$ingress_id") ||
+                fail 'dashboard public ingress UID unavailable'
+            ingress_image=$(docker_cli inspect --format '{{.Image}}' "$ingress_id") ||
+                fail 'dashboard public ingress image unavailable'
+            ingress_network=$(docker_cli inspect --format '{{.HostConfig.NetworkMode}}' "$ingress_id") ||
+                fail 'dashboard public ingress network unavailable'
+            ingress_mounts=$(docker_cli inspect --format '{{range .Mounts}}{{.Name}};{{end}}' "$ingress_id") ||
+                fail 'dashboard public ingress mounts unavailable'
+            [ "$ingress_user" = 50045:50045 ] &&
+                [ "$ingress_image" = "$image" ] &&
+                [ "$ingress_network" = host ] ||
+                fail 'dashboard public ingress UID/image/network mismatch'
+            case "$ingress_mounts" in
+                *mark-api-data-v1*|*mark-api-backups-v1*|*mark-api-executor-socket-v1*|*mark-api-fence-*)
+                    fail 'dashboard ingress has forbidden data, browser or recovery authority' ;;
+            esac
+            ingress_health=$(docker_cli inspect --format '{{.State.Health.Status}}' "$ingress_id") ||
+                fail 'dashboard public ingress health unavailable'
+            attempts=0
+            while [ "$ingress_health" = starting ] && [ "$attempts" -lt 20 ]; do
+                attempts=$((attempts + 1))
+                /usr/bin/sleep 1
+                ingress_health=$(docker_cli inspect --format '{{.State.Health.Status}}' "$ingress_id") ||
+                    fail 'dashboard public ingress health unavailable'
+            done
+            [ "$ingress_health" = healthy ] ||
+                fail 'dashboard public ingress loopback unavailable'
             exit 0
         fi
         docker_cli compose -f "$compose" --project-name mark-api --profile backup \

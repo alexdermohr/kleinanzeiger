@@ -9,8 +9,15 @@ services:
     user: "50042:50042"
     working_dir: /
     entrypoint: ["/bin/sh", "/etc/mark-api/frontend.sh"]
-    networks: ["frontend_isolated"]
-    ports: ["127.0.0.1:8875:8875"]
+    # Kernel-enforced independent boundary: even malicious UID 50042 code
+    # has no route to host CDP, owner ports, IPv6, gateways or LAN.
+    network_mode: none
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "-I", "-S", "/etc/mark-api/healthcheck.py", "frontend"]
+      interval: 2s
+      timeout: 1s
+      retries: 5
+      start_period: 2s
     depends_on:
       mark-api-owner:
         condition: service_healthy
@@ -26,6 +33,45 @@ services:
       - type: volume
         source: mark_executor_socket
         target: /run/mark-api-executor
+        volume:
+          nocopy: true
+        read_only: true
+      - type: volume
+        source: mark_ingress_socket
+        target: /run/mark-api-ingress
+        volume:
+          nocopy: true
+  # Trusted fixed-destination byte ingress only. UID 50045 receives no
+  # executor, witness, SQLite, backup or browser mounts. Only the frontend
+  # can accept its SO_PEERCRED-attested Unix socket connection.
+  mark-api-ingress:
+    image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
+    profiles: ["live"]
+    user: "50045:50045"
+    entrypoint: ["/bin/sh", "/etc/mark-api/ingress.sh"]
+    working_dir: /
+    network_mode: host
+    depends_on:
+      mark-api:
+        condition: service_healthy
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    restart: "no"
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "-I", "-S", "/etc/mark-api/healthcheck.py", "ingress"]
+      interval: 2s
+      timeout: 1s
+      retries: 5
+      start_period: 2s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16777216,mode=1777
+    volumes:
+      - type: volume
+        source: mark_ingress_socket
+        target: /run/mark-api-ingress
         volume:
           nocopy: true
         read_only: true
@@ -166,16 +212,6 @@ volumes:
   mark_executor_socket:
     external: true
     name: mark-api-executor-socket-v1
-
-networks:
-  frontend_isolated:
-    enable_ipv6: false
-    # Real rootful-Docker testing showed an internal bridge on this host
-    # does not publish the requested localhost port. A separate ordinary
-    # bridge namespace still prevents the frontend's 127.0.0.1 from being
-    # the host's Chrome/CDP :9222. Production live remains explicitly
-    # blocked until host gateway/CDP and credential boundaries are attested.
-    driver: bridge
-    driver_opts:
-      com.docker.network.bridge.enable_ip_masquerade: "false"
-      com.docker.network.bridge.enable_icc: "false"
+  mark_ingress_socket:
+    external: true
+    name: mark-api-ingress-socket-v1

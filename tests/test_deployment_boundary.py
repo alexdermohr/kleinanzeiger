@@ -54,7 +54,7 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
             (DOCS / "mark-api.sysusers.conf").read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
-        self.assertEqual(len(lines), 3)
+        self.assertEqual(len(lines), 4)
         self.assertEqual(
             shlex.split(lines[0]),
             ["u", "mark-api", "50042", "Isolated Mark dashboard frontend",
@@ -80,11 +80,15 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#")
         ]
         accounts = {line[1]: line for line in lines}
-        self.assertEqual(set(accounts), {"mark-api", "mark-api-witness", "mark-api-owner"})
+        self.assertEqual(set(accounts), {
+            "mark-api", "mark-api-witness", "mark-api-owner", "mark-api-ingress",
+        })
         for name in accounts:
             self.assertEqual(accounts[name][0], "u")
             self.assertEqual(accounts[name][-1], "/usr/sbin/nologin")
-        self.assertEqual(len({line[2] for line in lines}), 3)
+        self.assertEqual(len({line[2] for line in lines}), 4)
+        self.assertEqual(accounts["mark-api-ingress"][2], "50045")
+        self.assertEqual(accounts["mark-api-ingress"][-2], "/nonexistent")
 
     def test_bearer_and_dashboard_url_do_not_enter_journal_stdout(self) -> None:
         service = _unit("mark-api.service")["Service"]

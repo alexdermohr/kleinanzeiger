@@ -384,5 +384,257 @@ def relay_frontend_main(argv: list[str] | None = None) -> int:
     return 0 if completed else 2
 
 
+# Production candidate: no IP stack exists in the untrusted frontend.
+# A separate, deliberately small host-loopback ingress owns public TCP. It
+# has no executor or witness socket mount; its only peer is this frontend UDS.
+# A compromised frontend UID cannot create a route to host CDP/owner ports.
+class _NetlessFrontendHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        service: NetlessFrontendDashboardRelay = self.server  # type: ignore[assignment]
+        try:
+            if _peer_uid(self.request) != service.ingress_uid:
+                return
+            with closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as backend:
+                backend.settimeout(5.0)
+                backend.connect(str(service.backend_path))
+                if _peer_uid(backend) != service.owner_uid:
+                    return
+                _relay_streams(self.request, backend, stop=service._stopping)
+        except (OSError, TimeoutError, ValueError, DashboardRelayError):
+            return
+
+
+class NetlessFrontendDashboardRelay(
+    _LimitedThreading, socketserver.ThreadingMixIn, socketserver.UnixStreamServer,
+):
+    """UID 50042 cannot create network traffic; accepts only UID 50045 ingress."""
+
+    request_queue_size = _MAX_PEERS
+    allow_reuse_address = False
+
+    def __init__(
+        self, *, socket_path: Path, backend_path: Path,
+        ingress_uid: int, ingress_gid: int, owner_uid: int,
+    ) -> None:
+        if (
+            not isinstance(socket_path, Path) or not socket_path.is_absolute()
+            or not isinstance(backend_path, Path) or not backend_path.is_absolute()
+            or socket_path == backend_path
+            or any(type(value) is not int or value < 1
+                   for value in (ingress_uid, ingress_gid, owner_uid))
+            or len({ingress_uid, owner_uid, os.geteuid()}) != 3
+            or not hasattr(socket, "SO_PEERCRED")
+        ):
+            raise DashboardRelayError("invalid netless frontend peer identities")
+        try:
+            _private_directory(
+                socket_path.parent, os.geteuid(), mode=0o2710, gid=ingress_gid,
+            )
+        except FenceWitnessError as exc:
+            raise DashboardRelayError("unsafe ingress socket directory") from exc
+        if socket_path.exists() or socket_path.is_symlink():
+            raise DashboardRelayError("refusing to replace ingress socket")
+        self.socket_path = socket_path
+        self.backend_path = backend_path
+        self.owner_uid = owner_uid
+        self.ingress_uid = ingress_uid
+        self._inode: tuple[int, int] | None = None
+        super().__init__(str(socket_path), _NetlessFrontendHandler)
+        try:
+            os.chmod(socket_path, 0o660)
+            info = socket_path.lstat()
+            self._inode = (info.st_dev, info.st_ino)
+            if (
+                not stat.S_ISSOCK(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_gid != ingress_gid
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o660
+            ):
+                raise DashboardRelayError("netless ingress socket permissions unsafe")
+        except BaseException:
+            self.server_close()
+            raise
+
+    def server_close(self) -> None:
+        super().server_close()
+        try:
+            info = self.socket_path.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISSOCK(info.st_mode) and (
+            info.st_dev, info.st_ino,
+        ) == self._inode:
+            self.socket_path.unlink()
+
+
+class _PublicIngressHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        service: TrustedDashboardPublicIngress = self.server  # type: ignore[assignment]
+        try:
+            # Check the actual listening inode and the kernel peer identity on
+            # every connection; a stale/swapped pathname never grants trust.
+            before = service._validate_socket()
+            with closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as peer:
+                peer.settimeout(5.0)
+                peer.connect(str(service.socket_path))
+                if _peer_uid(peer) != service.frontend_uid:
+                    return
+                after = service._validate_socket()
+                if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                    return
+                _relay_streams(self.request, peer, stop=service._stopping)
+        except (OSError, TimeoutError, ValueError, DashboardRelayError):
+            return
+
+
+class TrustedDashboardPublicIngress(
+    _LimitedThreading, socketserver.ThreadingMixIn, socketserver.TCPServer,
+):
+    """Host-loopback TCP ingress with no CDP/SQLite/owner/witness mounts."""
+
+    allow_reuse_address = False
+    request_queue_size = _MAX_PEERS
+
+    def __init__(
+        self, *, socket_path: Path, frontend_uid: int,
+        listen_host: str = "127.0.0.1", listen_port: int = 8875,
+    ) -> None:
+        if (
+            not isinstance(socket_path, Path) or not socket_path.is_absolute()
+            or type(frontend_uid) is not int or frontend_uid < 1
+            or frontend_uid == os.geteuid()
+            or listen_host != "127.0.0.1"
+            or type(listen_port) is not int
+            or not 0 <= listen_port <= 65535
+            or not hasattr(socket, "SO_PEERCRED")
+        ):
+            raise DashboardRelayError("invalid public ingress identity/loopback bind")
+        self.socket_path = socket_path
+        self.frontend_uid = frontend_uid
+        self._validate_socket()
+        super().__init__((listen_host, listen_port), _PublicIngressHandler)
+
+    def _validate_socket(self) -> os.stat_result:
+        try:
+            parent = self.socket_path.parent.lstat()
+            info = self.socket_path.lstat()
+        except OSError as exc:
+            raise DashboardRelayError("frontend ingress socket unavailable") from exc
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != self.frontend_uid
+            or parent.st_gid != os.getegid()
+            or stat.S_IMODE(parent.st_mode) != 0o2710
+            or not stat.S_ISSOCK(info.st_mode)
+            or info.st_uid != self.frontend_uid
+            or info.st_gid != os.getegid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o660
+        ):
+            raise DashboardRelayError("untrusted frontend ingress socket identity")
+        return info
+
+
+def relay_netless_frontend_main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints",
+              file=sys.stderr)
+        return 2
+    parser = argparse.ArgumentParser(description="Netless UID-bound dashboard frontend")
+    parser.add_argument("--backend-socket", required=True, type=Path)
+    parser.add_argument("--expected-owner-uid", required=True, type=int)
+    parser.add_argument("--ingress-socket", required=True, type=Path)
+    parser.add_argument("--ingress-uid", required=True, type=int)
+    parser.add_argument("--ingress-gid", required=True, type=int)
+    args = parser.parse_args(argv)
+    # An existing stale socket blocks even before contacting the backend.
+    try:
+        args.ingress_socket.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return 2
+    else:
+        return 2
+    try:
+        with closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as check:
+            check.settimeout(5.0)
+            check.connect(str(args.backend_socket))
+            if _peer_uid(check) != args.expected_owner_uid:
+                raise DashboardRelayError("untrusted owner socket")
+        service = NetlessFrontendDashboardRelay(
+            socket_path=args.ingress_socket, backend_path=args.backend_socket,
+            ingress_uid=args.ingress_uid, ingress_gid=args.ingress_gid,
+            owner_uid=args.expected_owner_uid,
+        )
+    except (OSError, ValueError, DashboardRelayError):
+        print("mark netless frontend: trusted Unix sockets unavailable",
+              file=sys.stderr)
+        return 2
+    stopping = Event()
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda _sig, _frame: stopping.set())
+    try:
+        service.start()
+        while not stopping.wait(.2):
+            if service._serving is None or not service._serving.is_alive():
+                return 2
+    except KeyboardInterrupt:
+        pass
+    finally:
+        completed = service.stop()
+        signal.signal(signal.SIGTERM, previous)
+    return 0 if completed else 2
+
+
+def relay_public_ingress_main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints",
+              file=sys.stderr)
+        return 2
+    parser = argparse.ArgumentParser(description="Bounded local Mark dashboard ingress")
+    parser.add_argument("--frontend-socket", required=True, type=Path)
+    parser.add_argument("--frontend-uid", required=True, type=int)
+    parser.add_argument("--port", type=int, default=8875)
+    args = parser.parse_args(argv)
+    if args.port != 8875:
+        print("mark public ingress: fixed localhost port 8875 required",
+              file=sys.stderr)
+        return 2
+    try:
+        service = TrustedDashboardPublicIngress(
+            socket_path=args.frontend_socket, frontend_uid=args.frontend_uid,
+            listen_port=args.port,
+        )
+        with closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as check:
+            check.settimeout(5.0)
+            check.connect(str(args.frontend_socket))
+            if _peer_uid(check) != args.frontend_uid:
+                raise DashboardRelayError("wrong frontend peer UID")
+    except (OSError, ValueError, DashboardRelayError):
+        print("mark public ingress: verified frontend unavailable",
+              file=sys.stderr)
+        return 2
+    stopping = Event()
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda _sig, _frame: stopping.set())
+    try:
+        service.start()
+        while not stopping.wait(.2):
+            if service._serving is None or not service._serving.is_alive():
+                return 2
+    except KeyboardInterrupt:
+        pass
+    finally:
+        completed = service.stop()
+        signal.signal(signal.SIGTERM, previous)
+    return 0 if completed else 2
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["netless-frontend"]:
+        raise SystemExit(relay_netless_frontend_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["public-ingress"]:
+        raise SystemExit(relay_public_ingress_main(sys.argv[2:]))
     raise SystemExit(relay_frontend_main())

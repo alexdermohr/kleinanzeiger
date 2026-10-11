@@ -144,6 +144,7 @@ private_git archive "$expected" -- \
     docs/mark-api-container.Dockerfile \
     docs/mark-api-container-start.sh \
     docs/mark-api-container-frontend.sh \
+    docs/mark-api-container-ingress.sh \
     docs/mark-api-container-witness.sh \
     docs/mark-api-container-healthcheck.py \
     docs/mark-api-container-backup.sh \
@@ -152,7 +153,8 @@ private_git archive "$expected" -- \
 /usr/bin/tar -xf "$temp/docs.tar" -C "$temp" ||
     fail 'verified Docker files extraction failed'
 for file in mark-api-container.Dockerfile mark-api-container-start.sh \
-            mark-api-container-frontend.sh mark-api-container-witness.sh \
+            mark-api-container-frontend.sh mark-api-container-ingress.sh \
+            mark-api-container-witness.sh \
             mark-api-container-healthcheck.py \
             mark-api-container-backup.sh mark-api-bootstrap.sh \
             mark-api-preflight.py; do

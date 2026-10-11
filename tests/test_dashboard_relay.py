@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import http.client
 import os
+from contextlib import closing
 from pathlib import Path
 import socket
 import tempfile
@@ -21,7 +22,11 @@ from mark_api.dashboard_relay import (
     _chrome_cdp_reachable,
     FrontendDashboardRelay,
     UnixDashboardRelay,
+    NetlessFrontendDashboardRelay,
+    TrustedDashboardPublicIngress,
     relay_frontend_main,
+    relay_netless_frontend_main,
+    relay_public_ingress_main,
 )
 
 
@@ -281,6 +286,72 @@ class DashboardRelayTests(unittest.TestCase):
             ])
         self.assertEqual(code, 2)
         self.assertIsNone(self.front)
+
+
+
+class NetlessFrontendContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="mark-netless-relay-")
+        self.addCleanup(self.temp.cleanup)
+        self.parent = Path(self.temp.name) / "ingress"
+        self.parent.mkdir(mode=0o700)
+        self.parent.chmod(0o2710)
+        self.sock = self.parent / "frontend.sock"
+        self.uid = os.geteuid()
+        self.fake_ingress_uid = self.uid + 10010
+        self.fake_owner_uid = self.uid + 10011
+
+    def make_netless(self) -> NetlessFrontendDashboardRelay:
+        relay = NetlessFrontendDashboardRelay(
+            socket_path=self.sock, backend_path=self.parent / "executor.sock",
+            ingress_uid=self.fake_ingress_uid, ingress_gid=os.getegid(),
+            owner_uid=self.fake_owner_uid,
+        )
+        self.addCleanup(relay.stop)
+        return relay
+
+    def test_netless_rejects_same_uid_and_unsafe_existing_socket(self) -> None:
+        with self.assertRaises(DashboardRelayError):
+            NetlessFrontendDashboardRelay(
+                socket_path=self.sock, backend_path=self.parent / "executor.sock",
+                ingress_uid=self.uid, ingress_gid=os.getegid(),
+                owner_uid=self.fake_owner_uid,
+            )
+        self.sock.symlink_to(self.parent / "missing")
+        with self.assertRaises(DashboardRelayError):
+            self.make_netless()
+        self.assertTrue(self.sock.is_symlink())
+
+    def test_netless_wrong_ingress_uid_cannot_access_backend(self) -> None:
+        relay = self.make_netless()
+        relay.start()
+        with closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as conn:
+            conn.settimeout(1)
+            conn.connect(str(self.sock))
+            conn.sendall(b"GET /readyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            try:
+                self.assertEqual(conn.recv(1), b"")
+            except ConnectionResetError:
+                pass  # The rejected peer never reaches the trusted backend.
+        self.assertTrue(relay.stop())
+        self.assertFalse(self.sock.exists())
+
+    def test_ingress_binds_only_exact_ipv4_loopback_and_other_uid(self) -> None:
+        with self.assertRaises(DashboardRelayError):
+            TrustedDashboardPublicIngress(
+                socket_path=self.sock, frontend_uid=self.uid,
+                listen_host="127.0.0.1", listen_port=8875,
+            )
+        with self.assertRaises(DashboardRelayError):
+            TrustedDashboardPublicIngress(
+                socket_path=self.sock, frontend_uid=self.fake_ingress_uid,
+                listen_host="0.0.0.0", listen_port=8875,
+            )
+
+    def test_new_direct_python_mains_preserve_unattested_draft_stop(self) -> None:
+        with patch("mark_api.dashboard_relay.container_draft_denied", return_value=True):
+            self.assertEqual(relay_netless_frontend_main([]), 2)
+            self.assertEqual(relay_public_ingress_main([]), 2)
 
 
 if __name__ == "__main__":

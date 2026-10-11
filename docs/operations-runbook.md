@@ -294,40 +294,45 @@ definieren eine opt-in-Produktkomposition:
   `mark_api.launcher` ohne `--init-db` auf. Bestätigungen, Bearer,
   Ownership-, Idempotenz- und Recovery-Fences bleiben erhalten.
 - Das Produktprofil ist ausdrücklich `live`, das Backup `backup`.
-  Das weiterhin gesperrte Draft-Profil `live` enthält die HTTP-Frontend-UID
-  50042 (`mark-api`), den einzigen CDP-/SQLite-Executor unter UID 50044
-  (`mark-api-owner`) und den getrennten Ledger-Witness unter UID 50043
-  (`mark-api-witness`). `backup` verwendet UID 50044, nicht 50042.
-  Kein Produktdienst startet ohne explizites Profil. Alle vier Dienste haben
-  ein read-only Root-Dateisystem, keine Linux-Capabilities,
-  `no-new-privileges` und begrenzte PIDs. Alle **sechs** Volumes sind
-  `external: true`, und jeder Named-Volume-Mount setzt `nocopy: true`,
-  damit Docker keine leeren Volumes aus den Image-Verzeichnissen
-  vorbefüllen oder still umberechtigen kann.
-  Witness und Backup besitzen `network_mode: none`. Es gibt keine
-  automatische Ledger-Initialisierung im Normalbetrieb.
-- Nur der vertrauenswürdige UID-50044-Executor hat `network_mode: host`
-  für eine bereits authentifizierte Chrome/CDP-Sitzung auf
-  **127.0.0.1:9222** und Zugriff auf SQLite/WAL/SHM.
-  Dashboard-Backend und Write-API binden ausschließlich Owner-Loopback
-  **18875/18876**. Das UID-50042-Frontend besitzt keine Daten-/Witness-Mounts,
-  liegt in einem separaten Docker-Bridge-Netz und veröffentlicht nur
-  **127.0.0.1:8875**. Es verbindet sich per AF_UNIX/SO_PEERCRED mit dem
-  authentifizierten UID-50044-Dashboard-Relay. Default-on-Writes gehen
-  ausschließlich über die bestehende typisierte Write-API mit unabhängigen
-  Fences; der Relay ist **kein** CDP-Passthrough.
-  **Weiterhin offen:** Das Bridge-Netz ist keine Host-Firewall.
-  Der Frontend-Relay prüft beim Start auch die IPv4-Default-Gateways
-  auf CDP-Port 9222 und Owner-Ports 18875/18876 und bricht bei
-  fehlender Route oder erreichbarem Dienst ab. IPv6 ist im
-  Compose-Bridge-Netz deaktiviert. Das ist nur zusätzliche Abwehr.
-  Ein unabhängiger Root-/Host-Nachweis muss vor Livebetrieb die
-  dauerhafte nftables-/INPUT-Sperre für das gesamte Frontend-Bridge-Netz
-  gegen Host-CDP und Owner-Ports sowie die exklusive
-  127.0.0.1-CDP-Bindung bestätigen; Bindungswechsel dürfen nicht
-  nach dem einmaligen Probezeitpunkt einen Bypass eröffnen. Zusätzlich sind alter
-  FD-/MAP_SHARED-Zustand, paarweises Ledger-Backup/Restore und externe
-  Plattformberechtigungen nicht belegt. Keine Live-Freigabe.
+  Das weiterhin gesperrte Draft-Profil `live` enthält UID 50042
+  (untrusted Frontend ohne IP-Netzwerk), UID 50045 (separater vertrauenswürdiger
+  öffentlicher HTTP-Eingang), UID 50044 (Browser-/SQLite-Executor) und UID
+  50043 (unabhängiger Witness). `backup` verwendet weiterhin UID 50044.
+  Alle fünf Dienste sind explizit profiliert, besitzen read-only Rootfs,
+  `cap_drop: ALL`, `no-new-privileges`, begrenzte PIDs und
+  `restart: no`. Sieben Volumes sind ausschließlich extern mit
+  `nocopy: true`; es wird nichts automatisch provisioniert oder initialisiert.
+- **Unabhängige Host-CDP-Grenze für UID 50042:** Das Frontend läuft
+  mit Docker-`network_mode: none` und hat weder IPv4-/IPv6-Hostroute
+  noch ein veröffentlichtes TCP-Portmapping. Auch kompromittierter
+  Frontend-Python-Code kann daher kein TCP zu CDP-/Owner-Ports, Gateway
+  oder LAN herstellen. Er kann nur die fest gebundenen Unix-Sockets nutzen.
+  Ein unabhängiger *trusted* Ingress unter UID 50045 bindet
+  **127.0.0.1:8875** im Host-Namespace und verbindet sich mit dem
+  UID-50042-Socket `/run/mark-api-ingress/frontend.sock` über
+  `SO_PEERCRED`, mit Inode-/Modus-/UID-/GID-Prüfung. Er besitzt keine
+  Executor-, Daten-, Witness- oder Backup-Mounts.
+  Das netzlose Frontend verbindet sich ausschließlich per UID-geprüftem
+  Unix-Socket mit dem UID-50044-Dashboard-Relay, nicht mit TCP.
+  Das Backend bindet weiterhin nur **127.0.0.1:18875/18876**.
+  Nur UID 50044 benötigt Hostnetzwerk für eine bereits authentifizierte
+  Chrome-Sitzung auf 127.0.0.1:9222. Ein fremder UID-Prozess kann den
+  Frontend-Ingress-Socket nicht öffnen. Alle fünf Entrypoints sind Draft-
+  gesperrt. Der ältere Bridge-basierte TCP-Frontend-Pfad gehört nicht
+  zum installierbaren Compose-Entwurf und ist kein Release-Nachweis.
+- **Teilnachweis:** Der real ausgeführte ausschließlich synthetische
+  Rootful-Docker-Mehr-UID-Test `tests/test_dashboard_relay_netless_multiuid.py`
+  beweist die tatsächliche UDS/TCP-Weiterleitung über UID 50045 → 50042 →
+  50044, nicht erreichbare Host-TCP-Ziele aus `network:none`, verweigerte
+  fremde Socket-UID und blockierten Neustart nach verwaistem Socket.
+  Das ist weder ein finales Produktimage noch eine Attestation historischer
+  Host-UID-/FD-/Mapping-Rechte oder der Autorität eines kompromittierten
+  UID-50044-Executors. Auch UID 50045 muss im echten Hostprozess- und
+  Portbestand exklusiv verifiziert werden. Keine Live-Freigabe.
+  Default-on-Writes bleiben unverändert an Write-API, Ownership,
+  Confirmation, Idempotenz, Witness und No-Blind-Retry gebunden.
+  Frontend-Token/User-Intention, Storage-Mappings, gemeinsames
+  SQLite/Witness-Backup/Restore und Plattformrechte sind weiterhin offen.
   Geheimnisse bleiben im UID-50044-Tmpfs `/run/mark-api/launcher.log`,
   nicht im öffentlichen Frontend oder dessen Docker-STDOUT.
 
@@ -337,12 +342,13 @@ numerisch Host-UIDs. Auf dem aktuell geprüften Host ist **UID 999 schon
 für Caddy sowie Redis-/MongoDB-/PostgreSQL-Prozesse in Benutzung**.
 Die synthetische Container-UID 999 darf daher nicht übernommen werden!
 Die neue Konfiguration verwendet numerische UID/GID **50042** für das
-unprivilegierte Frontend, **50043** für den Witness und **50044** für den
-Browser-/SQLite-Owner. Sie liegen außerhalb systemds üblichem
+unprivilegierte Frontend, **50043** für den Witness, **50044** für den
+Browser-/SQLite-Owner und **50045** für den ausschließlich
+Loopback-UDS-basierten Ingress. Sie liegen außerhalb systemds üblichem
 DynamicUser-Bereich. Das ist **keine automatische UID-Exklusivität**:
-Vor einer echten Installation muss root alle drei Identitäten systemweit
+Vor einer echten Installation muss root alle vier Identitäten systemweit
 eindeutig den nicht-interaktiven Diensten `mark-api`,
-`mark-api-witness` und `mark-api-owner` zuweisen und nachweisen,
+`mark-api-witness`, `mark-api-owner` und `mark-api-ingress` zuweisen und nachweisen,
 dass keine fremden Host- oder Containerprozesse dieselbe numerische UID
 besitzen, vorher besessen haben oder schreibbare Mappings der betroffenen
 DB-, WAL- oder SHM-Inodes halten. Die Registrierung, die aktive Prozess-
@@ -376,17 +382,19 @@ auf einen ungescannten Benutzer-Python-Importpfad ausweichen.
 
 **Vor einem kontrollierten Start müssen zusätzlich** alle folgenden
 Bedingungen nachgewiesen sein: dedizierte, reservierte Host-UID/GID
-**50042/50043/50044**, keine fremden Prozesse, alten DB-/WAL-/SHM-FDs
+**50042/50043/50044/50045**, keine fremden Prozesse, alten DB-/WAL-/SHM-FDs
 oder writable MAP_SHARED-Inodes; kein Docker-UserNS-Remap oder
 Rootless-Daemon; eine offline attestierte vollständige SQLite-v2-DB samt
-`0600`-Sidecars unter **50044**; sechs unveränderliche externe Volumes
+`0600`-Sidecars unter **50044**; sieben unveränderliche externe Volumes
 `mark-api-data-v1`, `mark-api-backups-v1`,
 `mark-api-fence-ledger-v1`, `mark-api-fence-runtime-socket-v1`,
-`mark-api-fence-operator-socket-v1`, `mark-api-executor-socket-v1`.
+`mark-api-fence-operator-socket-v1`, `mark-api-executor-socket-v1`,
+`mark-api-ingress-socket-v1`.
 Ledger-Verzeichnis: **50043:50043 / 0700**;
 Witness-Runtime-Socket-Verzeichnis: **50043:50044 / 2710**;
 Operator-Socket-Verzeichnis: **50043:50043 / 0700**;
-Executor-Dashboard-Socket-Verzeichnis: **50044:50042 / 2710**.
+Executor-Dashboard-Socket-Verzeichnis: **50044:50042 / 2710**;
+Frontend-Ingress-Socket-Verzeichnis: **50042:50045 / 2710**.
 UID 50042 darf weder Daten/Sidecars noch Ledger- oder Operator-Socket
 öffnen. Nur ein kontrollierter **einmaliger Offline-Cutover** nach
 historischer Fence-Inventur darf das Ledger neu erzeugen; `live` nie.
@@ -404,8 +412,8 @@ Witness-Backup-/Restore-Lösung.
 `live` mit `unmediated host CDP bypass blocks product live deployment`
 und `backup` mit
 `independent witness ledger backup is not implemented`.
-**Zusätzlich** verweigern alle vier Entrypoints (Owner, Frontend,
-Witness und Backup) den direkten Compose-Start vor jeder sensiblen
+**Zusätzlich** verweigern alle fünf Entrypoints (Owner, Frontend,
+Ingress, Witness und Backup) den direkten Compose-Start vor jeder sensiblen
 Operation, auch mit `--no-deps`. Das Image-Default ist
 `ENTRYPOINT ["/usr/bin/false"]`. Socket-Healthchecks verwenden echte
 AF_UNIX-Connects mit SO_PEERCRED statt nur `test -S`. Verwaiste Socket-
@@ -472,9 +480,10 @@ geprüfte unveränderliche `sha256:...`-Image-ID und kontrolliert das
 Mutable Tags wie `latest` oder `mark-api:pr75-...` sowie unvollständige
 Image-IDs werden verweigert. Der **vorbereitete, weiterhin durch die Host-/Recovery-Sperren unerreichbare**
 Startzweig verlangt root-verwaltete numerische Host-Identitäten
-**50042 (Frontend), 50043 (Witness), 50044 (Executor)** und alle sechs
-bereits existierenden, geprüften Volumes. Die vorgesehene Reihenfolge ist
-Witness → Executor → Frontend, jeweils mit numerischer UID-, Image- und
+**50042 (Frontend), 50043 (Witness), 50044 (Executor), 50045 (Ingress)**
+und alle sieben bereits existierenden, geprüften Volumes. Die vorgesehene
+Reihenfolge ist Witness → Executor → netzloses Frontend → Host-Loopback-Ingress,
+jeweils mit numerischer UID-, Image-, Netzwerk- und
 Health-Attestation. Dies ist noch kein tatsächlich installierter Dienst.
 Heute wird keiner dieser Live-Starts ausgeführt. Selbst nach späterer
 Aktivierung ist ein grüner Socket-Healthcheck **keine** unabhängige
