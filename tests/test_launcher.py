@@ -244,6 +244,60 @@ class ProductLauncherTests(unittest.TestCase):
                 ).fetchone()
             )
 
+    def test_older_open_sync_blocks_launcher_before_runtime_and_writes(self) -> None:
+        _tmp, db = self.make_db()
+        store = SnapshotStore(db, create_if_missing=False)
+        older = store.begin_sync_attempt(
+            source="older-owner", started_at=NOW - timedelta(minutes=3),
+        )
+        newer = store.begin_sync_attempt(
+            source="newer-owner", started_at=NOW - timedelta(minutes=2),
+        )
+        store.append_inventory_result(
+            ReadResult.success_empty(()),
+            source="newer-owner",
+            observed_at=NOW - timedelta(minutes=1),
+            attempt_id=newer, completed_at=NOW - timedelta(minutes=1),
+        )
+        self.assertEqual(store.sync_status()["state"], "success_empty")
+        self.assertEqual(store.sync_recovery_status()["unresolved_count"], 1)
+        runtime_calls = []
+
+        def runtime_factory(**kwargs):
+            runtime_calls.append(kwargs)
+            return InventoryRuntime(ReadResult.success_empty(()))
+
+        with self.assertRaisesRegex(
+            ProductLauncherError, "local snapshot store startup failed",
+        ):
+            build_product_launcher(
+                db_path=db,
+                cdp_port=9222,
+                runtime_factory=runtime_factory,
+                clock=lambda: NOW,
+            )
+        self.assertEqual(runtime_calls, [])
+        self.write_factory.assert_not_called()
+        self.assertEqual(store.latest_sync_attempt().id, newer)
+        self.assertEqual(
+            store.sync_recovery_status()["oldest_unresolved_attempt"]["id"],
+            older,
+        )
+        # This is privileged test-only reconciliation of a synthetic store;
+        # the untrusted executor has no SQL or clearance RPC in production.
+        store.fail_sync_attempt(
+            older, source="older-owner",
+            completed_at=NOW, error_kind="persistence_error",
+        )
+        launcher = build_product_launcher(
+            db_path=db, cdp_port=9222, runtime_factory=runtime_factory,
+            dashboard_factory=lambda *args, **kwargs: DashboardServer(),
+            clock=lambda: NOW,
+        )
+        launcher.close()
+        self.assertEqual(len(runtime_calls), 1)
+        self.assertEqual(store.sync_recovery_status()["unresolved_count"], 0)
+
     def test_corrupted_database_fails_before_inventory_or_writes(self) -> None:
         _tmp, db = self.make_db()
         db.write_bytes(b"corrupted local sqlite store")

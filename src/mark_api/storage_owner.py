@@ -1595,7 +1595,15 @@ class StorageOwnerClient:
             if not page or len(page) != _TRACKED_PAGE:
                 raise StorageOwnerError("tracked-ID page falsely claims more")
 
-    def begin_sync_attempt(self, *, source: str, started_at: datetime) -> int:
+    def begin_sync_attempt(
+        self, *, source: str, started_at: datetime,
+        require_no_unresolved: bool = True,
+    ) -> int:
+        # The isolated owner *always* applies its BEGIN IMMEDIATE durable
+        # unresolved-sync check. Do not accept a facade opt-out that would
+        # imply a weaker contract or broaden the executor's authority.
+        if require_no_unresolved is not True:
+            raise StorageOwnerError("durable inventory sync recovery fence is required")
         answer = self._call("sync_begin", source=_validated(source, _OWNER),
                             at=started_at.isoformat())
         if set(answer) != {"attempt"} or type(answer["attempt"]) is not int or answer["attempt"] < 1:

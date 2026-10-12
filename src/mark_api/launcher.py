@@ -435,6 +435,7 @@ def build_product_launcher(
         attempt_id = store.begin_sync_attempt(
             source=_LAUNCHER_SOURCE,
             started_at=_validated_observed_at(clock),
+            require_no_unresolved=True,
         )
     except ProductLauncherError:
         raise

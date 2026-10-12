@@ -1525,6 +1525,30 @@ class StorageOwnerUnitTests(unittest.TestCase):
                 client.sync_recovery_status()
             rpc.assert_called_once_with("sync_recovery_status")
 
+    def test_owner_sync_begin_requires_unskippable_durable_quarantine(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        store = SnapshotStore(self.database, create_if_missing=False)
+        for disabled in (False, None, 0, 1, "true"):
+            with self.subTest(disabled=disabled), self.assertRaises(StorageOwnerError):
+                client.begin_sync_attempt(
+                    source="owner", started_at=NOW,
+                    require_no_unresolved=disabled,
+                )
+            self.assertEqual(store.sync_status()["state"], "never_attempted")
+        first = client.begin_sync_attempt(
+            source="owner", started_at=NOW, require_no_unresolved=True,
+        )
+        self.assertEqual(
+            store.sync_recovery_status()["oldest_unresolved_attempt"]["id"],
+            first,
+        )
+        with self.assertRaises(StorageOwnerError):
+            client.begin_sync_attempt(source="owner", started_at=NOW)
+        self.assertEqual(store.sync_recovery_status()["unresolved_count"], 1)
+
     def test_sync_status_exact_readback_without_recovery_mutation(self) -> None:
         # The broker must expose the real sync journal, not infer success
         # from last-known ad snapshots or synthesize a successful attempt.
