@@ -154,10 +154,12 @@ wheel_sha=${wheel_sha%% *}
 # (notably UV_VENV_SEED and UV_FIND_LINKS), DIST_EXTRA_CONFIG, user HOME and
 # setuptools distutils settings are not trusted execution inputs. A pinned
 # version and --no-config alone do not suppress environment-variable options.
-build_uv=${MARK_UV:-uv}
 build_home=$(/usr/bin/getent passwd "$(/usr/bin/id -u)" | /usr/bin/cut -d: -f6) ||
     fail 'trusted operator account unavailable'
 case "$build_home" in /*) ;; *) fail 'trusted operator account home invalid' ;; esac
+# Resolve the operator's uv binary before the process environment is cleared;
+# do not reintroduce the user-controlled command-search PATH to the backend.
+build_uv=${MARK_UV:-"$build_home/.local/bin/uv"}
 mkdir -m 0700 "$temp/build-home" "$temp/uv-cache" ||
     fail 'private build environment unavailable'
 uv_cli() {
