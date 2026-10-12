@@ -39,9 +39,9 @@ class OfflineBuildDependencyTests(unittest.TestCase):
         env = os.environ.copy()
         env.pop("DOCKER_HOST", None)
         env.pop("DOCKER_CONTEXT", None)
-        env["MARK_SETUPTOOLS_WHEEL"] = wheel
+        env["MARK_SETUPTOOLS_WHEEL"] = ""  # Explicit argv must own dependency admission.
         return subprocess.run(
-            ["/bin/sh", str(root / "docs" / BUILDER.name), sha],
+            ["/bin/sh", str(root / "docs" / BUILDER.name), sha, wheel],
             cwd=root, env=env, text=True, capture_output=True, timeout=45,
             check=False,
         )

@@ -19,7 +19,7 @@ safe_git() {
         -c core.fsmonitor=false -c core.hooksPath=/dev/null \
         -c diff.external= -c core.pager=cat "$@"
 }
-[ "$#" -eq 1 ] || { printf '%s\n' 'usage: sh docs/mark-api-container-build.sh EXACT_HEAD_SHA' >&2; exit 64; }
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || { printf '%s\n' 'usage: sh docs/mark-api-container-build.sh EXACT_HEAD_SHA [PINNED_SETUPTOOLS_WHEEL]' >&2; exit 64; }
 expected=$1
 case "$expected" in
     *[!0-9a-f]*|'') exit 64 ;;
@@ -137,7 +137,7 @@ private_git archive "$expected" -- pyproject.toml README.md src > "$temp/source.
 # The reviewed build backend must be supplied offline, not resolved from a
 # mutable registry or inherited user-site packages. Copy the caller artifact
 # into our private directory and authenticate its bytes *after* the copy.
-setuptools_source=${MARK_SETUPTOOLS_WHEEL:-}
+setuptools_source=${2:-${MARK_SETUPTOOLS_WHEEL:-}}
 [ -n "$setuptools_source" ] && [ -f "$setuptools_source" ] &&
     [ ! -L "$setuptools_source" ] ||
     fail 'pinned setuptools wheel is required (MARK_SETUPTOOLS_WHEEL)'
