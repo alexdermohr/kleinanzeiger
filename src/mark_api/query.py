@@ -135,7 +135,10 @@ class MarkQueryService:
         history = self._store.inbound_message_history(ad_id)
         if not history:
             return None
-        conversations, messages = self._store.inbound_message_counts(ad_id)
+        # Use the same pinned event generation for counts and provenance.
+        # A concurrent import after the history read must not inflate totals.
+        conversations = len({event.conversation_id for event in history})
+        messages = len(history)
         return EmailReactionView(
             ad_id=ad_id,
             conversation_count=conversations,

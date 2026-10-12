@@ -625,6 +625,47 @@ class StorageOwnerUnitTests(unittest.TestCase):
         self.assertEqual(analytics_rpc.group_rankings("city", "email_inbound_message_count"),
                          analytics_expected.group_rankings("city", "email_inbound_message_count"))
 
+    def test_email_reaction_uses_one_pinned_history_for_counts(self) -> None:
+        from mark_api.domain import InboundMessageEvent
+        from mark_api.query import MarkQueryService
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        early = tuple(InboundMessageEvent(
+            ad_id="email-only", conversation_id=f"buyer-{index}",
+            provider_message_id=f"message-{index}",
+            observed_at=NOW + timedelta(minutes=index),
+            source="email:snapshot",
+        ) for index in range(2))
+        self.assertEqual(store.append_inbound_message_events(early), 2)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        late = InboundMessageEvent(
+            ad_id="email-only", conversation_id="buyer-late",
+            provider_message_id="message-late",
+            observed_at=NOW + timedelta(minutes=10),
+            source="email:late",
+        )
+        original_call = client._call
+        fired = False
+        def append_after_first_page(op: str, **fields: object) -> dict[str, object]:
+            nonlocal fired
+            response = original_call(op, **fields)
+            if op == "inbound_message_page" and not fired:
+                fired = True
+                store.append_inbound_message_events((late,))
+            return response
+        with patch.object(client, "_call", side_effect=append_after_first_page):
+            view = MarkQueryService(client).email_reaction("email-only")
+        self.assertTrue(fired)
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertEqual(view.conversation_count, 2)
+        self.assertEqual(view.inbound_message_count, 2)
+        self.assertEqual(view.first_observed_at, early[0].observed_at)
+        self.assertEqual(view.last_observed_at, early[-1].observed_at)
+        self.assertEqual(store.inbound_message_counts("email-only"), (3, 3))
+
     def test_inbox_multibyte_full_reply_frames_do_not_truncate_events(self) -> None:
         from mark_api.domain import InboundMessageEvent
         service = self.make_service()
