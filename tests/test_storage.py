@@ -959,6 +959,38 @@ class SnapshotStoreTests(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(events, ["enter", "exit"])
 
+    def test_pending_write_claim_never_persists_unreadable_json(self) -> None:
+        store = self.make_store()
+        malformed = (
+            '{"title":"first","title":"second"}',
+            '{"nested":{"key":1,"key":2}}',
+            '{"price":NaN}',
+            '{"price":Infinity}',
+            '{"price":-Infinity}',
+        )
+        for payload_json in malformed:
+            with self.subTest(payload_json=payload_json):
+                with self.assertRaisesRegex(ValueError, "payload_json is invalid"):
+                    store.claim_dashboard_pending_write(
+                        scope="create", resource_key="create",
+                        idempotency_key="ui:invalid-json",
+                        method="POST", path="/api/write/ads",
+                        payload_json=payload_json, ad_id=None,
+                    )
+                # Malformed durable JSON would break all owner-paged reads.
+                self.assertEqual(store.dashboard_pending_writes(), ())
+                self.assertTrue(store.is_ready())
+
+        valid = '{"title":"valid","nested":{"key":1}}'
+        self.assertTrue(store.claim_dashboard_pending_write(
+            scope="create", resource_key="create",
+            idempotency_key="ui:valid-json", method="POST",
+            path="/api/write/ads", payload_json=valid, ad_id=None,
+        ))
+        self.assertEqual(
+            store.dashboard_pending_writes()[0].payload_json, valid,
+        )
+
     def test_dashboard_pending_write_acknowledgement_is_two_phase(self) -> None:
         store = self.make_store()
         created = store.claim_dashboard_pending_write(

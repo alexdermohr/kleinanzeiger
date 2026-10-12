@@ -256,6 +256,28 @@ def _sync_attempt_from_row(row: sqlite3.Row) -> SyncAttemptRecord:
     )
 
 
+def _unresolved_sync_attempt_summary(
+    connection: sqlite3.Connection,
+) -> tuple[int, SyncAttemptRecord | None]:
+    """Inspect all open generations in one bounded-memory SQL traversal.
+
+    Checking only the oldest outstanding attempt can conceal a malformed
+    middle generation when a later completed attempt is otherwise healthy.
+    SQL cursors stream rows without materializing private journal history.
+    This read-only check neither settles nor grants retry authorization.
+    """
+    count = 0
+    oldest: SyncAttemptRecord | None = None
+    for row in connection.execute(
+        "SELECT * FROM sync_attempts WHERE outcome='in_progress' ORDER BY id ASC"
+    ):
+        record = _sync_attempt_from_row(row)
+        if oldest is None:
+            oldest = record
+        count += 1
+    return count, oldest
+
+
 def _sync_attempt_to_dict(item: SyncAttemptRecord | None) -> dict[str, object] | None:
     if item is None:
         return None
@@ -461,14 +483,13 @@ class SnapshotStore:
                     "SELECT * FROM sync_attempts WHERE outcome IN "
                     "('success_empty','success_nonempty') "
                     "ORDER BY completed_at DESC, id DESC LIMIT 1",
-                    # An older unfinished attempt may survive a newer
-                    # success and must be as decodable as the displayed row.
-                    "SELECT * FROM sync_attempts WHERE outcome='in_progress' "
-                    "ORDER BY id ASC LIMIT 1",
                 ):
                     record = connection.execute(statement).fetchone()
                     if record is not None:
                         _sync_attempt_from_row(record)
+                # A valid oldest open record does not establish that a later
+                # unfinished predecessor is safe. Audit every open generation.
+                _unresolved_sync_attempt_summary(connection)
 
     def is_ready(self) -> bool:
         """Observe complete schema/data without creating or repairing a store."""
@@ -1931,9 +1952,27 @@ class SnapshotStore:
         if payload_json is not None:
             if not isinstance(payload_json, str) or len(payload_json) > 64 * 1024:
                 raise ValueError("payload_json is invalid")
+            def unique_members(
+                members: list[tuple[str, object]],
+            ) -> dict[str, object]:
+                # The owner readback rejects duplicate object members. Do not
+                # durably admit a pending fence that its reader cannot decode.
+                values: dict[str, object] = {}
+                for key, value in members:
+                    if key in values:
+                        raise ValueError("duplicate JSON member")
+                    values[key] = value
+                return values
+
+            def reject_nonfinite_constant(_literal: str) -> object:
+                raise ValueError("nonfinite JSON constant")
+
             try:
-                payload = json.loads(payload_json)
-            except json.JSONDecodeError as exc:
+                payload = json.loads(
+                    payload_json, object_pairs_hook=unique_members,
+                    parse_constant=reject_nonfinite_constant,
+                )
+            except (ValueError, RecursionError) as exc:
                 raise ValueError("payload_json is invalid") from exc
             if not isinstance(payload, dict):
                 raise ValueError("payload_json is invalid")
@@ -2171,14 +2210,9 @@ class SnapshotStore:
                 "WHERE outcome IN ('success_empty', 'success_nonempty') "
                 "ORDER BY completed_at DESC, id DESC LIMIT 1"
             ).fetchone()
-            oldest_open = connection.execute(
-                "SELECT * FROM sync_attempts WHERE outcome='in_progress' "
-                "ORDER BY id ASC LIMIT 1"
-            ).fetchone()
-        # Do not claim a newer success if an older outstanding recovery row
-        # cannot be decoded. This is the same consistent read transaction.
-        if oldest_open is not None:
-            _sync_attempt_from_row(oldest_open)
+            # Do not claim a newer success if any older open recovery
+            # row is malformed, even when the oldest such row is valid.
+            _unresolved_sync_attempt_summary(connection)
         latest_item = _sync_attempt_from_row(latest) if latest is not None else None
         success_item = (
             _sync_attempt_from_row(successful) if successful is not None else None
@@ -2198,22 +2232,10 @@ class SnapshotStore:
         """
         with self._connect() as connection:
             connection.execute("BEGIN")
-            count_row = connection.execute(
-                "SELECT COUNT(*) AS unresolved_count FROM sync_attempts "
-                "WHERE outcome='in_progress'"
-            ).fetchone()
-            oldest = connection.execute(
-                "SELECT * FROM sync_attempts WHERE outcome='in_progress' "
-                "ORDER BY id ASC LIMIT 1"
-            ).fetchone()
-        count = count_row["unresolved_count"] if count_row is not None else None
-        if type(count) is not int or count < 0 or (count == 0) != (oldest is None):
-            raise sqlite3.DatabaseError("unresolved sync journal summary invalid")
+            count, oldest = _unresolved_sync_attempt_summary(connection)
         return {
             "unresolved_count": count,
-            "oldest_unresolved_attempt": _sync_attempt_to_dict(
-                _sync_attempt_from_row(oldest) if oldest is not None else None
-            ),
+            "oldest_unresolved_attempt": _sync_attempt_to_dict(oldest),
         }
 
     def append_inventory_result(

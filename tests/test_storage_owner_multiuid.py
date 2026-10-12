@@ -117,6 +117,24 @@ assert client.sync_status()=={
 assert client.sync_recovery_status()=={
     'unresolved_count':0,'oldest_unresolved_attempt':None,
 }
+for invalid in (
+    '{"title":"one","title":"two"}',
+    '{"nested":{"key":1,"key":2}}',
+    '{"price":NaN}',
+    '{"price":-Infinity}',
+):
+    try:
+        client.claim_dashboard_pending_write(
+            scope='hostile:payload',resource_key='hostile:payload',
+            idempotency_key='uid:hostile:json',method='POST',
+            path='/api/write/ads',payload_json=invalid,ad_id=None,
+        )
+    except StorageOwnerError:
+        pass
+    else:
+        raise AssertionError('executor persisted unreadable UI pending JSON')
+    assert client.dashboard_pending_writes()==()
+print('REAL_UID_HOSTILE_PENDING_JSON_FENCES_DENIED',flush=True)
 assert not client.has_write_recovery_clearance(
     idempotency_key='uid:test:1', request_sha256='a'*64)
 assert client.read_request('uid:test:1') is None
@@ -642,6 +660,8 @@ class RealStorageOwnerTests(unittest.TestCase):
                     *code, *rpc, IMAGE, "-B", "-c", _RUNTIME,
                 )
                 self.assertIn("REAL_UID_OWNER_ONLY_INVENTORY_CLI_GREEN", runtime.stdout)
+                self.assertIn("REAL_UID_HOSTILE_PENDING_JSON_FENCES_DENIED",
+                              runtime.stdout)
                 self.assertIn("STORAGE_TYPED_FENCE_AND_LOST_ACK_GREEN", runtime.stdout)
                 self.assertIn("REAL_UID_DASHBOARD_HTTP_OWNER_NO_DB_MOUNT_GREEN",
                               runtime.stdout)

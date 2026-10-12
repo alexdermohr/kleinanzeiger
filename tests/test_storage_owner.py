@@ -163,6 +163,38 @@ class StorageOwnerUnitTests(unittest.TestCase):
             idempotency_key="pending:000", request_sha256=SHA,
         ))
 
+    def test_dashboard_pending_owner_rejects_json_bombs_before_persistence(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()  # Framing only; real UID test separate.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        malformed = (
+            '{"title":"first","title":"second"}',
+            '{"nested":{"key":1,"key":2}}',
+            '{"price":NaN}', '{"price":Infinity}', '{"price":-Infinity}',
+        )
+        for payload_json in malformed:
+            with self.subTest(payload_json=payload_json):
+                with self.assertRaises(StorageOwnerError):
+                    client.claim_dashboard_pending_write(
+                        scope="create", resource_key="create",
+                        idempotency_key="pending:bad-json", method="POST",
+                        path="/api/write/ads", payload_json=payload_json,
+                        ad_id=None,
+                    )
+                self.assertEqual(client.dashboard_pending_writes(), ())
+                self.assertTrue(client.ready())
+                self.assertFalse(service.store.has_write_recovery_clearance(
+                    idempotency_key="pending:bad-json", request_sha256=SHA,
+                ))
+        valid = '{"title":"single-value"}'
+        self.assertTrue(client.claim_dashboard_pending_write(
+            scope="create", resource_key="create",
+            idempotency_key="pending:good-json", method="POST",
+            path="/api/write/ads", payload_json=valid, ad_id=None,
+        ))
+        self.assertEqual(client.dashboard_pending_writes()[0].payload_json, valid)
+
     def test_dashboard_pending_owner_rejects_oversize_and_forged_pages(self) -> None:
         service = self.make_service()
         service.runtime_uid = os.geteuid()  # Framing-only; OS isolation tested separately.

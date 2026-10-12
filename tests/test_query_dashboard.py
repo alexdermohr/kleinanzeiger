@@ -817,7 +817,6 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
         self.addCleanup(replacement_server.shutdown)
         host, port = replacement_server.server_address
         replacement_base = f"http://{host}:{port}"
-
         pending_request = Request(
             replacement_base + "/api/dashboard/pending-writes",
             headers={
@@ -1470,6 +1469,37 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
         shutil.copyfile(backup, self.store.path)
         self.assertEqual(json.loads(self.get("/readyz")[2]), {"status": "ready"})
         self.assertEqual(json.loads(self.get("/api/summary")[2]), expected)
+
+    def test_middle_unfinished_sync_corruption_fails_dashboard_recovery(self) -> None:
+        first = self.store.begin_sync_attempt(source="first-owner", started_at=T0)
+        hidden = self.store.begin_sync_attempt(source="hidden-owner", started_at=T0)
+        self.store.begin_sync_attempt(source="third-owner", started_at=T0)
+        latest = self.store.begin_sync_attempt(source="newer-owner", started_at=T1)
+        self.store.append_inventory_result(
+            ReadResult.success_empty(()), source="newer-owner",
+            observed_at=T1, attempt_id=latest, completed_at=T1,
+        )
+        self.assertEqual(self.get("/api/sync/recovery")[0], 200)
+        self.assertEqual(
+            json.loads(self.get("/api/sync/recovery")[2])["unresolved_count"], 3,
+        )
+        with sqlite3.connect(self.store.path) as connection:
+            connection.execute(
+                "UPDATE sync_attempts SET started_at=? WHERE id=?",
+                ("private-middle-corrupt-timestamp", hidden),
+            )
+        self.assertEqual(json.loads(self.get("/healthz")[2]), {"status": "ok"})
+        for route in (
+            "/readyz", "/api/sync/status", "/api/sync/recovery", "/api/summary",
+        ):
+            with self.subTest(route=route), self.assertRaises(HTTPError) as caught:
+                urlopen(self.base + route, timeout=2)
+            response = caught.exception
+            self.assertEqual(response.code, 503)
+            body = response.read().decode("utf-8")
+            self.assertNotIn("private-middle-corrupt-timestamp", body)
+            self.assertNotIn(str(self.store.path), body)
+        self.assertEqual(first + 1, hidden)
 
     def test_hidden_old_open_sync_corruption_fails_http_readiness(self) -> None:
         old = self.store.begin_sync_attempt(source="previous-owner", started_at=T0)
@@ -4097,7 +4127,6 @@ globalThis.fetch = async (path, options) => {
             0,
             msg=f"node stderr:\n{completed.stderr}\nnode stdout:\n{completed.stdout}",
         )
-
     def test_write_runtime_discards_media_when_cross_tab_create_loses_claim(self) -> None:
         _, _, js_body = self.get("/dashboard.js")
         javascript = js_body.decode("utf-8")
