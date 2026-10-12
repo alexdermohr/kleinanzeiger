@@ -1,7 +1,7 @@
 """Opt-in synthetic rootful-Docker network:none, UID and Unix relay proof.
 
 Set MARK_NETLESS_TEST_IMAGE to an already locally present immutable image ID
-containing /usr/local/bin/python. All resources are uniquely named and removed.
+containing a reviewed Python entrypoint. All resources are uniquely named and removed.
 No production volume, Chrome profile, account or platform Write is touched.
 A passed test proves this particular kernel/Docker host configuration only.
 """
@@ -23,7 +23,9 @@ from uuid import uuid4
 REPO = Path(__file__).resolve().parents[1]
 IMAGE = os.environ.get("MARK_NETLESS_TEST_IMAGE", "")
 IMAGE_OK = bool(re.fullmatch(r"sha256:[a-f0-9]{64}", IMAGE))
-PYTHON = "/usr/local/bin/python"
+PYTHON = os.environ.get("MARK_NETLESS_TEST_PYTHON", "/usr/local/bin/python")
+if PYTHON not in {"/usr/local/bin/python", "/opt/mark-api/venv/bin/python"}:
+    raise ValueError("unattested netless Docker test interpreter")
 
 
 def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:

@@ -30,6 +30,9 @@ landlock = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(landlock)
 IMAGE = os.environ.get("MARK_INGRESS_LANDLOCK_TEST_IMAGE", "")
 IMAGE_OK = bool(re.fullmatch(r"sha256:[a-f0-9]{64}", IMAGE))
+PYTHON = os.environ.get("MARK_INGRESS_LANDLOCK_TEST_PYTHON", "/usr/local/bin/python")
+if PYTHON not in {"/usr/local/bin/python", "/opt/mark-api/venv/bin/python"}:
+    raise ValueError("unattested ingress kernel test interpreter")
 
 
 class IngressLandlockContractTests(unittest.TestCase):
@@ -173,7 +176,7 @@ class IngressLandlockKernelTests(unittest.TestCase):
                     f"type=bind,source={stage},target=/safety,readonly",
                     "-e", "PYTHONDONTWRITEBYTECODE=1",
                     "--workdir", "/",
-                    "--entrypoint", "/usr/local/bin/python", IMAGE,
+                    "--entrypoint", PYTHON, IMAGE,
                     "-B", "-c", parent, str(target_port), str(permitted_port),
                 ]
                 proc = subprocess.run(

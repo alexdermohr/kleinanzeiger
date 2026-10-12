@@ -109,7 +109,15 @@ try:
             bad.close()
     finally:
         assert fake.stop()
-    assert not Path('/var/lib/mark-api/mark.sqlite').exists()
+    # A separate UID50046 database directory may exist but be untraversable.
+    # A PermissionError is a successful kernel denial, not a test failure.
+    try:
+        descriptor = os.open('/var/lib/mark-api/mark.sqlite', os.O_RDONLY)
+    except (PermissionError, FileNotFoundError):
+        pass
+    else:
+        os.close(descriptor)
+        raise AssertionError('frontend obtained direct SQLite file read authority')
     print('MULTI_UID_GREEN', flush=True)
 finally:
     assert relay.stop()
