@@ -1584,9 +1584,12 @@ class StorageOwnerClient:
             "sync_fail", attempt=attempt_id, source=_validated(source, _OWNER),
             at=completed_at.isoformat(), error_kind=error_kind,
         )
-        if set(answer) != {"failed", "attempt"} or answer != {
-            "failed": True, "attempt": attempt_id,
-        }:
+        if (
+            set(answer) != {"failed", "attempt"}
+            or answer["failed"] is not True
+            or type(answer["attempt"]) is not int
+            or answer["attempt"] != attempt_id
+        ):
             raise StorageOwnerError("invalid sync failure receipt")
 
     def append_inventory_result(
@@ -1639,7 +1642,12 @@ class StorageOwnerClient:
             answer = self._call(
                 "sync_stage", attempt=attempt_id, offset=offset, snapshots=batch,
             )
-            if answer != {"accepted": offset + len(batch), "digest": digest}:
+            if (
+                set(answer) != {"accepted", "digest"}
+                or type(answer["accepted"]) is not int
+                or answer["accepted"] != offset + len(batch)
+                or answer["digest"] != digest
+            ):
                 raise StorageOwnerError("inventory chunk ACK does not match manifest")
             offset += len(batch)
         answer = self._call(
@@ -1648,6 +1656,7 @@ class StorageOwnerClient:
         )
         if (
             set(answer) != {"persisted", "attempt", "digest"}
+            or type(answer["attempt"]) is not int
             or answer["attempt"] != attempt_id
             or answer["digest"] != digest
             or type(answer["persisted"]) is not int

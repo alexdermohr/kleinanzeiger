@@ -189,6 +189,31 @@ print('REAL_UID_TYPED_CLASSIFICATION_MERGE_GREEN',flush=True)
 print('REAL_UID_EMAIL_ANALYTICS_QUERY_GREEN',flush=True)
 
 
+# Exercise the newly installed owner-only inventory composition under REAL
+# UID50044 -> UID50046 SO_PEERCRED, without either a DB mount or a browser
+# platform action. The fake reader observes empty ads but has no Write API.
+from mark_api.owner_inventory_cli import sync_owner_inventory
+class SyntheticInventoryReader:
+    def __init__(self):
+        self.reads=0
+        self.closed=False
+    def read_inventory(self):
+        self.reads+=1
+        return ReadResult.success_empty()
+    def close(self):
+        self.closed=True
+synthetic_reader=SyntheticInventoryReader()
+owner_only=sync_owner_inventory(
+    client, cdp_port=9222, clock=lambda:now,
+    runtime_factory=lambda **kw:synthetic_reader,
+)
+assert synthetic_reader.closed and synthetic_reader.reads==1
+assert owner_only.observed_count==0 and owner_only.persisted_count==0
+assert client.sync_status()['state']=='success_empty'
+assert client.sync_status()['last_successful_attempt']['source']=='private-web-owner-inventory'
+assert not Path('/data/mark.sqlite').exists()
+print('REAL_UID_OWNER_ONLY_INVENTORY_CLI_GREEN',flush=True)
+
 sync=client.begin_sync_attempt(source="docker_synthetic",started_at=now)
 ad_snapshots=tuple(
     AdSnapshot(ad_id=str(800+index),
@@ -445,6 +470,7 @@ class RealStorageOwnerTests(unittest.TestCase):
                     "--security-opt", "no-new-privileges:true",
                     *code, *rpc, IMAGE, "-B", "-c", _RUNTIME,
                 )
+                self.assertIn("REAL_UID_OWNER_ONLY_INVENTORY_CLI_GREEN", runtime.stdout)
                 self.assertIn("STORAGE_TYPED_FENCE_AND_LOST_ACK_GREEN", runtime.stdout)
                 self.assertIn("REAL_UID_DASHBOARD_HTTP_OWNER_NO_DB_MOUNT_GREEN",
                               runtime.stdout)

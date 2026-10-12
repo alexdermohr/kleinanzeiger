@@ -1495,6 +1495,73 @@ class StorageOwnerUnitTests(unittest.TestCase):
             ), self.assertRaises(StorageOwnerError):
                 client.sync_status()
 
+    def test_inventory_sync_rejects_boolean_and_float_receipt_aliases(self) -> None:
+        """JSON true and 1.0 may compare equal to 1, but are not integer ACKs."""
+        from mark_api.domain import AdSnapshot
+
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        record = AdSnapshot(
+            ad_id="ack-1", observed_at=NOW, source="synthetic",
+        )
+        digest = owner_module._sync_digest(
+            owner_module._SYNC_DIGEST_SEED,
+            [owner_module._snapshot_as_json(record)],
+        )
+        for forged in (True, 1.0):
+            with self.subTest(stage_accepted=forged), patch.object(
+                client, "_call", return_value={"accepted": forged, "digest": digest},
+            ) as rpc:
+                with self.assertRaisesRegex(
+                    StorageOwnerError, "chunk ACK",
+                ):
+                    client.append_inventory_result(
+                        ReadResult.success_nonempty((record,)),
+                        source="synthetic", attempt_id=1, observed_at=NOW,
+                        completed_at=NOW + timedelta(minutes=1),
+                    )
+                self.assertEqual(rpc.call_count, 1)
+                self.assertEqual(rpc.call_args.args, ("sync_stage",))
+
+            with self.subTest(finish_attempt=forged), patch.object(
+                client, "_call", return_value={
+                    "persisted": 0, "attempt": forged,
+                    "digest": owner_module._SYNC_DIGEST_SEED,
+                },
+            ) as rpc:
+                with self.assertRaisesRegex(StorageOwnerError, "commit receipt"):
+                    client.append_inventory_result(
+                        ReadResult.success_empty(()), source="synthetic",
+                        attempt_id=1, observed_at=NOW,
+                        completed_at=NOW + timedelta(minutes=1),
+                    )
+                self.assertEqual(rpc.call_count, 1)
+                self.assertEqual(rpc.call_args.args, ("sync_finish",))
+
+            with self.subTest(failure_attempt=forged), patch.object(
+                client, "_call", return_value={
+                    "failed": True, "attempt": forged,
+                },
+            ) as rpc:
+                with self.assertRaisesRegex(StorageOwnerError, "failure receipt"):
+                    client.fail_sync_attempt(
+                        1, source="synthetic", completed_at=NOW,
+                        error_kind="reader_exception",
+                    )
+                self.assertEqual(rpc.call_count, 1)
+
+        for forged_failed in (1, 1.0):
+            with self.subTest(failure_flag=forged_failed), patch.object(
+                client, "_call", return_value={
+                    "failed": forged_failed, "attempt": 1,
+                },
+            ) as rpc:
+                with self.assertRaisesRegex(StorageOwnerError, "failure receipt"):
+                    client.fail_sync_attempt(
+                        1, source="synthetic", completed_at=NOW,
+                        error_kind="reader_exception",
+                    )
+                self.assertEqual(rpc.call_count, 1)
+
     def test_container_draft_denies_direct_python_main_before_argparse(self) -> None:
         with patch("mark_api.storage_owner.container_draft_denied", return_value=True):
             self.assertEqual(main(["--db", str(self.database)]), 2)
