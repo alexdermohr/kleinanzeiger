@@ -73,6 +73,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from mark_api.storage_owner import StorageOwnerClient, StorageOwnerError
 from mark_api.storage import WriteApiRequestRecord
+from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.results import ReadResult
+from mark_api.storage_owner import _snapshot_as_json
 import json, socket, time
 client=StorageOwnerClient(Path('/rpc/owner.sock'),expected_owner_uid=50046)
 assert client.ready()
@@ -85,6 +88,20 @@ assert not client.has_write_recovery_clearance(
     idempotency_key='uid:test:1', request_sha256='a'*64)
 assert client.read_request('uid:test:1') is None
 now=datetime(2026,10,11,12,0,tzinfo=timezone.utc)
+assert client.tracked_ad_ids()==()
+sync=client.begin_sync_attempt(source="docker_synthetic",started_at=now)
+ad_snapshots=tuple(
+    AdSnapshot(ad_id=str(800+index),source="docker_synthetic",
+               observed_at=now,lifecycle_state=LifecycleState.ACTIVE,
+               title="Synthetic",description="Line one\\n"+"x"*7800,
+               views=index)
+    for index in range(9))
+assert client.append_inventory_result(
+    ReadResult.success_nonempty(ad_snapshots),tracked_ad_ids=(),
+    observed_at=now,source="docker_synthetic",attempt_id=sync,
+    completed_at=now)==9
+assert client.tracked_ad_ids()==tuple(str(800+i) for i in range(9))
+assert client.sync_status()["state"]=="success_nonempty"
 request=client.claim(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
 assert request.created and isinstance(request.record,WriteApiRequestRecord)
 started=client.begin(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
@@ -126,6 +143,25 @@ for _ in range(100):
     if record is not None:break
     time.sleep(0.02)
 assert record is not None and record.request_sha256=='b'*64
+# Start a new generation and stage, but intentionally do not commit it.
+# SIGKILL below must retain this attempt as pending, not publish its bytes.
+incomplete=client.begin_sync_attempt(source='docker_synthetic',started_at=now)
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
+    sock.settimeout(4)
+    sock.connect('/rpc/owner.sock')
+    candidate=_snapshot_as_json(AdSnapshot(
+        ad_id='999',source='docker_synthetic',observed_at=now,
+        lifecycle_state=LifecycleState.ACTIVE,
+    ))
+    payload={'version':1,'op':'sync_stage','attempt':incomplete,
+             'offset':0,'snapshots':[candidate]}
+    sock.sendall((json.dumps(payload)+'\n').encode())
+    received=b''
+    while not received.endswith(b'\n'):
+        received+=sock.recv(4096)
+    assert json.loads(received)['ok'] is True
+assert client.sync_stage_status(incomplete)['accepted']==1
+assert client.sync_status()['state']=='in_progress'
 print('STORAGE_TYPED_FENCE_AND_LOST_ACK_GREEN',flush=True)
 """
 
@@ -171,6 +207,14 @@ try:
     assert late is not None and late[0]=='b'*64
     cleared=db.execute('SELECT COUNT(*) FROM write_recovery_clearances').fetchone()
     assert cleared[0]==0
+    correct=db.execute("SELECT COUNT(*) FROM sync_attempts WHERE outcome='success_nonempty'").fetchone()
+    pending=db.execute("SELECT COUNT(*) FROM sync_attempts WHERE outcome='in_progress'").fetchone()
+    assert correct[0]==1 and pending[0]==1
+    rows=db.execute("SELECT COUNT(*) FROM ad_snapshots WHERE ad_id IN "
+                    "('800','801','802','803','804','805','806','807','808')").fetchone()
+    assert rows[0]==9
+    uncommitted=db.execute("SELECT COUNT(*) FROM ad_snapshots WHERE ad_id='999'").fetchone()
+    assert uncommitted[0]==0
 finally:
     db.close()
 print('SIGKILL_PERSISTED_OPEN_FENCES_AND_NO_CLEARANCE',flush=True)

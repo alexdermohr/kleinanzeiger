@@ -478,6 +478,193 @@ class StorageOwnerUnitTests(unittest.TestCase):
         )
         self.assertIsNotNone(persisted.execution_started_at)
 
+    def test_typed_inventory_journal_preserves_started_recovery_fences(self) -> None:
+        from mark_api.domain import AdSnapshot, LifecycleState
+        service = self.make_service()
+        previous = SnapshotStore(self.database, create_if_missing=False)
+        previous.append_ad_snapshot(AdSnapshot(
+            ad_id="100", observed_at=NOW, source="synthetic", title="Old",
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
+        service.runtime_uid = os.geteuid()  # Protocol only; real UID in Docker.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        client.claim(key="uid:fenced:sync", sha=SHA, owner="runtime:one", at=NOW)
+        client.begin(key="uid:fenced:sync", sha=SHA, owner="runtime:one", at=NOW)
+        self.assertEqual(client.tracked_ad_ids(), ("100",))
+        attempt = client.begin_sync_attempt(source="synthetic", started_at=NOW)
+        self.assertEqual(client.sync_status()["state"], "in_progress")
+        self.assertEqual(previous.ad_history("100")[-1].lifecycle_state,
+                         LifecycleState.ACTIVE)
+        snapshot = AdSnapshot(
+            ad_id="200", source="synthetic",
+            observed_at=NOW + timedelta(minutes=1), title="New",
+            lifecycle_state=LifecycleState.ACTIVE, views=4,
+        )
+        count = client.append_inventory_result(
+            ReadResult.success_nonempty((snapshot,)),
+            tracked_ad_ids=("100",), source="synthetic", attempt_id=attempt,
+            observed_at=NOW + timedelta(minutes=1),
+            completed_at=NOW + timedelta(minutes=2),
+        )
+        self.assertEqual(count, 2)
+        self.assertEqual(previous.latest_ad_snapshot("200"), snapshot)
+        self.assertEqual(previous.latest_ad_snapshot("100").lifecycle_state,
+                         LifecycleState.ABSENT)
+        self.assertEqual(client.sync_status()["state"], "success_nonempty")
+        self.assertTrue(client.create_pending(
+            exclude_key="uid:next:sync", owner="runtime:one"))
+        self.assertFalse(client.has_write_recovery_clearance(
+            idempotency_key="uid:fenced:sync", request_sha256=SHA))
+        # No silent replay of a potentially committed operation.
+        with self.assertRaises(StorageOwnerError):
+            client.append_inventory_result(
+                ReadResult.success_nonempty((snapshot,)),
+                tracked_ad_ids=("100",), source="synthetic", attempt_id=attempt,
+                observed_at=NOW + timedelta(minutes=1),
+                completed_at=NOW + timedelta(minutes=2),
+            )
+        self.assertEqual(len(previous.ad_history("200")), 1)
+
+    def test_multi_batch_inventory_preserves_multiline_descriptions(self) -> None:
+        from mark_api.domain import AdSnapshot, LifecycleState
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        attempt = client.begin_sync_attempt(source="synthetic", started_at=NOW)
+        snapshots = tuple(
+            AdSnapshot(ad_id=str(800 + index), observed_at=NOW,
+                       source="synthetic", lifecycle_state=LifecycleState.ACTIVE,
+                       title="Artikel", description="Zeile eins\\n" + "x" * 7800,
+                       views=index)
+            for index in range(9)
+        )
+        self.assertEqual(client.append_inventory_result(
+            ReadResult.success_nonempty(snapshots), tracked_ad_ids=(),
+            observed_at=NOW, source="synthetic", attempt_id=attempt,
+            completed_at=NOW + timedelta(minutes=1),
+        ), 9)
+        store = SnapshotStore(self.database, create_if_missing=False)
+        self.assertEqual(store.latest_ad_snapshot("808"), snapshots[-1])
+        self.assertEqual(client.sync_status()["state"], "success_nonempty")
+
+    def test_lost_stage_ack_never_retries_or_commits_a_success(self) -> None:
+        from mark_api.domain import AdSnapshot
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        attempt = client.begin_sync_attempt(source="synthetic", started_at=NOW)
+        original = client._call
+        calls = []
+
+        def lose_ack(op: str, **fields: object) -> dict[str, object]:
+            calls.append(op)
+            value = original(op, **fields)
+            if op == "sync_stage":
+                raise StorageOwnerError("synthetic ACK loss AFTER append")
+            return value
+
+        with patch.object(client, "_call", side_effect=lose_ack):
+            with self.assertRaisesRegex(StorageOwnerError, "ACK loss"):
+                client.append_inventory_result(
+                    ReadResult.success_nonempty((owner_module._snapshot_from_json({
+                        "ad_id": "700", "observed_at": NOW.isoformat(),
+                        "source": "synthetic", "lifecycle_state": "active",
+                        "title": "One", "description": None,
+                        "views": None, "watch_count": None, "reply_count": None,
+                        "metric_source": None,
+                    }),)), tracked_ad_ids=(), source="synthetic",
+                    attempt_id=attempt, observed_at=NOW,
+                    completed_at=NOW + timedelta(minutes=1),
+                )
+        self.assertEqual(calls.count("sync_stage"), 1)
+        self.assertNotIn("sync_finish", calls)
+        self.assertEqual(client.sync_stage_status(attempt)["accepted"], 1)
+        self.assertEqual(client.sync_status()["state"], "in_progress")
+        self.assertEqual(SnapshotStore(self.database, create_if_missing=False)
+                         .ad_history("700"), ())
+
+    def test_incomplete_inventory_stage_never_commits_or_clears_fences(self) -> None:
+        from mark_api.domain import AdSnapshot, LifecycleState
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        attempt = client.begin_sync_attempt(source="synthetic", started_at=NOW)
+        snapshot = AdSnapshot(
+            ad_id="300", source="synthetic", observed_at=NOW,
+            lifecycle_state=LifecycleState.ACTIVE,
+        )
+        owner_module._snapshot_as_json(snapshot)
+        reply = service.dispatch({
+            "version": 1, "op": "sync_stage", "attempt": attempt, "offset": 0,
+            "snapshots": [owner_module._snapshot_as_json(snapshot)],
+        })
+        self.assertEqual(reply["accepted"], 1)
+        self.assertEqual(client.sync_status()["state"], "in_progress")
+        self.assertEqual(client.sync_stage_status(attempt)["accepted"], 1)
+        self.assertEqual(SnapshotStore(self.database, create_if_missing=False)
+                         .ad_history("300"), ())
+        # Untrusted executor cannot attach arbitrary SQL/clearance to the
+        # operation-bound envelope, or claim success using a wrong digest.
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch({
+                "version": 1, "op": "sync_stage", "attempt": attempt,
+                "offset": 1, "snapshots": [], "sql": "DELETE FROM write_api_requests",
+            })
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch({
+                "version": 1, "op": "sync_finish", "attempt": attempt,
+                "source": "synthetic", "digest": "0" * 64,
+                "observed_at": NOW.isoformat(), "completed_at": NOW.isoformat(),
+            })
+        self.assertEqual(client.sync_status()["state"], "in_progress")
+        service.stop()
+        self.assertFalse(self.sock.exists())
+        restarted = self.make_service()
+        restarted.runtime_uid = os.geteuid()
+        restarted.start()
+        fresh = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(fresh.sync_status()["state"], "in_progress")
+        self.assertEqual(SnapshotStore(self.database, create_if_missing=False)
+                         .ad_history("300"), ())
+        with self.assertRaises(StorageOwnerError):
+            fresh.sync_stage_status(attempt)
+
+    def test_bounded_inventory_batch_rejects_forged_record_and_unknown_attempt(self) -> None:
+        from mark_api.domain import AdSnapshot
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        attempt = client.begin_sync_attempt(source="synthetic", started_at=NOW)
+        record = owner_module._snapshot_as_json(AdSnapshot(
+            ad_id="400", source="synthetic", observed_at=NOW,
+        ))
+        for forged in (
+            dict(record, views=True),
+            dict(record, metric_source=42),
+            dict(record, sql="DROP TABLE write_recovery_clearances"),
+            dict(record, source="other"),
+        ):
+            with self.subTest(forged=forged), self.assertRaises(StorageOwnerError):
+                service.dispatch({"version": 1, "op": "sync_stage",
+                                  "attempt": attempt, "offset": 0,
+                                  "snapshots": [forged]})
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch({"version": 1, "op": "sync_stage",
+                              "attempt": attempt + 1, "offset": 0,
+                              "snapshots": [record]})
+        self.assertEqual(client.sync_stage_status(attempt)["accepted"], 0)
+        client.fail_sync_attempt(attempt, source="synthetic",
+                                 completed_at=NOW + timedelta(minutes=1),
+                                 error_kind="reader_exception")
+        self.assertEqual(client.sync_status()["state"], "failed")
+        self.assertEqual(SnapshotStore(self.database, create_if_missing=False)
+                         .ad_history("400"), ())
+
     def test_clearance_lookup_is_exact_and_cannot_mint_recovery_authority(self) -> None:
         service = self.make_service()
         claim = {"version": 1, "op": "claim", "key": "ui:clearance:1",
