@@ -204,6 +204,56 @@ assert client.ad_history('missing')==()
 assert client.sync_status()["state"]=="success_nonempty"
 assert client.ad_history('808')[0].source=="management-observed"
 assert client.sync_status()["last_successful_attempt"]["source"]=="docker_synthetic"
+assert not Path('/data/mark.sqlite').exists(), 'executor unexpectedly has SQLite volume'
+from mark_api.dashboard import create_server, DashboardWriteProxy
+from threading import Thread
+from urllib.request import urlopen, Request
+from urllib.error import HTTPError
+dashboard=create_server(client,port=0)
+dashboard_thread=Thread(target=dashboard.serve_forever,daemon=True)
+dashboard_thread.start()
+dashboard_host,dashboard_port=dashboard.server_address
+dashboard_origin=f'http://{dashboard_host}:{dashboard_port}'
+try:
+    def get_api(route):
+        with urlopen(dashboard_origin+route,timeout=4) as response:
+            assert response.status==200
+            return json.loads(response.read())
+    assert get_api('/readyz')=={'status':'ready'}
+    ads=get_api('/api/ads')
+    assert len(ads)==9 and ads[0]['ad_id']=='800',ads
+    assert get_api('/api/summary')['tracked_ads']==9
+    assert get_api('/api/dashboard/config')=={'write_ui_available':False}
+    rankings=get_api('/api/analytics/ads?metric=views')
+    assert len(rankings)==9 and rankings[0]['ad_id']=='808',rankings
+    labels=get_api('/api/analytics/groups?dimension=city&metric=email_inbound_message_count')
+    assert len(labels)==1 and labels[0]['label']=='Berlin',labels
+    try:
+        urlopen(Request(dashboard_origin+'/api/write/ads/800',
+                        data=b'{"title":"denied"}',method='PATCH'),timeout=4)
+    except HTTPError as error:
+        assert error.code==405,error.code
+    else:
+        raise AssertionError('socket-backed dashboard opened unmediated HTTP Write')
+    try:
+        other=create_server(
+            client,port=0,
+            write_proxy=DashboardWriteProxy(
+                host='127.0.0.1',port=9,
+                bearer_token='backend-token-00000000001',
+                ui_token='dashboard-token-000000001',
+            ),
+        )
+    except ValueError:
+        pass
+    else:
+        other.server_close()
+        raise AssertionError('socket-backed dashboard enabled Write proxy')
+finally:
+    dashboard.shutdown()
+    dashboard.server_close()
+    dashboard_thread.join(timeout=4)
+print('REAL_UID_DASHBOARD_HTTP_OWNER_NO_DB_MOUNT_GREEN',flush=True)
 request=client.claim(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
 assert request.created and isinstance(request.record,WriteApiRequestRecord)
 started=client.begin(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
@@ -392,6 +442,8 @@ class RealStorageOwnerTests(unittest.TestCase):
                     *code, *rpc, IMAGE, "-B", "-c", _RUNTIME,
                 )
                 self.assertIn("STORAGE_TYPED_FENCE_AND_LOST_ACK_GREEN", runtime.stdout)
+                self.assertIn("REAL_UID_DASHBOARD_HTTP_OWNER_NO_DB_MOUNT_GREEN",
+                              runtime.stdout)
                 # This additional mount exists ONLY for the hostile DAC test.
                 hostile = _docker(
                     "run", "--rm", "--network", "none", "--read-only",

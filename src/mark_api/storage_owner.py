@@ -1191,6 +1191,10 @@ class StorageOwnerClient:
             raise StorageOwnerError("storage readiness reply invalid")
         return answer["ready"]
 
+    def is_ready(self) -> bool:
+        """Dashboard readiness over the existing typed owner RPC."""
+        return self.ready()
+
     def sync_status(self) -> dict[str, object]:
         answer = self._call("sync_status")
         if set(answer) != {"sync_status"}:

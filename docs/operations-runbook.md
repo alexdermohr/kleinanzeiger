@@ -182,15 +182,27 @@ Der Client attestiert per Kernel-`SO_PEERCRED` die echte Owner-UID. Eine
 verwaiste Socket-Inode verhindert den Neustart; keine automatische Löschung,
 Schema-Neuanlage oder Historienmigration.
 
-Erlaubt sind ausschließlich typisierte `ready`, `read_request`,
-`create_pending`, `claim` und `begin`. Der persistente Request-Hash,
-Owner und Idempotency-Key sind gebunden; ein bereits gestarteter Write
-bleibt auch bei verlorenem ACK, SIGKILL oder verweigerter SQL-/Clearance-
-Anfrage erhalten. **Keine** allgemeine SQL-/Datei-/RPC-Methodendispatch-
-Schnittstelle, beliebige `complete`-, `clearance`-, Operator-Clear-,
-Restore- oder Backup-Operation. Antworten/Transportfehler dürfen eine
+Der veröffentlichte Broker bietet feste typisierte RPCs für Readiness,
+Sync-Versuche und atomare Inventarübernahmen, paginierte Anzeigen-/Reaktions-/
+Inbox-Historien, E-Mail-Batchpersistenz, Klassifikationen, gebundene
+Write-Request-Claims/-Starts/-Readbacks sowie reine Dashboard-Pending-
+Claim-/Leseseiten. Provenienz, originale Beobachtungszeiten, Idempotency-Key
+und Fingerprint bleiben erhalten. Er enthält **keine** allgemeine
+SQL-/Datei-/RPC-Methodendispatch-Schnittstelle, keinen beliebigen
+`complete`-, Pending-`ack`-, Recovery-`clearance`-, Operator-Clear-,
+Restore- oder Backup-Aufruf. Antworten/Transportfehler dürfen eine
 unklare Persistenz niemals als sichere Ablehnung interpretieren. Ein
-unbekannter ACK wird erst beobachtend aufgelöst und nie blind wiederholt.
+unbekannter ACK wird nur beobachtend aufgelöst und nie blind wiederholt.
+
+Zusätzlich zu den E-Mail-Import- und Klassifikations-Socket-Modi kann das
+read-only Dashboard über `mark-api-dashboard --owner-socket
+/rpc/owner.sock --owner-uid 50046` ohne
+SQLite-Pfad unter Client-UID 50044 lesen (nur attestierte Test-/Offline-
+Umgebungen; die Docker-Draft-Startgate bleibt wirksam). Query, Analytics,
+Dashboard-Readiness und die HTTP-Antwort 503 bei ausgefallenem Owner sind
+regressionstestsicher. Der Socket-Dashboard-Modus verweigert einen
+`DashboardWriteProxy` ausdrücklich **vor** der Serverbindung. Keine
+UI-Write-Bestätigung oder Recovery-Clearance wird hierdurch ermöglicht.
 
 **Shutdown-Fence:** Angenommene RPC-Threads sind seit diesem Slice nicht
 mehr `daemon_threads`; ein kontrolliertes `stop()`/Socket-Close wartet
@@ -204,13 +216,14 @@ nach `SIGKILL`, bei ererbten Alt-FDs oder gegen defekte Hardware.
 In solchen Fällen bleibt der Store gesperrt bis zur Offline-Reconciliation.
 
 **Strikter Status: Integrationsprototyp, keine Produktfreigabe.** Die
-Produkt-Compose mountet SQLite nach wie vor bei UID 50044. Der bestehende
-`SnapshotStore` und die sechs default-on-Produkt-Writes benutzen diesen
-Broker noch **nicht**. Auch kann der Broker für vollständige Write-
-Completion, Analytics, Sync und sichere unabhängige Clearances noch
-nicht verwendet werden. Der privilegierte Storage-Owner muss später erst
-nach vollständigem, offline nachgewiesenem Cutover unter getrennter
-root-verwalteter UID in die reale Komposition aufgenommen werden.
+Produkt-Compose mountet SQLite nach wie vor bei UID 50044. Die sechs default-on-Produkt-Writes und die produktive
+Launcher-/Compose-Topologie benutzen den Broker noch **nicht vollständig**:
+Write-Completion, Operations-/Create-/Media-Receipts, überprüfte
+Pending-Acknowledgements und unabhängige Clearances fehlen. Analytics und
+Sync funktionieren bereits über die geschlossenen Owner-RPCs. Der
+privilegierte Storage-Owner muss erst nach vollständigem, offline
+nachgewiesenem Cutover unter getrennter root-verwalteter UID in die reale
+Komposition aufgenommen werden.
 Alt geöffnete writable FDs und `MAP_SHARED`-Mappings werden durch
 `chown`, einen neu laufenden Prozess oder diesen isolierten Test **nicht
 entzogen**. Erst danach darf eine echte kompromittierte UID-50044-
@@ -224,8 +237,10 @@ Der optionale Rootful-Docker-Test
 eigens erzeugten synthetischen Volumes unter UID 50046/50044. Er überprüft
 genau diese Grenzen, darunter lost-ACK-Readback, fremden DB-FD-Zugriff,
 verweigerte Raw-SQL/Clearance-Anfragen, persistente offene Fences nach
-SIGKILL und blockierten Neustart mit altem Socket. Er ersetzt keine
-Produktinstallation und keine Prüfung historischer offener Mappings.
+SIGKILL und blockierten Neustart mit altem Socket. Der Test führt zudem unter UID 50044 **ohne SQLite-Datenmount** echte
+HTTP-Dashboard-/Analytics-Lesezugriffe über den UID-50046-Socket aus;
+ein Write-Proxy ist dort verboten. Er ersetzt keine Produktinstallation
+und keine Prüfung historischer offener Mappings.
 
 ## Legacy-Systemdienst ist sicherheitshalber außer Betrieb
 

@@ -33,6 +33,7 @@ from .query import (
     summary_to_dict,
 )
 from .storage import SnapshotStore
+from .storage_owner import StorageOwnerClient, StorageOwnerError
 
 
 _MAX_PROXY_JSON_BODY_BYTES = 16 * 1024
@@ -1903,7 +1904,7 @@ def _dashboard_pending_identity(
 
 
 def _handler_factory(
-    store: SnapshotStore,
+    store: SnapshotStore | StorageOwnerClient,
     query: MarkQueryService,
     analytics: AnalyticsService,
     write_proxy: DashboardWriteProxy | None,
@@ -2322,7 +2323,7 @@ def _handler_factory(
         def do_GET(self) -> None:
             try:
                 self._handle_GET()
-            except sqlite3.Error:
+            except (sqlite3.Error, StorageOwnerError):
                 # No database error messages, SQL or filesystem paths on HTTP.
                 self._send_json(503, {"error": "database_unavailable"})
 
@@ -2632,7 +2633,7 @@ class LoopbackDashboardServer(ThreadingHTTPServer):
 
 
 def create_server(
-    store: SnapshotStore,
+    store: SnapshotStore | StorageOwnerClient,
     *,
     host: str = "127.0.0.1",
     port: int = 8765,
@@ -2654,6 +2655,10 @@ def create_server(
     ):
         raise ValueError("public_origin_port must be an integer between 1 and 65535")
 
+    if isinstance(store, StorageOwnerClient) and write_proxy is not None:
+        # Dashboard pending ACK and independent external Write completion are
+        # not yet mediated. Refuse the entire Write UI before binding HTTP.
+        raise ValueError("independent storage dashboard Writes are not yet attested")
     query = MarkQueryService(store)
     analytics = AnalyticsService(store, contract=analytics_contract)
     return LoopbackDashboardServer(
@@ -2673,11 +2678,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Serve the local read-only mark-api dashboard.",
     )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--db", type=Path,
+        help="Trusted offline SQLite database (never mount in untrusted runtime).",
+    )
+    source.add_argument(
+        "--owner-socket", type=Path,
+        help="Read-only analytics over the independent SQLite-owner Unix socket.",
+    )
     parser.add_argument(
-        "--db",
-        type=Path,
-        required=True,
-        help="Path to the mark-api SQLite database.",
+        "--owner-uid", type=int,
+        help="Required exact SO_PEERCRED UID for --owner-socket (no DB fallback).",
     )
     parser.add_argument(
         "--port",
@@ -2710,10 +2722,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    try:
-        store = SnapshotStore(args.db, create_if_missing=args.init_db)
-    except (OSError, sqlite3.Error):
-        parser.error("SQLite database unavailable or not initialized")
+    if args.owner_socket is not None:
+        if args.init_db:
+            parser.error("--init-db is forbidden with --owner-socket")
+        if args.owner_uid is None:
+            parser.error("--owner-uid is required for --owner-socket")
+        try:
+            store = StorageOwnerClient(
+                args.owner_socket, expected_owner_uid=args.owner_uid,
+            )
+            if not store.is_ready():
+                parser.error("independent SQLite owner unavailable")
+        except (StorageOwnerError, OSError):
+            parser.error("independent SQLite owner unavailable")
+    else:
+        if args.owner_uid is not None:
+            parser.error("--owner-uid requires --owner-socket")
+        try:
+            store = SnapshotStore(args.db, create_if_missing=args.init_db)
+        except (OSError, sqlite3.Error):
+            parser.error("SQLite database unavailable or not initialized")
     contract = AnalyticsContract(
         reaction_metric=args.reaction_metric,
         objective_metric=args.objective_metric,

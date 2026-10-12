@@ -6,6 +6,7 @@ from datetime import datetime
 
 from .domain import AdSnapshot, LifecycleState, ReactionSnapshot
 from .storage import SnapshotStore
+from .storage_owner import StorageOwnerClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +92,7 @@ def _last_metric_with_evidence(
 class MarkQueryService:
     """Read-only projections over the append-only SQLite history."""
 
-    def __init__(self, store: SnapshotStore) -> None:
+    def __init__(self, store: SnapshotStore | StorageOwnerClient) -> None:
         self._store = store
 
     def latest_ads(self) -> tuple[AdView, ...]:
