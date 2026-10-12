@@ -260,7 +260,14 @@ genau diese Grenzen, darunter lost-ACK-Readback, fremden DB-FD-Zugriff,
 verweigerte Raw-SQL/Clearance-Anfragen, persistente offene Fences nach
 SIGKILL und blockierten Neustart mit altem Socket. Der Test führt zudem unter UID 50044 **ohne SQLite-Datenmount** echte
 HTTP-Dashboard-/Analytics-Lesezugriffe über den UID-50046-Socket aus;
-ein Write-Proxy ist dort verboten. Er ersetzt keine Produktinstallation
+ein Write-Proxy ist dort verboten. Eine zweite synthetische
+Gegenprobe startet die UID-50044-/50046-Container ohne Quellcode-Bindmount,
+nutzt direkt das installierte Release-Wheel und führt den nichtleeren
+`sync_owner_inventory`-Kompositionspfad aus. Sie prüft den realen
+`SO_PEERCRED`-Peer, journalisierte Nichtleer-Beobachtung, Snapshot-Historie,
+offene Idempotency-Write-Fences und das Fortbestehen der Draft-CLI-Sperre.
+Dabei wird weder ein echter CDP-Browser gelesen noch auf Kleinanzeigen
+geschrieben. Auch diese Tests ersetzen keine Host-Cutover-/Live-Produktabnahme
 und keine Prüfung historischer offener Mappings.
 
 ## Legacy-Systemdienst ist sicherheitshalber außer Betrieb

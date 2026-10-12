@@ -420,8 +420,128 @@ else:
 """
 
 
+_INSTALLED_NONEMPTY = r"""
+from datetime import datetime, timezone
+from pathlib import Path
+from importlib import metadata
+import subprocess
+from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.results import ReadResult
+from mark_api.storage_owner import StorageOwnerClient
+from mark_api import owner_inventory_cli as cli
+
+assert "site-packages" in Path(cli.__file__).resolve().parts
+distribution=metadata.distribution("mark-api")
+assert distribution.version=="0.1.0"
+assert "mark-api-inventory-sync" in {
+    entry.name for entry in distribution.entry_points
+    if entry.group=="console_scripts"
+}
+probe=subprocess.run(
+    ["/opt/mark-api/venv/bin/mark-api-inventory-sync","--help"],
+    capture_output=True,text=True,timeout=10,
+)
+assert probe.returncode==2 and "unattested container draft" in probe.stderr
+client=StorageOwnerClient(Path("/rpc/owner.sock"),expected_owner_uid=50046)
+assert client.ready()
+now=datetime(2026,10,12,19,0,tzinfo=timezone.utc)
+snapshot=AdSnapshot(
+    ad_id="910",source="installed-wheel-synthetic-reader",
+    observed_at=now,lifecycle_state=LifecycleState.ACTIVE,
+    title="Synthetic installed owner",description="No platform connection",
+)
+class SyntheticReader:
+    reads=0
+    closed=False
+    def read_inventory(self):
+        self.reads+=1
+        return ReadResult.success_nonempty((snapshot,))
+    def close(self):
+        self.closed=True
+reader=SyntheticReader()
+receipt=cli.sync_owner_inventory(
+    client,cdp_port=9222,clock=lambda:now,
+    runtime_factory=lambda **kw:reader,
+)
+assert reader.reads==1 and reader.closed
+assert receipt.observed_count==1 and receipt.persisted_count==1
+assert client.tracked_ad_ids()==("910",)
+assert client.ad_history("910")==(snapshot,)
+status=client.sync_status()
+assert status["state"]=="success_nonempty"
+assert status["latest_attempt"]["snapshot_count"]==1
+assert status["latest_attempt"]["source"]=="private-web-owner-inventory"
+assert not Path("/data/mark.sqlite").exists()
+claim=client.claim(
+    key="installed:uid:request",sha="c"*64,owner="runtime:installed",at=now,
+)
+assert claim.created
+started=client.begin(
+    key="installed:uid:request",sha="c"*64,owner="runtime:installed",at=now,
+)
+assert started.state=="in_progress" and started.execution_started_at is not None
+assert client.read_request("installed:uid:request")==started
+assert not client.has_write_recovery_clearance(
+    idempotency_key="installed:uid:request",request_sha256="c"*64,
+)
+print("REAL_UID_INSTALLED_WHEEL_NONEMPTY_OWNER_CLI_AND_DRAFT_GATE_GREEN",flush=True)
+"""
+
+
 @unittest.skipUnless(IMAGE_OK, "Explicit immutable preexisting Docker test image needed")
 class RealStorageOwnerTests(unittest.TestCase):
+    @unittest.skipUnless(
+        PYTHON == "/opt/mark-api/venv/bin/python",
+        "requires exact installed Mark release-image Python",
+    )
+    def test_installed_wheel_nonempty_owner_inventory_and_draft_gate(self) -> None:
+        # Separate source-free container path; the usual multi-UID test binds
+        # /src and cannot attest whether the release Wheel includes the CLI.
+        suffix = uuid4().hex[:12]
+        store_volume = "mark-installed-owner-db-" + suffix
+        socket_volume = "mark-installed-owner-rpc-" + suffix
+        service = "mark-installed-owner-" + suffix
+        volumes: list[str] = []
+        started = False
+        code = ["--workdir", "/", "--entrypoint", PYTHON]
+        store = ["--mount", f"type=volume,source={store_volume},target=/data"]
+        rpc = ["--mount", f"type=volume,source={socket_volume},target=/rpc"]
+        try:
+            for name in (store_volume, socket_volume):
+                _docker("volume", "create", name)
+                volumes.append(name)
+            seeded = _docker(
+                "run", "--rm", "--pull", "never", "--network", "none",
+                "--user", "0:0", *code, *store, *rpc,
+                IMAGE, "-I", "-B", "-c", _SEED,
+            )
+            self.assertIn("PRIVATE_EXISTING_SCHEMA_V2", seeded.stdout)
+            _docker(
+                "run", "-d", "--pull", "never", "--name", service,
+                "--network", "none", "--user", "50046:50046", "--read-only",
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                *code, *store, *rpc, IMAGE, "-I", "-B", "-c", _SERVICE,
+            )
+            started = True
+            self._ready(service, "PRIVATE_STORAGE_OWNER_READY")
+            executor = _docker(
+                "run", "--rm", "--pull", "never", "--network", "none",
+                "--read-only", "--user", "50044:50044", "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges:true",
+                *code, *rpc, IMAGE, "-I", "-B", "-c", _INSTALLED_NONEMPTY,
+            )
+            self.assertIn(
+                "REAL_UID_INSTALLED_WHEEL_NONEMPTY_OWNER_CLI_AND_DRAFT_GATE_GREEN",
+                executor.stdout,
+            )
+        finally:
+            if started:
+                stopped = _docker("rm", "-f", service, allow_failure=True)
+                self.assertEqual(stopped.returncode, 0, stopped.stderr[-300:])
+            for volume in reversed(volumes):
+                deleted = _docker("volume", "rm", volume, allow_failure=True)
+                self.assertEqual(deleted.returncode, 0, deleted.stderr[-300:])
+
     def test_foreign_uid_cannot_rewrite_or_clear_private_sqlite_fences(self) -> None:
         suffix = uuid4().hex[:12]
         store_volume = "mark-store-owner-db-" + suffix
