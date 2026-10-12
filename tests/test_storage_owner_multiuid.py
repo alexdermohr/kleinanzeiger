@@ -50,7 +50,14 @@ os.chmod(rpc,0o2710)
 os.setgroups([])
 os.setgid(50046)
 os.setuid(50046)
-SnapshotStore(database/'mark.sqlite')
+from datetime import datetime, timezone
+from mark_api.domain import ReactionSnapshot
+store=SnapshotStore(database/'mark.sqlite')
+store.append_reaction_snapshot(ReactionSnapshot(
+    ad_id='777', observed_at=datetime(2026,10,11,12,0,tzinfo=timezone.utc),
+    source='kleinanzeigen:email-only', conversation_count=2,
+    unique_buyer_count=3, inbound_message_count=5,
+))
 print('PRIVATE_EXISTING_SCHEMA_V2',flush=True)
 """
 
@@ -73,7 +80,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from mark_api.storage_owner import StorageOwnerClient, StorageOwnerError
 from mark_api.storage import WriteApiRequestRecord
-from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.domain import AdSnapshot, LifecycleState, ReactionSnapshot
 from mark_api.results import ReadResult
 from mark_api.storage_owner import _snapshot_as_json
 import json, socket, time
@@ -89,6 +96,13 @@ assert not client.has_write_recovery_clearance(
 assert client.read_request('uid:test:1') is None
 now=datetime(2026,10,11,12,0,tzinfo=timezone.utc)
 assert client.tracked_ad_ids()==()
+seed_rx=ReactionSnapshot(
+    ad_id='777', observed_at=now, source='kleinanzeigen:email-only',
+    conversation_count=2, unique_buyer_count=3, inbound_message_count=5,
+)
+assert client.reaction_history('777')==(seed_rx,)
+assert client.reaction_history('unknown')==()
+
 sync=client.begin_sync_attempt(source="docker_synthetic",started_at=now)
 ad_snapshots=tuple(
     AdSnapshot(ad_id=str(800+index),source="docker_synthetic",

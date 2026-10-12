@@ -188,6 +188,56 @@ class SnapshotStoreTests(unittest.TestCase):
                 store.ad_history_page("unknown", **kwargs)
         self.assertEqual(store.tracked_ad_ids(), ())
 
+    def test_reaction_page_pins_generation_and_keeps_distinct_metrics(self) -> None:
+        store = self.make_store()
+        originals = tuple(ReactionSnapshot(
+            ad_id="same", observed_at=NOW + timedelta(minutes=(20 - i)),
+            source='kleinanzeigen:{"provenance":"literal"}',
+            conversation_count=i, unique_buyer_count=i + 1,
+            inbound_message_count=i + 2,
+        ) for i in range(19))
+        for row in originals:
+            store.append_reaction_snapshot(row)
+        watermark, page, more = store.reaction_history_page(
+            "same", after_id=0, watermark=None, limit=4,
+        )
+        self.assertTrue(more)
+        collected = list(page)
+        late = ReactionSnapshot(
+            ad_id="same", observed_at=NOW, source="late",
+            conversation_count=99, unique_buyer_count=98,
+            inbound_message_count=100,
+        )
+        store.append_reaction_snapshot(late)
+        while more:
+            pinned, rows, more = store.reaction_history_page(
+                "same", after_id=collected[-1][0],
+                watermark=watermark, limit=4,
+            )
+            self.assertEqual(pinned, watermark)
+            collected.extend(rows)
+        self.assertEqual([value for _, value in collected], list(originals))
+        self.assertEqual(len({rowid for rowid, _ in collected}), len(originals))
+        self.assertEqual(store.reaction_history("same"), (*originals, late))
+
+    def test_reaction_page_rejects_invalid_cursors_and_unknown_id(self) -> None:
+        store = self.make_store()
+        for kwargs in (
+            {"after_id": True, "watermark": None, "limit": 2},
+            {"after_id": -1, "watermark": None, "limit": 2},
+            {"after_id": 0, "watermark": True, "limit": 2},
+            {"after_id": 5, "watermark": 3, "limit": 2},
+            {"after_id": 0, "watermark": None, "limit": 0},
+            {"after_id": 0, "watermark": None, "limit": 33},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                store.reaction_history_page("unknown", **kwargs)
+        self.assertEqual(
+            store.reaction_history_page(
+                "unknown", after_id=0, watermark=None, limit=4,
+            ), (0, (), False),
+        )
+
     def test_metric_source_column_preserves_raw_source_and_disallows_blank_origin(self) -> None:
         store = self.make_store()
         value = AdSnapshot(

@@ -587,6 +587,71 @@ class StorageOwnerUnitTests(unittest.TestCase):
         }), self.assertRaises(StorageOwnerError):
             client.ad_history("123")
 
+    def test_reaction_history_rpc_preserves_original_provenance_and_counters(self) -> None:
+        from mark_api.domain import ReactionSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        originals = tuple(ReactionSnapshot(
+            ad_id="rx", observed_at=NOW + timedelta(minutes=(20 - i)),
+            source="kleinanzeigen:" + "ä" * 800,
+            conversation_count=i, unique_buyer_count=i + 2,
+            inbound_message_count=i + 7,
+        ) for i in range(19))
+        for row in originals:
+            store.append_reaction_snapshot(row)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.reaction_history("rx"), originals)
+        self.assertEqual(client.reaction_history("no-match"), ())
+
+    def test_reaction_history_rpc_pins_watermark_and_rejects_sql(self) -> None:
+        from mark_api.domain import ReactionSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        for i in range(19):
+            store.append_reaction_snapshot(ReactionSnapshot(
+                ad_id="rx", observed_at=NOW, source="first",
+                conversation_count=i, unique_buyer_count=i,
+                inbound_message_count=i,
+            ))
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        late = ReactionSnapshot(
+            ad_id="rx", observed_at=NOW, source="late",
+            conversation_count=99, unique_buyer_count=99,
+            inbound_message_count=99,
+        )
+        original_call = client._call
+        fired = False
+        def append_late(op: str, **fields: object) -> dict[str, object]:
+            nonlocal fired
+            result = original_call(op, **fields)
+            if op == "reaction_history_page" and not fired:
+                fired = True
+                store.append_reaction_snapshot(late)
+            return result
+        with patch.object(client, "_call", side_effect=append_late):
+            previous = client.reaction_history("rx")
+        self.assertTrue(fired)
+        self.assertEqual(len(previous), 19)
+        self.assertNotIn(late, previous)
+        self.assertIn(late, client.reaction_history("rx"))
+        for fields in (
+            {"ad_id": "rx", "after_id": True, "watermark": None},
+            {"ad_id": "rx", "after_id": 0, "watermark": None,
+             "sql": "DELETE FROM write_recovery_clearances"},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(StorageOwnerError):
+                service.dispatch({
+                    "version": 1, "op": "reaction_history_page", **fields,
+                })
+        with patch.object(client, "_call", return_value={
+            "watermark": 1, "more": True, "rows": [],
+        }), self.assertRaises(StorageOwnerError):
+            client.reaction_history("rx")
+
     def test_typed_inventory_journal_preserves_started_recovery_fences(self) -> None:
         from mark_api.domain import AdSnapshot, LifecycleState
         service = self.make_service()

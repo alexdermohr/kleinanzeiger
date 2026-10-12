@@ -41,7 +41,7 @@ from .fence_witness import (
 )
 from .storage import (SnapshotStore, WriteApiRequestClaim, WriteApiRequestRecord,
                       _SYNC_ERROR_KINDS)
-from .domain import AdSnapshot, LifecycleState
+from .domain import AdSnapshot, LifecycleState, ReactionSnapshot
 from .results import ReadResult, ReadStatus
 
 
@@ -302,6 +302,39 @@ def _snapshot_from_json(raw: object) -> AdSnapshot:
     )
 
 
+def _reaction_as_json(value: ReactionSnapshot) -> dict[str, object]:
+    if not isinstance(value, ReactionSnapshot):
+        raise StorageOwnerError("reaction is not a typed snapshot")
+    return {
+        "ad_id": value.ad_id, "observed_at": value.observed_at.isoformat(),
+        "source": value.source, "conversation_count": value.conversation_count,
+        "unique_buyer_count": value.unique_buyer_count,
+        "inbound_message_count": value.inbound_message_count,
+    }
+
+
+def _reaction_from_json(raw: object) -> ReactionSnapshot:
+    if type(raw) is not dict or set(raw) != {
+        "ad_id", "observed_at", "source", "conversation_count",
+        "unique_buyer_count", "inbound_message_count",
+    }:
+        raise StorageOwnerError("reaction reply schema invalid")
+    metrics: dict[str, int] = {}
+    for field_name in (
+        "conversation_count", "unique_buyer_count", "inbound_message_count",
+    ):
+        value = raw[field_name]
+        if type(value) is not int or not 0 <= value <= 2**63 - 1:
+            raise StorageOwnerError("reaction reply counter invalid")
+        metrics[field_name] = value
+    return ReactionSnapshot(
+        ad_id=_limited_text(raw["ad_id"], bound=160),
+        observed_at=_timestamp(raw["observed_at"]),
+        source=_limited_text(raw["source"], bound=1024),
+        **metrics,
+    )
+
+
 def _sync_digest(previous: str, snapshots: list[dict[str, object]]) -> str:
     """Append-only chunk commitment, independent of JSON key ordering."""
     return hashlib.sha256(
@@ -488,6 +521,43 @@ class StorageOwnerServer(
             return {"ready": self.store.is_ready()}
         if op == "sync_status" and set(request) == {"version", "op"}:
             return {"sync_status": self.store.sync_status()}
+
+        if op == "reaction_history_page" and set(request) == {
+            "version", "op", "ad_id", "after_id", "watermark",
+        }:
+            ad_id = _limited_text(request["ad_id"], bound=160)
+            after_id, watermark = request["after_id"], request["watermark"]
+            if (
+                type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))
+            ):
+                raise StorageOwnerError("invalid reaction cursor")
+            pinned, entries, more = self.store.reaction_history_page(
+                ad_id, after_id=after_id, watermark=watermark,
+                limit=_MAX_HISTORY_PAGE,
+            )
+            rows: list[dict[str, object]] = []
+            for rowid, snapshot in entries:
+                trial = [*rows, {"id": rowid, "reaction": _reaction_as_json(snapshot)}]
+                envelope = {
+                    "ok": True, "result": {
+                        "watermark": pinned, "more": False, "rows": trial,
+                    },
+                }
+                if len(_canonical_json(envelope).encode("utf-8")) + 1 > _MAX_FRAME + 1:
+                    break
+                rows = trial
+            if entries and not rows:
+                raise StorageOwnerError("stored reaction exceeds IPC frame")
+            return {
+                "watermark": pinned,
+                "more": more or len(rows) < len(entries),
+                "rows": rows,
+            }
 
         if op == "ad_history_page" and set(request) == {
             "version", "op", "ad_id", "after_id", "watermark",
@@ -762,6 +832,49 @@ class StorageOwnerClient:
             raise StorageOwnerError("storage sync status reply invalid")
         return _sync_status_from_json(answer["sync_status"])
 
+
+    def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
+        """Read bounded, generation-pinned reaction history in insertion order."""
+        ad_id = _limited_text(ad_id, bound=160)
+        result: list[ReactionSnapshot] = []
+        watermark: int | None = None
+        after_id = 0
+        while True:
+            answer = self._call(
+                "reaction_history_page", ad_id=ad_id, after_id=after_id,
+                watermark=watermark,
+            )
+            if (
+                set(answer) != {"watermark", "more", "rows"}
+                or type(answer["watermark"]) is not int
+                or not 0 <= answer["watermark"] <= 2**63 - 1
+                or type(answer["more"]) is not bool
+                or type(answer["rows"]) is not list
+                or len(answer["rows"]) > _MAX_HISTORY_PAGE
+            ):
+                raise StorageOwnerError("reaction page envelope invalid")
+            pinned = answer["watermark"]
+            if watermark is not None and pinned != watermark:
+                raise StorageOwnerError("reaction watermark changed")
+            watermark = pinned
+            rows = answer["rows"]
+            if answer["more"] and not rows:
+                raise StorageOwnerError("reaction paging failed to advance")
+            for row in rows:
+                if type(row) is not dict or set(row) != {"id", "reaction"}:
+                    raise StorageOwnerError("reaction item schema invalid")
+                rowid = row["id"]
+                if type(rowid) is not int or not after_id < rowid <= watermark:
+                    raise StorageOwnerError("reaction cursor repeated or out of range")
+                item = _reaction_from_json(row["reaction"])
+                if item.ad_id != ad_id:
+                    raise StorageOwnerError("reaction identity mismatch")
+                result.append(item)
+                after_id = rowid
+                if len(result) > _MAX_HISTORY_RECORDS:
+                    raise StorageOwnerError("reaction history exceeds query capacity")
+            if not answer["more"]:
+                return tuple(result)
 
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
         """Read one pinned, immutable observation history in bounded pages.

@@ -2297,6 +2297,57 @@ class SnapshotStore:
             ).fetchall()
         return tuple(str(row["ad_id"]) for row in rows)
 
+    def reaction_history_page(
+        self, ad_id: str, *, after_id: int, watermark: int | None,
+        limit: int = 16,
+    ) -> tuple[int, tuple[tuple[int, ReactionSnapshot], ...], bool]:
+        """Read one bounded immutable-generation reaction page in insertion order.
+
+        The first page pins MAX(id) inside its read transaction. Later appends
+        cannot enter this generation; no caller-supplied SQL is evaluated.
+        """
+        if not isinstance(ad_id, str) or not ad_id.strip():
+            raise ValueError("reaction history ID is invalid")
+        if (type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or type(limit) is not int or not 1 <= limit <= 32
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))):
+            raise ValueError("reaction history page cursor is invalid")
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            if watermark is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS bound "
+                    "FROM reaction_snapshots WHERE ad_id = ?", (ad_id,),
+                ).fetchone()
+                assert row is not None
+                watermark = int(row["bound"])
+            rows = conn.execute(
+                """SELECT id, ad_id, observed_at, source,
+                          conversation_count, unique_buyer_count,
+                          inbound_message_count
+                   FROM reaction_snapshots
+                   WHERE ad_id = ? AND id > ? AND id <= ?
+                   ORDER BY id ASC LIMIT ?""",
+                (ad_id, after_id, watermark, limit + 1),
+            ).fetchall()
+        more = len(rows) > limit
+        page = tuple((
+            int(row["id"]),
+            ReactionSnapshot(
+                ad_id=row["ad_id"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+                source=row["source"],
+                conversation_count=row["conversation_count"],
+                unique_buyer_count=row["unique_buyer_count"],
+                inbound_message_count=row["inbound_message_count"],
+            ),
+        ) for row in rows[:limit])
+        return watermark, page, more
+
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
         with self._connect() as connection:
             rows = connection.execute(
