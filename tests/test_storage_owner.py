@@ -587,6 +587,93 @@ class StorageOwnerUnitTests(unittest.TestCase):
         }), self.assertRaises(StorageOwnerError):
             client.ad_history("123")
 
+    def test_email_only_query_and_analytics_use_typed_owner_not_raw_sqlite(self) -> None:
+        from mark_api.domain import InboundMessageEvent, AdClassification
+        from mark_api.analytics import AnalyticsService
+        from mark_api.query import MarkQueryService
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        events = tuple(InboundMessageEvent(
+            ad_id="email-only", conversation_id=f"buyer-{i % 3}",
+            provider_message_id=f"provider:{i:02}",
+            observed_at=NOW + timedelta(minutes=(20 - i)),
+            source="email:sample",
+        ) for i in range(19))
+        self.assertEqual(store.append_inbound_message_events(events), 19)
+        expected_classification = AdClassification(
+            ad_id="email-only", observed_at=NOW,
+            source="manual", city="Magdeburg",
+        )
+        store.append_classification(expected_classification)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.inbound_message_history("email-only"),
+                         store.inbound_message_history("email-only"))
+        self.assertEqual(client.inbound_message_counts("email-only"), (3, 19))
+        self.assertEqual(client.inbound_message_ad_ids(), ("email-only",))
+        self.assertEqual(client.latest_classification("email-only"),
+                         expected_classification)
+        self.assertIsNone(client.latest_classification("missing"))
+        query_expected, query_rpc = MarkQueryService(store), MarkQueryService(client)
+        self.assertEqual(query_rpc.email_reactions(), query_expected.email_reactions())
+        self.assertEqual(query_rpc.email_reaction("email-only"),
+                         query_expected.email_reaction("email-only"))
+        analytics_expected, analytics_rpc = AnalyticsService(store), AnalyticsService(client)
+        self.assertEqual(analytics_rpc.rank_ads("email_inbound_message_count"),
+                         analytics_expected.rank_ads("email_inbound_message_count"))
+        self.assertEqual(analytics_rpc.group_rankings("city", "email_inbound_message_count"),
+                         analytics_expected.group_rankings("city", "email_inbound_message_count"))
+
+    def test_inbox_multibyte_full_reply_frames_do_not_truncate_events(self) -> None:
+        from mark_api.domain import InboundMessageEvent
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        events = tuple(InboundMessageEvent(
+            ad_id="long-valid",
+            conversation_id="buyer:" + str(i),
+            provider_message_id=f"provider:{i:02}:" + "x" * 1800,
+            observed_at=NOW + timedelta(minutes=30 - i),
+            source="email:" + "ä" * 800,
+        ) for i in range(22))
+        self.assertEqual(store.append_inbound_message_events(events), len(events))
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(
+            client.inbound_message_history("long-valid"),
+            store.inbound_message_history("long-valid"),
+        )
+        self.assertEqual(client.inbound_message_counts("long-valid"), (22, 22))
+        self.assertEqual(client.inbound_message_history("missing"), ())
+
+    def test_typed_inbox_pages_refuse_sql_and_untrusted_cursors(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        for fields in (
+            {"ad_id": "email-only", "after_id": True, "watermark": None},
+            {"ad_id": "email-only", "after_id": 0, "watermark": None,
+             "sql": "DELETE FROM write_api_requests"},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(StorageOwnerError):
+                service.dispatch({"version": 1, "op": "inbound_message_page", **fields})
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch({
+                "version": 1, "op": "inbound_ad_ids_page",
+                "after": "", "watermark": None,
+                "sql": "SELECT * FROM write_recovery_clearances",
+            })
+        with patch.object(client, "_call", return_value={
+            "watermark": 2, "more": True, "rows": [],
+        }), self.assertRaises(StorageOwnerError):
+            client.inbound_message_history("email-only")
+        with patch.object(client, "_call", return_value={
+            "watermark": 2, "more": True, "ids": [],
+        }), self.assertRaises(StorageOwnerError):
+            client.inbound_message_ad_ids()
+
     def test_reaction_history_rpc_preserves_original_provenance_and_counters(self) -> None:
         from mark_api.domain import ReactionSnapshot
         service = self.make_service()

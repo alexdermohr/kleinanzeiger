@@ -2372,6 +2372,80 @@ class SnapshotStore:
             for row in rows
         )
 
+    def inbound_message_page(
+        self, ad_id: str, *, after_id: int, watermark: int | None,
+        limit: int = 16,
+    ) -> tuple[int, tuple[tuple[int, InboundMessageEvent], ...], bool]:
+        """Bounded immutable-generation inbox read ordered by insertion id."""
+        if not isinstance(ad_id, str) or not ad_id.strip() or len(ad_id) > 160:
+            raise ValueError("inbound history ID is invalid")
+        if (type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or type(limit) is not int or not 1 <= limit <= 32
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))):
+            raise ValueError("inbound history page cursor is invalid")
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            if watermark is None:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS bound "
+                    "FROM inbound_message_events WHERE ad_id = ?", (ad_id,),
+                ).fetchone()
+                assert row is not None
+                watermark = int(row["bound"])
+            rows = connection.execute(
+                """SELECT id, ad_id, conversation_id, provider_message_id,
+                          observed_at, source
+                   FROM inbound_message_events
+                   WHERE ad_id = ? AND id > ? AND id <= ?
+                   ORDER BY id ASC LIMIT ?""",
+                (ad_id, after_id, watermark, limit + 1),
+            ).fetchall()
+        more = len(rows) > limit
+        page = tuple((
+            int(row["id"]),
+            InboundMessageEvent(
+                ad_id=row["ad_id"], conversation_id=row["conversation_id"],
+                provider_message_id=row["provider_message_id"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+                source=row["source"],
+            ),
+        ) for row in rows[:limit])
+        return watermark, page, more
+
+    def inbound_message_ad_ids_page(
+        self, *, after: str, watermark: int | None,
+        limit: int = 64,
+    ) -> tuple[int, tuple[str, ...], bool]:
+        """List imported email-only and tracked IDs with a pinned generation."""
+        if (type(after) is not str or len(after) > 160
+                or (after and not after.strip())
+                or type(limit) is not int or not 1 <= limit <= 64
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                ))):
+            raise ValueError("inbound ad-ID page cursor is invalid")
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            if watermark is None:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS bound FROM inbound_message_events",
+                ).fetchone()
+                assert row is not None
+                watermark = int(row["bound"])
+            rows = connection.execute(
+                """SELECT DISTINCT ad_id
+                   FROM inbound_message_events
+                   WHERE id <= ? AND ad_id > ?
+                   ORDER BY ad_id ASC LIMIT ?""",
+                (watermark, after, limit + 1),
+            ).fetchall()
+        return watermark, tuple(row["ad_id"] for row in rows[:limit]), len(rows) > limit
+
     def inbound_message_history(
         self,
         ad_id: str,
@@ -2465,6 +2539,45 @@ class SnapshotStore:
                 title_type=row["title_type"],
             )
             for row in ordered_rows
+        )
+
+    def latest_classification_bounded(
+        self, ad_id: str, *, max_records: int = 200000,
+    ) -> AdClassification | None:
+        """Select latest real observation instant in bounded constant memory.
+
+        This yields the same (observed_at, insertion-ID) winner as the existing
+        classification_history sort without materializing arbitrary history.
+        """
+        if (type(ad_id) is not str or not ad_id.strip() or len(ad_id) > 160
+                or type(max_records) is not int or not 1 <= max_records <= 200000):
+            raise ValueError("classification lookup bound is invalid")
+        selected: sqlite3.Row | None = None
+        selected_key: tuple[datetime, int] | None = None
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """SELECT id, ad_id, observed_at, source, image_type, city,
+                          text_type, title_type
+                   FROM ad_classifications WHERE ad_id = ?
+                   ORDER BY id ASC""", (ad_id,),
+            )
+            for count, row in enumerate(cursor, start=1):
+                if count > max_records:
+                    raise ValueError("classification history capacity exceeded")
+                when = datetime.fromisoformat(row["observed_at"])
+                key = when, int(row["id"])
+                if selected_key is None or key > selected_key:
+                    selected, selected_key = row, key
+        if selected is None:
+            return None
+        return AdClassification(
+            ad_id=selected["ad_id"],
+            observed_at=datetime.fromisoformat(selected["observed_at"]),
+            source=selected["source"],
+            image_type=selected["image_type"],
+            city=selected["city"],
+            text_type=selected["text_type"],
+            title_type=selected["title_type"],
         )
 
     def latest_classification(self, ad_id: str) -> AdClassification | None:

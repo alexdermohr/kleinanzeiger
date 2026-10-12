@@ -58,6 +58,25 @@ store.append_reaction_snapshot(ReactionSnapshot(
     source='kleinanzeigen:email-only', conversation_count=2,
     unique_buyer_count=3, inbound_message_count=5,
 ))
+from mark_api.domain import InboundMessageEvent, AdClassification
+store.append_inbound_message_events((
+    InboundMessageEvent(
+        ad_id='777', conversation_id='buyer1',
+        provider_message_id='real-uid-event-1',
+        observed_at=datetime(2026,10,11,12,0,tzinfo=timezone.utc),
+        source='email-only-synthetic',
+    ),
+    InboundMessageEvent(
+        ad_id='777', conversation_id='buyer2',
+        provider_message_id='real-uid-event-2',
+        observed_at=datetime(2026,10,11,12,1,tzinfo=timezone.utc),
+        source='email-only-synthetic',
+    ),
+))
+store.append_classification(AdClassification(
+    ad_id='777', observed_at=datetime(2026,10,11,12,0,tzinfo=timezone.utc),
+    source='manual', city='Berlin',
+))
 print('PRIVATE_EXISTING_SCHEMA_V2',flush=True)
 """
 
@@ -102,6 +121,39 @@ seed_rx=ReactionSnapshot(
 )
 assert client.reaction_history('777')==(seed_rx,)
 assert client.reaction_history('unknown')==()
+from mark_api.domain import InboundMessageEvent, AdClassification
+from mark_api.query import MarkQueryService
+from mark_api.analytics import AnalyticsService
+events=(
+    InboundMessageEvent(
+        ad_id='777', conversation_id='buyer1',
+        provider_message_id='real-uid-event-1',
+        observed_at=now, source='email-only-synthetic',
+    ),
+    InboundMessageEvent(
+        ad_id='777', conversation_id='buyer2',
+        provider_message_id='real-uid-event-2',
+        observed_at=datetime(2026,10,11,12,1,tzinfo=timezone.utc),
+        source='email-only-synthetic',
+    ),
+)
+assert client.inbound_message_history('777')==events
+assert client.inbound_message_counts('777')==(2,2)
+assert client.inbound_message_ad_ids()==('777',)
+assert client.latest_classification('777')==AdClassification(
+    ad_id='777', observed_at=now, source='manual', city='Berlin',
+)
+query=MarkQueryService(client)
+assert query.email_reaction('777').conversation_count==2
+assert query.email_reaction('777').inbound_message_count==2
+analytics=AnalyticsService(client)
+assert len(analytics.rank_ads('email_inbound_message_count'))==1
+assert analytics.rank_ads('email_inbound_message_count')[0].value==2
+groups=analytics.group_rankings('city','email_inbound_message_count')
+assert len(groups)==1 and groups[0].label=='Berlin'
+assert groups[0].metric_sum==2 and groups[0].sample_size==1
+print('REAL_UID_EMAIL_ANALYTICS_QUERY_GREEN',flush=True)
+
 
 sync=client.begin_sync_attempt(source="docker_synthetic",started_at=now)
 ad_snapshots=tuple(

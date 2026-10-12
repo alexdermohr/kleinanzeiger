@@ -188,6 +188,109 @@ class SnapshotStoreTests(unittest.TestCase):
                 store.ad_history_page("unknown", **kwargs)
         self.assertEqual(store.tracked_ad_ids(), ())
 
+    def test_latest_classification_bounded_uses_real_instant_and_limit(self) -> None:
+        from mark_api.domain import AdClassification
+        store = self.make_store()
+        newest = AdClassification(
+            ad_id="e", observed_at=NOW + timedelta(hours=1),
+            source="manual", city="Berlin",
+        )
+        older = AdClassification(
+            ad_id="e", observed_at=(NOW + timedelta(minutes=90)).astimezone(
+                timezone(timedelta(hours=2))
+            ) - timedelta(hours=1),
+            source="manual", city="Magdeburg",
+        )
+        store.append_classification(newest)
+        store.append_classification(older)
+        self.assertEqual(store.latest_classification_bounded("e"), newest)
+        self.assertEqual(store.latest_classification_bounded("none"), None)
+        with self.assertRaises(ValueError):
+            store.latest_classification_bounded("e", max_records=1)
+        with self.assertRaises(ValueError):
+            store.latest_classification_bounded("e", max_records=True)
+
+    def test_inbound_message_pages_pin_generation_and_preserve_observed_time(self) -> None:
+        store = self.make_store()
+        events = tuple(InboundMessageEvent(
+            ad_id="email-only",
+            conversation_id=f"conversation-{i % 5}",
+            provider_message_id=f"provider-{i}",
+            observed_at=NOW + timedelta(minutes=20 - i),
+            source="email:imported",
+        ) for i in range(19))
+        self.assertEqual(store.append_inbound_message_events(events), 19)
+        pinned, page, more = store.inbound_message_page(
+            "email-only", after_id=0, watermark=None, limit=5,
+        )
+        collected = list(page)
+        late = InboundMessageEvent(
+            ad_id="email-only", conversation_id="new-buyer",
+            provider_message_id="provider-late",
+            observed_at=NOW - timedelta(hours=1), source="email:late",
+        )
+        store.append_inbound_message_events((late,))
+        while more:
+            watermark, items, more = store.inbound_message_page(
+                "email-only", after_id=collected[-1][0],
+                watermark=pinned, limit=5,
+            )
+            self.assertEqual(watermark, pinned)
+            collected.extend(items)
+        self.assertEqual(tuple(item for _, item in collected), events)
+        self.assertEqual(len({n for n, _ in collected}), 19)
+        self.assertEqual(store.inbound_message_counts("email-only"), (6, 20))
+        self.assertEqual(
+            store.inbound_message_history("email-only")[0], late,
+        )
+
+    def test_inbound_ad_id_pagination_pins_global_generation(self) -> None:
+        store = self.make_store()
+        events = tuple(InboundMessageEvent(
+            ad_id=f"ad-{i:03}", conversation_id="conversation",
+            provider_message_id=f"event-{i}",
+            observed_at=NOW, source="synthetic",
+        ) for i in range(70))
+        store.append_inbound_message_events(events)
+        pinned, page, more = store.inbound_message_ad_ids_page(
+            after="", watermark=None, limit=16,
+        )
+        self.assertTrue(more)
+        collected = list(page)
+        store.append_inbound_message_events((InboundMessageEvent(
+            ad_id="ad-999", conversation_id="conversation",
+            provider_message_id="late-event",
+            observed_at=NOW, source="synthetic",
+        ),))
+        while more:
+            watermark, ids, more = store.inbound_message_ad_ids_page(
+                after=collected[-1], watermark=pinned, limit=16,
+            )
+            self.assertEqual(watermark, pinned)
+            collected.extend(ids)
+        self.assertEqual(tuple(collected), tuple(f"ad-{i:03}" for i in range(70)))
+        self.assertIn("ad-999", store.inbound_message_ad_ids())
+
+    def test_inbound_rpc_store_page_rejects_bad_cursors(self) -> None:
+        store = self.make_store()
+        for kwargs in (
+            {"after_id": True, "watermark": None, "limit": 1},
+            {"after_id": -1, "watermark": None, "limit": 1},
+            {"after_id": 2, "watermark": 1, "limit": 1},
+            {"after_id": 0, "watermark": None, "limit": 0},
+            {"after_id": 0, "watermark": None, "limit": 33},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                store.inbound_message_page("missing", **kwargs)
+        for kwargs in (
+            {"after": True, "watermark": None, "limit": 1},
+            {"after": "", "watermark": True, "limit": 1},
+            {"after": "", "watermark": None, "limit": 0},
+            {"after": "", "watermark": None, "limit": 65},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                store.inbound_message_ad_ids_page(**kwargs)
+
     def test_reaction_page_pins_generation_and_keeps_distinct_metrics(self) -> None:
         store = self.make_store()
         originals = tuple(ReactionSnapshot(

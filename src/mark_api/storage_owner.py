@@ -41,7 +41,8 @@ from .fence_witness import (
 )
 from .storage import (SnapshotStore, WriteApiRequestClaim, WriteApiRequestRecord,
                       _SYNC_ERROR_KINDS)
-from .domain import AdSnapshot, LifecycleState, ReactionSnapshot
+from .domain import (AdSnapshot, LifecycleState, ReactionSnapshot,
+                     InboundMessageEvent, AdClassification)
 from .results import ReadResult, ReadStatus
 
 
@@ -335,6 +336,64 @@ def _reaction_from_json(raw: object) -> ReactionSnapshot:
     )
 
 
+def _inbound_as_json(value: InboundMessageEvent) -> dict[str, object]:
+    if not isinstance(value, InboundMessageEvent):
+        raise StorageOwnerError("invalid typed inbound message")
+    return {
+        "ad_id": value.ad_id, "conversation_id": value.conversation_id,
+        "provider_message_id": value.provider_message_id,
+        "observed_at": value.observed_at.isoformat(), "source": value.source,
+    }
+
+
+def _inbound_from_json(raw: object) -> InboundMessageEvent:
+    if type(raw) is not dict or set(raw) != {
+        "ad_id", "conversation_id", "provider_message_id", "observed_at", "source",
+    }:
+        raise StorageOwnerError("inbound message reply schema invalid")
+    return InboundMessageEvent(
+        ad_id=_limited_text(raw["ad_id"], bound=160),
+        conversation_id=_limited_text(raw["conversation_id"], bound=1024),
+        provider_message_id=_limited_text(raw["provider_message_id"], bound=2048),
+        observed_at=_timestamp(raw["observed_at"]),
+        source=_limited_text(raw["source"], bound=1024),
+    )
+
+
+def _class_as_json(value: AdClassification) -> dict[str, object]:
+    if not isinstance(value, AdClassification):
+        raise StorageOwnerError("invalid stored classification")
+    return {
+        "ad_id": value.ad_id, "observed_at": value.observed_at.isoformat(),
+        "source": value.source, "image_type": value.image_type,
+        "city": value.city, "text_type": value.text_type,
+        "title_type": value.title_type,
+    }
+
+
+def _class_from_json(raw: object) -> AdClassification:
+    fields = {
+        "ad_id", "observed_at", "source", "image_type",
+        "city", "text_type", "title_type",
+    }
+    if type(raw) is not dict or set(raw) != fields:
+        raise StorageOwnerError("classification reply schema invalid")
+    label_names = ("image_type", "city", "text_type", "title_type")
+    labels = {
+        name: _limited_text(raw[name], bound=1024, optional=True)
+        for name in label_names
+    }
+    value = AdClassification(
+        ad_id=_limited_text(raw["ad_id"], bound=160),
+        observed_at=_timestamp(raw["observed_at"]),
+        source=_limited_text(raw["source"], bound=1024),
+        **labels,
+    )
+    if any(getattr(value, name) != raw[name] for name in label_names):
+        raise StorageOwnerError("stored classification is not canonical")
+    return value
+
+
 def _sync_digest(previous: str, snapshots: list[dict[str, object]]) -> str:
     """Append-only chunk commitment, independent of JSON key ordering."""
     return hashlib.sha256(
@@ -521,6 +580,95 @@ class StorageOwnerServer(
             return {"ready": self.store.is_ready()}
         if op == "sync_status" and set(request) == {"version", "op"}:
             return {"sync_status": self.store.sync_status()}
+
+        if op == "inbound_message_page" and set(request) == {
+            "version", "op", "ad_id", "after_id", "watermark",
+        }:
+            ad_id = _limited_text(request["ad_id"], bound=160)
+            after_id, watermark = request["after_id"], request["watermark"]
+            if (
+                type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))
+            ):
+                raise StorageOwnerError("inbound history cursor invalid")
+            pinned, entries, more = self.store.inbound_message_page(
+                ad_id, after_id=after_id, watermark=watermark,
+                limit=_MAX_HISTORY_PAGE,
+            )
+            rows: list[dict[str, object]] = []
+            for rowid, event in entries:
+                trial = [*rows, {"id": rowid, "event": _inbound_as_json(event)}]
+                envelope = {
+                    "ok": True, "result": {
+                        "watermark": pinned, "more": False, "rows": trial,
+                    },
+                }
+                if len(_canonical_json(envelope).encode("utf-8")) + 1 > _MAX_FRAME + 1:
+                    break
+                rows = trial
+            if entries and not rows:
+                raise StorageOwnerError("stored inbound event exceeds IPC frame")
+            return {
+                "watermark": pinned,
+                "more": more or len(rows) < len(entries),
+                "rows": rows,
+            }
+        if op == "inbound_ad_ids_page" and set(request) == {
+            "version", "op", "after", "watermark",
+        }:
+            after = _limited_text(
+                request["after"], bound=160, allow_empty=True,
+            )
+            watermark = request["watermark"]
+            if watermark is not None and (
+                type(watermark) is not int
+                or not 0 <= watermark <= 2**63 - 1
+            ):
+                raise StorageOwnerError("inbound ad-ID watermark invalid")
+            pinned, ids, more = self.store.inbound_message_ad_ids_page(
+                after=after, watermark=watermark, limit=64,
+            )
+            selected: list[str] = []
+            for item in ids:
+                item = _limited_text(item, bound=160)
+                trial = [*selected, item]
+                envelope = {
+                    "ok": True, "result": {
+                        "watermark": pinned, "more": False, "ids": trial,
+                    },
+                }
+                if len(_canonical_json(envelope).encode("utf-8")) + 1 > _MAX_FRAME + 1:
+                    break
+                selected = trial
+            if ids and not selected:
+                raise StorageOwnerError("stored email ad ID exceeds IPC frame")
+            return {
+                "watermark": pinned, "more": more or len(selected) < len(ids),
+                "ids": selected,
+            }
+        if op == "inbound_counts" and set(request) == {
+            "version", "op", "ad_id",
+        }:
+            ad_id = _limited_text(request["ad_id"], bound=160)
+            conversations, messages = self.store.inbound_message_counts(ad_id)
+            return {"conversations": conversations, "messages": messages}
+        if op == "classification_latest" and set(request) == {
+            "version", "op", "ad_id",
+        }:
+            ad_id = _limited_text(request["ad_id"], bound=160)
+            classification = self.store.latest_classification_bounded(
+                ad_id, max_records=_MAX_HISTORY_RECORDS,
+            )
+            return {
+                "classification": (
+                    _class_as_json(classification)
+                    if classification is not None else None
+                ),
+            }
 
         if op == "reaction_history_page" and set(request) == {
             "version", "op", "ad_id", "after_id", "watermark",
@@ -832,6 +980,112 @@ class StorageOwnerClient:
             raise StorageOwnerError("storage sync status reply invalid")
         return _sync_status_from_json(answer["sync_status"])
 
+
+    def inbound_message_history(self, ad_id: str) -> tuple[InboundMessageEvent, ...]:
+        """One pinned inbox generation ordered by real time, insertion ID."""
+        ad_id = _limited_text(ad_id, bound=160)
+        found: list[tuple[int, InboundMessageEvent]] = []
+        after_id = 0
+        watermark: int | None = None
+        while True:
+            page = self._call(
+                "inbound_message_page", ad_id=ad_id,
+                after_id=after_id, watermark=watermark,
+            )
+            if (
+                set(page) != {"watermark", "more", "rows"}
+                or type(page["watermark"]) is not int
+                or not 0 <= page["watermark"] <= 2**63 - 1
+                or type(page["more"]) is not bool
+                or type(page["rows"]) is not list
+                or len(page["rows"]) > _MAX_HISTORY_PAGE
+            ):
+                raise StorageOwnerError("inbound history page envelope invalid")
+            pinned = page["watermark"]
+            if watermark is not None and pinned != watermark:
+                raise StorageOwnerError("inbound history watermark drift")
+            watermark = pinned
+            rows = page["rows"]
+            if page["more"] and not rows:
+                raise StorageOwnerError("inbound history cursor did not advance")
+            for row in rows:
+                if type(row) is not dict or set(row) != {"id", "event"}:
+                    raise StorageOwnerError("inbound event schema invalid")
+                rowid = row["id"]
+                if type(rowid) is not int or not after_id < rowid <= watermark:
+                    raise StorageOwnerError("inbound history cursor invalid")
+                event = _inbound_from_json(row["event"])
+                if event.ad_id != ad_id:
+                    raise StorageOwnerError("inbound history identity changed")
+                found.append((rowid, event))
+                after_id = rowid
+                if len(found) > _MAX_HISTORY_RECORDS:
+                    raise StorageOwnerError("inbound history query capacity exceeded")
+            if not page["more"]:
+                return tuple(
+                    event for _, event in sorted(
+                        found, key=lambda pair: (pair[1].observed_at, pair[0]),
+                    )
+                )
+
+    def inbound_message_ad_ids(self) -> tuple[str, ...]:
+        after = ""
+        watermark: int | None = None
+        all_ids: list[str] = []
+        while True:
+            page = self._call(
+                "inbound_ad_ids_page", after=after, watermark=watermark,
+            )
+            if (
+                set(page) != {"watermark", "more", "ids"}
+                or type(page["watermark"]) is not int
+                or not 0 <= page["watermark"] <= 2**63 - 1
+                or type(page["more"]) is not bool
+                or type(page["ids"]) is not list
+                or len(page["ids"]) > 64
+            ):
+                raise StorageOwnerError("inbound ad-ID page envelope invalid")
+            pinned = page["watermark"]
+            if watermark is not None and pinned != watermark:
+                raise StorageOwnerError("inbound ad-ID watermark drift")
+            watermark = pinned
+            ids = page["ids"]
+            if page["more"] and not ids:
+                raise StorageOwnerError("inbound ad-ID cursor did not advance")
+            for value in ids:
+                item = _limited_text(value, bound=160)
+                if item <= after:
+                    raise StorageOwnerError("inbound ad-ID ordering invalid")
+                all_ids.append(item)
+                after = item
+                if len(all_ids) > _MAX_HISTORY_RECORDS:
+                    raise StorageOwnerError("inbound ad-ID capacity exceeded")
+            if not page["more"]:
+                return tuple(all_ids)
+
+    def inbound_message_counts(self, ad_id: str) -> tuple[int, int]:
+        ad_id = _limited_text(ad_id, bound=160)
+        value = self._call("inbound_counts", ad_id=ad_id)
+        if set(value) != {"conversations", "messages"}:
+            raise StorageOwnerError("inbound counts reply schema invalid")
+        conversations, messages = value["conversations"], value["messages"]
+        if (type(conversations) is not int or type(messages) is not int
+                or conversations < 0 or messages < conversations
+                or messages > 2**63 - 1):
+            raise StorageOwnerError("inbound counts reply value invalid")
+        return conversations, messages
+
+    def latest_classification(self, ad_id: str) -> AdClassification | None:
+        ad_id = _limited_text(ad_id, bound=160)
+        value = self._call("classification_latest", ad_id=ad_id)
+        if set(value) != {"classification"}:
+            raise StorageOwnerError("classification reply schema invalid")
+        if value["classification"] is None:
+            return None
+        result = _class_from_json(value["classification"])
+        if result.ad_id != ad_id:
+            raise StorageOwnerError("classification reply identity mismatch")
+        return result
 
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
         """Read bounded, generation-pinned reaction history in insertion order."""
