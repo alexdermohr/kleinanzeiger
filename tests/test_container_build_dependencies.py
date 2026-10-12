@@ -69,5 +69,63 @@ class OfflineBuildDependencyTests(unittest.TestCase):
             self.assertIn("pinned setuptools wheel checksum mismatch", result.stderr)
 
 
+    def test_attested_commit_epoch_without_parent_objects(self) -> None:
+        # The build's private Git object store intentionally contains only
+        # the current attested commit and reachable tree/blob objects, not
+        # its ancestor commits. A history-walking 'git show' must not be used.
+        temp, root, _ = self._fixture()
+        with temp:
+            readme = root / "README.md"
+            readme.write_text("new synthetic verified revision\\n")
+            subprocess.run(["/usr/bin/git", "-C", str(root), "add", "README.md"],
+                           check=True)
+            subprocess.run([
+                "/usr/bin/git", "-C", str(root),
+                "-c", "user.name=Release fixture",
+                "-c", "user.email=release-fixture@example.invalid",
+                "commit", "-qm", "new revision",
+            ], check=True)
+            sha = subprocess.check_output(
+                ["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD"],
+                text=True,
+            ).strip()
+            expected = subprocess.check_output(
+                ["/usr/bin/git", "-C", str(root), "show", "-s", "--format=%ct", sha],
+                text=True,
+            ).strip()
+            private = Path(temp.name) / "private.git"
+            subprocess.run(["/usr/bin/git", "init", "--bare", "-q", str(private)],
+                           check=True)
+            commit = subprocess.check_output([
+                "/usr/bin/git", "-C", str(root), "cat-file", "commit", sha,
+            ])
+            stored = subprocess.run([
+                "/usr/bin/git", "--git-dir", str(private),
+                "hash-object", "-w", "-t", "commit", "--stdin",
+            ], input=commit, capture_output=True, check=True)
+            self.assertEqual(stored.stdout.decode().strip(), sha)
+
+            # Execute the actual production timestamp block, not a rewritten
+            # reimplementation of its algorithm.
+            source = BUILDER.read_text()
+            start = source.index("verified_commit=$(private_git cat-file commit")
+            end = source.index("export SOURCE_DATE_EPOCH", start)
+            block = source[start:end] + "export SOURCE_DATE_EPOCH\\n"
+            shell = "\n".join((
+                "set -eu",
+                'private_git() { /usr/bin/git --git-dir="$GIT_DIR" "$@"; }',
+                'fail() { echo "$1" >&2; exit 1; }',
+                'expected="$EXPECTED"',
+                block,
+                'printf "%s\\n" "$SOURCE_DATE_EPOCH"',
+            )) + "\n"
+            result = subprocess.run(
+                ["/bin/sh", "-c", shell], capture_output=True, text=True,
+                env={**os.environ, "GIT_DIR": str(private), "EXPECTED": sha},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

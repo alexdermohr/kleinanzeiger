@@ -164,8 +164,23 @@ build_uv=${MARK_UV:-uv}
 "$temp/build-venv/bin/python" -I -c \
     'import importlib.metadata as md; assert md.version("setuptools") == "80.9.0"' ||
     fail 'build backend version unverified'
-SOURCE_DATE_EPOCH=$(private_git show -s --format=%ct "$expected") ||
+# Git's history-walking 'show' would follow the commit's unneeded
+# parent outside this deliberately minimal, hash-verified object store.
+# Derive the epoch strictly from the verified commit object header instead.
+verified_commit=$(private_git cat-file commit "$expected") ||
     fail 'attested commit timestamp unavailable'
+SOURCE_DATE_EPOCH=$(printf '%s\n' "$verified_commit" | /usr/bin/awk '
+    $0 == "" { exit }
+    $1 == "committer" {
+        if (NF >= 3 && $(NF - 1) ~ /^[0-9]+$/ &&
+                $NF ~ /^[+-][0-9][0-9][0-9][0-9]$/) {
+            print $(NF - 1)
+            found = 1
+        }
+        exit
+    }
+    END { if (!found) exit 1 }
+') || fail 'attested commit timestamp unavailable'
 export SOURCE_DATE_EPOCH
 "$build_uv" --no-config build --wheel --offline --no-build-isolation \
     --python "$temp/build-venv/bin/python" \
