@@ -649,6 +649,35 @@ diese separaten Gates bleiben Pflicht. Ohne sie wird kein `live` oder
 eine grüne `docker compose config` sind keine erfolgreiche Host-Installation.
 Keine Wiederholung einer unklaren Backup- oder Plattformmutation ohne Readback.
 
+**UID-50046-Inventarsynchronisation (separates, noch nicht freigegebenes
+Produktinkrement):** `mark-api-inventory-sync` liest ausschließlich den bereits
+angemeldeten Besitzerbestand über einen bestehenden lokalen CDP-Reader und
+schreibt die Beobachtung per UID-geprüftem, typisiertem
+`StorageOwnerClient`-Socket. Der SQLite-Pfad wird dem Prozess nicht übergeben.
+Vor der Browserabfrage entsteht ein dauerhafter Sync-Versuch. Erfolgreiche
+leere Bestände, echte Read-Fehler und unklare Storage-ACKs bleiben unterscheidbar;
+bei verlorenem Commit-ACK erfolgt kein automatischer Replay. Der CLI-Fehler
+meldet daher JSON mit `kind`, bekannter `attempt_id`, optionalem
+`read_status`, `cleanup_failed` und stets
+`platform_retry_authorized: false`. `read_failed` bezeichnet einen
+klassifizierten Browserlesefehler; `storage_unknown` einen nicht
+bestätigten Store-Abschluss. Ein anschließender lokaler Cleanupfehler
+überschreibt die ursprüngliche Kategorie nicht. Ein kompromittierter
+Executor kann Beobachtungsdaten behaupten: Sie erzeugen weder
+Write-Receipts noch Recovery-Clearances oder externe Write-Autorität.
+
+Die nur für **explizite, autorisierte und isolierte Integrationsprüfungen**
+vorgesehene CLI-Signatur lautet:
+
+~~~text
+mark-api-inventory-sync --storage-socket /run/mark-api-storage/storage.sock --storage-owner-uid 50046 --cdp-port 9222
+~~~
+
+Der Container-Draft-Gate verweigert auch diesen installierten Python-Einstieg.
+Die Aufnahme als Paket-Entrypoint erlaubt **keinen** echten Docker-Cutover,
+kein Testen fremder Kleinanzeigenkonten und keinen Ersatz für die vollständige
+default-on Write-/Recovery-Migration.
+
 **Frontend-Trust-Grenze:** Ein kompromittiertes UID-50042-Frontend
 kann den Dashboard-Token und Origin-Header sehen und eigene typisierte
 Write-API-Anfragen im Rahmen dieser Sitzung auslösen. Seine Trennung
