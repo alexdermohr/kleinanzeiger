@@ -372,6 +372,23 @@ class ContainerDeploymentTests(unittest.TestCase):
                       _read("mark-api-container.compose.yaml"))
 
 
+    def test_cutover_guard_denies_external_volume_driver_bind_aliases(self) -> None:
+        # Distinct Compose volume *names* alone cannot prove distinct inodes:
+        # a malicious/misconfigured driver_opts.device can alias SQLite into
+        # the executor's apparently separate media volume.
+        control = _read("mark-api-container-control.sh")
+        function = control.split("attest_existing_volume() {", 1)[1].split(
+            "\n}\n", 1,
+        )[0]
+        self.assertIn("volume inspect --format '{{.Driver}}'", function)
+        self.assertIn("volume inspect --format '{{json .Options}}'", function)
+        self.assertIn("expected a local Docker volume with no driver options",
+                      function)
+        self.assertLess(
+            function.index("{{json .Options}}"),
+            function.index("--mount \"type=volume,source=${volume_name}"),
+        )
+
     def test_live_guard_attests_existing_volume_directory_and_ledger_identity(self) -> None:
         control = _read("mark-api-container-control.sh")
         self.assertIn("attest_existing_volume() {", control)

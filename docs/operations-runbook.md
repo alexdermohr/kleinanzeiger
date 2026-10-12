@@ -511,6 +511,12 @@ Rootless-Daemon; eine offline attestierte vollständige SQLite-v2-DB samt
 `mark-api-fence-ledger-v1`, `mark-api-fence-runtime-socket-v1`,
 `mark-api-fence-operator-socket-v1`, `mark-api-executor-socket-v1`,
 `mark-api-ingress-socket-v1`.
+Für jedes dieser Volumes prüft die vorbereitete Betreiberkontrolle zusätzlich
+Docker-Driver `local` und **leere Treiberoptionen**. Zwei unterschiedliche
+Volume-Namen können sonst über `driver_opts` denselben Datenpfad binden und
+dem Executor wieder rohe SQLite-Zugriffe eröffnen. Auch diese Prüfung
+ersetzt weder die Root-attestierte Inode-/Mountpoint-Exklusivität noch die
+Revokation bereits offener historischer FDs/Mappings.
 Ledger-Verzeichnis: **50043:50043 / 0700**;
 Witness-Runtime-Socket-Verzeichnis: **50043:50044 / 2710**;
 Operator-Socket-Verzeichnis: **50043:50043 / 0700**;

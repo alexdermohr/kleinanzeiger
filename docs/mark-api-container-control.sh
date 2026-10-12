@@ -168,6 +168,19 @@ attest_existing_volume() {
     volume_name=$1
     expected_identity=$2
     inspection_user=${expected_identity%:*}
+    # A different named volume may still alias SQLite's host data through
+    # driver_opts.device, bind, NFS or a custom plugin. Only default local
+    # volumes are eligible for future independent UID/mount attestation.
+    observed_driver=$(docker_cli volume inspect --format '{{.Driver}}' "$volume_name") ||
+        fail 'existing volume driver unavailable'
+    observed_options=$(docker_cli volume inspect --format '{{json .Options}}' "$volume_name") ||
+        fail 'existing volume driver options unavailable'
+    [ "$observed_driver" = local ] ||
+        fail 'expected a local Docker volume with no driver options'
+    case "$observed_options" in
+        null|'{}') ;;
+        *) fail 'expected a local Docker volume with no driver options' ;;
+    esac
     observed_identity=$(docker_cli run --rm --network none --read-only \
         --cap-drop ALL --security-opt no-new-privileges:true \
         --user "$inspection_user" \
