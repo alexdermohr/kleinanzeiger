@@ -124,6 +124,75 @@ class StorageOwnerUnitTests(unittest.TestCase):
             self.make_service()
         self.assertTrue(self.sock.is_symlink())
 
+    def test_dashboard_pending_owner_claim_and_paged_read_no_clearance(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()  # Framing-only; OS isolation tested separately.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.dashboard_pending_writes(), ())
+        for number in range(22):
+            details = dict(
+                scope=f"scope:{number:03}", resource_key=f"resource:{number:03}",
+                idempotency_key=f"pending:{number:03}", method="POST",
+                path="/api/write/ads", payload_json='{"title":"known"}',
+                ad_id=None,
+            )
+            self.assertTrue(client.claim_dashboard_pending_write(**details))
+            self.assertFalse(client.claim_dashboard_pending_write(**details))
+        pending = client.dashboard_pending_writes()
+        self.assertEqual(len(pending), 22)
+        self.assertEqual([item.scope for item in pending],
+                         [f"scope:{number:03}" for number in range(22)])
+        self.assertEqual(pending[0].payload_json, '{"title":"known"}')
+        self.assertFalse(any(item.acknowledged for item in pending))
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch({
+                "version": 1, "op": "dashboard_pending_ack",
+                "scope": "scope:000", "key": "pending:000",
+            })
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch({
+                "version": 1, "op": "dashboard_pending_claim",
+                "scope": "scope:023", "resource_key": "resource:023",
+                "key": "pending:023", "method": "POST", "path": "/api/write/ads",
+                "payload_json": None, "ad_id": None,
+                "sql": "DELETE FROM write_recovery_clearances",
+            })
+        self.assertEqual(len(client.dashboard_pending_writes()), 22)
+        self.assertFalse(service.store.has_write_recovery_clearance(
+            idempotency_key="pending:000", request_sha256=SHA,
+        ))
+
+    def test_dashboard_pending_owner_rejects_oversize_and_forged_pages(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()  # Framing-only; OS isolation tested separately.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        invalid = dict(scope="scope:invalid", resource_key="resource:invalid",
+                       idempotency_key="pending:invalid", method="POST",
+                       path="/api/write/ads", payload_json=None, ad_id=None)
+        with self.assertRaises(StorageOwnerError):
+            client.claim_dashboard_pending_write(**dict(invalid, method="GET"))
+        self.assertEqual(client.dashboard_pending_writes(), ())
+        # A valid legacy pending body can exceed the bounded IPC frame.
+        # Do not silently truncate or acknowledge it.
+        service.store.claim_dashboard_pending_write(
+            scope="scope:legacy", resource_key="resource:legacy",
+            idempotency_key="pending:legacy", method="POST",
+            path="/api/write/ads",
+            payload_json='{"body":"' + ("x" * 40000) + '"}', ad_id=None,
+        )
+        with self.assertRaises(StorageOwnerError):
+            client.dashboard_pending_writes()
+        self.assertEqual(service.store.dashboard_pending_writes()[0].scope,
+                         "scope:legacy")
+        self.assertFalse(service.store.dashboard_pending_writes()[0].acknowledged)
+        with patch.object(client, "_call", return_value={
+            "rows": [{"scope": "fake"}], "more": False,
+        }):
+            with self.assertRaises(StorageOwnerError):
+                client.dashboard_pending_writes()
+
     def test_exact_write_claim_and_start_persist_without_clearance(self) -> None:
         service = self.make_service()
         def call(op: str, **fields: object) -> dict[str, object]:

@@ -41,7 +41,7 @@ from .fence_witness import (
     _strict_json, FenceWitnessError,
 )
 from .storage import (SnapshotStore, WriteApiRequestClaim, WriteApiRequestRecord,
-                      _SYNC_ERROR_KINDS)
+                      DashboardPendingWrite, _SYNC_ERROR_KINDS)
 from .domain import (AdSnapshot, LifecycleState, ReactionSnapshot,
                      InboundMessageEvent, AdClassification)
 from .results import ReadResult, ReadStatus
@@ -155,6 +155,55 @@ def _record_from_json(value: object) -> WriteApiRequestRecord:
         requested_at=_timestamp(value["requested_at"]),
         claim_owner=claimed, execution_started_at=started, completed_at=completed,
         response_status=status, response_json=response_json,
+    )
+
+
+def _pending_as_json(record: DashboardPendingWrite) -> dict[str, object]:
+    return {
+        "scope": record.scope, "resource_key": record.resource_key,
+        "idempotency_key": record.idempotency_key, "method": record.method,
+        "path": record.path, "payload_json": record.payload_json,
+        "ad_id": record.ad_id, "acknowledged": record.acknowledged,
+    }
+
+
+def _pending_from_json(value: object) -> DashboardPendingWrite:
+    if type(value) is not dict or set(value) != {
+        "scope", "resource_key", "idempotency_key", "method",
+        "path", "payload_json", "ad_id", "acknowledged",
+    }:
+        raise StorageOwnerError("pending write reply schema invalid")
+    scope = _limited_text(value["scope"], bound=128)
+    resource = _limited_text(value["resource_key"], bound=128)
+    key = _validated(value["idempotency_key"], _KEY)
+    method = value["method"]
+    path = _limited_text(value["path"], bound=512)
+    payload = _limited_text(value["payload_json"], bound=64 * 1024,
+                            optional=True, allow_linebreaks=True)
+    ad_id = _limited_text(value["ad_id"], bound=32, optional=True)
+    acknowledged = value["acknowledged"]
+    if (
+        any(ch.isspace() for text in (scope, resource, key, path)
+            for ch in text)
+        or len(key) > 128 or method not in ("POST", "PATCH", "DELETE")
+        or not path.startswith("/api/write/") or "?" in path or "#" in path
+        or type(acknowledged) is not bool
+        or (ad_id is not None and (
+            not ad_id.isascii() or not ad_id.isdigit()
+        ))
+    ):
+        raise StorageOwnerError("pending write reply record invalid")
+    if payload is not None:
+        try:
+            data = _strict_json(payload.encode("utf-8"))
+        except (UnicodeError, FenceWitnessError, ValueError) as exc:
+            raise StorageOwnerError("pending write reply JSON invalid") from exc
+        if type(data) is not dict:
+            raise StorageOwnerError("pending write payload must be object")
+    return DashboardPendingWrite(
+        scope=scope, resource_key=resource, idempotency_key=key,
+        method=method, path=path, payload_json=payload,
+        ad_id=ad_id, acknowledged=acknowledged,
     )
 
 
@@ -978,6 +1027,51 @@ class StorageOwnerServer(
             key = _validated(request["key"], _KEY)
             rec = self.store.write_api_request(key)
             return {"record": _record_as_json(rec) if rec is not None else None}
+        if op == "dashboard_pending_page" and set(request) == {
+            "version", "op", "after",
+        }:
+            after = _limited_text(request["after"], bound=128, allow_empty=True)
+            if any(ch.isspace() for ch in after):
+                raise StorageOwnerError("invalid pending write cursor")
+            records, more = self.store.dashboard_pending_writes_page(
+                after=after, limit=16,
+            )
+            rows: list[dict[str, object]] = []
+            for record in records:
+                trial = [*rows, _pending_as_json(record)]
+                frame = {"ok": True, "result": {"rows": trial, "more": False}}
+                if len(_canonical_json(frame).encode("utf-8")) + 1 > _MAX_FRAME + 1:
+                    break
+                rows = trial
+            if records and not rows:
+                raise StorageOwnerError("stored pending record exceeds IPC frame")
+            return {"rows": rows, "more": more or len(rows) < len(records)}
+        if op == "dashboard_pending_claim" and set(request) == {
+            "version", "op", "scope", "resource_key", "key",
+            "method", "path", "payload_json", "ad_id",
+        }:
+            scope = _limited_text(request["scope"], bound=128)
+            resource_key = _limited_text(request["resource_key"], bound=128)
+            key = _validated(request["key"], _KEY)
+            method = request["method"]
+            path = _limited_text(request["path"], bound=512)
+            payload = _limited_text(request["payload_json"], bound=64 * 1024,
+                                    optional=True, allow_linebreaks=True)
+            ad_id = _limited_text(request["ad_id"], bound=32, optional=True)
+            if (
+                len(key) > 128 or method not in ("POST", "PATCH", "DELETE")
+                or any(ch.isspace() for text in (scope, resource_key, key, path)
+                       for ch in text)
+                or (ad_id is not None and (
+                    not ad_id.isascii() or not ad_id.isdigit()
+                ))
+            ):
+                raise StorageOwnerError("pending claim fields invalid")
+            created = self.store.claim_dashboard_pending_write(
+                scope=scope, resource_key=resource_key, idempotency_key=key,
+                method=method, path=path, payload_json=payload, ad_id=ad_id,
+            )
+            return {"created": created}
         if op == "create_pending" and set(request) == {
             "version", "op", "exclude_key", "owner",
         }:
@@ -1580,6 +1674,44 @@ class StorageOwnerClient:
         if record.idempotency_key != key:
             raise StorageOwnerError("storage readback key binding mismatch")
         return record
+
+    def dashboard_pending_writes(self) -> tuple[DashboardPendingWrite, ...]:
+        """Read advisory pending UI intents; never acknowledge or clear fences."""
+        rows: list[DashboardPendingWrite] = []
+        after = ""
+        while True:
+            answer = self._call("dashboard_pending_page", after=after)
+            if (
+                set(answer) != {"rows", "more"} or type(answer["rows"]) is not list
+                or type(answer["more"]) is not bool or len(answer["rows"]) > 16
+            ):
+                raise StorageOwnerError("pending write page reply invalid")
+            page = [_pending_from_json(item) for item in answer["rows"]]
+            for item in page:
+                if item.scope <= after:
+                    raise StorageOwnerError("pending write page cursor invalid")
+                after = item.scope
+                rows.append(item)
+            if len(rows) > 4096:
+                raise StorageOwnerError("pending write history exceeds IPC budget")
+            if not answer["more"]:
+                return tuple(rows)
+            if not page:
+                raise StorageOwnerError("pending write page made no progress")
+
+    def claim_dashboard_pending_write(
+        self, *, scope: str, resource_key: str, idempotency_key: str,
+        method: str, path: str, payload_json: str | None, ad_id: str | None,
+    ) -> bool:
+        """Create one durable UI pending fence; no successful write attestation."""
+        answer = self._call(
+            "dashboard_pending_claim", scope=scope, resource_key=resource_key,
+            key=idempotency_key, method=method, path=path,
+            payload_json=payload_json, ad_id=ad_id,
+        )
+        if set(answer) != {"created"} or type(answer["created"]) is not bool:
+            raise StorageOwnerError("pending write claim reply invalid")
+        return answer["created"]
 
     def create_pending(self, *, exclude_key: str, owner: str) -> bool:
         answer = self._call("create_pending", exclude_key=_validated(exclude_key, _KEY),

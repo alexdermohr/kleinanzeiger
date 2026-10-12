@@ -1863,6 +1863,39 @@ class SnapshotStore:
             for row in rows
         )
 
+    def dashboard_pending_writes_page(
+        self, *, after: str = "", limit: int = 16,
+    ) -> tuple[tuple[DashboardPendingWrite, ...], bool]:
+        """Bound pending-write reads without granting recovery-clearance authority.
+
+        This is a read-only advisory view, not a witness or clearance.
+        Concurrent insertions/deletions may affect later pages.
+        """
+        if (
+            type(after) is not str or len(after) > 128
+            or any(character.isspace() for character in after)
+        ):
+            raise ValueError("invalid pending-write cursor")
+        if type(limit) is not int or not 1 <= limit <= 16:
+            raise ValueError("invalid pending-write page capacity")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT scope, resource_key, idempotency_key, method, path,
+                       payload_json, ad_id, acknowledged
+                FROM dashboard_pending_writes
+                WHERE scope > ?
+                ORDER BY scope
+                LIMIT ?
+                """,
+                (after, limit + 1),
+            ).fetchall()
+        return (
+            tuple(self._dashboard_pending_write_record(row)
+                  for row in rows[:limit]),
+            len(rows) > limit,
+        )
+
     def claim_dashboard_pending_write(
         self,
         *,
