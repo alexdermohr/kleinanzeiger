@@ -54,11 +54,11 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
             (DOCS / "mark-api.sysusers.conf").read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(len(lines), 5)
         self.assertEqual(
             shlex.split(lines[0]),
             ["u", "mark-api", "50042", "Isolated Mark dashboard frontend",
-             "/var/lib/mark-api", "/usr/sbin/nologin"],
+             "/nonexistent", "/usr/sbin/nologin"],
         )
 
     def test_legacy_systemd_cannot_start_unwitnessed_cdp_runtime(self) -> None:
@@ -82,13 +82,18 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
         accounts = {line[1]: line for line in lines}
         self.assertEqual(set(accounts), {
             "mark-api", "mark-api-witness", "mark-api-owner", "mark-api-ingress",
+            "mark-api-storage",
         })
         for name in accounts:
             self.assertEqual(accounts[name][0], "u")
             self.assertEqual(accounts[name][-1], "/usr/sbin/nologin")
-        self.assertEqual(len({line[2] for line in lines}), 4)
+        self.assertEqual(len({line[2] for line in lines}), 5)
         self.assertEqual(accounts["mark-api-ingress"][2], "50045")
         self.assertEqual(accounts["mark-api-ingress"][-2], "/nonexistent")
+        self.assertEqual(accounts["mark-api-owner"][2], "50044")
+        self.assertEqual(accounts["mark-api-owner"][-2], "/var/lib/mark-api-media")
+        self.assertEqual(accounts["mark-api-storage"][2], "50046")
+        self.assertEqual(accounts["mark-api-storage"][-2], "/var/lib/mark-api")
 
     def test_bearer_and_dashboard_url_do_not_enter_journal_stdout(self) -> None:
         service = _unit("mark-api.service")["Service"]

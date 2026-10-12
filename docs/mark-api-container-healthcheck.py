@@ -50,6 +50,13 @@ def check_socket(path: Path, *, owner_uid: int, socket_mode: int) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    if args == ["storage"] and os.geteuid() == 50046:
+        # Read-only SO_PEERCRED liveness. Never open or initialize SQLite,
+        # issue a recovery clearance or attempt any Write.
+        return 0 if check_socket(
+            Path("/run/mark-api-storage/storage.sock"),
+            owner_uid=50046, socket_mode=0o660,
+        ) else 1
     if args == ["owner"] and os.geteuid() == 50044:
         return 0 if (
             # Do not connect to the witness runtime socket as UID 50044:

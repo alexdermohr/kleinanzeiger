@@ -10,7 +10,7 @@ from unittest.mock import patch
 from mark_api import backup_cli, container_draft, dashboard_relay
 from mark_api import dashboard, classification_cli, email_import_cli
 from mark_api import local_smoke, private_web_runtime_smoke
-from mark_api import fence_witness, launcher, legacy_migration
+from mark_api import fence_witness, launcher, legacy_migration, storage_owner
 
 
 class ContainerDraftGateTests(unittest.TestCase):
@@ -28,6 +28,7 @@ class ContainerDraftGateTests(unittest.TestCase):
                 (launcher, launcher.main),
                 (dashboard_relay, dashboard_relay.relay_frontend_main),
                 (fence_witness, fence_witness.main),
+                (storage_owner, storage_owner.main),
                 (backup_cli, backup_cli.main),
                 (legacy_migration, legacy_migration.main),
                 (dashboard, dashboard.main),

@@ -201,8 +201,8 @@ case "$action" in
         ;;
     live|backup)
         if [ "$action" = live ]; then
-            # The draft split now reserves CDP/SQLite only for UID 50044,
-            # but the real host/CDP/old-FD/MAP_SHARED/paired-ledger gates
+            # The draft now assigns SQLite to UID50046, not UID50044.
+            # Real host/CDP/old-FD/MAP_SHARED/paired-ledger gates
             # are not yet independently reproduced. Keep live disabled.
             # Static Compose, CI and synthetic tests are not release proof.
             fail 'unmediated host CDP bypass blocks product live deployment'
@@ -243,7 +243,13 @@ case "$action" in
         [ "$ingress_passwd" = mark-api-ingress ] &&
             [ "$ingress_group" = mark-api-ingress ] ||
             fail 'exclusive host ingress UID/GID 50045 not reserved'
+        storage_passwd=$(/usr/bin/getent passwd 50046 | /usr/bin/cut -d: -f1)
+        storage_group=$(/usr/bin/getent group 50046 | /usr/bin/cut -d: -f1)
+        [ "$storage_passwd" = mark-api-storage ] &&
+            [ "$storage_group" = mark-api-storage ] ||
+            fail 'exclusive host SQLite owner UID/GID 50046 not reserved'
         for name in mark-api-data-v1 mark-api-backups-v1 \
+            mark-api-media-v1 mark-api-storage-socket-v1 \
             mark-api-fence-ledger-v1 mark-api-fence-runtime-socket-v1 \
             mark-api-fence-operator-socket-v1 mark-api-executor-socket-v1 \
             mark-api-ingress-socket-v1; do
@@ -251,8 +257,10 @@ case "$action" in
                 fail 'required pre-attested external volume missing'
             [ "$found" = "$name" ] || fail 'volume identity changed'
         done
-        attest_existing_volume mark-api-data-v1 50044:50044:700
-        attest_existing_volume mark-api-backups-v1 50044:50044:700
+        attest_existing_volume mark-api-data-v1 50046:50046:700
+        attest_existing_volume mark-api-backups-v1 50046:50046:700
+        attest_existing_volume mark-api-media-v1 50044:50044:700
+        attest_existing_volume mark-api-storage-socket-v1 50046:50044:2710
         attest_existing_volume mark-api-fence-ledger-v1 50043:50043:700
         attest_existing_volume mark-api-fence-runtime-socket-v1 50043:50044:2710
         attest_existing_volume mark-api-fence-operator-socket-v1 50043:50043:700
@@ -298,6 +306,47 @@ case "$action" in
                 fail 'independent witness did not become healthy'
 
             docker_cli compose -f "$compose" --project-name mark-api --profile live \
+                up --no-deps --no-build --pull never --detach mark-api-storage ||
+                fail 'independent SQLite owner failed to start'
+            storage_id=$(docker_cli compose -f "$compose" --project-name mark-api \
+                --profile live ps -q mark-api-storage) ||
+                fail 'SQLite owner identity unavailable'
+            [ -n "$storage_id" ] || fail 'SQLite owner not running'
+            storage_user=$(docker_cli inspect --format '{{.Config.User}}' "$storage_id") ||
+                fail 'SQLite owner UID unavailable'
+            storage_image=$(docker_cli inspect --format '{{.Image}}' "$storage_id") ||
+                fail 'SQLite owner image unavailable'
+            storage_network=$(docker_cli inspect --format '{{.HostConfig.NetworkMode}}' "$storage_id") ||
+                fail 'SQLite owner network unavailable'
+            storage_mounts=$(docker_cli inspect --format '{{range .Mounts}}{{.Name}};{{end}}' "$storage_id") ||
+                fail 'SQLite owner mounts unavailable'
+            [ "$storage_user" = '50046:50046' ] &&
+                [ "$storage_image" = "$image" ] &&
+                [ "$storage_network" = none ] ||
+                fail 'SQLite owner UID, image or network mismatch'
+            case "$storage_mounts" in
+                *mark-api-data-v1*mark-api-storage-socket-v1*|*mark-api-storage-socket-v1*mark-api-data-v1*) ;;
+                *) fail 'SQLite owner has no attested data and socket mounts' ;;
+            esac
+            case "$storage_mounts" in
+                *mark-api-executor-socket-v1*|*mark-api-media-v1*|*mark-api-fence-*)
+                    fail 'SQLite owner has forbidden browser, media or Witness mounts' ;;
+            esac
+            storage_health=starting
+            attempts=0
+            while [ "$attempts" -lt 20 ]; do
+                storage_health=$(docker_cli inspect --format '{{.State.Health.Status}}' "$storage_id") ||
+                    fail 'SQLite owner health unavailable'
+                [ "$storage_health" = healthy ] && break
+                [ "$storage_health" = starting ] ||
+                    fail 'SQLite owner not healthy'
+                attempts=$((attempts + 1))
+                /usr/bin/sleep 1
+            done
+            [ "$storage_health" = healthy ] ||
+                fail 'independent SQLite owner socket unavailable'
+
+            docker_cli compose -f "$compose" --project-name mark-api --profile live \
                 up --no-deps --no-build --pull never --detach mark-api-owner ||
                 fail 'browser executor failed to start'
             owner_id=$(docker_cli compose -f "$compose" --project-name mark-api \
@@ -314,6 +363,16 @@ case "$action" in
                 [ "$observed_owner_image" = "$image" ] &&
                 [ "$observed_owner_network" = host ] ||
                 fail 'executor UID, image or host network mismatch'
+            observed_owner_mounts=$(docker_cli inspect --format '{{range .Mounts}}{{.Name}};{{end}}' "$owner_id") ||
+                fail 'executor mount identities unavailable'
+            case "$observed_owner_mounts" in
+                *mark-api-data-v1*|*mark-api-backups-v1*|*mark-api-fence-ledger-v1*)
+                    fail 'executor retained raw SQLite, backup or Witness authority' ;;
+            esac
+            case "$observed_owner_mounts" in
+                *mark-api-storage-socket-v1*mark-api-media-v1*|*mark-api-media-v1*mark-api-storage-socket-v1*) ;;
+                *) fail 'executor independent storage socket or media directory missing' ;;
+            esac
             owner_health=starting
             attempts=0
             while [ "$attempts" -lt 20 ]; do

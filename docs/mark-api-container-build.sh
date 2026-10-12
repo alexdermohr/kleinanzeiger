@@ -147,6 +147,7 @@ private_git archive "$expected" -- \
     docs/mark-api-container-ingress.sh \
     docs/mark-api-container-ingress-landlock.py \
     docs/mark-api-container-witness.sh \
+    docs/mark-api-container-storage.sh \
     docs/mark-api-container-healthcheck.py \
     docs/mark-api-container-backup.sh \
     docs/mark-api-bootstrap.sh docs/mark-api-preflight.py > "$temp/docs.tar" ||
@@ -157,6 +158,7 @@ for file in mark-api-container.Dockerfile mark-api-container-start.sh \
             mark-api-container-frontend.sh mark-api-container-ingress.sh \
             mark-api-container-ingress-landlock.py \
             mark-api-container-witness.sh \
+            mark-api-container-storage.sh \
             mark-api-container-healthcheck.py \
             mark-api-container-backup.sh mark-api-bootstrap.sh \
             mark-api-preflight.py; do

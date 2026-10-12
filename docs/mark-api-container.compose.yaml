@@ -78,13 +78,15 @@ services:
   mark-api-owner:
     image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
     profiles: ["live"]
-    # Only trusted executor UID has both CDP and SQLite access.
+    # Browser/CDP/write executor. No raw SQLite, WAL/SHM or backup mount.
     user: "50044:50044"
     entrypoint: ["/bin/sh", "/etc/mark-api/start.sh"]
     network_mode: host
     working_dir: /
     depends_on:
       mark-api-witness:
+        condition: service_healthy
+      mark-api-storage:
         condition: service_healthy
     read_only: true
     cap_drop: ["ALL"]
@@ -103,13 +105,13 @@ services:
       start_period: 2s
     volumes:
       - type: volume
-        source: mark_data
-        target: /var/lib/mark-api
+        source: mark_media
+        target: /var/lib/mark-api-media
         volume:
           nocopy: true
       - type: volume
-        source: mark_backups
-        target: /var/lib/mark-api-backups
+        source: mark_storage_socket
+        target: /run/mark-api-storage
         volume:
           nocopy: true
         read_only: true
@@ -169,7 +171,9 @@ services:
   mark-api-backup:
     image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
     profiles: ["backup"]
-    user: "50044:50044"
+    # Until paired SQLite/Witness backup exists, this is still hard-stopped.
+    # Never run backup as the compromised browser/CDP executor UID.
+    user: "50046:50046"
     working_dir: /
     network_mode: none
     entrypoint: ["/bin/sh", "/etc/mark-api/backup.sh"]
@@ -192,11 +196,52 @@ services:
         volume:
           nocopy: true
 
+  mark-api-storage:
+    image: sha256:${MARK_API_IMAGE_DIGEST:?Verified immutable image digest required}
+    profiles: ["live"]
+    # Dedicated SQLite main/WAL/SHM authority; no browser/CDP or public HTTP.
+    user: "50046:50046"
+    entrypoint: ["/bin/sh", "/etc/mark-api/storage.sh"]
+    command: []
+    network_mode: none
+    working_dir: /
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    restart: "no"
+    stop_grace_period: 90s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=33554432,mode=1777
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "-I", "-S", "/etc/mark-api/healthcheck.py", "storage"]
+      interval: 2s
+      timeout: 1s
+      retries: 5
+      start_period: 2s
+    volumes:
+      - type: volume
+        source: mark_data
+        target: /var/lib/mark-api
+        volume:
+          nocopy: true
+      - type: volume
+        source: mark_storage_socket
+        target: /run/mark-api-storage
+        volume:
+          nocopy: true
+
 # Never automatically create or re-own existing user-data volumes.
 volumes:
   mark_data:
     external: true
     name: mark-api-data-v1
+  mark_media:
+    external: true
+    name: mark-api-media-v1
+  mark_storage_socket:
+    external: true
+    name: mark-api-storage-socket-v1
   mark_backups:
     external: true
     name: mark-api-backups-v1

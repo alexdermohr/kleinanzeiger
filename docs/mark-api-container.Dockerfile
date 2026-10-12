@@ -31,21 +31,28 @@ RUN set -eu; \
     ! getent passwd "$MARK_UID"; ! getent group "$MARK_GID"; \
     groupadd --gid "$MARK_GID" mark-api; \
     useradd --uid "$MARK_UID" --gid "$MARK_GID" --system \
-      --home-dir /var/lib/mark-api --shell /usr/sbin/nologin \
+      --home-dir /nonexistent --shell /usr/sbin/nologin \
       --no-create-home mark-api; \
     ! getent passwd 50044; ! getent group 50044; \
     groupadd --gid 50044 mark-api-owner; \
     useradd --uid 50044 --gid 50044 --system \
-      --home-dir /var/lib/mark-api --shell /usr/sbin/nologin \
+      --home-dir /var/lib/mark-api-media --shell /usr/sbin/nologin \
       --no-create-home mark-api-owner; \
     ! getent passwd 50045; ! getent group 50045; \
     groupadd --gid 50045 mark-api-ingress; \
     useradd --uid 50045 --gid 50045 --system \
       --home-dir /nonexistent --shell /usr/sbin/nologin \
       --no-create-home mark-api-ingress; \
+    ! getent passwd 50046; ! getent group 50046; \
+    groupadd --gid 50046 mark-api-storage; \
+    useradd --uid 50046 --gid 50046 --system \
+      --home-dir /var/lib/mark-api --shell /usr/sbin/nologin \
+      --no-create-home mark-api-storage; \
     install -d -o root -g root -m 0755 /etc/mark-api; \
-    install -d -o mark-api-owner -g mark-api-owner -m 0700 \
+    install -d -o mark-api-storage -g mark-api-storage -m 0700 \
       /var/lib/mark-api /var/lib/mark-api-backups; \
+    install -d -o mark-api-owner -g mark-api-owner -m 0700 \
+      /var/lib/mark-api-media; \
     printf '%s\\n' 'UNATTESTED DRAFT: direct Python entrypoints disabled' \
       > /etc/mark-api/UNATTESTED_DRAFT; \
     chmod 0444 /etc/mark-api/UNATTESTED_DRAFT
@@ -58,12 +65,13 @@ COPY --chmod=0644 mark-api-container-frontend.sh /etc/mark-api/frontend.sh
 COPY --chmod=0644 mark-api-container-ingress.sh /etc/mark-api/ingress.sh
 COPY --chmod=0644 mark-api-container-ingress-landlock.py /etc/mark-api/ingress-landlock.py
 COPY --chmod=0644 mark-api-container-witness.sh /etc/mark-api/witness.sh
+COPY --chmod=0644 mark-api-container-storage.sh /etc/mark-api/storage.sh
 COPY --chmod=0644 mark-api-container-backup.sh /etc/mark-api/backup.sh
 
 # Verify actual distro stdlib before any Mark application import.
 RUN /bin/sh /etc/mark-api/bootstrap.sh --help
 USER mark-api:mark-api
-WORKDIR /var/lib/mark-api
+WORKDIR /
 # Unqualified docker run and stale Compose must never start the owner.
 # Only reviewed Compose may explicitly select /etc/mark-api/start.sh.
 ENTRYPOINT ["/usr/bin/false"]

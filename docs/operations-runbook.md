@@ -168,7 +168,7 @@ Medien-/Browserprofile sind getrennte Betreiberaufgaben. Persistente
 SQLite-Daten allein stellen keine CDP-Sitzung und keine opaken
 temporären Media-Staging-Handles wieder her.
 
-## Unabhängiger SQLite-Owner – geprüfter, noch nicht integrierter Slice
+## Unabhängiger SQLite-Owner – Compose-Draft, nicht produktiv gestartet
 
 `src/mark_api/storage_owner.py` implementiert einen ersten **separat
 UID-geschützten und streng typisierten** AF_UNIX-Datenbankzugang. Vorgesehene
@@ -215,15 +215,19 @@ abgeschlossen sein muss. Dies beweist keine atomare Wiederherstellung
 nach `SIGKILL`, bei ererbten Alt-FDs oder gegen defekte Hardware.
 In solchen Fällen bleibt der Store gesperrt bis zur Offline-Reconciliation.
 
-**Strikter Status: Integrationsprototyp, keine Produktfreigabe.** Die
-Produkt-Compose mountet SQLite nach wie vor bei UID 50044. Die sechs default-on-Produkt-Writes und die produktive
-Launcher-/Compose-Topologie benutzen den Broker noch **nicht vollständig**:
-Write-Completion, Operations-/Create-/Media-Receipts, überprüfte
-Pending-Acknowledgements und unabhängige Clearances fehlen. Analytics und
-Sync funktionieren bereits über die geschlossenen Owner-RPCs. Der
-privilegierte Storage-Owner muss erst nach vollständigem, offline
-nachgewiesenem Cutover unter getrennter root-verwalteter UID in die reale
-Komposition aufgenommen werden.
+**Strikter Status: weiterhin Draft, keine Produktfreigabe.** Die geplante
+sechste Compose-Instanz UID 50046 besitzt exklusiv das SQLite-Main-/WAL-/
+SHM-Volume. UID 50044 hat im Compose **keinen** Rohdatenbank- oder
+Backup-Mount mehr: nur ein gesondertes Media-Volume, den typisierten
+UID-50046-Storage-Socket und die bestehenden privaten Executor-/Witness-
+Sockets. Auch der gestoppte Backup-Container ist auf UID 50046 getrennt.
+Die normale Launcher-/Write-API-Laufzeit funktioniert damit aber **noch
+nicht**: ihr direkter SnapshotStore, Write-Completion, Operation-/Create-/
+Media-Receipts, Dashboard-Pending-Acks und unabhängige Clearances sind
+noch nicht vollständig migriert. Read-only Dashboard, Analytics und Sync
+verwenden bereits die geschlossenen RPCs. Die sechs direkten Entrypoints
+sind deshalb weiterhin **vor** der ersten sensiblen Operation hart gesperrt.
+Eine Compose-Datei allein ist weder historischer Cutover noch Runtime-Beleg.
 Alt geöffnete writable FDs und `MAP_SHARED`-Mappings werden durch
 `chown`, einen neu laufenden Prozess oder diesen isolierten Test **nicht
 entzogen**. Erst danach darf eine echte kompromittierte UID-50044-
@@ -370,12 +374,16 @@ definieren eine opt-in-Produktkomposition:
 - Das Produktprofil ist ausdrücklich `live`, das Backup `backup`.
   Das weiterhin gesperrte Draft-Profil `live` enthält UID 50042
   (untrusted Frontend ohne IP-Netzwerk), UID 50045 (separater vertrauenswürdiger
-  öffentlicher HTTP-Eingang), UID 50044 (Browser-/SQLite-Executor) und UID
-  50043 (unabhängiger Witness). `backup` verwendet weiterhin UID 50044.
-  Alle fünf Dienste sind explizit profiliert, besitzen read-only Rootfs,
+  öffentlicher HTTP-Eingang), UID 50044 (Browser-/Write-Executor ohne rohe
+  SQLite-Mounts), UID 50043 (unabhängiger Witness) und UID 50046
+  (unabhängiger SQLite-Owner). `backup` ist ebenfalls UID 50046,
+  aber bis zur gepaarten Witness-Wiederherstellung hart gestoppt.
+  Alle sechs Dienste sind explizit profiliert, besitzen read-only Rootfs,
   `cap_drop: ALL`, `no-new-privileges`, begrenzte PIDs und
-  `restart: no`. Sieben Volumes sind ausschließlich extern mit
+  `restart: no`. Neun Volumes sind ausschließlich extern mit
   `nocopy: true`; es wird nichts automatisch provisioniert oder initialisiert.
+  Die fünf bisherigen Image-/Entrypoint-Grenzen und der neue Storage-
+  Entrypoint sind weiterhin **Draft-only**.
 - **Unabhängige Host-CDP-Grenze für UID 50042:** Das Frontend läuft
   mit Docker-`network_mode: none` und hat weder IPv4-/IPv6-Hostroute
   noch ein veröffentlichtes TCP-Portmapping. Auch kompromittierter
@@ -421,7 +429,7 @@ definieren eine opt-in-Produktkomposition:
   Darum bleiben UID-50045-Exklusivität, sicherer OS-Cutover, sämtliche
   Prozess-/Socket-FDs sowie tatsächliche finale Produktimage-Negativtests
   gesonderte Gates. Ein fremder UID-Prozess kann den
-  Frontend-Ingress-Socket nicht öffnen. Alle fünf Entrypoints sind Draft-
+  Frontend-Ingress-Socket nicht öffnen. Alle sechs Entrypoints sind Draft-
   gesperrt. Der ältere Bridge-basierte TCP-Frontend-Pfad gehört nicht
   zum installierbaren Compose-Entwurf und ist kein Release-Nachweis.
 - **Teilnachweis:** Der real ausgeführte ausschließlich synthetische
@@ -454,12 +462,13 @@ für Caddy sowie Redis-/MongoDB-/PostgreSQL-Prozesse in Benutzung**.
 Die synthetische Container-UID 999 darf daher nicht übernommen werden!
 Die neue Konfiguration verwendet numerische UID/GID **50042** für das
 unprivilegierte Frontend, **50043** für den Witness, **50044** für den
-Browser-/SQLite-Owner und **50045** für den ausschließlich
-Loopback-UDS-basierten Ingress. Sie liegen außerhalb systemds üblichem
+Browser-/Write-Executor, **50045** für den ausschließlich
+Loopback-UDS-basierten Ingress und **50046** für den SQLite-Owner. Sie liegen außerhalb systemds üblichem
 DynamicUser-Bereich. Das ist **keine automatische UID-Exklusivität**:
-Vor einer echten Installation muss root alle vier Identitäten systemweit
+Vor einer echten Installation muss root alle fünf Identitäten systemweit
 eindeutig den nicht-interaktiven Diensten `mark-api`,
-`mark-api-witness`, `mark-api-owner` und `mark-api-ingress` zuweisen und nachweisen,
+`mark-api-witness`, `mark-api-owner`, `mark-api-ingress` und
+`mark-api-storage` zuweisen und nachweisen,
 dass keine fremden Host- oder Containerprozesse dieselbe numerische UID
 besitzen, vorher besessen haben oder schreibbare Mappings der betroffenen
 DB-, WAL- oder SHM-Inodes halten. Die Registrierung, die aktive Prozess-
@@ -493,11 +502,12 @@ auf einen ungescannten Benutzer-Python-Importpfad ausweichen.
 
 **Vor einem kontrollierten Start müssen zusätzlich** alle folgenden
 Bedingungen nachgewiesen sein: dedizierte, reservierte Host-UID/GID
-**50042/50043/50044/50045**, keine fremden Prozesse, alten DB-/WAL-/SHM-FDs
+**50042/50043/50044/50045/50046**, keine fremden Prozesse, alten DB-/WAL-/SHM-FDs
 oder writable MAP_SHARED-Inodes; kein Docker-UserNS-Remap oder
 Rootless-Daemon; eine offline attestierte vollständige SQLite-v2-DB samt
-`0600`-Sidecars unter **50044**; sieben unveränderliche externe Volumes
+`0600`-Sidecars unter **50046**; neun externe, vorab attestierte Volumes
 `mark-api-data-v1`, `mark-api-backups-v1`,
+`mark-api-media-v1`, `mark-api-storage-socket-v1`,
 `mark-api-fence-ledger-v1`, `mark-api-fence-runtime-socket-v1`,
 `mark-api-fence-operator-socket-v1`, `mark-api-executor-socket-v1`,
 `mark-api-ingress-socket-v1`.
@@ -505,7 +515,10 @@ Ledger-Verzeichnis: **50043:50043 / 0700**;
 Witness-Runtime-Socket-Verzeichnis: **50043:50044 / 2710**;
 Operator-Socket-Verzeichnis: **50043:50043 / 0700**;
 Executor-Dashboard-Socket-Verzeichnis: **50044:50042 / 2710**;
-Frontend-Ingress-Socket-Verzeichnis: **50042:50045 / 2710**.
+Frontend-Ingress-Socket-Verzeichnis: **50042:50045 / 2710**;
+Storage-RPC-Socket-Verzeichnis: **50046:50044 / 2710**;
+Media-Verzeichnis: **50044:50044 / 0700**;
+SQLite- und Backup-Verzeichnisse: **50046:50046 / 0700**.
 UID 50042 darf weder Daten/Sidecars noch Ledger- oder Operator-Socket
 öffnen. Nur ein kontrollierter **einmaliger Offline-Cutover** nach
 historischer Fence-Inventur darf das Ledger neu erzeugen; `live` nie.
@@ -523,8 +536,8 @@ Witness-Backup-/Restore-Lösung.
 `live` mit `unmediated host CDP bypass blocks product live deployment`
 und `backup` mit
 `independent witness ledger backup is not implemented`.
-**Zusätzlich** verweigern alle fünf Entrypoints (Owner, Frontend,
-Ingress, Witness und Backup) den direkten Compose-Start vor jeder sensiblen
+**Zusätzlich** verweigern alle sechs Entrypoints (Executor, Frontend,
+Ingress, Witness, SQLite-Owner und Backup) den direkten Compose-Start vor jeder sensiblen
 Operation, auch mit `--no-deps`. Das Image-Default ist
 `ENTRYPOINT ["/usr/bin/false"]`. Socket-Healthchecks verwenden echte
 AF_UNIX-Connects mit SO_PEERCRED statt nur `test -S`. Verwaiste Socket-
@@ -537,7 +550,7 @@ Das ist eine Sicherheitsblockade, keine künstliche Benutzerfreigabe.
 
 **Zusätzliche Draft-Image-Sperre:** Das gebaute Image enthält das
 root-eigene, für Laufzeit-UIDs nicht entfernbare
-`/etc/mark-api/UNATTESTED_DRAFT`. Alle zehn vorhandenen direkten
+`/etc/mark-api/UNATTESTED_DRAFT`. Alle elf vorhandenen direkten
 Python-CLI-Einstiege prüfen es vor Argumentverarbeitung, DB-Zugriff,
 CDP oder Betrieb und verweigern den Start. Ein explizites
 `docker run --entrypoint python` hebt die Sperre daher nicht auf.
@@ -591,16 +604,17 @@ geprüfte unveränderliche `sha256:...`-Image-ID und kontrolliert das
 Mutable Tags wie `latest` oder `mark-api:pr75-...` sowie unvollständige
 Image-IDs werden verweigert. Der **vorbereitete, weiterhin durch die Host-/Recovery-Sperren unerreichbare**
 Startzweig verlangt root-verwaltete numerische Host-Identitäten
-**50042 (Frontend), 50043 (Witness), 50044 (Executor), 50045 (Ingress)**
-und alle sieben bereits existierenden, geprüften Volumes. Die vorgesehene
-Reihenfolge ist Witness → Executor → netzloses Frontend → Host-Loopback-Ingress,
+**50042 (Frontend), 50043 (Witness), 50044 (Executor), 50045 (Ingress),
+50046 (SQLite-Owner)**
+und alle neun bereits existierenden, geprüften Volumes. Die vorgesehene
+Reihenfolge ist Witness → SQLite-Owner → Executor → netzloses Frontend → Host-Loopback-Ingress,
 jeweils mit numerischer UID-, Image-, Netzwerk- und
 Health-Attestation. Dies ist noch kein tatsächlich installierter Dienst.
 Heute wird keiner dieser Live-Starts ausgeführt. Selbst nach späterer
 Aktivierung ist ein grüner Socket-Healthcheck **keine** unabhängige
 Protokoll-, Storage- oder CDP-Abnahme.
 **Direktes `docker compose up/run` umgeht die Kontrollschnittstelle,
-aber alle fünf Entrypoints und der Image-Default verweigern im Draft
+aber alle sechs Entrypoints und der Image-Default verweigern im Draft
 jeden Produktstart.** Ein manipulierter
 Entrypoint oder ein privilegierter Root-/Docker-Daemon-Operator liegt
 außerhalb dieser Grenze. Direkter Compose-Aufruf ist kein freigegebener
