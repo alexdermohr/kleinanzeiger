@@ -781,7 +781,10 @@ class ContainerDeploymentTests(unittest.TestCase):
                 env={**os.environ, "MARK_UV": "/usr/bin/true"},
             )
             self.assertNotEqual(p.returncode, 0)
-            self.assertIn("expected exactly one verified wheel", p.stderr)
+            # The clean split index must advance through source attestation
+            # to the offline build-backend admission gate.
+            self.assertIn("pinned setuptools wheel is required", p.stderr)
+            self.assertNotIn("source checkout is dirty", p.stderr)
             p = subprocess.run(
                 ["/bin/sh", str(repo / "docs/mark-api-container-control.sh"),
                  "verify", "sha256:" + "a" * 64, expected],
@@ -967,22 +970,19 @@ class ContainerDeploymentTests(unittest.TestCase):
             self.assertFalse(marker.exists(),
                 "wheel builder must not process unverified source bytes")
 
-    def test_build_verified_source_reaches_wheel_builder(self) -> None:
+    def test_build_verified_source_reaches_pinned_backend_admission(self) -> None:
         with TemporaryDirectory(prefix="mark-build-verified-source-") as tmp:
             repo, expected = self._fake_git_repo(Path(tmp))
-            marker = Path(tmp) / "wheel-builder-invoked"
-            wheel = Path(tmp) / "fake-wheel-builder.sh"
-            wheel.write_text("#!/bin/sh\ntouch " + str(marker) + "\nexit 77\n")
-            wheel.chmod(0o700)
             result = subprocess.run(
                 ["/bin/sh", str(repo / "docs/mark-api-container-build.sh"),
                  expected],
                 capture_output=True, text=True,
-                env={**os.environ, "MARK_UV": str(wheel)},
+                env={**os.environ, "MARK_SETUPTOOLS_WHEEL": ""},
             )
-            self.assertEqual(result.returncode, 77, result.stderr)
-            self.assertTrue(marker.exists(),
-                "validated source should be available to wheel builder")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("pinned setuptools wheel is required", result.stderr)
+            self.assertNotIn("attested Git object content mismatch", result.stderr)
+            self.assertNotIn("source checkout is dirty", result.stderr)
 
     def test_control_rejects_forged_loose_compose_blob(self) -> None:
         with TemporaryDirectory(prefix="mark-forged-git-blob-") as tmp:

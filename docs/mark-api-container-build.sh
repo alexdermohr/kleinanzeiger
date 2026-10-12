@@ -134,7 +134,43 @@ private_git archive "$expected" -- pyproject.toml README.md src > "$temp/source.
     fail 'verified source archive unavailable'
 /usr/bin/tar -xf "$temp/source.tar" -C "$temp/source" ||
     fail 'verified source extraction failed'
-"${MARK_UV:-uv}" build --wheel --offline --out-dir "$temp/context" "$temp/source"
+# The reviewed build backend must be supplied offline, not resolved from a
+# mutable registry or inherited user-site packages. Copy the caller artifact
+# into our private directory and authenticate its bytes *after* the copy.
+setuptools_source=${MARK_SETUPTOOLS_WHEEL:-}
+[ -n "$setuptools_source" ] && [ -f "$setuptools_source" ] &&
+    [ ! -L "$setuptools_source" ] ||
+    fail 'pinned setuptools wheel is required (MARK_SETUPTOOLS_WHEEL)'
+setuptools_wheel="$temp/setuptools-80.9.0-py3-none-any.whl"
+cp -- "$setuptools_source" "$setuptools_wheel" ||
+    fail 'cannot copy pinned setuptools wheel'
+wheel_sha=$(/usr/bin/sha256sum "$setuptools_wheel") ||
+    fail 'cannot hash pinned setuptools wheel'
+wheel_sha=${wheel_sha%% *}
+[ "$wheel_sha" = "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922" ] ||
+    fail 'pinned setuptools wheel checksum mismatch'
+
+# No PYTHONPATH/user site, registry resolution, downloaded interpreter or
+# inherited Python environment may supply executable build backend code.
+unset PYTHONPATH PYTHONHOME PYTHONUSERBASE VIRTUAL_ENV
+export PYTHONNOUSERSITE=1
+build_uv=${MARK_UV:-uv}
+"$build_uv" --no-config venv --offline --no-project --no-python-downloads \
+    --python 3.12.12 "$temp/build-venv" ||
+    fail 'fixed Python 3.12.12 build environment unavailable'
+"$build_uv" --no-config pip install --offline --no-index --no-deps \
+    --python "$temp/build-venv/bin/python" "$setuptools_wheel" ||
+    fail 'verified build backend installation failed'
+"$temp/build-venv/bin/python" -I -c \
+    'import importlib.metadata as md; assert md.version("setuptools") == "80.9.0"' ||
+    fail 'build backend version unverified'
+SOURCE_DATE_EPOCH=$(private_git show -s --format=%ct "$expected") ||
+    fail 'attested commit timestamp unavailable'
+export SOURCE_DATE_EPOCH
+"$build_uv" --no-config build --wheel --offline --no-build-isolation \
+    --python "$temp/build-venv/bin/python" \
+    --out-dir "$temp/context" "$temp/source" ||
+    fail 'verified offline wheel build failed'
 set -- "$temp/context"/*.whl
 [ "$#" -eq 1 ] && [ -f "$1" ] || {
     printf '%s\n' 'mark-api: expected exactly one verified wheel' >&2

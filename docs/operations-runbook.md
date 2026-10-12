@@ -483,7 +483,15 @@ bestehende Docker-Volumes blind übernehmen/umberechtigen.
 ~~~bash
 # Im sauberen, unabhängig geprüften PR-Checkout mit exakt aktuellem HEAD:
 HEAD_SHA=$(git rev-parse HEAD)
-MARK_UV=/home/alex/.local/bin/uv sh docs/mark-api-container-build.sh "$HEAD_SHA"
+# Setuptools 80.9.0: das offizielle Wheel vorab aus unabhängig
+# geprüfter Herkunft separat beziehen. Nie aus User-Site importieren.
+# Der Build kopiert es und prüft dessen Bytes nach dem Kopieren.
+SETUPTOOLS_WHEEL=/pfad/zum/verifizierten/setuptools-80.9.0-py3-none-any.whl
+printf '%s  %s\n' \
+  062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922 \
+  "$SETUPTOOLS_WHEEL" | sha256sum --check
+MARK_SETUPTOOLS_WHEEL="$SETUPTOOLS_WHEEL" MARK_UV=/home/alex/.local/bin/uv \
+  sh docs/mark-api-container-build.sh "$HEAD_SHA"
 # Das Tag dient nur zur Identifikation der gerade gebauten lokalen Datei.
 # Für jede tatsächliche Container-Aktion gilt anschließend ausschließlich die
 # vollständige unveränderliche Image-ID; das Release-Label wird erneut geprüft.
