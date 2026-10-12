@@ -24,7 +24,11 @@ from uuid import uuid4
 REPO = Path(__file__).resolve().parents[1]
 IMAGE = os.environ.get("MARK_STORAGE_OWNER_TEST_IMAGE", "")
 IMAGE_OK = bool(re.fullmatch(r"sha256:[a-f0-9]{64}", IMAGE))
-PYTHON = "/usr/local/bin/python"
+# Synthetic upstream Python images and the actual Mark release image install
+# Python at distinct audited paths. Never silently select an arbitrary binary.
+PYTHON = os.environ.get("MARK_STORAGE_OWNER_TEST_PYTHON", "/usr/local/bin/python")
+if PYTHON not in {"/usr/local/bin/python", "/opt/mark-api/venv/bin/python"}:
+    raise ValueError("unattested Docker test interpreter path")
 
 
 def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
