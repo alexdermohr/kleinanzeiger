@@ -49,6 +49,14 @@ _KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}\Z", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _OWNER = re.compile(r"[A-Za-z0-9._:@-]{1,128}\Z", re.ASCII)
 _MAX_PEERS = 8
+_UCRED = struct.Struct("=iII")  # Linux pid_t (signed), uid_t/gid_t (unsigned).
+
+
+def _linux_ucred_uid(raw: bytes) -> int:
+    """Decode a complete Linux SO_PEERCRED payload without signed-UID aliasing."""
+    if type(raw) is not bytes or len(raw) != _UCRED.size:
+        raise StorageOwnerError("malformed Linux peer credential")
+    return _UCRED.unpack(raw)[1]
 
 
 def _validated(value: object, pattern: re.Pattern[str]) -> str:
@@ -192,11 +200,17 @@ def _sync_status_from_json(value: object) -> dict[str, object]:
     else:
         if value["state"] != latest["outcome"]:
             raise StorageOwnerError("storage sync latest state mismatch")
-        if (
-            latest["outcome"] in {"success_empty", "success_nonempty"}
-            and success != latest
-        ):
-            raise StorageOwnerError("storage latest success is not the last success")
+        if latest["outcome"] in {"success_empty", "success_nonempty"}:
+            # Latest *started* is ordered by id, but last successful is
+            # ordered by completion time. An older attempt can finish later.
+            # Reject a missing success or a supposedly newer result that
+            # could not win the store's (completed_at DESC, id DESC) order.
+            if success is None or (
+                success["id"] != latest["id"]
+                and _timestamp(success["completed_at"])
+                    <= _timestamp(latest["completed_at"])
+            ):
+                raise StorageOwnerError("storage latest success ordering invalid")
         if success is not None:
             if (
                 success["outcome"] not in {"success_empty", "success_nonempty"}
@@ -243,7 +257,7 @@ class _StorageHandler(socketserver.StreamRequestHandler):
             if not hasattr(socket, "SO_PEERCRED"):
                 raise StorageOwnerError("SO_PEERCRED unavailable")
             raw = self.request.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-            if len(raw) != 12 or struct.unpack("3i", raw)[1] != service.runtime_uid:
+            if _linux_ucred_uid(raw) != service.runtime_uid:
                 raise StorageOwnerError("runtime UID not authorized")
             frame = self.rfile.readline(_MAX_FRAME + 2)
             if (
@@ -466,8 +480,7 @@ class StorageOwnerClient:
                 peer.connect(str(self.socket_path))
                 credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
                 if (
-                    len(credentials) != 12
-                    or struct.unpack("3i", credentials)[1] != self.expected_owner_uid
+                    _linux_ucred_uid(credentials) != self.expected_owner_uid
                 ):
                     raise StorageOwnerError("independent storage peer UID is wrong")
                 peer.sendall(message)

@@ -7,17 +7,19 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
 import socket
 import sqlite3
+import struct
 import tempfile
 from threading import Event, Thread
 import unittest
 from unittest.mock import patch
 
 from mark_api.storage import SnapshotStore
+from mark_api import storage_owner as owner_module
 from mark_api.results import ReadResult
 from mark_api.storage_owner import (
     StorageOwnerClient, StorageOwnerError, StorageOwnerServer, main,
@@ -379,6 +381,102 @@ class StorageOwnerUnitTests(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertEqual(record.state, "in_progress")
         self.assertIsNotNone(record.execution_started_at)
+
+    def test_out_of_order_sync_completions_are_not_spoofed_or_rejected(self) -> None:
+        """Latest started and latest completed-success are distinct journal facts."""
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        t0, t1, t2, t3 = (
+            NOW, NOW + timedelta(minutes=1),
+            NOW + timedelta(minutes=2), NOW + timedelta(minutes=3),
+        )
+        older = store.begin_sync_attempt(source="overlap", started_at=t0)
+        newer = store.begin_sync_attempt(source="overlap", started_at=t1)
+        store.append_inventory_result(
+            ReadResult.success_empty(()), source="overlap", observed_at=t2,
+            attempt_id=newer, completed_at=t2,
+        )
+        store.append_inventory_result(
+            ReadResult.success_empty(()), source="overlap", observed_at=t3,
+            attempt_id=older, completed_at=t3,
+        )
+        actual = store.sync_status()
+        self.assertEqual(actual["latest_attempt"]["id"], newer)
+        self.assertEqual(actual["last_successful_attempt"]["id"], older)
+        service.runtime_uid = os.geteuid()  # Framing only.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.sync_status(), actual)
+        # An older success cannot win the store's completion-time ordering
+        # unless it was actually completed strictly later than the new one.
+        forged = dict(actual)
+        forged["last_successful_attempt"] = dict(
+            actual["last_successful_attempt"], completed_at=t2.isoformat(),
+        )
+        with patch.object(client, "_call", return_value={"sync_status": forged}):
+            with self.assertRaises(StorageOwnerError):
+                client.sync_status()
+
+    def test_linux_ucred_uid_is_unsigned_32_bit(self) -> None:
+        """Even though deployed UIDs are 50044/50046, Linux uid_t is unsigned."""
+        for uid in (50044, 50046, 2**31, 2**32 - 2):
+            with self.subTest(uid=uid):
+                raw = struct.pack("=iII", os.getpid(), uid, 50044)
+                self.assertEqual(owner_module._linux_ucred_uid(raw), uid)
+        for raw in (b"", bytes(11), bytes(13)):
+            with self.subTest(length=len(raw)), self.assertRaises(StorageOwnerError):
+                owner_module._linux_ucred_uid(raw)
+
+    def test_shutdown_does_not_unlink_after_four_second_inflight_rpc(self) -> None:
+        """The 4s serve_forever join is not a 4s handler drain deadline."""
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        client.claim(key="ui:slow:1", sha=SHA, owner="runtime:one", at=NOW)
+        entered, release, done = Event(), Event(), Event()
+        errors: list[BaseException] = []
+        orig = service.store.begin_write_api_request
+        def delayed(**kw: object) -> object:
+            entered.set()
+            if not release.wait(timeout=7):
+                raise AssertionError("slow RPC was not released")
+            return orig(**kw)
+        def request() -> None:
+            try:
+                client.begin(key="ui:slow:1", sha=SHA, owner="runtime:one", at=NOW)
+            except BaseException as exc:
+                errors.append(exc)
+        def close() -> None:
+            try:
+                service.stop()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+        with patch.object(service.store, "begin_write_api_request", side_effect=delayed):
+            writer = Thread(target=request, daemon=True)
+            writer.start()
+            self.assertTrue(entered.wait(3))
+            stopper = Thread(target=close, daemon=True)
+            stopper.start()
+            try:
+                self.assertFalse(done.wait(timeout=4.3),
+                                 "socket unlinked before in-flight RPC ended")
+                self.assertTrue(self.sock.exists())
+            finally:
+                release.set()
+                writer.join(9)
+                stopper.join(9)
+        self.assertFalse(writer.is_alive())
+        self.assertFalse(stopper.is_alive())
+        self.assertFalse(errors, errors)
+        self.assertTrue(done.is_set())
+        self.assertFalse(self.sock.exists())
+        persisted = SnapshotStore(self.database, create_if_missing=False).write_api_request(
+            "ui:slow:1",
+        )
+        self.assertIsNotNone(persisted.execution_started_at)
 
     def test_clearance_lookup_is_exact_and_cannot_mint_recovery_authority(self) -> None:
         service = self.make_service()
