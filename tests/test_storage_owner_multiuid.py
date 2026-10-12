@@ -101,6 +101,9 @@ assert client.append_inventory_result(
     observed_at=now,source="docker_synthetic",attempt_id=sync,
     completed_at=now)==9
 assert client.tracked_ad_ids()==tuple(str(800+i) for i in range(9))
+assert client.ad_history('808')==(ad_snapshots[-1],)
+assert client.latest_ad_snapshot('800')==ad_snapshots[0]
+assert client.ad_history('missing')==()
 assert client.sync_status()["state"]=="success_nonempty"
 request=client.claim(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
 assert request.created and isinstance(request.record,WriteApiRequestRecord)

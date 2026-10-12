@@ -58,6 +58,8 @@ _MAX_PEERS = 8
 _MAX_SYNC_BATCH = 4
 _MAX_SYNC_ITEMS = 2048
 _TRACKED_PAGE = 64
+_MAX_HISTORY_PAGE = 16
+_MAX_HISTORY_RECORDS = 200000
 _SYNC_DIGEST_SEED = hashlib.sha256(b"mark-storage-owner-sync-v1").hexdigest()
 _UCRED = struct.Struct("=iII")  # Linux pid_t (signed), uid_t/gid_t (unsigned).
 
@@ -234,12 +236,12 @@ def _sync_status_from_json(value: object) -> dict[str, object]:
 
 def _limited_text(
     value: object, *, bound: int, optional: bool = False,
-    allow_linebreaks: bool = False,
+    allow_linebreaks: bool = False, allow_empty: bool = False,
 ) -> str | None:
     if value is None and optional:
         return None
     if (
-        type(value) is not str or not value.strip()
+        type(value) is not str or (not allow_empty and not value.strip())
         or len(value) > bound or any(
             ord(ch) == 0 or (not allow_linebreaks and ord(ch) in (10, 13))
             for ch in value
@@ -287,12 +289,13 @@ def _snapshot_from_json(raw: object) -> AdSnapshot:
     return AdSnapshot(
         ad_id=_limited_text(raw["ad_id"], bound=160),
         observed_at=_timestamp(raw["observed_at"]),
-        source=_validated(raw["source"], _OWNER),
+        source=_limited_text(raw["source"], bound=1024),
         lifecycle_state=lifecycle,
-        title=_limited_text(raw["title"], bound=512, optional=True),
+        title=_limited_text(raw["title"], bound=512, optional=True,
+                            allow_empty=True),
         description=_limited_text(
             raw["description"], bound=8192, optional=True,
-            allow_linebreaks=True,
+            allow_linebreaks=True, allow_empty=True,
         ),
         metric_source=_limited_text(raw["metric_source"], bound=160, optional=True),
         **counters,
@@ -486,6 +489,43 @@ class StorageOwnerServer(
         if op == "sync_status" and set(request) == {"version", "op"}:
             return {"sync_status": self.store.sync_status()}
 
+        if op == "ad_history_page" and set(request) == {
+            "version", "op", "ad_id", "after_id", "watermark",
+        }:
+            ad_id = _limited_text(request["ad_id"], bound=160)
+            after_id, watermark = request["after_id"], request["watermark"]
+            if (
+                type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or (watermark is not None and (
+                    type(watermark) is not int or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))
+            ):
+                raise StorageOwnerError("invalid history cursor")
+            pinned, entries, more = self.store.ad_history_page(
+                ad_id, after_id=after_id, watermark=watermark,
+                limit=_MAX_HISTORY_PAGE,
+            )
+            # A single large historical description can occupy most of an
+            # IPC frame. Pack complete rows only, never truncate user data.
+            rows: list[dict[str, object]] = []
+            for rowid, snapshot in entries:
+                trial = [*rows, {"id": rowid, "snapshot": _snapshot_as_json(snapshot)}]
+                envelope = {
+                    "ok": True, "result": {
+                        "watermark": pinned, "more": False, "rows": trial,
+                    },
+                }
+                if len(_canonical_json(envelope).encode("utf-8")) + 1 > _MAX_FRAME + 1:
+                    break
+                rows = trial
+            if entries and not rows:
+                raise StorageOwnerError("stored snapshot exceeds IPC frame")
+            return {
+                "watermark": pinned,
+                "more": more or len(rows) < len(entries),
+                "rows": rows,
+            }
         if op == "tracked_ids" and set(request) == {"version", "op", "after"}:
             after = request["after"]
             if after != "":
@@ -722,6 +762,60 @@ class StorageOwnerClient:
             raise StorageOwnerError("storage sync status reply invalid")
         return _sync_status_from_json(answer["sync_status"])
 
+
+    def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
+        """Read one pinned, immutable observation history in bounded pages.
+
+        Response ordering matches SnapshotStore.ad_history: actual timestamp
+        and insertion ID. A later append is visible only to a *new* read.
+        """
+        ad_id = _limited_text(ad_id, bound=160)
+        entries: list[tuple[int, AdSnapshot]] = []
+        watermark: int | None = None
+        after_id = 0
+        while True:
+            answer = self._call(
+                "ad_history_page", ad_id=ad_id, after_id=after_id,
+                watermark=watermark,
+            )
+            if (
+                set(answer) != {"watermark", "more", "rows"}
+                or type(answer["watermark"]) is not int
+                or not 0 <= answer["watermark"] <= 2**63 - 1
+                or type(answer["more"]) is not bool
+                or type(answer["rows"]) is not list
+                or len(answer["rows"]) > _MAX_HISTORY_PAGE
+            ):
+                raise StorageOwnerError("invalid history page envelope")
+            pinned = answer["watermark"]
+            if watermark is not None and pinned != watermark:
+                raise StorageOwnerError("history watermark changed during read")
+            watermark = pinned
+            rows = answer["rows"]
+            if answer["more"] and not rows:
+                raise StorageOwnerError("history paging failed to advance")
+            for row in rows:
+                if type(row) is not dict or set(row) != {"id", "snapshot"}:
+                    raise StorageOwnerError("invalid history item schema")
+                rowid = row["id"]
+                if type(rowid) is not int or not after_id < rowid <= watermark:
+                    raise StorageOwnerError("history cursor repeated or out of range")
+                item = _snapshot_from_json(row["snapshot"])
+                if item.ad_id != ad_id:
+                    raise StorageOwnerError("history ad identity mismatch")
+                entries.append((rowid, item))
+                after_id = rowid
+                if len(entries) > _MAX_HISTORY_RECORDS:
+                    raise StorageOwnerError("history exceeds bounded query capacity")
+            if not answer["more"]:
+                ordered = sorted(
+                    entries, key=lambda pair: (pair[1].observed_at, pair[0]),
+                )
+                return tuple(snapshot for _, snapshot in ordered)
+
+    def latest_ad_snapshot(self, ad_id: str) -> AdSnapshot | None:
+        history = self.ad_history(ad_id)
+        return history[-1] if history else None
 
     def tracked_ad_ids(self) -> tuple[str, ...]:
         """Read bounded ascending pages, never a raw SQLite table or cursor."""

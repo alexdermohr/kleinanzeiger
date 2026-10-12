@@ -478,6 +478,115 @@ class StorageOwnerUnitTests(unittest.TestCase):
         )
         self.assertIsNotNone(persisted.execution_started_at)
 
+    def test_history_readback_is_bounded_and_orders_real_instants(self) -> None:
+        from mark_api.domain import AdSnapshot, LifecycleState
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        timeline = (
+            NOW + timedelta(hours=1),
+            NOW + timedelta(minutes=2),
+            NOW + timedelta(hours=1),
+            NOW + timedelta(minutes=3),
+        )
+        entries = tuple(AdSnapshot(
+            ad_id="123", observed_at=when,
+            source='mark:source-v1:{"source":"opaque origin"}',
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Record " + str(index),
+            description="Zeile Eins\n" + "x" * 7800,
+            metric_source="management+stats",
+            views=index,
+        ) for index, when in enumerate(timeline))
+        for row in entries:
+            store.append_ad_snapshot(row)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.ad_history("123"), store.ad_history("123"))
+        self.assertEqual(client.ad_history("unknown"), ())
+
+    def test_history_watermark_disallows_late_insert_but_next_read_includes(self) -> None:
+        from mark_api.domain import AdSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        for n in range(20):
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="123", observed_at=NOW, source="first", views=n,
+            ))
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        late = AdSnapshot(ad_id="123", observed_at=NOW - timedelta(minutes=1),
+                          source="late", views=99)
+        old = client._call
+        fired = False
+        def insert_between_pages(op: str, **fields: object) -> dict[str, object]:
+            nonlocal fired
+            result = old(op, **fields)
+            if op == "ad_history_page" and not fired:
+                fired = True
+                store.append_ad_snapshot(late)
+            return result
+        with patch.object(client, "_call", side_effect=insert_between_pages):
+            before = client.ad_history("123")
+        self.assertTrue(fired)
+        self.assertNotIn(late, before)
+        self.assertEqual(len(before), 20)
+        self.assertIn(late, client.ad_history("123"))
+
+    def test_history_terminal_page_cannot_overrun_reply_frame(self) -> None:
+        from mark_api.domain import AdSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        snapshot = AdSnapshot(ad_id="frame", source="owner", observed_at=NOW,
+                              title="single row")
+        store.append_ad_snapshot(snapshot)
+        raw_record = owner_module._snapshot_as_json(snapshot)
+        optimistic = {
+            "ok": True,
+            "result": {
+                "watermark": 1, "more": True,
+                "rows": [{"id": 1, "snapshot": raw_record}],
+            },
+        }
+        # false is one byte larger than true. A final-page response must be
+        # accounted for with its actual/worst-case byte length.
+        tiny_limit = len(owner_module._canonical_json(optimistic).encode("utf-8"))
+        with patch.object(owner_module, "_MAX_FRAME", tiny_limit):
+            with self.assertRaises(StorageOwnerError):
+                service.dispatch({
+                    "version": 1, "op": "ad_history_page", "ad_id": "frame",
+                    "after_id": 0, "watermark": None,
+                })
+
+    def test_history_readback_preserves_valid_empty_optional_text(self) -> None:
+        from mark_api.domain import AdSnapshot
+        service = self.make_service()
+        stored = AdSnapshot(ad_id="empty", source="owner", observed_at=NOW,
+                            title="", description="")
+        SnapshotStore(self.database, create_if_missing=False).append_ad_snapshot(stored)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.ad_history("empty"), (stored,))
+
+    def test_history_pagination_rejects_forged_sql_and_cursor_envelope(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        for fields in (
+            {"ad_id": "123", "after_id": 0, "watermark": None, "sql": "DELETE FROM write_api_requests"},
+            {"ad_id": "123", "after_id": True, "watermark": None},
+            {"ad_id": "123", "after_id": -1, "watermark": None},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(StorageOwnerError):
+                service.dispatch({"version": 1, "op": "ad_history_page", **fields})
+        with patch.object(client, "_call", return_value={
+            "watermark": 10, "more": True, "rows": [],
+        }), self.assertRaises(StorageOwnerError):
+            client.ad_history("123")
+
     def test_typed_inventory_journal_preserves_started_recovery_fences(self) -> None:
         from mark_api.domain import AdSnapshot, LifecycleState
         service = self.make_service()

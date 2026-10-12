@@ -2188,6 +2188,63 @@ class SnapshotStore:
                 )
         return len(snapshots) + len(absent_ids)
 
+    def ad_history_page(
+        self, ad_id: str, *, after_id: int, watermark: int | None,
+        limit: int = 16,
+    ) -> tuple[int, tuple[tuple[int, AdSnapshot], ...], bool]:
+        """Read one bounded append-only observation page in insertion order.
+
+        The high-water mark is pinned on the first page in the same SQLite
+        read transaction. Later appends cannot change this logical snapshot;
+        the consumer sorts the pinned rows by (actual instant, insertion ID).
+        No caller-supplied SQL, table name or unlimited LIMIT is accepted.
+        """
+        if not isinstance(ad_id, str) or not ad_id.strip():
+            raise ValueError("ad history ID is invalid")
+        if (type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or type(limit) is not int or not 1 <= limit <= 32
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))):
+            raise ValueError("ad history page cursor is invalid")
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            if watermark is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS bound "
+                    "FROM ad_snapshots WHERE ad_id = ?", (ad_id,),
+                ).fetchone()
+                assert row is not None
+                watermark = int(row["bound"])
+            rows = conn.execute(
+                """SELECT id, ad_id, observed_at, source, lifecycle_state,
+                          title, description, views, watch_count, reply_count,
+                          metric_source
+                   FROM ad_snapshots
+                   WHERE ad_id = ? AND id > ? AND id <= ?
+                   ORDER BY id ASC LIMIT ?""",
+                (ad_id, after_id, watermark, limit + 1),
+            ).fetchall()
+        more = len(rows) > limit
+        page = tuple(
+            (
+                int(row["id"]),
+                AdSnapshot(
+                    ad_id=row["ad_id"],
+                    observed_at=datetime.fromisoformat(row["observed_at"]),
+                    source=row["source"], metric_source=row["metric_source"],
+                    lifecycle_state=LifecycleState(row["lifecycle_state"]),
+                    title=row["title"], description=row["description"],
+                    views=row["views"], watch_count=row["watch_count"],
+                    reply_count=row["reply_count"],
+                ),
+            )
+            for row in rows[:limit]
+        )
+        return watermark, page, more
+
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
         """Return observations by actual instant, then insertion ID for ties."""
 

@@ -138,6 +138,56 @@ class SnapshotStoreTests(unittest.TestCase):
                 "AND name='write_api_requests'"
             ).fetchone())
 
+    def test_history_pages_exclude_later_append_and_preserve_snapshot_identity(self) -> None:
+        store = self.make_store()
+        ordered_times = (
+            NOW + timedelta(minutes=5), NOW + timedelta(minutes=1),
+            NOW + timedelta(minutes=5), NOW + timedelta(minutes=2),
+        )
+        values = tuple(
+            AdSnapshot(
+                ad_id="same", source="mark:source-v1:literal-{payload}",
+                observed_at=when, lifecycle_state=LifecycleState.ACTIVE,
+                title="Row " + str(index), metric_source="management+stats",
+                views=index,
+            ) for index, when in enumerate(ordered_times)
+        )
+        for value in values:
+            store.append_ad_snapshot(value)
+        watermark, page, more = store.ad_history_page(
+            "same", after_id=0, watermark=None, limit=2,
+        )
+        self.assertTrue(more)
+        self.assertEqual(tuple(row[1] for row in page), values[:2])
+        late = AdSnapshot(ad_id="same", source="late", observed_at=NOW,
+                          lifecycle_state=LifecycleState.ACTIVE)
+        store.append_ad_snapshot(late)
+        next_watermark, second, more = store.ad_history_page(
+            "same", after_id=page[-1][0], watermark=watermark, limit=2,
+        )
+        self.assertEqual(next_watermark, watermark)
+        self.assertFalse(more)
+        self.assertEqual(tuple(row[1] for row in second), values[2:])
+        self.assertEqual(
+            {row[0] for row in (*page, *second)},
+            {1, 2, 3, 4},
+        )
+        self.assertEqual(len(store.ad_history("same")), 5)
+
+    def test_history_page_rejects_invalid_cursors_and_never_creates_data(self) -> None:
+        store = self.make_store()
+        for kwargs in (
+            {"after_id": -1, "watermark": None, "limit": 2},
+            {"after_id": True, "watermark": None, "limit": 2},
+            {"after_id": 0, "watermark": -1, "limit": 2},
+            {"after_id": 0, "watermark": True, "limit": 2},
+            {"after_id": 0, "watermark": None, "limit": 0},
+            {"after_id": 0, "watermark": None, "limit": 33},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                store.ad_history_page("unknown", **kwargs)
+        self.assertEqual(store.tracked_ad_ids(), ())
+
     def test_metric_source_column_preserves_raw_source_and_disallows_blank_origin(self) -> None:
         store = self.make_store()
         value = AdSnapshot(
