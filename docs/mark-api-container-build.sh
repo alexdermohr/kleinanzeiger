@@ -150,18 +150,33 @@ wheel_sha=${wheel_sha%% *}
 [ "$wheel_sha" = "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922" ] ||
     fail 'pinned setuptools wheel checksum mismatch'
 
-# No PYTHONPATH/user site, registry resolution, downloaded interpreter or
-# inherited Python environment may supply executable build backend code.
-unset PYTHONPATH PYTHONHOME PYTHONUSERBASE VIRTUAL_ENV
-export PYTHONNOUSERSITE=1
+# Permit only the build-controlled process environment. Inherited UV_* flags
+# (notably UV_VENV_SEED and UV_FIND_LINKS), DIST_EXTRA_CONFIG, user HOME and
+# setuptools distutils settings are not trusted execution inputs. A pinned
+# version and --no-config alone do not suppress environment-variable options.
 build_uv=${MARK_UV:-uv}
-"$build_uv" --no-config venv --offline --no-project --no-python-downloads \
+build_home=$(/usr/bin/getent passwd "$(/usr/bin/id -u)" | /usr/bin/cut -d: -f6) ||
+    fail 'trusted operator account unavailable'
+case "$build_home" in /*) ;; *) fail 'trusted operator account home invalid' ;; esac
+mkdir -m 0700 "$temp/build-home" "$temp/uv-cache" ||
+    fail 'private build environment unavailable'
+uv_cli() {
+    /usr/bin/env -i PATH=/usr/bin:/bin HOME="$temp/build-home" \
+        XDG_CONFIG_HOME="$temp/build-home" XDG_CACHE_HOME="$temp/uv-cache" \
+        UV_CACHE_DIR="$temp/uv-cache" UV_LINK_MODE=copy \
+        UV_PYTHON_INSTALL_DIR="$build_home/.local/share/uv/python" \
+        PYTHONNOUSERSITE=1 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH-}" \
+        "$build_uv" --no-config "$@"
+}
+uv_cli venv --offline --no-project --no-python-downloads \
     --python 3.12.12 "$temp/build-venv" ||
     fail 'fixed Python 3.12.12 build environment unavailable'
-"$build_uv" --no-config pip install --offline --no-index --no-deps \
+uv_cli pip install --offline --no-index --no-deps \
     --python "$temp/build-venv/bin/python" "$setuptools_wheel" ||
     fail 'verified build backend installation failed'
-"$temp/build-venv/bin/python" -I -c \
+/usr/bin/env -i PATH=/usr/bin:/bin HOME="$temp/build-home" \
+    XDG_CONFIG_HOME="$temp/build-home" PYTHONNOUSERSITE=1 \
+    "$temp/build-venv/bin/python" -I -c \
     'import importlib.metadata as md; assert md.version("setuptools") == "80.9.0"' ||
     fail 'build backend version unverified'
 # Git's history-walking 'show' would follow the commit's unneeded
@@ -182,7 +197,7 @@ SOURCE_DATE_EPOCH=$(printf '%s\n' "$verified_commit" | /usr/bin/awk '
     END { if (!found) exit 1 }
 ') || fail 'attested commit timestamp unavailable'
 export SOURCE_DATE_EPOCH
-"$build_uv" --no-config build --wheel --offline --no-build-isolation \
+uv_cli build --wheel --offline --no-build-isolation \
     --python "$temp/build-venv/bin/python" \
     --out-dir "$temp/context" "$temp/source" ||
     fail 'verified offline wheel build failed'

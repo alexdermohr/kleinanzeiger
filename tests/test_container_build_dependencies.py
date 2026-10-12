@@ -127,5 +127,67 @@ class OfflineBuildDependencyTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), expected)
 
 
+
+    def test_untrusted_env_never_reaches_uv_build_backend(self) -> None:
+        import hashlib
+        temp, root, _ = self._fixture()
+        with temp:
+            # Dummy wheel bytes are attested only in a throwaway Git fixture.
+            wheel = Path(temp.name) / "setuptools-80.9.0-py3-none-any.whl"
+            wheel.write_bytes(b"synthetic wheel; never install or execute")
+            script = root / "docs" / BUILDER.name
+            before = script.read_text()
+            actual = "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922"
+            self.assertEqual(before.count(actual), 1)
+            script.write_text(before.replace(actual, hashlib.sha256(wheel.read_bytes()).hexdigest()))
+            subprocess.run(["/usr/bin/git", "-C", str(root), "add", "docs"], check=True)
+            subprocess.run([
+                "/usr/bin/git", "-C", str(root),
+                "-c", "user.name=Release fixture",
+                "-c", "user.email=release-fixture@example.invalid",
+                "commit", "-qm", "attest dummy input",
+            ], check=True)
+            sha = subprocess.check_output(
+                ["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD"],
+                text=True,
+            ).strip()
+            marker = Path(temp.name) / "uv-command-environment"
+            fake = Path(temp.name) / "fake-uv"
+            fake.write_text(
+                "#!/bin/sh\n"
+                + "printf '%s\\n' "
+                + '"${UV_VENV_SEED-unset}" "${UV_FIND_LINKS-unset}" '
+                + '"${DIST_EXTRA_CONFIG-unset}" "${HOME-unset}" '
+                + '"${PYTHONPATH-unset}" > '
+                + "'" + str(marker) + "'\n"
+                + "exit 77\n"
+            )
+            fake.chmod(0o700)
+            poison_home = Path(temp.name) / "poison-home"
+            poison_home.mkdir()
+            (poison_home / ".pydistutils.cfg").write_text(
+                "[install_lib]\nbuild_dir = /tmp/poison\n"
+            )
+            env = {
+                **os.environ, "HOME": str(poison_home),
+                "UV_VENV_SEED": "true",
+                "UV_FIND_LINKS": str(poison_home),
+                "DIST_EXTRA_CONFIG": str(poison_home / ".pydistutils.cfg"),
+                "PYTHONPATH": str(poison_home), "MARK_UV": str(fake),
+            }
+            env.pop("DOCKER_HOST", None)
+            env.pop("DOCKER_CONTEXT", None)
+            run = subprocess.run(
+                ["/bin/sh", str(script), sha, str(wheel)],
+                cwd=root, env=env, capture_output=True, text=True,
+                timeout=45,
+            )
+            self.assertNotEqual(run.returncode, 0)
+            self.assertTrue(marker.exists(), run.stderr)
+            values = marker.read_text().splitlines()
+            self.assertEqual(values[:3], ["unset", "unset", "unset"])
+            self.assertNotEqual(values[3], str(poison_home))
+            self.assertEqual(values[4], "unset")
+
 if __name__ == "__main__":
     unittest.main()
