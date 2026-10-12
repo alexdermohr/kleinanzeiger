@@ -183,11 +183,66 @@ class OfflineBuildDependencyTests(unittest.TestCase):
                 timeout=45,
             )
             self.assertNotEqual(run.returncode, 0)
-            self.assertTrue(marker.exists(), run.stderr)
-            values = marker.read_text().splitlines()
-            self.assertEqual(values[:3], ["unset", "unset", "unset"])
-            self.assertNotEqual(values[3], str(poison_home))
-            self.assertEqual(values[4], "unset")
+            # The executable is attacker-controlled, not a legitimate uv.
+            # Even an env -i wrapper must never invoke it.
+            self.assertFalse(marker.exists(), run.stderr)
+            self.assertIn("untrusted uv binary override", run.stderr)
+
+
+    def test_caller_path_and_tar_checkpoint_never_execute(self) -> None:
+        temp, root, sha = self._fixture()
+        with temp:
+            tools = Path(temp.name) / "untrusted-path"
+            tools.mkdir()
+            marker = Path(temp.name) / "executed-dirname"
+            # A harmless, functional command shim proves preflight execution
+            # without changing Git objects or any non-test files.
+            executable = tools / "dirname"
+            executable.write_text(
+                "#!/bin/sh\n"
+                + "/usr/bin/touch '" + str(marker) + "'\n"
+                + "exec /usr/bin/dirname \"$@\"\n"
+            )
+            executable.chmod(0o700)
+            env = {
+                **os.environ,
+                "PATH": str(tools) + ":/usr/bin:/bin",
+                "TAR_OPTIONS": "--checkpoint=1 --checkpoint-action=echo=UNTRUSTED_TAR_MARKER",
+                "MARK_SETUPTOOLS_WHEEL": "",
+            }
+            env.pop("DOCKER_HOST", None)
+            env.pop("DOCKER_CONTEXT", None)
+            result = subprocess.run(
+                ["/bin/sh", str(root / "docs" / BUILDER.name), sha, ""],
+                cwd=root, env=env, capture_output=True, text=True,
+                timeout=45,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(marker.exists(), "caller PATH executed before attestation")
+            self.assertNotIn("UNTRUSTED_TAR_MARKER", result.stderr)
+            self.assertIn("pinned setuptools wheel is required", result.stderr)
+
+
+    def test_caller_tar_options_never_execute_even_with_safe_path(self) -> None:
+        temp, root, sha = self._fixture()
+        with temp:
+            env = {
+                **os.environ,
+                "PATH": "/usr/bin:/bin",
+                "TAR_OPTIONS": "--checkpoint=1 --checkpoint-action=echo=UNTRUSTED_TAR_MARKER",
+                "MARK_SETUPTOOLS_WHEEL": "",
+            }
+            env.pop("DOCKER_HOST", None)
+            env.pop("DOCKER_CONTEXT", None)
+            result = subprocess.run(
+                ["/bin/sh", str(root / "docs" / BUILDER.name), sha, ""],
+                cwd=root, env=env, capture_output=True, text=True,
+                timeout=45,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("UNTRUSTED_TAR_MARKER", result.stderr)
+            # Do not mistake a failed Git object check for tar hardening.
+            self.assertIn("pinned setuptools wheel is required", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,13 @@
 #!/bin/sh
 # Build a container solely from one clean, exact Git commit.
 set -eu
+# Do not resolve even the first dirname/mktemp/cp through caller PATH.
+# GNU tar honors TAR_OPTIONS (including executable checkpoint actions).
+PATH=/usr/bin:/bin
+export PATH
+# This cannot undo code already loaded before the shell entered this file;
+# use a trusted/sanitized operator launch as documented in the runbook.
+unset TAR_OPTIONS SOURCE_DATE_EPOCH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG
 # Never resolve a reviewed SHA through replacement objects or legacy grafts.
 # Local Git config inherited from caller must not redirect the object database.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
@@ -157,11 +164,25 @@ wheel_sha=${wheel_sha%% *}
 build_home=$(/usr/bin/getent passwd "$(/usr/bin/id -u)" | /usr/bin/cut -d: -f6) ||
     fail 'trusted operator account unavailable'
 case "$build_home" in /*) ;; *) fail 'trusted operator account home invalid' ;; esac
-# Resolve the operator's uv binary before the process environment is cleared;
-# do not reintroduce the user-controlled command-search PATH to the backend.
-build_uv=${MARK_UV:-"$build_home/.local/bin/uv"}
-mkdir -m 0700 "$temp/build-home" "$temp/uv-cache" ||
+# A caller-supplied MARK_UV executable is arbitrary code, even behind env -i.
+# Accept only the fixed operator toolchain path, then freeze and hash its bytes
+# inside this create-only private staging directory before first execution.
+trusted_uv="$build_home/.local/bin/uv"
+case ${MARK_UV-} in ""|"$trusted_uv") ;; *)
+    fail 'untrusted uv binary override' ;;
+esac
+[ -f "$trusted_uv" ] && [ ! -L "$trusted_uv" ] && [ -x "$trusted_uv" ] ||
+    fail 'trusted uv executable unavailable'
+mkdir -m 0700 "$temp/build-home" "$temp/uv-cache" "$temp/toolchain" ||
     fail 'private build environment unavailable'
+build_uv="$temp/toolchain/uv"
+/usr/bin/install -m 0500 "$trusted_uv" "$build_uv" ||
+    fail 'trusted uv executable copy failed'
+build_uv_sha=$(/usr/bin/sha256sum "$build_uv") ||
+    fail 'trusted uv executable hash unavailable'
+build_uv_sha=${build_uv_sha%% *}
+[ "$build_uv_sha" = "534bcd0cf0a0d00a0977363abfc93cd1300914d03e16a77d8d5133a3fd99dacb" ] ||
+    fail 'trusted uv executable checksum mismatch'
 uv_cli() {
     /usr/bin/env -i PATH=/usr/bin:/bin HOME="$temp/build-home" \
         XDG_CONFIG_HOME="$temp/build-home" XDG_CACHE_HOME="$temp/uv-cache" \

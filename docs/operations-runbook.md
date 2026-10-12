@@ -481,23 +481,33 @@ bestehende Docker-Volumes blind übernehmen/umberechtigen.
 **Image-Bau (kein Host-Deployment):**
 
 ~~~bash
-# Im sauberen, unabhängig geprüften PR-Checkout mit exakt aktuellem HEAD:
-HEAD_SHA=$(git rev-parse HEAD)
+# Im sauberen, unabhängig geprüften PR-Checkout mit exakt aktuellem HEAD.
+# Aufrufende Shell und Loader müssen bereits vertrauenswürdig sein:
+# LD_PRELOAD/LD_AUDIT wirken vor Eintritt ins Skript und auch vor env -i.
+# Nur aus einer unabhängig kontrollierten Operator-Startumgebung ausführen.
+HEAD_SHA=$(/usr/bin/git rev-parse HEAD)
 # Setuptools 80.9.0: das offizielle Wheel vorab aus unabhängig
 # geprüfter Herkunft separat beziehen. Nie aus User-Site importieren.
 # Der Build kopiert es und prüft dessen Bytes nach dem Kopieren.
 SETUPTOOLS_WHEEL=/pfad/zum/verifizierten/setuptools-80.9.0-py3-none-any.whl
 printf '%s  %s\n' \
   062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922 \
-  "$SETUPTOOLS_WHEEL" | sha256sum --check
-MARK_UV=/home/alex/.local/bin/uv \
-  sh docs/mark-api-container-build.sh "$HEAD_SHA" "$SETUPTOOLS_WHEEL"
+  "$SETUPTOOLS_WHEEL" | /usr/bin/sha256sum --check
+# Lokale, aktuell freigegebene uv-Toolchain (Versionswechsel neu attestieren).
+printf '%s  %s\n' \
+  534bcd0cf0a0d00a0977363abfc93cd1300914d03e16a77d8d5133a3fd99dacb \
+  /home/alex/.local/bin/uv | /usr/bin/sha256sum --check
+# MARK_UV darf keinen fremden Pfad wählen; das Skript kopiert und prüft
+# die Buildtool-Bytes nochmals nach dem Kopieren in ein privates Verzeichnis.
+/usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+  MARK_UV=/home/alex/.local/bin/uv \
+  /bin/sh docs/mark-api-container-build.sh "$HEAD_SHA" "$SETUPTOOLS_WHEEL"
 # Das Tag dient nur zur Identifikation der gerade gebauten lokalen Datei.
 # Für jede tatsächliche Container-Aktion gilt anschließend ausschließlich die
 # vollständige unveränderliche Image-ID; das Release-Label wird erneut geprüft.
-IMAGE_ID=$(docker --host unix:///var/run/docker.sock image inspect \
+IMAGE_ID=$(/usr/bin/docker --host unix:///var/run/docker.sock image inspect \
   --format '{{.Id}}' "mark-api:pr75-${HEAD_SHA%????????????????????????????}")
-sh docs/mark-api-container-control.sh verify "$IMAGE_ID" "$HEAD_SHA"
+/bin/sh docs/mark-api-container-control.sh verify "$IMAGE_ID" "$HEAD_SHA"
 ~~~
 
 Das 40-stellige Commit-SHA ist vor dem Bau aus GitHub unabhängig zu prüfen.

@@ -969,6 +969,13 @@ class ContainerDeploymentTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(marker.exists(),
                 "wheel builder must not process unverified source bytes")
+            self.assertTrue(
+                "source checkout is dirty" in result.stderr
+                or "attested Git object content mismatch" in result.stderr,
+                result.stderr,
+            )
+            self.assertNotIn("pinned setuptools wheel is required", result.stderr)
+            self.assertNotIn("untrusted uv binary override", result.stderr)
 
     def test_build_verified_source_reaches_pinned_backend_admission(self) -> None:
         with TemporaryDirectory(prefix="mark-build-verified-source-") as tmp:
