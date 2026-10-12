@@ -1086,6 +1086,39 @@ class StorageOwnerUnitTests(unittest.TestCase):
         }), self.assertRaises(StorageOwnerError):
             client.reaction_history("rx")
 
+    def test_mark_service_refresh_inventory_keeps_raw_observation_provenance(self) -> None:
+        from unittest.mock import Mock
+        from mark_api.application import MarkService
+        from mark_api.domain import AdSnapshot, LifecycleState
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        original = AdSnapshot(
+            ad_id="management-observed", observed_at=NOW,
+            source="management+stats", metric_source="management+stats",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Original title", views=42,
+        )
+        owner_reader = Mock()
+        owner_reader.read_ads.return_value = ReadResult.success_nonempty((original,))
+        application = MarkService(
+            owner_reader=owner_reader, management_reader=Mock(),
+            delete_confirmation_reader=Mock(), reaction_reader=Mock(),
+            state_writer=Mock(), delete_writer=Mock(), content_writer=Mock(),
+            store=client, clock=lambda: NOW,
+        )
+        self.assertEqual(application.refresh_inventory(),
+                         ReadResult.success_nonempty((original,)))
+        store = SnapshotStore(self.database, create_if_missing=False)
+        self.assertEqual(store.ad_history(original.ad_id), (original,))
+        self.assertEqual(client.ad_history(original.ad_id), (original,))
+        self.assertEqual(client.sync_status()["state"], "success_nonempty")
+        self.assertEqual(
+            client.sync_status()["last_successful_attempt"]["source"],
+            "mark-service-owner-inventory",
+        )
+
     def test_typed_inventory_journal_preserves_started_recovery_fences(self) -> None:
         from mark_api.domain import AdSnapshot, LifecycleState
         service = self.make_service()
@@ -1255,7 +1288,7 @@ class StorageOwnerUnitTests(unittest.TestCase):
             dict(record, views=True),
             dict(record, metric_source=42),
             dict(record, sql="DROP TABLE write_recovery_clearances"),
-            dict(record, source="other"),
+            dict(record, source=42),  # a raw origin still must be a bounded string
         ):
             with self.subTest(forged=forged), self.assertRaises(StorageOwnerError):
                 service.dispatch({"version": 1, "op": "sync_stage",

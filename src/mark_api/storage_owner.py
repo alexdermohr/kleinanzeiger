@@ -911,8 +911,9 @@ class StorageOwnerServer(
                 ):
                     raise StorageOwnerError("inventory stage cursor or capacity mismatch")
                 snapshots = [_snapshot_from_json(row) for row in raw_snapshots]
-                if any(item.source != stage.source for item in snapshots):
-                    raise StorageOwnerError("inventory source does not match attempt")
+                # The attempt source attests only the sync journal identity;
+                # each snapshot retains its original observation provenance.
+                # Neither field grants write-completion or recovery authority.
                 existing = {item.ad_id for item in stage.snapshots}
                 added = [item.ad_id for item in snapshots]
                 if len(set(added)) != len(added) or any(key in existing for key in added):

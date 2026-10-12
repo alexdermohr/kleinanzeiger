@@ -187,7 +187,8 @@ print('REAL_UID_EMAIL_ANALYTICS_QUERY_GREEN',flush=True)
 
 sync=client.begin_sync_attempt(source="docker_synthetic",started_at=now)
 ad_snapshots=tuple(
-    AdSnapshot(ad_id=str(800+index),source="docker_synthetic",
+    AdSnapshot(ad_id=str(800+index),
+               source=("management-observed" if index==8 else "docker_synthetic"),
                observed_at=now,lifecycle_state=LifecycleState.ACTIVE,
                title="Synthetic",description="Line one\\n"+"x"*7800,
                views=index)
@@ -201,6 +202,8 @@ assert client.ad_history('808')==(ad_snapshots[-1],)
 assert client.latest_ad_snapshot('800')==ad_snapshots[0]
 assert client.ad_history('missing')==()
 assert client.sync_status()["state"]=="success_nonempty"
+assert client.ad_history('808')[0].source=="management-observed"
+assert client.sync_status()["last_successful_attempt"]["source"]=="docker_synthetic"
 request=client.claim(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
 assert request.created and isinstance(request.record,WriteApiRequestRecord)
 started=client.begin(key='uid:test:1',sha='a'*64,owner='runtime:one',at=now)
