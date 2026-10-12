@@ -23,6 +23,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import socket
 import socketserver
@@ -31,7 +32,7 @@ import stat
 import struct
 import sys
 from threading import BoundedSemaphore, Event, RLock, Thread
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import quote
 
 from .container_draft import container_draft_denied
@@ -58,10 +59,13 @@ _OWNER = re.compile(r"[A-Za-z0-9._:@-]{1,128}\Z", re.ASCII)
 _MAX_PEERS = 8
 _MAX_SYNC_BATCH = 4
 _MAX_SYNC_ITEMS = 2048
+_MAX_INBOX_BATCH = 4
+_MAX_INBOX_ITEMS = 2048
 _TRACKED_PAGE = 64
 _MAX_HISTORY_PAGE = 16
 _MAX_HISTORY_RECORDS = 200000
 _SYNC_DIGEST_SEED = hashlib.sha256(b"mark-storage-owner-sync-v1").hexdigest()
+_INBOX_DIGEST_SEED = hashlib.sha256(b"mark-storage-owner-inbox-v1").hexdigest()
 _UCRED = struct.Struct("=iII")  # Linux pid_t (signed), uid_t/gid_t (unsigned).
 
 
@@ -402,6 +406,13 @@ def _sync_digest(previous: str, snapshots: list[dict[str, object]]) -> str:
 
 
 @dataclass(slots=True)
+class _InboxStage:
+    identity: str
+    events: list[InboundMessageEvent] = field(default_factory=list)
+    digest: str = _INBOX_DIGEST_SEED
+
+
+@dataclass(slots=True)
 class _SyncStage:
     attempt: int
     source: str
@@ -536,6 +547,8 @@ class StorageOwnerServer(
         # in-progress journal but NEVER publishes an incomplete success.
         self._sync_lock = RLock()
         self._active_sync: _SyncStage | None = None
+        self._inbox_lock = RLock()
+        self._inbox_stage: _InboxStage | None = None
         self._serving: Thread | None = None
         super().__init__(str(socket_path), _StorageHandler)
         try:
@@ -581,6 +594,80 @@ class StorageOwnerServer(
         if op == "sync_status" and set(request) == {"version", "op"}:
             return {"sync_status": self.store.sync_status()}
 
+        if op == "inbound_begin" and set(request) == {
+            "version", "op", "id",
+        }:
+            identity = _validated(request["id"], _KEY)
+            with self._inbox_lock:
+                if self._inbox_stage is not None:
+                    raise StorageOwnerError("another inbox batch is unresolved")
+                self._inbox_stage = _InboxStage(identity=identity)
+                return {
+                    "id": identity, "accepted": 0, "digest": _INBOX_DIGEST_SEED,
+                }
+        if op == "inbound_stage_status" and set(request) == {
+            "version", "op", "id",
+        }:
+            identity = _validated(request["id"], _KEY)
+            with self._inbox_lock:
+                stage = self._inbox_stage
+                if stage is None or stage.identity != identity:
+                    raise StorageOwnerError("inbox stage not active")
+                return {"accepted": len(stage.events), "digest": stage.digest}
+        if op == "inbound_stage" and set(request) == {
+            "version", "op", "id", "offset", "events",
+        }:
+            identity = _validated(request["id"], _KEY)
+            offset, raw_events = request["offset"], request["events"]
+            if (
+                type(offset) is not int or offset < 0
+                or type(raw_events) is not list
+                or not 1 <= len(raw_events) <= _MAX_INBOX_BATCH
+            ):
+                raise StorageOwnerError("inbox batch cursor invalid")
+            with self._inbox_lock:
+                stage = self._inbox_stage
+                if stage is None or stage.identity != identity:
+                    raise StorageOwnerError("inbox stage not active")
+                if offset != len(stage.events) or (
+                    offset + len(raw_events) > _MAX_INBOX_ITEMS
+                ):
+                    raise StorageOwnerError("inbox batch offset/capacity mismatch")
+                parsed = [_inbound_from_json(row) for row in raw_events]
+                prior = {row.provider_message_id for row in stage.events}
+                fresh = [row.provider_message_id for row in parsed]
+                if len(set(fresh)) != len(fresh) or any(
+                    item in prior for item in fresh
+                ):
+                    raise StorageOwnerError("duplicate provider evidence within batch")
+                canonical = [_inbound_as_json(event) for event in parsed]
+                stage.digest = _sync_digest(stage.digest, canonical)
+                stage.events.extend(parsed)
+                return {"accepted": len(stage.events), "digest": stage.digest}
+        if op == "inbound_finish" and set(request) == {
+            "version", "op", "id", "digest", "expected_count",
+        }:
+            identity = _validated(request["id"], _KEY)
+            digest = _validated(request["digest"], _SHA)
+            count = request["expected_count"]
+            if type(count) is not int or not 0 <= count <= _MAX_INBOX_ITEMS:
+                raise StorageOwnerError("inbox finish count invalid")
+            with self._inbox_lock:
+                stage = self._inbox_stage
+                if stage is None or stage.identity != identity:
+                    raise StorageOwnerError("inbox finish stage not active")
+                if len(stage.events) != count or stage.digest != digest:
+                    raise StorageOwnerError("inbox finish manifest mismatch")
+                # All provider IDs commit in one SQLite BEGIN IMMEDIATE.
+                # SIGKILL before finish loses only uncommitted staged RAM data.
+                inserted = self.store.append_inbound_message_events(
+                    tuple(stage.events)
+                )
+                self._inbox_stage = None
+                return {
+                    "id": identity, "received": count,
+                    "inserted": inserted, "digest": digest,
+                }
         if op == "inbound_message_page" and set(request) == {
             "version", "op", "ad_id", "after_id", "watermark",
         }:
@@ -1008,6 +1095,83 @@ class StorageOwnerClient:
             raise StorageOwnerError("storage sync status reply invalid")
         return _sync_status_from_json(answer["sync_status"])
 
+
+    def append_inbound_message_events(
+        self, events: Iterable[InboundMessageEvent],
+    ) -> int:
+        """Atomic bounded mailbox import without hidden transport retries.
+
+        One ambiguous finish ACK is UNKNOWN. Inspect all exact provider IDs
+        in the independently persisted history rather than blindly retrying.
+        """
+        unique: dict[str, InboundMessageEvent] = {}
+        for seen_count, item in enumerate(events, start=1):
+            if seen_count > _MAX_INBOX_ITEMS:
+                raise StorageOwnerError("inbox input exceeds bounded work budget")
+            canonical = _inbound_from_json(_inbound_as_json(item))
+            previous = unique.get(canonical.provider_message_id)
+            if previous is not None and previous != canonical:
+                raise StorageOwnerError("conflicting input provider evidence")
+            unique[canonical.provider_message_id] = canonical
+            if len(unique) > _MAX_INBOX_ITEMS:
+                raise StorageOwnerError("inbox import exceeds bounded capacity")
+        if not unique:
+            return 0
+        identity = secrets.token_hex(16)
+        payloads = [_inbound_as_json(row) for row in unique.values()]
+        # Prevalidate that each legitimate event can fit a complete frame.
+        # Otherwise we must not start a server-side stage we cannot complete.
+        for item in payloads:
+            frame = _canonical_json({
+                "version": _VERSION, "op": "inbound_stage",
+                "id": identity, "offset": _MAX_INBOX_ITEMS,
+                "events": [item],
+            }).encode("utf-8")
+            if len(frame) + 1 > _MAX_FRAME + 1:
+                raise StorageOwnerError("inbox event exceeds IPC frame")
+        begin = self._call("inbound_begin", id=identity)
+        if begin != {
+            "id": identity, "accepted": 0, "digest": _INBOX_DIGEST_SEED,
+        }:
+            raise StorageOwnerError("inbox stage admission unbound")
+        offset = 0
+        digest = _INBOX_DIGEST_SEED
+        while offset < len(payloads):
+            batch: list[dict[str, object]] = []
+            for item in payloads[offset:offset + _MAX_INBOX_BATCH]:
+                trial = [*batch, item]
+                frame = _canonical_json({
+                    "version": _VERSION, "op": "inbound_stage",
+                    "id": identity, "offset": offset, "events": trial,
+                }).encode("utf-8")
+                if len(frame) + 1 > _MAX_FRAME + 1:
+                    break
+                batch = trial
+            if not batch:
+                raise StorageOwnerError("inbox stage frame cannot advance")
+            digest = _sync_digest(digest, batch)
+            ack = self._call(
+                "inbound_stage", id=identity, offset=offset, events=batch,
+            )
+            if ack != {
+                "accepted": offset + len(batch), "digest": digest,
+            }:
+                raise StorageOwnerError("inbox stage digest ACK invalid")
+            offset += len(batch)
+        finish = self._call(
+            "inbound_finish", id=identity, digest=digest,
+            expected_count=len(payloads),
+        )
+        if (
+            set(finish) != {"id", "received", "inserted", "digest"}
+            or finish["id"] != identity or finish["digest"] != digest
+            or type(finish["received"]) is not int
+            or finish["received"] != len(payloads)
+            or type(finish["inserted"]) is not int
+            or not 0 <= finish["inserted"] <= len(payloads)
+        ):
+            raise StorageOwnerError("inbox commit receipt does not match manifest")
+        return finish["inserted"]
 
     def inbound_message_history(self, ad_id: str) -> tuple[InboundMessageEvent, ...]:
         """One pinned inbox generation ordered by real time, insertion ID."""

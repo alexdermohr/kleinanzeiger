@@ -160,6 +160,18 @@ classification=client.merge_classification(
 assert classification.source=='manual-uid-50044'
 assert classification.city=='Berlin' and classification.title_type=='clear_text'
 assert client.latest_classification('777')==classification
+batch=tuple(InboundMessageEvent(
+    ad_id='779', conversation_id=f'new-buyer-{i % 3}',
+    provider_message_id=f'uid-staged-email-{i:03}',
+    observed_at=now+timedelta(minutes=i), source='email-uid50044',
+) for i in range(19))
+assert client.append_inbound_message_events(batch)==19
+assert client.inbound_message_history('779')==batch
+assert client.inbound_message_counts('779')==(3,19)
+assert client.append_inbound_message_events(batch)==0
+assert client.inbound_message_ad_ids()==('777','779')
+assert len(client.inbound_message_history('779'))==19
+print('REAL_UID_ATOMIC_INBOX_IMPORT_GREEN',flush=True)
 print('REAL_UID_TYPED_CLASSIFICATION_MERGE_GREEN',flush=True)
 print('REAL_UID_EMAIL_ANALYTICS_QUERY_GREEN',flush=True)
 

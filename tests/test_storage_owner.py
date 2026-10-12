@@ -688,6 +688,147 @@ class StorageOwnerUnitTests(unittest.TestCase):
         self.assertEqual(client.inbound_message_counts("long-valid"), (22, 22))
         self.assertEqual(client.inbound_message_history("missing"), ())
 
+    def test_atomic_inbox_import_preserves_idempotent_duplicate_evidence(self) -> None:
+        from mark_api.domain import InboundMessageEvent
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        events = tuple(InboundMessageEvent(
+            ad_id="email-only", conversation_id=f"buyer-{i % 4}",
+            provider_message_id=f"email-evidence-{i:03}",
+            observed_at=NOW + timedelta(minutes=20 - i),
+            source="kleinanzeigen-email-import",
+        ) for i in range(19))
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.append_inbound_message_events((*events, events[0])), 19)
+        self.assertEqual(client.inbound_message_history("email-only"),
+                         store.inbound_message_history("email-only"))
+        self.assertEqual(client.inbound_message_counts("email-only"), (4, 19))
+        # A separate explicitly authorized repeat is idempotent by provider ID.
+        self.assertEqual(client.append_inbound_message_events(events), 0)
+        self.assertEqual(len(store.inbound_message_history("email-only")), 19)
+
+    def test_inbox_staged_events_never_persist_before_final_digest(self) -> None:
+        from mark_api.domain import InboundMessageEvent
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        event = InboundMessageEvent(
+            ad_id="email-only", conversation_id="buyer",
+            provider_message_id="evidence-1", observed_at=NOW,
+            source="email-synthetic",
+        )
+        begin = service.dispatch({
+            "version": 1, "op": "inbound_begin", "id": "stage-one",
+        })
+        self.assertEqual(begin["accepted"], 0)
+        started = service.dispatch({
+            "version": 1, "op": "inbound_stage",
+            "id": "stage-one", "offset": 0,
+            "events": [owner_module._inbound_as_json(event)],
+        })
+        self.assertEqual(started["accepted"], 1)
+        self.assertEqual(
+            service.dispatch({
+                "version": 1, "op": "inbound_stage_status", "id": "stage-one",
+            }), started,
+        )
+        self.assertEqual(store.inbound_message_history("email-only"), ())
+        for extra in (
+            {"sql": "DELETE FROM write_recovery_clearances"},
+            {"unexpected_method": "execute_sql"},
+        ):
+            with self.assertRaises(StorageOwnerError):
+                service.dispatch({
+                    "version": 1, "op": "inbound_finish",
+                    "id": "stage-one", "digest": started["digest"],
+                    "expected_count": 1, **extra,
+                })
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch({
+                "version": 1, "op": "inbound_finish",
+                "id": "stage-one", "digest": "0" * 64,
+                "expected_count": 1,
+            })
+        self.assertEqual(store.inbound_message_history("email-only"), ())
+        service.stop()
+        self.assertEqual(store.inbound_message_history("email-only"), ())
+
+    def test_inbox_finish_conflict_rolls_back_entire_batch(self) -> None:
+        from mark_api.domain import InboundMessageEvent
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        existing = InboundMessageEvent(
+            ad_id="email-only", conversation_id="buyer-a",
+            provider_message_id="provider-1", observed_at=NOW,
+            source="email-original",
+        )
+        store.append_inbound_message_events((existing,))
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        fresh = InboundMessageEvent(
+            ad_id="email-only", conversation_id="buyer-b",
+            provider_message_id="provider-2", observed_at=NOW,
+            source="email-new",
+        )
+        collision = InboundMessageEvent(
+            ad_id="email-only", conversation_id="wrong",
+            provider_message_id="provider-1", observed_at=NOW,
+            source="email-forged",
+        )
+        with self.assertRaises(StorageOwnerError):
+            client.append_inbound_message_events((fresh, collision))
+        self.assertEqual(store.inbound_message_history("email-only"), (existing,))
+        self.assertEqual(store.inbound_message_counts("email-only"), (1, 1))
+
+    def test_inbox_input_generator_has_total_work_bound_before_any_write(self) -> None:
+        from mark_api.domain import InboundMessageEvent
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        event = InboundMessageEvent(
+            ad_id="email-only", conversation_id="buyer",
+            provider_message_id="one-duplicate", observed_at=NOW,
+            source="email-synthetic",
+        )
+        too_many = (
+            event for _ in range(owner_module._MAX_INBOX_ITEMS + 1)
+        )
+        with self.assertRaises(StorageOwnerError):
+            client.append_inbound_message_events(too_many)
+        self.assertEqual(store.inbound_message_history("email-only"), ())
+
+    def test_inbox_finish_lost_ack_never_blindly_retries(self) -> None:
+        from mark_api.domain import InboundMessageEvent
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        event = InboundMessageEvent(
+            ad_id="email-only", conversation_id="buyer",
+            provider_message_id="ack-lost", observed_at=NOW,
+            source="kleinanzeigen-email",
+        )
+        original = client._call
+        finishes = 0
+        def lost_finish_ack(op: str, **fields: object) -> dict[str, object]:
+            nonlocal finishes
+            response = original(op, **fields)
+            if op == "inbound_finish":
+                finishes += 1
+                raise StorageOwnerError("synthetic lost acknowledgement")
+            return response
+        with patch.object(client, "_call", side_effect=lost_finish_ack):
+            with self.assertRaises(StorageOwnerError):
+                client.append_inbound_message_events((event,))
+        self.assertEqual(finishes, 1)
+        self.assertEqual(store.inbound_message_history("email-only"), (event,))
+        self.assertEqual(store.inbound_message_counts("email-only"), (1, 1))
+
     def test_classification_merge_rpc_preserves_prior_dimensions(self) -> None:
         from mark_api.domain import AdSnapshot
         service = self.make_service()
