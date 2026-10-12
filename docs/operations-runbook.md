@@ -222,15 +222,32 @@ SQLite-Transaktion vor einer neuen Journalanlage, ob **irgendein** älterer
 Quelle oder einem neueren abgeschlossenen Versuch. Nach Prozessverlust,
 verlorenem Begin-/Stage-ACK oder verlorener In-Memory-Stage kann ein neuer
 Inventar-Read deshalb nicht stillschweigend die ungeklärte Historie
-übergehen. Die Sperre ist dauerhaft und erfordert eine kontrollierte
-Offline-Untersuchung; der Executor besitzt weiterhin keine RPC zum
-Löschen, Abbrechen oder Umklassifizieren alter Versuche. Der gewöhnliche
+übergehen. Ein noch aktiver Owner darf denselben Versuch regulär
+abschließen; aus dem bloßen Zustand `in_progress` folgt **kein**
+dauerhafter Absturz. Bleibt ein Versuch nach Generationenwechsel oder
+verlorenem ACK unklar, sperrt er weitere Starts bis zur kontrollierten
+Reconciliation. Der Executor besitzt weiterhin keine RPC zum Löschen,
+Abbrechen oder Umklassifizieren alter Versuche. Der gewöhnliche
 `sync_status` zeigt nur den letzten gestarteten und letzten erfolgreichen
 Versuch und ist **kein** Beweis, dass keine älteren offenen Versuche
-existieren. Für die Untersuchung ist die vollständige Owner-Journaltabelle
-nur in einer separat abgesicherten Offline-Umgebung auszuwerten.
-Weder die Existenz eines neuen Browsers noch ein verlorener ACK beweisen
-eine vorherige erfolgreiche oder fehlgeschlagene Synchronisierung.
+existieren. Der neue **ausschließlich lesende** Owner-RPC
+`sync_recovery_status` und die Dashboard-Route `GET /api/sync/recovery`
+zeigen dagegen die Anzahl sämtlicher noch `in_progress`-Einträge und
+die gebundene Identität des ältesten offenen Versuchs, selbst wenn ein
+späterer Versuch erfolgreich war. Das Dashboard übernimmt diesen Status
+aus `/api/summary` und warnt sichtbar, ohne die alten Beobachtungen als
+gültige Freigabe oder Plattformnachweis zu deklarieren.
+
+~~~bash
+curl --fail http://127.0.0.1:8765/api/sync/recovery
+~~~
+
+Dies ist eine **zeitpunktbezogene Leseansicht**, keine Quittierung und
+kein Ersatz für kontrollierte Offline-Reconciliation. Für die vollständige
+Untersuchung ist die gesamte Owner-Journaltabelle nur in einer separat
+abgesicherten Offline-Umgebung auszuwerten. Weder die Existenz eines neuen
+Browsers noch ein verlorener ACK beweisen eine vorherige erfolgreiche
+oder fehlgeschlagene Synchronisierung.
 
 **Strikter Status: weiterhin Draft, keine Produktfreigabe.** Die geplante
 sechste Compose-Instanz UID 50046 besitzt exklusiv das SQLite-Main-/WAL-/

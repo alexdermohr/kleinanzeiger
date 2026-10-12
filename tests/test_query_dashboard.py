@@ -40,6 +40,7 @@ from mark_api.query import (
     email_reaction_view_to_dict,
     summary_to_dict,
 )
+from mark_api.results import ReadResult
 from mark_api.storage import SnapshotStore
 
 
@@ -1376,6 +1377,30 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
         self.assertEqual(failed["latest_attempt"]["error_kind"], "transport_error")
         self.assertIsNone(failed["last_successful_attempt"])
 
+    def test_sync_recovery_endpoint_and_summary_show_old_unknown_after_success(self) -> None:
+        self.assertEqual(json.loads(self.get("/api/sync/recovery")[2]), {
+            "unresolved_count": 0, "oldest_unresolved_attempt": None,
+        })
+        older = self.store.begin_sync_attempt(source="older-owner", started_at=T0)
+        newer = self.store.begin_sync_attempt(source="newer-owner", started_at=T1)
+        self.store.append_inventory_result(
+            ReadResult.success_empty(()), source="newer-owner", observed_at=T1,
+            attempt_id=newer, completed_at=T1,
+        )
+        _, _, latest_body = self.get("/api/sync/status")
+        self.assertEqual(json.loads(latest_body)["state"], "success_empty")
+        _, _, recovery_body = self.get("/api/sync/recovery")
+        recovery = json.loads(recovery_body)
+        self.assertEqual(recovery["unresolved_count"], 1)
+        self.assertEqual(recovery["oldest_unresolved_attempt"]["id"], older)
+        _, _, summary_body = self.get("/api/summary")
+        summary = json.loads(summary_body)
+        self.assertEqual(summary["sync_recovery"], recovery)
+        self.assertEqual(summary["sync_status"]["state"], "success_empty")
+        _, _, script = self.get("/dashboard.js")
+        self.assertIn("noch nicht abgeschlossene Sync-Versuche", script.decode("utf-8"))
+        self.assertIn("summary.sync_recovery", script.decode("utf-8"))
+
     def test_readyz_detects_existing_recovery_table_missing_required_columns(self) -> None:
         self.assertEqual(json.loads(self.get("/readyz")[2]), {"status": "ready"})
         with sqlite3.connect(self.store.path) as connection:
@@ -1409,6 +1434,7 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
             "/readyz",
             "/api/summary",
             "/api/sync/status",
+            "/api/sync/recovery",
             "/api/ads",
             "/api/analytics/groups?dimension=city&metric=views",
             "/api/ads/1/history",
@@ -1444,6 +1470,32 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
         shutil.copyfile(backup, self.store.path)
         self.assertEqual(json.loads(self.get("/readyz")[2]), {"status": "ready"})
         self.assertEqual(json.loads(self.get("/api/summary")[2]), expected)
+
+    def test_hidden_old_open_sync_corruption_fails_http_readiness(self) -> None:
+        old = self.store.begin_sync_attempt(source="previous-owner", started_at=T0)
+        newer = self.store.begin_sync_attempt(source="newer-owner", started_at=T1)
+        self.store.append_inventory_result(
+            ReadResult.success_empty(()), source="newer-owner",
+            observed_at=T1, attempt_id=newer, completed_at=T1,
+        )
+        self.assertEqual(json.loads(self.get("/api/sync/status")[2])["state"],
+                         "success_empty")
+        with sqlite3.connect(self.store.path) as connection:
+            connection.execute(
+                "UPDATE sync_attempts SET started_at=? WHERE id=?",
+                ("private-invalid-old-owner-timestamp", old),
+            )
+        self.assertEqual(json.loads(self.get("/healthz")[2]), {"status": "ok"})
+        for endpoint in (
+            "/readyz", "/api/sync/status", "/api/sync/recovery", "/api/summary",
+        ):
+            with self.subTest(endpoint=endpoint), self.assertRaises(HTTPError) as caught:
+                urlopen(self.base + endpoint, timeout=2)
+            response = caught.exception
+            self.assertEqual(response.code, 503)
+            data = response.read().decode("utf-8")
+            self.assertNotIn("private-invalid-old-owner-timestamp", data)
+            self.assertNotIn(str(self.store.path), data)
 
     def test_corrupted_sync_journal_returns_sanitized_unavailable_http(self) -> None:
         attempt = self.store.begin_sync_attempt(source="owner", started_at=T1)
@@ -1825,6 +1877,61 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
         )
         self.assertIn("grid-column: 2;", css)
         self.assertIn("overflow-wrap: anywhere;", css)
+
+    def test_sync_recovery_js_distinguishes_running_from_abandoned(self) -> None:
+        _, _, js_body = self.get("/dashboard.js")
+        definitions, marker, _ = js_body.decode("utf-8").partition(
+            'byId("reload").addEventListener',
+        )
+        self.assertTrue(marker)
+        harness = definitions + r"""
+const assert = require("node:assert/strict");
+const status = {textContent: ""};
+globalThis.document = {
+  getElementById(id) {
+    assert.equal(id, "sync-status");
+    return status;
+  },
+};
+const now = "2026-10-12T12:00:00+00:00";
+const active = {
+  state: "in_progress",
+  latest_attempt: {id: 4, source: "owner", started_at: now},
+  last_successful_attempt: null,
+};
+renderSyncStatus(active, {
+  unresolved_count: 1, oldest_unresolved_attempt: {id: 4},
+});
+assert.match(status.textContent, /möglicherweise noch aktiv oder unterbrochen/);
+assert.doesNotMatch(status.textContent, /dauerhaft offen/);
+const recentSuccess = {
+  state: "success_empty",
+  latest_attempt: {id: 5, source: "owner", started_at: now,
+                   completed_at: now, snapshot_count: 0},
+  last_successful_attempt: {id: 5, source: "owner", completed_at: now},
+};
+renderSyncStatus(recentSuccess, {
+  unresolved_count: 1, oldest_unresolved_attempt: {id: 4},
+});
+assert.match(status.textContent, /noch nicht abgeschlossene Sync-Versuche/);
+assert.match(status.textContent, /ältester Versuch #4/);
+renderSyncStatus(recentSuccess, {
+  unresolved_count: 0, oldest_unresolved_attempt: null,
+});
+assert.match(status.textContent, /Zum Abfragezeitpunkt keine offenen Sync-Versuche/);
+renderSyncStatus(recentSuccess, {
+  unresolved_count: true, oldest_unresolved_attempt: null,
+});
+assert.match(status.textContent, /konnten nicht geprüft werden/);
+"""
+        completed = subprocess.run(
+            ["node"], input=harness, text=True,
+            capture_output=True, check=False,
+        )
+        self.assertEqual(
+            completed.returncode, 0,
+            msg=f"node stderr:\n{completed.stderr}\nnode stdout:\n{completed.stdout}",
+        )
 
     def test_bar_chart_runtime_filters_values_and_preserves_semantics(self) -> None:
         _, _, js_body = self.get("/dashboard.js")

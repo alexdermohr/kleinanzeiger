@@ -1451,6 +1451,80 @@ class StorageOwnerUnitTests(unittest.TestCase):
                     idempotency_key="ui:clearance:1", request_sha256=SHA,
                 )
 
+    def test_recovery_summary_exposes_older_open_owner_attempt(self) -> None:
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        older = store.begin_sync_attempt(source="previous-owner", started_at=NOW)
+        newer = store.begin_sync_attempt(
+            source="later-owner", started_at=NOW + timedelta(seconds=1),
+        )
+        store.append_inventory_result(
+            ReadResult.success_empty(()), source="later-owner",
+            observed_at=NOW + timedelta(seconds=2),
+            attempt_id=newer, completed_at=NOW + timedelta(seconds=2),
+        )
+        service.runtime_uid = os.geteuid()  # Same-UID framing only.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        self.assertEqual(client.sync_status()["state"], "success_empty")
+        report = client.sync_recovery_status()
+        self.assertEqual(report["unresolved_count"], 1)
+        self.assertEqual(report["oldest_unresolved_attempt"]["id"], older)
+        self.assertEqual(
+            report["oldest_unresolved_attempt"]["source"], "previous-owner",
+        )
+        self.assertEqual(report, store.sync_recovery_status())
+        with self.assertRaises(StorageOwnerError):
+            service.dispatch({
+                "version": 1, "op": "sync_recovery_status",
+                "sql": "DELETE FROM sync_attempts",
+            })
+        store.fail_sync_attempt(
+            older, source="previous-owner", error_kind="persistence_error",
+            completed_at=NOW + timedelta(seconds=3),
+        )
+        self.assertEqual(client.sync_recovery_status(), {
+            "unresolved_count": 0, "oldest_unresolved_attempt": None,
+        })
+
+    def test_recovery_summary_client_rejects_forged_counts_and_oldest(self) -> None:
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        record = {
+            "id": 1, "source": "previous-owner", "started_at": NOW.isoformat(),
+            "completed_at": None, "outcome": "in_progress",
+            "error_kind": None, "snapshot_count": None,
+        }
+        invalid = (
+            {},
+            {"unresolved_count": 1, "oldest_unresolved_attempt": None},
+            {"unresolved_count": 0, "oldest_unresolved_attempt": record},
+            {"unresolved_count": True, "oldest_unresolved_attempt": record},
+            {"unresolved_count": 1.0, "oldest_unresolved_attempt": record},
+            {"unresolved_count": -1, "oldest_unresolved_attempt": record},
+            {"unresolved_count": 2**80, "oldest_unresolved_attempt": record},
+            {"unresolved_count": 1, "oldest_unresolved_attempt": {
+                **record, "id": True,
+            }},
+            {"unresolved_count": 1, "oldest_unresolved_attempt": {
+                **record, "outcome": "success_empty",
+                "completed_at": NOW.isoformat(), "snapshot_count": 0,
+            }},
+            {"unresolved_count": 1, "oldest_unresolved_attempt": {
+                **record, "source": "",
+            }},
+            {"unresolved_count": 1, "oldest_unresolved_attempt": {
+                **record, "sql": "DELETE FROM write_api_requests",
+            }},
+            {"unresolved_count": 0, "oldest_unresolved_attempt": None,
+             "cleared": True},
+        )
+        for forged in invalid:
+            with self.subTest(forged=forged), patch.object(
+                client, "_call", return_value={"sync_recovery": forged},
+            ) as rpc, self.assertRaises(StorageOwnerError):
+                client.sync_recovery_status()
+            rpc.assert_called_once_with("sync_recovery_status")
+
     def test_sync_status_exact_readback_without_recovery_mutation(self) -> None:
         # The broker must expose the real sync journal, not infer success
         # from last-known ad snapshots or synthesize a successful attempt.

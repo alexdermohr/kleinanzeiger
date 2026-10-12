@@ -708,7 +708,7 @@ function ageDescription(observedAt) {
   return "vor " + days + (days === 1 ? " Tag" : " Tagen");
 }
 
-function renderSyncStatus(sync) {
+function renderSyncStatus(sync, recovery) {
   const view = byId("sync-status");
   if (!sync || typeof sync !== "object") {
     view.textContent = "Sync-Status nicht verfügbar; Datenfrische unbekannt.";
@@ -745,7 +745,21 @@ function renderSyncStatus(sync) {
       + ageDescription(successful.completed_at) + "), Quelle: "
       + successful.source + "."
     : " Keine bestätigte Bestandsgrundlage aus diesem Journal.";
-  view.textContent = headline + baseline
+  let recoveryNote = " Offene ältere Sync-Versuche konnten nicht geprüft werden.";
+  if (recovery && typeof recovery === "object") {
+    const open = recovery.unresolved_count;
+    if (Number.isSafeInteger(open) && open === 0) {
+      recoveryNote = " Zum Abfragezeitpunkt keine offenen Sync-Versuche.";
+    } else if (Number.isSafeInteger(open) && open > 0) {
+      const oldest = recovery.oldest_unresolved_attempt;
+      const oldestId = oldest && Number.isSafeInteger(oldest.id)
+        ? " (ältester Versuch #" + oldest.id + ")" : "";
+      recoveryNote = " Achtung: " + open + " noch nicht abgeschlossene Sync-Versuche"
+        + oldestId + "; möglicherweise noch aktiv oder unterbrochen."
+        + " Unbekannte Ergebnisse dürfen nicht automatisch wiederholt werden.";
+    }
+  }
+  view.textContent = headline + baseline + recoveryNote
     + " Das Alter einzelner Zähler ist separat ausgewiesen.";
 }
 
@@ -1766,7 +1780,7 @@ async function load() {
     await refreshPendingWrites();
     renderWriteAvailability();
     renderAds(ads);
-    renderSyncStatus(summary.sync_status);
+    renderSyncStatus(summary.sync_status, summary.sync_recovery);
     renderAnalyticsContract(contract);
 
     const metricSelect = byId("metric-select");
@@ -2418,9 +2432,13 @@ def _handler_factory(
             if path == "/api/sync/status":
                 self._send_json(200, store.sync_status())
                 return
+            if path == "/api/sync/recovery":
+                self._send_json(200, store.sync_recovery_status())
+                return
             if path == "/api/summary":
                 payload = summary_to_dict(query.summary())
                 payload["sync_status"] = store.sync_status()
+                payload["sync_recovery"] = store.sync_recovery_status()
                 self._send_json(200, payload)
                 return
             if path == "/api/ads":

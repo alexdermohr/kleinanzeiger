@@ -114,6 +114,9 @@ assert client.sync_status()=={
     'latest_attempt':None,
     'last_successful_attempt':None,
 }
+assert client.sync_recovery_status()=={
+    'unresolved_count':0,'oldest_unresolved_attempt':None,
+}
 assert not client.has_write_recovery_clearance(
     idempotency_key='uid:test:1', request_sha256='a'*64)
 assert client.read_request('uid:test:1') is None
@@ -251,7 +254,10 @@ try:
     assert get_api('/readyz')=={'status':'ready'}
     ads=get_api('/api/ads')
     assert len(ads)==9 and ads[0]['ad_id']=='800',ads
-    assert get_api('/api/summary')['tracked_ads']==9
+    summary=get_api('/api/summary')
+    assert summary['tracked_ads']==9
+    assert summary['sync_recovery']['unresolved_count']==0
+    assert get_api('/api/sync/recovery')==summary['sync_recovery']
     assert get_api('/api/dashboard/config')=={'write_ui_available':False}
     rankings=get_api('/api/analytics/ads?metric=views')
     assert len(rankings)==9 and rankings[0]['ad_id']=='808',rankings
@@ -343,6 +349,9 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
     assert json.loads(received)['ok'] is True
 assert client.sync_stage_status(incomplete)['accepted']==1
 assert client.sync_status()['state']=='in_progress'
+pending_recovery=client.sync_recovery_status()
+assert pending_recovery['unresolved_count']==1
+assert pending_recovery['oldest_unresolved_attempt']['id']==incomplete
 print('STORAGE_TYPED_FENCE_AND_LOST_ACK_GREEN',flush=True)
 """
 
@@ -408,6 +417,45 @@ print('SIGKILL_PERSISTED_OPEN_FENCES_AND_NO_CLEARANCE',flush=True)
 """
 
 
+_STALE_SOCKET_OPERATOR_CLEANUP = r"""
+from pathlib import Path
+import os,stat
+socket=Path('/rpc/owner.sock')
+identity=socket.lstat()
+assert os.geteuid()==50046
+assert identity.st_uid==50046 and identity.st_gid==50044
+assert stat.S_ISSOCK(identity.st_mode)
+socket.unlink()
+print('TRUSTED_OWNER_CLEANED_ONLY_STALE_TEST_SOCKET',flush=True)
+"""
+
+_OWNER_RESTART_RECOVERY = r"""
+from datetime import datetime,timezone
+from pathlib import Path
+from mark_api.storage_owner import StorageOwnerClient,StorageOwnerError
+client=StorageOwnerClient(Path('/rpc/owner.sock'),expected_owner_uid=50046)
+assert client.ready()
+recovery=client.sync_recovery_status()
+assert recovery['unresolved_count']==1,recovery
+old=recovery['oldest_unresolved_attempt']
+assert old['source']=='docker_synthetic' and old['outcome']=='in_progress'
+assert client.sync_status()['state']=='in_progress'
+try:
+    client.begin_sync_attempt(
+        source='new-generation',started_at=datetime(2026,10,12,19,0,tzinfo=timezone.utc),
+    )
+except StorageOwnerError:
+    pass
+else:
+    raise AssertionError('new generation bypassed durable sync quarantine')
+assert client.sync_recovery_status()==recovery
+assert not client.has_write_recovery_clearance(
+    idempotency_key='uid:test:1',request_sha256='a'*64,
+)
+print('REAL_UID_RESTART_PRESERVES_DURABLE_SYNC_QUARANTINE',flush=True)
+"""
+
+
 _WRONG_UID = r"""
 from pathlib import Path
 from mark_api.storage_owner import StorageOwnerClient,StorageOwnerError
@@ -444,6 +492,9 @@ probe=subprocess.run(
 assert probe.returncode==2 and "unattested container draft" in probe.stderr
 client=StorageOwnerClient(Path("/rpc/owner.sock"),expected_owner_uid=50046)
 assert client.ready()
+assert client.sync_recovery_status()=={
+    'unresolved_count':0,'oldest_unresolved_attempt':None,
+}
 now=datetime(2026,10,12,19,0,tzinfo=timezone.utc)
 snapshot=AdSnapshot(
     ad_id="910",source="installed-wheel-synthetic-reader",
@@ -633,6 +684,37 @@ class RealStorageOwnerTests(unittest.TestCase):
                 )
                 self.assertNotEqual(bad.returncode, 0)
                 self.assertIn("refusing to replace storage RPC socket", bad.stderr)
+
+                # This is an isolated, uniquely named synthetic RPC volume.
+                # Only after docker rm -f confirmed the old service ended may
+                # UID50046 remove its stale socket; UID50044 cannot do this.
+                cleaned = _docker(
+                    "run", "--rm", "--network", "none", "--read-only",
+                    "--user", "50046:50046", "--cap-drop", "ALL",
+                    "--security-opt", "no-new-privileges:true",
+                    *code, *rpc, IMAGE, "-B", "-c", _STALE_SOCKET_OPERATOR_CLEANUP,
+                )
+                self.assertIn(
+                    "TRUSTED_OWNER_CLEANED_ONLY_STALE_TEST_SOCKET", cleaned.stdout,
+                )
+                _docker(
+                    "run", "-d", "--name", service, "--network", "none",
+                    "--user", "50046:50046", "--read-only",
+                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                    *code, *store, *rpc, IMAGE, "-B", "-c", _SERVICE,
+                )
+                container_started = True
+                self._ready(service, "PRIVATE_STORAGE_OWNER_READY")
+                recovered = _docker(
+                    "run", "--rm", "--network", "none", "--read-only",
+                    "--user", "50044:50044", "--cap-drop", "ALL",
+                    "--security-opt", "no-new-privileges:true",
+                    *code, *rpc, IMAGE, "-B", "-c", _OWNER_RESTART_RECOVERY,
+                )
+                self.assertIn(
+                    "REAL_UID_RESTART_PRESERVES_DURABLE_SYNC_QUARANTINE",
+                    recovered.stdout,
+                )
             finally:
                 if container_started:
                     result = _docker("rm", "-f", service, allow_failure=True)

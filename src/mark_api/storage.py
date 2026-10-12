@@ -461,6 +461,10 @@ class SnapshotStore:
                     "SELECT * FROM sync_attempts WHERE outcome IN "
                     "('success_empty','success_nonempty') "
                     "ORDER BY completed_at DESC, id DESC LIMIT 1",
+                    # An older unfinished attempt may survive a newer
+                    # success and must be as decodable as the displayed row.
+                    "SELECT * FROM sync_attempts WHERE outcome='in_progress' "
+                    "ORDER BY id ASC LIMIT 1",
                 ):
                     record = connection.execute(statement).fetchone()
                     if record is not None:
@@ -2167,6 +2171,14 @@ class SnapshotStore:
                 "WHERE outcome IN ('success_empty', 'success_nonempty') "
                 "ORDER BY completed_at DESC, id DESC LIMIT 1"
             ).fetchone()
+            oldest_open = connection.execute(
+                "SELECT * FROM sync_attempts WHERE outcome='in_progress' "
+                "ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+        # Do not claim a newer success if an older outstanding recovery row
+        # cannot be decoded. This is the same consistent read transaction.
+        if oldest_open is not None:
+            _sync_attempt_from_row(oldest_open)
         latest_item = _sync_attempt_from_row(latest) if latest is not None else None
         success_item = (
             _sync_attempt_from_row(successful) if successful is not None else None
@@ -2175,6 +2187,33 @@ class SnapshotStore:
             "state": latest_item.outcome if latest_item is not None else "never_attempted",
             "latest_attempt": _sync_attempt_to_dict(latest_item),
             "last_successful_attempt": _sync_attempt_to_dict(success_item),
+        }
+
+    def sync_recovery_status(self) -> dict[str, object]:
+        """Read every unresolved sync generation, not only the latest start.
+
+        A completed newer attempt cannot conceal an older in_progress journal
+        row. Count and oldest record come from one SQLite read transaction.
+        This method never settles, replays, authorizes or clears an attempt.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            count_row = connection.execute(
+                "SELECT COUNT(*) AS unresolved_count FROM sync_attempts "
+                "WHERE outcome='in_progress'"
+            ).fetchone()
+            oldest = connection.execute(
+                "SELECT * FROM sync_attempts WHERE outcome='in_progress' "
+                "ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+        count = count_row["unresolved_count"] if count_row is not None else None
+        if type(count) is not int or count < 0 or (count == 0) != (oldest is None):
+            raise sqlite3.DatabaseError("unresolved sync journal summary invalid")
+        return {
+            "unresolved_count": count,
+            "oldest_unresolved_attempt": _sync_attempt_to_dict(
+                _sync_attempt_from_row(oldest) if oldest is not None else None
+            ),
         }
 
     def append_inventory_result(

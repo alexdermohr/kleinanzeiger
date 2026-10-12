@@ -288,6 +288,30 @@ def _sync_status_from_json(value: object) -> dict[str, object]:
 
 
 
+def _sync_recovery_from_json(value: object) -> dict[str, object]:
+    """Reject forged unresolved counts and falsely terminal oldest records."""
+    if type(value) is not dict or set(value) != {
+        "unresolved_count", "oldest_unresolved_attempt",
+    }:
+        raise StorageOwnerError("storage recovery summary schema invalid")
+    count = value["unresolved_count"]
+    oldest = value["oldest_unresolved_attempt"]
+    if (
+        type(count) is not int or not 0 <= count <= 2**63 - 1
+        or (count == 0) != (oldest is None)
+    ):
+        raise StorageOwnerError("storage unresolved sync count invalid")
+    if oldest is not None:
+        # Reuse exact SyncAttempt validation. This is read-only evidence,
+        # never an executor power to terminate old journal entries.
+        _sync_status_from_json({
+            "state": "in_progress",
+            "latest_attempt": oldest,
+            "last_successful_attempt": None,
+        })
+    return value
+
+
 def _limited_text(
     value: object, *, bound: int, optional: bool = False,
     allow_linebreaks: bool = False, allow_empty: bool = False,
@@ -642,6 +666,8 @@ class StorageOwnerServer(
             return {"ready": self.store.is_ready()}
         if op == "sync_status" and set(request) == {"version", "op"}:
             return {"sync_status": self.store.sync_status()}
+        if op == "sync_recovery_status" and set(request) == {"version", "op"}:
+            return {"sync_recovery": self.store.sync_recovery_status()}
 
         if op == "inbound_begin" and set(request) == {
             "version", "op", "id",
@@ -1210,6 +1236,11 @@ class StorageOwnerClient:
             raise StorageOwnerError("storage sync status reply invalid")
         return _sync_status_from_json(answer["sync_status"])
 
+    def sync_recovery_status(self) -> dict[str, object]:
+        answer = self._call("sync_recovery_status")
+        if set(answer) != {"sync_recovery"}:
+            raise StorageOwnerError("storage recovery reply invalid")
+        return _sync_recovery_from_json(answer["sync_recovery"])
 
     def append_inbound_message_events(
         self, events: Iterable[InboundMessageEvent],

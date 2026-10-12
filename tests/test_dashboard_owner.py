@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 from mark_api.dashboard import DashboardWriteProxy, create_server, main as dashboard_main
 from mark_api.domain import AdClassification, AdSnapshot, LifecycleState, ReactionSnapshot
+from mark_api.results import ReadResult
 from mark_api.storage import SnapshotStore
 from mark_api.storage_owner import StorageOwnerClient, StorageOwnerServer
 
@@ -107,6 +108,29 @@ class DashboardOwnerSocketTests(unittest.TestCase):
                             data=b'{"title":"unsafe"}', method="PATCH"), timeout=3)
         self.assertEqual(no_write.exception.code, 405)
 
+    def test_dashboard_reports_old_open_sync_even_after_newer_success(self) -> None:
+        old = self.owner.store.begin_sync_attempt(
+            source="older-owner", started_at=NOW,
+        )
+        newer = self.owner.store.begin_sync_attempt(
+            source="newer-owner", started_at=NOW,
+        )
+        self.owner.store.append_inventory_result(
+            ReadResult.success_empty(()), source="newer-owner",
+            observed_at=NOW, attempt_id=newer, completed_at=NOW,
+        )
+        _, latest = self.get_json("/api/sync/status")
+        self.assertEqual(latest["state"], "success_empty")
+        _, recovery = self.get_json("/api/sync/recovery")
+        self.assertEqual(recovery["unresolved_count"], 1)
+        self.assertEqual(recovery["oldest_unresolved_attempt"]["id"], old)
+        _, summary = self.get_json("/api/summary")
+        self.assertEqual(summary["sync_recovery"], recovery)
+        self.assertEqual(summary["sync_status"]["state"], "success_empty")
+        # Data observability grants neither write requests nor clearances.
+        self.assertFalse(hasattr(self.client, "complete_write_api_request"))
+        self.assertFalse(hasattr(self.client, "record_write_recovery_clearance"))
+
     def test_dashboard_cli_socket_mode_requires_attested_owner_without_db(self) -> None:
         args = [
             "--owner-socket", str(self.client.socket_path),
@@ -145,7 +169,7 @@ class DashboardOwnerSocketTests(unittest.TestCase):
 
     def test_owner_disconnect_returns_fail_closed_http_503(self) -> None:
         self.owner.stop()
-        for path in ("/readyz", "/api/ads",
+        for path in ("/readyz", "/api/ads", "/api/sync/recovery",
                      "/api/analytics/ads?metric=views"):
             with self.subTest(path=path), self.assertRaises(HTTPError) as error:
                 urlopen(self.base + path, timeout=3)
