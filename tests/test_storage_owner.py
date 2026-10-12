@@ -688,6 +688,101 @@ class StorageOwnerUnitTests(unittest.TestCase):
         self.assertEqual(client.inbound_message_counts("long-valid"), (22, 22))
         self.assertEqual(client.inbound_message_history("missing"), ())
 
+    def test_classification_merge_rpc_preserves_prior_dimensions(self) -> None:
+        from mark_api.domain import AdSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="123", observed_at=NOW, source="management",
+        ))
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        first = client.merge_classification(
+            ad_id="123", source="manual-cli",
+            changes={"city": "Berlin"}, observed_at=NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(first.city, "Berlin")
+        self.assertEqual(first.source, "manual-cli")
+        second = client.merge_classification(
+            ad_id="123", source="manual-cli",
+            changes={"image_type": "product_photo"},
+            observed_at=NOW + timedelta(minutes=2),
+        )
+        self.assertEqual(second.city, "Berlin")
+        self.assertEqual(second.image_type, "product_photo")
+        self.assertEqual(store.classification_history("123"), (first, second))
+        self.assertEqual(client.latest_classification("123"), second)
+
+    def test_classification_merge_refuses_unknown_id_fields_and_late_observation(self) -> None:
+        from mark_api.domain import AdSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="123", observed_at=NOW, source="management",
+        ))
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        for fields in (
+            {"ad_id": "123", "source": "manual", "at": NOW.isoformat(),
+             "changes": {"sql": "DELETE FROM write_recovery_clearances"}},
+            {"ad_id": "123", "source": "manual", "at": NOW.isoformat(),
+             "changes": {"city": True}},
+            {"ad_id": "123", "source": "manual", "at": NOW.isoformat(),
+             "changes": {"city": " "}},
+            {"ad_id": "123", "source": "manual", "at": NOW.isoformat(),
+             "changes": {"city": "Berlin"}, "sql": "DELETE FROM ad_snapshots"},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(StorageOwnerError):
+                service.dispatch({"version": 1, "op": "classification_merge", **fields})
+        with self.assertRaises(StorageOwnerError):
+            client.merge_classification(
+                ad_id="absent", source="manual", changes={"city": "Berlin"},
+                observed_at=NOW + timedelta(minutes=1),
+            )
+        accepted = client.merge_classification(
+            ad_id="123", source="manual", changes={"city": "Berlin"},
+            observed_at=NOW + timedelta(minutes=1),
+        )
+        with self.assertRaises(StorageOwnerError):
+            client.merge_classification(
+                ad_id="123", source="manual", changes={"text_type": "long"},
+                observed_at=NOW,
+            )
+        self.assertEqual(store.classification_history("123"), (accepted,))
+        self.assertEqual(client.latest_classification("absent"), None)
+        self.assertTrue(store.is_ready())
+
+    def test_classification_merge_lost_ack_does_not_retry_persisted_write(self) -> None:
+        from mark_api.domain import AdSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="123", observed_at=NOW, source="management",
+        ))
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        original = client._call
+        sent = 0
+        def lost_ack(op: str, **fields: object) -> dict[str, object]:
+            nonlocal sent
+            result = original(op, **fields)
+            if op == "classification_merge":
+                sent += 1
+                raise StorageOwnerError("synthetic acknowledgement lost")
+            return result
+        with patch.object(client, "_call", side_effect=lost_ack):
+            with self.assertRaises(StorageOwnerError):
+                client.merge_classification(
+                    ad_id="123", source="manual", changes={"city": "Berlin"},
+                    observed_at=NOW + timedelta(minutes=1),
+                )
+        self.assertEqual(sent, 1)
+        self.assertEqual(len(store.classification_history("123")), 1)
+        self.assertEqual(store.latest_classification("123").city, "Berlin")
+
     def test_typed_inbox_pages_refuse_sql_and_untrusted_cursors(self) -> None:
         service = self.make_service()
         service.runtime_uid = os.geteuid()

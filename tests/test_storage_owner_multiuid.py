@@ -95,7 +95,7 @@ while True:time.sleep(2)
 """
 
 _RUNTIME = r"""
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from mark_api.storage_owner import StorageOwnerClient, StorageOwnerError
 from mark_api.storage import WriteApiRequestRecord
@@ -152,6 +152,15 @@ assert analytics.rank_ads('email_inbound_message_count')[0].value==2
 groups=analytics.group_rankings('city','email_inbound_message_count')
 assert len(groups)==1 and groups[0].label=='Berlin'
 assert groups[0].metric_sum==2 and groups[0].sample_size==1
+classification=client.merge_classification(
+    ad_id='777', source='manual-uid-50044',
+    changes={'title_type':'clear_text'},
+    observed_at=now+timedelta(minutes=2),
+)
+assert classification.source=='manual-uid-50044'
+assert classification.city=='Berlin' and classification.title_type=='clear_text'
+assert client.latest_classification('777')==classification
+print('REAL_UID_TYPED_CLASSIFICATION_MERGE_GREEN',flush=True)
 print('REAL_UID_EMAIL_ANALYTICS_QUERY_GREEN',flush=True)
 
 

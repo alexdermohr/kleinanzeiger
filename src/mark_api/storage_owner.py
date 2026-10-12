@@ -656,6 +656,34 @@ class StorageOwnerServer(
             ad_id = _limited_text(request["ad_id"], bound=160)
             conversations, messages = self.store.inbound_message_counts(ad_id)
             return {"conversations": conversations, "messages": messages}
+        if op == "classification_merge" and set(request) == {
+            "version", "op", "ad_id", "source", "at", "changes",
+        }:
+            ad_id = _limited_text(request["ad_id"], bound=160)
+            source = _limited_text(request["source"], bound=1024)
+            observed_at = _timestamp(request["at"])
+            changes = request["changes"]
+            allowed = {"image_type", "city", "text_type", "title_type"}
+            if (
+                type(changes) is not dict
+                or not 1 <= len(changes) <= 4
+                or not set(changes) <= allowed
+            ):
+                raise StorageOwnerError("invalid operation-bound classification fields")
+            normalized = {
+                field: (
+                    _limited_text(value, bound=1024).strip()
+                    if value is not None else None
+                )
+                for field, value in changes.items()
+            }
+            # BEGIN IMMEDIATE in SnapshotStore is the atomic merge boundary.
+            # No executor-controlled clearance, completion, file or SQL.
+            result = self.store.merge_classification(
+                ad_id=ad_id, source=source,
+                changes=normalized, observed_at=observed_at,
+            )
+            return {"classification": _class_as_json(result)}
         if op == "classification_latest" and set(request) == {
             "version", "op", "ad_id",
         }:
@@ -1074,6 +1102,46 @@ class StorageOwnerClient:
                 or messages > 2**63 - 1):
             raise StorageOwnerError("inbound counts reply value invalid")
         return conversations, messages
+
+    def merge_classification(
+        self, *, ad_id: str, source: str,
+        changes: dict[str, str | None], observed_at: datetime,
+    ) -> AdClassification:
+        """Atomic typed label merge; transport ambiguity never triggers retry."""
+        ad_id = _limited_text(ad_id, bound=160)
+        source = _limited_text(source, bound=1024)
+        if type(observed_at) is not datetime:
+            raise StorageOwnerError("classification timestamp invalid")
+        observed_at = _timestamp(observed_at.isoformat())
+        allowed = {"image_type", "city", "text_type", "title_type"}
+        if (
+            type(changes) is not dict
+            or not 1 <= len(changes) <= 4
+            or not set(changes) <= allowed
+        ):
+            raise StorageOwnerError("invalid classification changes")
+        normalized = {
+            key: (
+                _limited_text(value, bound=1024).strip()
+                if value is not None else None
+            )
+            for key, value in changes.items()
+        }
+        response = self._call(
+            "classification_merge", ad_id=ad_id,
+            source=source, at=observed_at.isoformat(), changes=normalized,
+        )
+        if set(response) != {"classification"}:
+            raise StorageOwnerError("classification merge reply invalid")
+        merged = _class_from_json(response["classification"])
+        if (
+            merged.ad_id != ad_id or merged.source != source
+            or merged.observed_at != observed_at
+            or any(getattr(merged, key) != val
+                   for key, val in normalized.items())
+        ):
+            raise StorageOwnerError("classification merge readback unbound")
+        return merged
 
     def latest_classification(self, ad_id: str) -> AdClassification | None:
         ad_id = _limited_text(ad_id, bound=160)
