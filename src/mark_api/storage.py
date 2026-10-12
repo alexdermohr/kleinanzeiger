@@ -2051,15 +2051,34 @@ class SnapshotStore:
                 )
             return "finalized"
 
-    def begin_sync_attempt(self, *, source: str, started_at: datetime) -> int:
-        """Record intent durably before any owner-inventory network read."""
+    def begin_sync_attempt(
+        self, *, source: str, started_at: datetime,
+        require_no_unresolved: bool = False,
+    ) -> int:
+        """Journal intent; the isolated owner also fences *older* open attempts.
+
+        BEGIN IMMEDIATE makes the unresolved-attempt check and insertion one
+        serialized SQLite transaction across owner generations/processes.
+        Historical local import callers retain their existing journal contract.
+        An open attempt is never silently settled or cleared by a new read.
+        """
         if not isinstance(source, str) or not source.strip():
             raise ValueError("sync source must not be empty")
+        if type(require_no_unresolved) is not bool:
+            raise TypeError("sync recovery fence flag must be bool")
+        started = _sync_time(started_at)
         with self._connect() as connection:
+            if require_no_unresolved:
+                connection.execute("BEGIN IMMEDIATE")
+                if connection.execute(
+                    "SELECT 1 FROM sync_attempts "
+                    "WHERE outcome='in_progress' LIMIT 1"
+                ).fetchone() is not None:
+                    raise RuntimeError("unresolved inventory sync requires reconciliation")
             record = connection.execute(
                 "INSERT INTO sync_attempts (source, started_at, outcome) "
                 "VALUES (?, ?, 'in_progress')",
-                (source, _sync_time(started_at)),
+                (source, started),
             )
             if record.lastrowid is None:
                 raise sqlite3.DatabaseError("sync attempt insert failed")

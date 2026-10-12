@@ -1460,6 +1460,65 @@ class SnapshotStoreTests(unittest.TestCase):
         with self.assertRaises(sqlite3.DatabaseError):
             SnapshotStore(store.path, create_if_missing=False)
 
+    def test_exclusive_owner_sync_preserves_prior_unresolved_journal_across_sources(self) -> None:
+        store = self.make_store()
+        old = store.begin_sync_attempt(source="previous-generation", started_at=NOW)
+        recent = store.begin_sync_attempt(
+            source="later-generation", started_at=NOW + timedelta(minutes=1),
+        )
+        store.fail_sync_attempt(
+            recent, source="later-generation",
+            completed_at=NOW + timedelta(minutes=2),
+            error_kind="transport_error",
+        )
+        reopened = SnapshotStore(store.path, create_if_missing=False)
+        with self.assertRaisesRegex(RuntimeError, "unresolved"):
+            reopened.begin_sync_attempt(
+                source="owner-inventory", started_at=NOW + timedelta(minutes=3),
+                require_no_unresolved=True,
+            )
+        with sqlite3.connect(store.path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM sync_attempts"
+            ).fetchone()[0], 2)
+        with self.assertRaises(TypeError):
+            reopened.begin_sync_attempt(
+                source="owner-inventory", started_at=NOW, require_no_unresolved=1,
+            )
+        store.fail_sync_attempt(
+            old, source="previous-generation",
+            completed_at=NOW + timedelta(minutes=4),
+            error_kind="persistence_error",
+        )
+        resumed = reopened.begin_sync_attempt(
+            source="owner-inventory", started_at=NOW + timedelta(minutes=5),
+            require_no_unresolved=True,
+        )
+        self.assertEqual(resumed, recent + 1)
+
+    def test_exclusive_owner_sync_is_atomic_across_sqlite_connections(self) -> None:
+        store = self.make_store()
+        gate = Barrier(2)
+
+        def begin_one() -> tuple[bool, int | None]:
+            other = SnapshotStore(store.path, create_if_missing=False)
+            gate.wait(timeout=5)
+            try:
+                return True, other.begin_sync_attempt(
+                    source="concurrent-owner", started_at=NOW,
+                    require_no_unresolved=True,
+                )
+            except RuntimeError:
+                return False, None
+
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            outcomes = list(workers.map(lambda _: begin_one(), range(2)))
+        self.assertEqual(sorted(ok for ok, _ in outcomes), [False, True])
+        with sqlite3.connect(store.path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM sync_attempts WHERE outcome='in_progress'"
+            ).fetchone()[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

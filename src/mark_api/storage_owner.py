@@ -931,9 +931,18 @@ class StorageOwnerServer(
             with self._sync_lock:
                 if self._active_sync is not None:
                     raise StorageOwnerError("another inventory sync is unresolved")
-                attempt = self.store.begin_sync_attempt(
-                    source=source, started_at=started_at,
-                )
+                try:
+                    attempt = self.store.begin_sync_attempt(
+                        source=source, started_at=started_at,
+                        require_no_unresolved=True,
+                    )
+                except RuntimeError as exc:
+                    # A previous generation may have lost its Begin, Stage or
+                    # Finish ACK. It is not safe to infer an empty/failed read
+                    # merely because the in-memory stage disappeared.
+                    raise StorageOwnerError(
+                        "durable inventory sync recovery is unresolved"
+                    ) from exc
                 self._active_sync = _SyncStage(attempt=attempt, source=source)
                 return {"attempt": attempt}
         if op == "sync_stage_status" and set(request) == {

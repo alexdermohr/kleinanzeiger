@@ -215,6 +215,23 @@ abgeschlossen sein muss. Dies beweist keine atomare Wiederherstellung
 nach `SIGKILL`, bei ererbten Alt-FDs oder gegen defekte Hardware.
 In solchen Fällen bleibt der Store gesperrt bis zur Offline-Reconciliation.
 
+**Inventar-Sync-Recovery über Neustarts:** Ein `sync_begin` unter dem
+isolierten Storage-Owner prüft nun in derselben `BEGIN IMMEDIATE`-
+SQLite-Transaktion vor einer neuen Journalanlage, ob **irgendein** älterer
+`sync_attempts`-Eintrag noch `in_progress` ist – unabhängig von dessen
+Quelle oder einem neueren abgeschlossenen Versuch. Nach Prozessverlust,
+verlorenem Begin-/Stage-ACK oder verlorener In-Memory-Stage kann ein neuer
+Inventar-Read deshalb nicht stillschweigend die ungeklärte Historie
+übergehen. Die Sperre ist dauerhaft und erfordert eine kontrollierte
+Offline-Untersuchung; der Executor besitzt weiterhin keine RPC zum
+Löschen, Abbrechen oder Umklassifizieren alter Versuche. Der gewöhnliche
+`sync_status` zeigt nur den letzten gestarteten und letzten erfolgreichen
+Versuch und ist **kein** Beweis, dass keine älteren offenen Versuche
+existieren. Für die Untersuchung ist die vollständige Owner-Journaltabelle
+nur in einer separat abgesicherten Offline-Umgebung auszuwerten.
+Weder die Existenz eines neuen Browsers noch ein verlorener ACK beweisen
+eine vorherige erfolgreiche oder fehlgeschlagene Synchronisierung.
+
 **Strikter Status: weiterhin Draft, keine Produktfreigabe.** Die geplante
 sechste Compose-Instanz UID 50046 besitzt exklusiv das SQLite-Main-/WAL-/
 SHM-Volume. UID 50044 hat im Compose **keinen** Rohdatenbank- oder

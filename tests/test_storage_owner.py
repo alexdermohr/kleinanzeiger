@@ -451,6 +451,41 @@ class StorageOwnerUnitTests(unittest.TestCase):
         self.assertEqual(record.state, "in_progress")
         self.assertIsNotNone(record.execution_started_at)
 
+    def test_inventory_restart_cannot_ignore_durable_unfinished_attempt(self) -> None:
+        first = self.make_service()
+        first.runtime_uid = os.geteuid()  # Same-UID framing, not OS separation.
+        first.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        attempt = client.begin_sync_attempt(
+            source="previous-generation", started_at=NOW,
+        )
+        first.stop()  # Simulate an owner restart and loss of its in-memory stage.
+        restarted = self.make_service()
+        restarted.runtime_uid = os.geteuid()
+        restarted.start()
+        with self.assertRaises(StorageOwnerError):
+            client.begin_sync_attempt(
+                source="new-source", started_at=NOW + timedelta(minutes=1),
+            )
+        store = SnapshotStore(self.database, create_if_missing=False)
+        self.assertEqual(store.sync_status()["state"], "in_progress")
+        self.assertEqual(store.sync_status()["latest_attempt"]["id"], attempt)
+        with sqlite3.connect(self.database) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM sync_attempts"
+            ).fetchone()[0], 1)
+        # Reconciliation requires trusted store authority; the executor has
+        # no RPC to discard or re-label the old unknown result.
+        store.fail_sync_attempt(
+            attempt, source="previous-generation",
+            completed_at=NOW + timedelta(minutes=2),
+            error_kind="persistence_error",
+        )
+        next_attempt = client.begin_sync_attempt(
+            source="new-source", started_at=NOW + timedelta(minutes=3),
+        )
+        self.assertEqual(next_attempt, attempt + 1)
+
     def test_out_of_order_sync_completions_are_not_spoofed_or_rejected(self) -> None:
         """Latest started and latest completed-success are distinct journal facts."""
         service = self.make_service()
