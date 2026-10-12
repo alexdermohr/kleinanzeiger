@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from contextlib import AbstractContextManager, closing
@@ -1967,10 +1968,20 @@ class SnapshotStore:
             def reject_nonfinite_constant(_literal: str) -> object:
                 raise ValueError("nonfinite JSON constant")
 
+            def finite_json_float(literal: str) -> float:
+                # JSON 1e999 is syntactically valid but CPython parses it
+                # as infinity without invoking parse_constant. Reject it
+                # before durable pending writes can poison UI readback.
+                value = float(literal)
+                if not math.isfinite(value):
+                    raise ValueError("nonfinite JSON number")
+                return value
+
             try:
                 payload = json.loads(
                     payload_json, object_pairs_hook=unique_members,
                     parse_constant=reject_nonfinite_constant,
+                    parse_float=finite_json_float,
                 )
             except (ValueError, RecursionError) as exc:
                 raise ValueError("payload_json is invalid") from exc

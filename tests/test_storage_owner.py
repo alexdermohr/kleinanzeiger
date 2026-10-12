@@ -172,6 +172,8 @@ class StorageOwnerUnitTests(unittest.TestCase):
             '{"title":"first","title":"second"}',
             '{"nested":{"key":1,"key":2}}',
             '{"price":NaN}', '{"price":Infinity}', '{"price":-Infinity}',
+            '{"price":1e999}', '{"price":-1E999}',
+            '{"nested":{"price":9e999}}',
         )
         for payload_json in malformed:
             with self.subTest(payload_json=payload_json):

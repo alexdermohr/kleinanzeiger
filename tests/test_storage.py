@@ -967,6 +967,9 @@ class SnapshotStoreTests(unittest.TestCase):
             '{"price":NaN}',
             '{"price":Infinity}',
             '{"price":-Infinity}',
+            '{"price":1e999}',
+            '{"price":-1E999}',
+            '{"nested":{"price":9e999}}',
         )
         for payload_json in malformed:
             with self.subTest(payload_json=payload_json):
@@ -989,6 +992,15 @@ class SnapshotStoreTests(unittest.TestCase):
         ))
         self.assertEqual(
             store.dashboard_pending_writes()[0].payload_json, valid,
+        )
+        finite = '{"price":1e308}'
+        self.assertTrue(store.claim_dashboard_pending_write(
+            scope="create-finite", resource_key="create-finite",
+            idempotency_key="ui:finite-json", method="POST",
+            path="/api/write/ads", payload_json=finite, ad_id=None,
+        ))
+        self.assertEqual(
+            store.dashboard_pending_writes()[1].payload_json, finite,
         )
 
     def test_dashboard_pending_write_acknowledgement_is_two_phase(self) -> None:

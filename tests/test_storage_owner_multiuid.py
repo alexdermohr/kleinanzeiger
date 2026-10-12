@@ -122,6 +122,8 @@ for invalid in (
     '{"nested":{"key":1,"key":2}}',
     '{"price":NaN}',
     '{"price":-Infinity}',
+    '{"price":1e999}',
+    '{"nested":{"price":-1e999}}',
 ):
     try:
         client.claim_dashboard_pending_write(
