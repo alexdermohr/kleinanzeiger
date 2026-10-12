@@ -951,6 +951,76 @@ class StorageOwnerUnitTests(unittest.TestCase):
         }), self.assertRaises(StorageOwnerError):
             client.inbound_message_ad_ids()
 
+    def test_reaction_append_owner_only_retains_distinct_provenance(self) -> None:
+        from mark_api.domain import ReactionSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        row = ReactionSnapshot(
+            ad_id="rx", observed_at=NOW, source="kleinanzeigen:observed",
+            conversation_count=4, unique_buyer_count=3,
+            inbound_message_count=7,
+        )
+        self.assertIsNone(client.append_reaction_snapshot(row))
+        self.assertEqual(client.reaction_history("rx"), (row,))
+        self.assertEqual(store.reaction_history("rx"), (row,))
+        self.assertEqual(store.tracked_ad_ids(), ())
+
+    def test_reaction_append_rpc_refuses_sql_extra_fields_and_bad_counters(self) -> None:
+        from mark_api.domain import ReactionSnapshot
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        row = ReactionSnapshot(
+            ad_id="rx", observed_at=NOW, source="owner",
+            conversation_count=2, unique_buyer_count=2,
+            inbound_message_count=5,
+        )
+        payload = owner_module._reaction_as_json(row)
+        invalid = (
+            {"reaction": payload, "sql": "DELETE FROM write_recovery_clearances"},
+            {"reaction": {**payload, "conversation_count": True}},
+            {"reaction": {**payload, "source": ""}},
+            {"reaction": {**payload, "extra": "execute_sql"}},
+        )
+        for fields in invalid:
+            with self.subTest(fields=fields), self.assertRaises(StorageOwnerError):
+                service.dispatch({"version": 1, "op": "reaction_append", **fields})
+        self.assertEqual(client.reaction_history("rx"), ())
+        self.assertFalse(client.has_write_recovery_clearance(
+            idempotency_key="rx", request_sha256="a" * 64,
+        ))
+
+    def test_reaction_append_lost_ack_remains_unknown_without_retry(self) -> None:
+        from mark_api.domain import ReactionSnapshot
+        service = self.make_service()
+        store = SnapshotStore(self.database, create_if_missing=False)
+        service.runtime_uid = os.geteuid()
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        row = ReactionSnapshot(
+            ad_id="rx", observed_at=NOW, source="owner",
+            conversation_count=0, unique_buyer_count=0,
+            inbound_message_count=0,
+        )
+        original = client._call
+        called = 0
+        def lost_ack(op: str, **fields: object) -> dict[str, object]:
+            nonlocal called
+            answer = original(op, **fields)
+            if op == "reaction_append":
+                called += 1
+                raise StorageOwnerError("simulated lost acknowledgement")
+            return answer
+        with patch.object(client, "_call", side_effect=lost_ack):
+            with self.assertRaises(StorageOwnerError):
+                client.append_reaction_snapshot(row)
+        self.assertEqual(called, 1)
+        self.assertEqual(store.reaction_history("rx"), (row,))
+
     def test_reaction_history_rpc_preserves_original_provenance_and_counters(self) -> None:
         from mark_api.domain import ReactionSnapshot
         service = self.make_service()

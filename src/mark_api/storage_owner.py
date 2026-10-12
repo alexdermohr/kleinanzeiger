@@ -785,6 +785,13 @@ class StorageOwnerServer(
                 ),
             }
 
+        if op == "reaction_append" and set(request) == {
+            "version", "op", "reaction",
+        }:
+            reaction = _reaction_from_json(request["reaction"])
+            # Append-only observation. No claim, completion or clearance minted.
+            self.store.append_reaction_snapshot(reaction)
+            return {"reaction": _reaction_as_json(reaction)}
         if op == "reaction_history_page" and set(request) == {
             "version", "op", "ad_id", "after_id", "watermark",
         }:
@@ -1318,6 +1325,14 @@ class StorageOwnerClient:
         if result.ad_id != ad_id:
             raise StorageOwnerError("classification reply identity mismatch")
         return result
+
+    def append_reaction_snapshot(self, snapshot: ReactionSnapshot) -> None:
+        """Write exactly one typed observation, never replay lost acknowledgements."""
+        item = _reaction_from_json(_reaction_as_json(snapshot))
+        answer = self._call("reaction_append", reaction=_reaction_as_json(item))
+        if set(answer) != {"reaction"} or _reaction_from_json(answer["reaction"]) != item:
+            raise StorageOwnerError("reaction append receipt does not match original")
+        return None
 
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
         """Read bounded, generation-pinned reaction history in insertion order."""

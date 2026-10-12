@@ -172,6 +172,15 @@ assert client.append_inbound_message_events(batch)==0
 assert client.inbound_message_ad_ids()==('777','779')
 assert len(client.inbound_message_history('779'))==19
 print('REAL_UID_ATOMIC_INBOX_IMPORT_GREEN',flush=True)
+rx_added=ReactionSnapshot(
+    ad_id='777', observed_at=now+timedelta(minutes=3),
+    source='uid50044-synthetic-reaction',
+    conversation_count=3, unique_buyer_count=4,
+    inbound_message_count=6,
+)
+assert client.append_reaction_snapshot(rx_added) is None
+assert client.reaction_history('777')==(seed_rx,rx_added)
+print('REAL_UID_TYPED_REACTION_APPEND_GREEN',flush=True)
 print('REAL_UID_TYPED_CLASSIFICATION_MERGE_GREEN',flush=True)
 print('REAL_UID_EMAIL_ANALYTICS_QUERY_GREEN',flush=True)
 
@@ -303,6 +312,12 @@ try:
     rows=db.execute("SELECT COUNT(*) FROM ad_snapshots WHERE ad_id IN "
                     "('800','801','802','803','804','805','806','807','808')").fetchone()
     assert rows[0]==9
+    persisted_rx=db.execute(
+        "SELECT conversation_count,unique_buyer_count,inbound_message_count "
+        "FROM reaction_snapshots WHERE ad_id='777' "
+        "AND source='uid50044-synthetic-reaction'"
+    ).fetchall()
+    assert persisted_rx==[(3,4,6)],persisted_rx
     uncommitted=db.execute("SELECT COUNT(*) FROM ad_snapshots WHERE ad_id='999'").fetchone()
     assert uncommitted[0]==0
 finally:
