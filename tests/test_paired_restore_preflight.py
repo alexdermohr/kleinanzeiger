@@ -15,6 +15,7 @@ import unittest
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from mark_api.domain import (
     AdSnapshot, CreateOperationReceipt, LifecycleState,
@@ -606,6 +607,47 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 "CREATE TRIGGER extra_veto BEFORE DELETE ON events "
                 "BEGIN SELECT RAISE(IGNORE); END"
             )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_reserved_sqlite_prefix_trigger_must_never_be_hidden(self) -> None:
+        # A hostile writable_schema snapshot can contain a reserved sqlite_
+        # name even though normal CREATE would reject that name. This trigger
+        # can silently ignore future Witness started events after restore.
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("PRAGMA writable_schema=ON")
+            connection.execute(
+                "INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) "
+                "VALUES('trigger','sqlite_veto','events',0,?)",
+                (
+                    "CREATE TRIGGER sqlite_veto BEFORE INSERT ON events "
+                    "WHEN NEW.kind='started' BEGIN SELECT RAISE(IGNORE); END",
+                ),
+            )
+            connection.execute("PRAGMA schema_version=81")
+            connection.execute("PRAGMA writable_schema=OFF")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_sqlite_wal_header_rejected_before_image_parser(self) -> None:
+        with sqlite3.connect(self.sqlite) as connection:
+            self.assertEqual(connection.execute(
+                "PRAGMA journal_mode=WAL",
+            ).fetchone()[0].lower(), "wal")
+        with patch(
+            "mark_api.paired_restore_preflight._readonly",
+            side_effect=AssertionError("untrusted WAL source reached SQLite parser"),
+        ):
+            with self.assertRaises(PairPreflightError):
+                inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_sqlite_wal_header_without_sidecar_is_not_safe_restore_source(self) -> None:
+        with sqlite3.connect(self.sqlite) as connection:
+            mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+            self.assertEqual(mode[0].lower(), "wal")
+        self.assertEqual(self.sqlite.read_bytes()[18:20], bytes((2, 2)))
+        self.assertFalse(self.sqlite.with_name(self.sqlite.name + "-wal").exists())
+        self.assertFalse(self.sqlite.with_name(self.sqlite.name + "-shm").exists())
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 

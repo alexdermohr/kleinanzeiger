@@ -749,7 +749,10 @@ und Witness-v2-Kopien gegen ein **extern verankertes** JSON-Manifest.
 Voraussetzung: physisch unabhängiger Host-Cutover, kein vorbestehendes
 writable FD/MAP_SHARED, vollständiger gestoppter Storage-/Witness-Writer,
 beide Quellen in einem privaten Operator-Verzeichnis (`0700`) als
-einzelne UID-eigene reguläre Dateien (`0600`). Keine Sidecars,
+einzelne UID-eigene reguläre Dateien (`0600`). Beide unveränderten
+Quellbilder brauchen schon **vor dem SQLite-Parser** den SQLite-Header
+für den DELETE-Journal-Modus (`01 01`); ein WAL-Header (`02 02`) ist
+auch bei fehlenden `-wal`-/`-shm`-Dateien unzulässig. Keine Sidecars,
 Symlinks oder offenen Witness-Owner-Leases. Die ursprüngliche
 `witness.sqlite.lock` muss als reguläre, UID-eigene Datei mit Modus
 `0600` **bereits vor dem Scan vorhanden** sein. Die Prüfung hält
@@ -762,6 +765,11 @@ und `fences`. `fences` enthält genau `sqlite_started`,
 `sqlite_sync_open`, `dashboard_pending`, `ambiguous_creates`,
 `ambiguous_final_creates`, `witness_started`, `witness_unresolved`,
 `witness_chain_tip`, `sqlite_quarantined`, `sqlite_media_unresolved`.
+Die Witness-DDL-Prüfung verlangt die vollständigen, unveränderten
+Tabellen-, UNIQUE-Partial-Index- und RAISE-Abbruch-Trigger-Semantiken
+einschließlich exakter SQL-Literalwerte und Token-Grenzen. Zusätzlich
+wird jedes `sqlite_`-Schemaobjekt geprüft; einzig der echte interne
+Session-Primärschlüsselindex ist in dieser Schema-Version erlaubt.
 Die bisherigen Schema-v1/v2/v3-Manifeste bleiben nach dieser
 sicherheitsrelevanten Erweiterung grundsätzlich ungültig.
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die

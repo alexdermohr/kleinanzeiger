@@ -277,14 +277,14 @@ def _readonly(
         raise
 
 
-def _require_witness_delete_header(fd: int) -> None:
-    """Check original rollback journal bytes (memory DB uses journal=memory)."""
+def _require_delete_journal_header(fd: int, *, name: str) -> None:
+    """Check original source journal bytes before any in-memory SQLite parsing."""
     header = os.pread(fd, 20, 0)
     if (
         len(header) != 20 or header[:16] != b"SQLite format 3\x00"
         or header[18:20] != b"\x01\x01"
     ):
-        raise PairPreflightError("Witness file is not a DELETE-journal SQLite image")
+        raise PairPreflightError(f"{name} is not a DELETE-journal SQLite image")
 
 
 def _rows(conn: sqlite3.Connection, sql: str) -> list[sqlite3.Row]:
@@ -555,18 +555,39 @@ def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
     expected = {
         key: _witness_ddl_tokens(ddl) for key, ddl in expected_sql.items()
     }
-    observed = {
-        (str(kind), str(name)): _witness_ddl_tokens(ddl)
-        for kind, name, ddl in conn.execute(
-            "SELECT type,name,sql FROM sqlite_master "
-            "WHERE type IN ('table','index','trigger','view') "
-            "AND name NOT GLOB 'sqlite_*'"
-        )
-    }
-    if observed != expected:
+    observed: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
+    internal: set[tuple[str, str, str]] = set()
+    for kind, name, table_name, ddl in conn.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_master "
+        "WHERE type IN ('table','index','trigger','view')"
+    ):
+        kind, name, table_name = str(kind), str(name), str(table_name)
+        if name.lower().startswith("sqlite_"):
+            # An attacker can inject otherwise reserved names through
+            # writable_schema on an offline image; SQLite will still load
+            # and execute such a forged trigger. Ignore nothing by prefix.
+            # The real v2 schema has exactly this one internal PK index.
+            if (
+                kind != "index" or name != "sqlite_autoindex_sessions_1"
+                or table_name != "sessions" or ddl is not None
+            ):
+                raise PairPreflightError("unknown SQLite-reserved witness schema object")
+            internal.add((kind, name, table_name))
+            continue
+        observed[(kind, name)] = _witness_ddl_tokens(ddl)
+    if (
+        observed != expected
+        or internal != {("index", "sqlite_autoindex_sessions_1", "sessions")}
+    ):
         raise PairPreflightError(
             "witness recovery schema has missing, altered or unexpected security objects"
         )
+    sessions_indexes = [
+        (str(row[1]), int(row[2]), str(row[3]), int(row[4]))
+        for row in conn.execute("PRAGMA index_list('sessions')")
+    ]
+    if sessions_indexes != [("sqlite_autoindex_sessions_1", 1, "pk", 0)]:
+        raise PairPreflightError("witness sessions primary-key index invalid")
     # Non-textual SQLite properties also bind the expected rowid and exact
     # four partial UNIQUE indexes. Names or SQL text alone are insufficient.
     primary = [
@@ -688,7 +709,8 @@ def inspect_offline_pair(
                 raise PairPreflightError(
                     "offline candidate content differs from independent image digest anchors"
                 )
-            _require_witness_delete_header(wit_fd)
+            _require_delete_journal_header(sql_fd, name="SQLite store")
+            _require_delete_journal_header(wit_fd, name="Witness")
             with (
                 closing(_readonly(
                     sql, pinned_fd=sql_fd, expected_sha256=sql_hash,
