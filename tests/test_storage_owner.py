@@ -758,6 +758,70 @@ class StorageOwnerUnitTests(unittest.TestCase):
         self.assertIsNotNone(begun["execution_started_at"])
         self.assertEqual(begun["state"], "in_progress")
 
+    def test_owner_begin_blocks_unsettled_started_write_without_quarantine(self) -> None:
+        """A crashed/malicious executor cannot skip voluntary quarantine to Begin B."""
+        service = self.make_service()
+
+        def rpc(op: str, key: str) -> dict[str, object]:
+            return service.dispatch({
+                "version": _VERSION, "op": op, "key": key,
+                "sha": SHA, "owner": "runtime:one", "at": NOW.isoformat(),
+            })
+
+        first, second = "write:begun:unsettled", "write:next:must-wait"
+        rpc("claim", first)
+        self.assertIsNotNone(rpc("begin", first)["record"]["execution_started_at"])
+        rpc("claim", second)
+        self.assertTrue(service.store.create_recovery_pending(
+            exclude_idempotency_key=second, claim_owner="runtime:one",
+        ))
+        with self.assertRaisesRegex(ValueError, "unresolved started owner write"):
+            rpc("begin", second)
+        self.assertIsNone(service.store.write_api_request(second).execution_started_at)
+        # Readback across a separate connection must preserve the original fence.
+        persisted = SnapshotStore(self.database, create_if_missing=False)
+        self.assertIsNotNone(persisted.write_api_request(first).execution_started_at)
+        self.assertIsNone(persisted.write_api_request(second).execution_started_at)
+        # Only independent operator reconciliation can settle the first write.
+        service.store.record_write_recovery_clearance(
+            idempotency_key=first, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="operator:synthetic-independent-postread",
+            observed_at=NOW,
+        )
+        self.assertIsNotNone(rpc("begin", second)["record"]["execution_started_at"])
+
+    def test_owner_begin_serializes_different_keys_under_concurrent_calls(self) -> None:
+        """Independent-owner BEGIN IMMEDIATE must admit at most one started key."""
+        service = self.make_service()
+        keys = ("write:parallel:first", "write:parallel:second")
+        for key in keys:
+            service.dispatch({
+                "version": _VERSION, "op": "claim", "key": key,
+                "sha": SHA, "owner": "runtime:one", "at": NOW.isoformat(),
+            })
+
+        def begin(key: str) -> bool:
+            try:
+                service.dispatch({
+                    "version": _VERSION, "op": "begin", "key": key,
+                    "sha": SHA, "owner": "runtime:one", "at": NOW.isoformat(),
+                })
+                return True
+            except ValueError as exc:
+                self.assertIn("unresolved started owner write", str(exc))
+                return False
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(begin, keys))
+        self.assertEqual(sum(outcomes), 1)
+        begun = [service.store.write_api_request(key).execution_started_at
+                 is not None for key in keys]
+        self.assertEqual(sum(begun), 1)
+        self.assertTrue(service.store.create_recovery_pending(
+            exclude_idempotency_key="write:parallel:new", claim_owner="runtime:one",
+        ))
+
     def test_closed_rpc_table_denies_sql_clearances_completion_and_paths(self) -> None:
         service = self.make_service()
         calls = [
