@@ -1207,8 +1207,49 @@ class PrivateWebWriteApiRuntime:
                     raise PrivateWebRuntimeSetupError(
                         "media reconciliation lacks bound write operation"
                     )
-                # If persistence succeeded but memory release failed, never
-                # overwrite or duplicate the immutable clearance record.
+                # The browser/runtime UID may forge any in-process media
+                # observation, including a claimed successful post-read.
+                # The independent witness must already contain an OPERATOR
+                # clearance bound to this original key and fingerprint before
+                # UID50044 may request any local recovery mutation.
+                if self._fence_witness is not None:
+                    try:
+                        independently_cleared = self._fence_witness.clearance_recorded(
+                            key=key, sha=record.request_sha256,
+                        )
+                    except FenceWitnessError:
+                        # Only after a lost/uncertain read on the old socket:
+                        # reconnect through SO_PEERCRED and VERIFY the exact
+                        # existing operator receipt. No second platform write
+                        # and no runtime_clear RPC may ever be sent here.
+                        independently_cleared = (
+                            self._fence_witness.resume_from_verified_clearance(
+                                key=key, sha=record.request_sha256,
+                            )
+                        )
+                    if independently_cleared is not True:
+                        # Operator clearance requires the original started
+                        # session to be SEALED. Dropping our borrowed client
+                        # socket closes only this runtime's write authority;
+                        # the independent server seals on EOF. Keep the media
+                        # page, local DB and pending request untouched. An
+                        # operator can then inspect and clear that exact key.
+                        # A later call may *only* reopen through the verified
+                        # operator-clearance readback path above.
+                        try:
+                            self._fence_witness.close()
+                        except Exception as exc:
+                            raise PrivateWebRuntimeSetupError(
+                                "witness operator handoff could not seal session"
+                            ) from exc
+                        raise PrivateWebRuntimeSetupError(
+                            "independent operator witness clearance required "
+                            "before local media recovery"
+                        )
+
+                # Once the operator-bound witness fact is durably verified,
+                # local persistence may fail/ACK may be lost. Re-check the
+                # immutable local record on later calls; never duplicate it.
                 if not self._store.has_write_recovery_clearance(
                     idempotency_key=key,
                     request_sha256=record.request_sha256,
@@ -1216,37 +1257,18 @@ class PrivateWebWriteApiRuntime:
                     self._store.record_write_recovery_clearance(
                         idempotency_key=key,
                         request_sha256=record.request_sha256,
-                        verification_kind="media_submit_reconciled",
-                        evidence_reference="private-web:observation-only-submit-settlement",
+                        verification_kind=(
+                            "operator_verified_postread"
+                            if self._fence_witness is not None
+                            else "media_submit_reconciled"
+                        ),
+                        evidence_reference=(
+                            "witness:operation-bound-operator-clearance"
+                            if self._fence_witness is not None
+                            else "private-web:observation-only-submit-settlement"
+                        ),
                         observed_at=_utc_now(),
                     )
-                if self._fence_witness is not None:
-                    # A local durable clearance alone cannot release the
-                    # independent fence after mapped/rolled-back SQLite.
-                    # Read the exact historical witness clearance before any
-                    # append to handle an ACK lost *after* its durable commit.
-                    # A failed/unverified IPC read retains the original page
-                    # and forbids another browser submit or guessed retry.
-                    try:
-                        already_cleared = self._fence_witness.clearance_recorded(
-                            key=key, sha=record.request_sha256,
-                        )
-                    except FenceWitnessError:
-                        # Only on a LATER explicit reconciliation call: an
-                        # uncertain clearance ACK poisoned the old session.
-                        # Open a fresh SO_PEERCRED-authenticated session only
-                        # after an exact durable clearance readback. This is
-                        # not a repeat of runtime_clear or any browser input.
-                        already_cleared = (
-                            self._fence_witness.resume_from_verified_clearance(
-                                key=key, sha=record.request_sha256,
-                            )
-                        )
-                    if not already_cleared:
-                        self._fence_witness.runtime_clear(
-                            key=key, sha=record.request_sha256,
-                            evidence="private-web:observation-only-submit-settlement",
-                        )
                 self._server.clear_verified_create_recovery(
                     key, record.request_sha256,
                 )
