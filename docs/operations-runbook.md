@@ -740,3 +740,46 @@ bleiben bis zu tatsächlichen Multi-UID-/Prozess-/SQLite-/WAL-/SHM-Nachweisen
 und SHA-gebundenen unabhängigen Sicherheits-/Captain-Gates
 **weiterhin blockierend**. Kein PR-Merge und keine reale
 Kleinanzeigenmutation zu Testzwecken ohne nachgewiesene Berechtigung.
+
+## Offline-Paar-Restore-Preflight (A6: KEINE Produkt- oder Restore-Freigabe)
+
+Das neue optionale `mark-api-pair-restore-check` kontrolliert zwei bereits
+**stillgelegte**, private, vom unabhängigen Operator besessene SQLite-v2-
+und Witness-v2-Kopien gegen ein **extern verankertes** JSON-Manifest.
+Voraussetzung: physisch unabhängiger Host-Cutover, kein vorbestehendes
+writable FD/MAP_SHARED, vollständiger gestoppter Storage-/Witness-Writer,
+beide Quellen in einem privaten Operator-Verzeichnis (`0700`) als
+einzelne UID-eigene reguläre Dateien (`0600`). Keine Sidecars,
+Symlinks oder offenen Witness-Owner-Leases.
+
+Das kanonische JSON-Manifest hat die Felder `schema_version=1`,
+`generation` (32 lowercase hex), `sqlite_sha256`, `witness_sha256`
+und `fences`. `fences` enthält genau `sqlite_started`,
+`sqlite_sync_open`, `dashboard_pending`, `ambiguous_creates`,
+`witness_started`, `witness_unresolved`, `witness_chain_tip`.
+Alle Identitäten sind sortiert und bei der Paarsicherung durch die
+**unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
+vollständige File-Digests, SQLite-Integrität/Schemata, die Witness-
+Hashkette, Operation-/Key-/SHA-Übereinstimmung und den Erhalt aller
+im extern verankerten Manifest enthaltenen Pending-Fences.
+
+Der Aufruf erfolgt **erst nach** Bereitstellung aller vertrauenswürdig
+erzeugten Kopien und des Digest-Ankers außerhalb der DB-/Witness-Volumes:
+
+```sh
+mark-api-pair-restore-check --sqlite /privat/mark.sqlite --witness /privat/witness.sqlite --manifest /privat/manifest.json --expected-manifest-sha256 VORHER_EXTERN_ATTESTIERTER_SHA256
+```
+
+**Sicherheitsgrenze:** `inspect_offline_pair()` ist ein nicht
+attestiertes Diagnoseinventar, **kein** Manifest-Signer. Wird der
+erwartete SHA erst aus einer möglicherweise kompromittierten Backup-
+Datei berechnet, beweist die Prüfung keine Quellintegrität.
+Der neue Checker erzeugt, publiziert und restauriert keine Sicherung,
+löscht keine Write-Fences und heilt keine beschädigten Bestände.
+Er kann die historische MAP_SHARED-/WAL-Rollback-Angriffsklasse
+gegen den **vor** dem Backup manipulierten Quellstand nicht allein
+widerlegen. Auch mit Checker-PASS fehlen das unabhängige sichere
+Paarbackup-Generationenprotokoll, ein root-attestierter Host-Cutover,
+Crash-/Restore-Negativbelege und externe Plattformfreigaben.
+`mark-api-container-backup.sh`, `live` und Draft-Entrypoints
+bleiben gesperrt; PR #78 und Issue #76 bleiben NO-GO.
