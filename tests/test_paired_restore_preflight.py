@@ -602,6 +602,32 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_witness_started_operation_without_originating_session_fails(self) -> None:
+        # After the original owner sealed, a candidate image is corrupted by
+        # removing only its originating sessions row. Events and chain remain
+        # cryptographically self-consistent, but operator_clearance cannot run.
+        self._start(key="orphan:start")
+        with sqlite3.connect(self.ledger) as connection:
+            originating = connection.execute(
+                "SELECT session_id FROM events "
+                "WHERE kind='started' AND request_key='orphan:start'"
+            ).fetchone()
+            self.assertIsNotNone(originating)
+            connection.execute(
+                "DELETE FROM sessions WHERE id=?", (originating[0],),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_orphan_open_event_cannot_pass_empty_fence_inventory(self) -> None:
+        with FenceLedger(self.ledger) as owner:
+            session = owner.open_session()
+            owner.seal_session(session)
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("DELETE FROM sessions WHERE id=?", (session,))
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_witness_noop_delete_trigger_cannot_imitate_secure_schema(self) -> None:
         with sqlite3.connect(self.ledger) as connection:
             connection.execute("DROP TRIGGER events_no_delete")

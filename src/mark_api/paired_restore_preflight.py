@@ -704,6 +704,17 @@ def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     _verify_witness_security_schema(conn)
     FenceLedger._verify_operator_index(conn)
     FenceLedger._verify_chain(conn)
+    # The hash chain authenticates event payloads but does not establish
+    # referential integrity with the separate sessions table. An orphaned
+    # started event can be listed as an unresolved fence while the restored
+    # Witness can never perform operator_clearance: it requires the sealed
+    # original session to exist. No orphan event is a valid restore source,
+    # including opened/sealed events without a pending write.
+    if conn.execute(
+        "SELECT 1 FROM events AS e LEFT JOIN sessions AS s "
+        "ON s.id=e.session_id WHERE s.id IS NULL LIMIT 1"
+    ).fetchone() is not None:
+        raise PairPreflightError("witness event has no originating session")
     starts = [
         [_text(row[0]), _text(row[1])] for row in _rows(
             conn, "SELECT request_key,request_sha256 FROM events "

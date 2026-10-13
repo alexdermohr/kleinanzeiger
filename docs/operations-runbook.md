@@ -794,6 +794,13 @@ Tabellen-, UNIQUE-Partial-Index- und RAISE-Abbruch-Trigger-Semantiken
 einschließlich exakter SQL-Literalwerte und Token-Grenzen. Zusätzlich
 wird jedes `sqlite_`-Schemaobjekt geprüft; einzig der echte interne
 Session-Primärschlüsselindex ist in dieser Schema-Version erlaubt.
+Jedes Witness-Event muss zusätzlich auf eine vorhandene
+Ursprungs-`sessions`-Zeile verweisen. Ein hashkonsistentes
+`started`-Event nach Löschung dieser Session ist **nicht**
+wiederherstellbar: die unabhängige Operator-Clearance verlangt eine
+versiegelte Ursprungssession. Die Prüfung lehnt auch verwaiste
+`opened`- und `sealed`-Events ab.
+
 Die bisherigen Schema-v1/v2/v3-Manifeste bleiben nach dieser
 sicherheitsrelevanten Erweiterung grundsätzlich ungültig.
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die
