@@ -1901,7 +1901,15 @@ def _dashboard_write_route(path: str, method: str) -> str | None:
     target = urlsplit(path)
     if target.query:
         return None
-    parts = [unquote(item) for item in target.path.split("/") if item]
+    # Reject noncanonical write paths before binding any durable intent.
+    # Otherwise a percent-encoded media route can lose its staging references.
+    raw_parts = target.path.split("/")
+    if (
+        raw_parts[0] != ""
+        or any(not part or unquote(part) != part for part in raw_parts[1:])
+    ):
+        return None
+    parts = raw_parts[1:]
     if parts == ["api", "write", "ads"] and method == "POST":
         return "json"
     if parts == ["api", "write", "media", "stage"] and method == "POST":
@@ -2295,9 +2303,21 @@ def _handler_factory(
                 pending_payload_json: str | None = None
                 if body_kind == "json":
                     assert parsed_payload is not None
-                    pending_payload_json = _json_bytes(
-                        parsed_payload
-                    ).decode("utf-8")
+                    try:
+                        pending_payload_json = _json_bytes(
+                            parsed_payload
+                        ).decode("utf-8")
+                    except (UnicodeError, ValueError):
+                        # Lone JSON surrogates are not UTF-8. Reject before
+                        # claiming or forwarding instead of dropping the socket.
+                        self._send_json(
+                            400,
+                            {
+                                "error": "invalid_unicode_text",
+                                "platform_retry_authorized": False,
+                            },
+                        )
+                        return
                 try:
                     created = store.claim_dashboard_pending_write(
                         scope=pending_scope,

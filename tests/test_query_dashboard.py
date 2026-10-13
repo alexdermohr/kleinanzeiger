@@ -649,6 +649,62 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
                     self.assertEqual(self.store.dashboard_pending_writes(), ())
                     self.assertEqual(self.backend.requests, [])
 
+    def test_proxy_rejects_lone_surrogate_before_pending_claim(self) -> None:
+        # JSON permits the raw escape but a lone surrogate is not UTF-8.
+        # Reject it before an idempotency claim or backend side effect.
+        body = br'{"title":"\ud800"}'
+        routes = (
+            ("POST", "/api/write/ads"),
+            ("PATCH", "/api/write/ads/2"),
+            ("POST", "/api/write/media/ads"),
+        )
+        for index, (method, route) in enumerate(routes):
+            with self.subTest(method=method, route=route):
+                request = Request(
+                    self.base + route,
+                    data=body,
+                    method=method,
+                    headers=self.write_headers(
+                        content_type="application/json",
+                        idempotency_key=f"ui:invalid-surrogate-{index}",
+                    ),
+                )
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(request, timeout=2)
+                self.assertEqual(caught.exception.code, 400)
+                self.assertEqual(json.loads(caught.exception.read()), {
+                    "error": "invalid_unicode_text",
+                    "platform_retry_authorized": False,
+                })
+                self.assertEqual(self.store.dashboard_pending_writes(), ())
+                self.assertEqual(self.backend.requests, [])
+
+    def test_proxy_rejects_noncanonical_write_route_aliases(self) -> None:
+        # Percent-encoded or split path aliases must never lose staged media
+        # during pending-write recovery by persisting a different raw path.
+        cases = (
+            ("POST", "/api/write/media/%61ds"),
+            ("POST", "/api/write/media/ads/"),
+            ("POST", "/api/write//media/ads"),
+            ("PATCH", "/api/write/ads/%32"),
+        )
+        for index, (method, route) in enumerate(cases):
+            with self.subTest(method=method, route=route):
+                request = Request(
+                    self.base + route,
+                    data=b'{"title":"reject alias"}',
+                    method=method,
+                    headers=self.write_headers(
+                        content_type="application/json",
+                        idempotency_key=f"ui:noncanonical-route-{index}",
+                    ),
+                )
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(request, timeout=2)
+                self.assertEqual(caught.exception.code, 404)
+                self.assertEqual(self.store.dashboard_pending_writes(), ())
+                self.assertEqual(self.backend.requests, [])
+
     def test_proxy_valid_finite_json_keeps_wire_and_claim_identity(self) -> None:
         raw = b'{"title":"NaN is text","description":"[{}]","price_eur":1.25}'
         request = Request(
