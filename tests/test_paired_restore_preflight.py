@@ -77,7 +77,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def _pin(self, *, generation: str = GENERATION) -> str:
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
-        manifest = {"schema_version": 2, "generation": generation, **inspected}
+        manifest = {"schema_version": 3, "generation": generation, **inspected}
         raw = _canonical(manifest)
         self.manifest.write_bytes(raw)
         os.chmod(self.manifest, 0o600)
@@ -197,7 +197,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
     def test_v1_manifest_not_accepted_after_fence_inventory_schema_upgrade(self) -> None:
         expected = self._pin()
         loaded = json.loads(self.manifest.read_bytes())
-        self.assertEqual(loaded["schema_version"], 2)
+        self.assertEqual(loaded["schema_version"], 3)
         loaded["schema_version"] = 1
         older = _canonical(loaded)
         self.manifest.write_bytes(older)
@@ -207,6 +207,84 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 expected_manifest_sha256=hashlib.sha256(older).hexdigest(),
             )
         self.assertNotEqual(hashlib.sha256(older).hexdigest(), expected)
+
+    def test_owner_quarantined_write_is_a_distinct_unresolved_restore_fence(self) -> None:
+        self._start(key="quarantine:no-create-receipt")
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.quarantine_started_write_api_request(
+            idempotency_key="quarantine:no-create-receipt",
+            request_sha256=SHA,
+            claim_owner="pair-owner",
+            quarantined_at=AT,
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="another-key", claim_owner="separate-owner",
+        ))
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["ambiguous_creates"], [])
+        self.assertEqual(observed["fences"]["ambiguous_final_creates"], [])
+        self.assertEqual(
+            observed["fences"]["sqlite_quarantined"],
+            [["quarantine:no-create-receipt", SHA]],
+        )
+        digest = self._pin()
+        report = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=digest,
+        )
+        self.assertEqual(report["sqlite_quarantined_count"], 1)
+        self.assertEqual(report["ambiguous_create_count"], 1)
+        self.assertFalse(report["restore_authorized"])
+
+    def test_independent_operation_bound_clearance_excludes_quarantine_fence(self) -> None:
+        self._start(key="quarantine:cleared")
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.quarantine_started_write_api_request(
+            idempotency_key="quarantine:cleared", request_sha256=SHA,
+            claim_owner="pair-owner", quarantined_at=AT,
+        )
+        store.record_write_recovery_clearance(
+            idempotency_key="quarantine:cleared", request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic-test-only:operator-observation",
+            observed_at=AT,
+        )
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="unrelated", claim_owner="separate-owner",
+        ))
+        result = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(result["fences"]["sqlite_quarantined"], [])
+        self.assertEqual(result["fences"]["sqlite_started"], [["quarantine:cleared", SHA]])
+
+    def test_quarantined_response_with_unsupported_envelope_fails_closed(self) -> None:
+        self._start(key="quarantine:tamper")
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.quarantine_started_write_api_request(
+            idempotency_key="quarantine:tamper", request_sha256=SHA,
+            claim_owner="pair-owner", quarantined_at=AT,
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET response_json=? WHERE idempotency_key=?",
+                ('{"error":"write_outcome_unverified","idempotency_key":"other-key"}',
+                 "quarantine:tamper"),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_v2_manifest_rejected_when_quarantine_fence_schema_is_upgraded(self) -> None:
+        old_sha = self._pin()
+        raw = json.loads(self.manifest.read_bytes())
+        self.assertEqual(raw["schema_version"], 3)
+        raw["schema_version"] = 2
+        old_bytes = _canonical(raw)
+        self.manifest.write_bytes(old_bytes)
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=hashlib.sha256(old_bytes).hexdigest(),
+            )
+        self.assertNotEqual(old_sha, hashlib.sha256(old_bytes).hexdigest())
 
     def test_missing_witness_lock_fails_closed_without_recreating_lock(self) -> None:
         lock = self.ledger.with_name(self.ledger.name + ".lock")
@@ -332,6 +410,66 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 self.sqlite, self.ledger, self.manifest,
                 expected_manifest_sha256=expected,
             )
+
+    def test_witness_noop_delete_trigger_cannot_imitate_secure_schema(self) -> None:
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("DROP TRIGGER events_no_delete")
+            connection.execute(
+                "CREATE TRIGGER events_no_delete BEFORE DELETE ON events "
+                "BEGIN SELECT 1; END"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_noop_update_trigger_cannot_imitate_secure_schema(self) -> None:
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("DROP TRIGGER events_no_update")
+            connection.execute(
+                "CREATE TRIGGER events_no_update BEFORE UPDATE ON events "
+                "BEGIN SELECT 1; END"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_extra_veto_trigger_cannot_bypass_append_only_guards(self) -> None:
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute(
+                "CREATE TRIGGER extra_veto BEFORE DELETE ON events "
+                "BEGIN SELECT RAISE(IGNORE); END"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_sqlite_prefix_lookalike_trigger_is_not_skipped(self) -> None:
+        # In SQL LIKE, '_' matches any single character. User objects named
+        # sqliteXveto must not be confused with the reserved sqlite_ prefix.
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute(
+                "CREATE TRIGGER sqliteXveto BEFORE DELETE ON events "
+                "BEGIN SELECT RAISE(IGNORE); END"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_nonunique_start_index_cannot_imitate_secure_schema(self) -> None:
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("DROP INDEX one_start_per_key")
+            connection.execute(
+                "CREATE INDEX one_start_per_key ON events(request_key) "
+                "WHERE kind='started'"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_unconstrained_sessions_cannot_imitate_secure_schema(self) -> None:
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("DROP TABLE sessions")
+            connection.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, state TEXT NOT NULL, "
+                "opened_at TEXT NOT NULL, sealed_at TEXT)"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_witness_rollback_to_older_valid_ledger_is_rejected(self) -> None:
         old_ledger = self.source / "witness-old.sqlite"

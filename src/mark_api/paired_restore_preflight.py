@@ -33,7 +33,8 @@ _MAX_ROWS = 250_000
 # pathname; oversized restore candidates require a different attested path.
 _MAX_IMAGE_BYTES = 512 * 1024 * 1024
 _FENCE_KEYS = frozenset({
-    "sqlite_started", "sqlite_sync_open", "dashboard_pending",
+    "sqlite_started", "sqlite_sync_open", "sqlite_quarantined",
+    "dashboard_pending",
     "ambiguous_creates", "ambiguous_final_creates",
     "witness_started", "witness_unresolved",
     "witness_chain_tip",
@@ -83,7 +84,7 @@ def _manifest(raw: bytes, expected_sha: str) -> dict[str, object]:
             "witness_sha256", "fences",
         }
         or type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 2
+        or manifest["schema_version"] != 3
         or not isinstance(manifest["generation"], str)
         or _GENERATION.fullmatch(manifest["generation"]) is None
         or any(
@@ -313,6 +314,29 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     ]
     if any(_SHA.fullmatch(row[1]) is None for row in starts):
         raise PairPreflightError("SQLite started operation digest invalid")
+    # Owner-quarantined write results have canonical 202/UNKNOWN responses
+    # and may have no create checkpoint or final media receipt. They remain
+    # non-retryable until separately attested, operation-bound clearance.
+    # Mirror SnapshotStore.create_recovery_pending's canonical prefix test.
+    quarantined = []
+    for row in _rows(
+        conn,
+        "SELECT w.idempotency_key,w.request_sha256,w.response_json "
+        "FROM write_api_requests AS w "
+        "LEFT JOIN write_recovery_clearances AS c "
+        "ON c.idempotency_key=w.idempotency_key "
+        "AND c.request_sha256=w.request_sha256 "
+        "WHERE w.state='completed' AND w.response_status=202 "
+        "AND c.idempotency_key IS NULL ORDER BY w.idempotency_key",
+    ):
+        key, sha, response = row
+        key, sha = _text(key), _text(sha)
+        if _SHA.fullmatch(sha) is None or not isinstance(response, str):
+            raise PairPreflightError("SQLite completed write response invalid")
+        if response.startswith('{"error":"write_outcome_unverified",'):
+            if response != SnapshotStore._unverified_write_api_response(key):
+                raise PairPreflightError("SQLite owner quarantine response invalid")
+            quarantined.append([key, sha])
     pending_sync = [
         int(row[0]) for row in _rows(
             conn, "SELECT id FROM sync_attempts WHERE outcome='in_progress' ORDER BY id",
@@ -385,10 +409,73 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     return {
         "sqlite_started": starts,
         "sqlite_sync_open": pending_sync,
+        "sqlite_quarantined": quarantined,
         "dashboard_pending": dashboard,
         "ambiguous_creates": ambiguous,
         "ambiguous_final_creates": ambiguous_final,
     }
+
+
+def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
+    """Accept only the real v2 Witness tables, UNIQUE indexes and abort triggers.
+
+    SQLite integrity_check and a valid hash chain alone cannot prove the
+    append-only schema: a same-named no-op trigger or ordinary index can
+    remain structurally present. Unexpected extra triggers can also change
+    the semantics of DELETE/UPDATE. Fail closed on every such variation.
+    """
+    expected = {
+        ("table", "sessions"): (
+            "createtablesessions(idtextprimarykey,"
+            "statetextnotnullcheck(statein('active','sealed')),"
+            "opened_attextnotnull,sealed_attext)"
+        ),
+        ("table", "events"): (
+            "createtableevents(seqintegerprimarykey,"
+            "session_idtextnotnull,kindtextnotnull,request_keytext,"
+            "request_sha256text,actiontext,outcometext,response_sha256text,"
+            "evidence_referencetext,created_attextnotnull,"
+            "previous_sha256textnotnull,row_sha256textnotnull)"
+        ),
+        ("index", "one_start_per_key"): (
+            "createuniqueindexone_start_per_keyonevents(request_key)"
+            "wherekind='started'"
+        ),
+        ("index", "one_completion_per_key"): (
+            "createuniqueindexone_completion_per_keyonevents(request_key)"
+            "wherekind='completed'"
+        ),
+        ("index", "one_runtime_clearance_per_key"): (
+            "createuniqueindexone_runtime_clearance_per_keyonevents(request_key)"
+            "wherekind='runtime_cleared'"
+        ),
+        ("index", "one_operator_clearance_per_key"): (
+            "createuniqueindexone_operator_clearance_per_keyonevents(request_key)"
+            "wherekind='operator_cleared'"
+        ),
+        ("trigger", "events_no_update"): (
+            "createtriggerevents_no_updatebeforeupdateonevents"
+            "beginselectraise(abort,'append-onlyevents');end"
+        ),
+        ("trigger", "events_no_delete"): (
+            "createtriggerevents_no_deletebeforedeleteonevents"
+            "beginselectraise(abort,'append-onlyevents');end"
+        ),
+    }
+    observed = {
+        (str(kind), str(name)): (
+            "".join(ddl.lower().split()) if isinstance(ddl, str) else ""
+        )
+        for kind, name, ddl in conn.execute(
+            "SELECT type,name,sql FROM sqlite_master "
+            "WHERE type IN ('table','index','trigger','view') "
+            "AND name NOT GLOB 'sqlite_*'"
+        )
+    }
+    if observed != expected:
+        raise PairPreflightError(
+            "witness recovery schema has missing, altered or unexpected security objects"
+        )
 
 
 def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:
@@ -403,21 +490,7 @@ def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         or journal is None or journal[0].lower() != "memory"
     ):
         raise PairPreflightError("unsupported witness schema or journal")
-    objects = {
-        (str(row[0]), str(row[1])) for row in conn.execute(
-            "SELECT type,name FROM sqlite_master "
-            "WHERE type IN ('table','index','trigger')"
-        )
-    }
-    required = {
-        ("table", "sessions"), ("table", "events"),
-        ("index", "one_start_per_key"), ("index", "one_completion_per_key"),
-        ("index", "one_runtime_clearance_per_key"),
-        ("index", "one_operator_clearance_per_key"),
-        ("trigger", "events_no_update"), ("trigger", "events_no_delete"),
-    }
-    if not required.issubset(objects):
-        raise PairPreflightError("witness recovery schema incomplete")
+    _verify_witness_security_schema(conn)
     FenceLedger._verify_operator_index(conn)
     FenceLedger._verify_chain(conn)
     starts = [
@@ -577,7 +650,9 @@ def verify_offline_pair(
                 "ambiguous_create_count": (
                     len(fences["ambiguous_creates"])
                     + len(fences["ambiguous_final_creates"])
+                    + len(fences["sqlite_quarantined"])
                 ),
+                "sqlite_quarantined_count": len(fences["sqlite_quarantined"]),
                 "ambiguous_final_create_count": len(fences["ambiguous_final_creates"]),
                 "offline_only": True,
                 "restore_authorized": False,

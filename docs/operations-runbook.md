@@ -756,12 +756,12 @@ Symlinks oder offenen Witness-Owner-Leases. Die ursprüngliche
 während des gesamten Scans ein exklusives `flock` und verweigert
 fehlende/unsichere Locks; sie erzeugt oder repariert diese nicht.
 
-Das kanonische JSON-Manifest hat die Felder `schema_version=2`,
+Das kanonische JSON-Manifest hat die Felder `schema_version=3`,
 `generation` (32 lowercase hex), `sqlite_sha256`, `witness_sha256`
 und `fences`. `fences` enthält genau `sqlite_started`,
 `sqlite_sync_open`, `dashboard_pending`, `ambiguous_creates`,
 `ambiguous_final_creates`, `witness_started`, `witness_unresolved`,
-`witness_chain_tip`. Die vorigen Schema-v1-Manifeste bleiben nach dieser
+`witness_chain_tip`, `sqlite_quarantined`. Die bisherigen Schema-v1/v2-Manifeste bleiben nach dieser
 sicherheitsrelevanten Erweiterung grundsätzlich ungültig.
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
@@ -783,7 +783,16 @@ Receipt-Zeilen-IDs; nur eine exakt an den ursprünglichen begonnenen
 Write-Request samt SHA gebundene unabhängige Recovery-Clearance kann
 dieses Teilinventar ausnehmen. Der Offline-Checker vergibt niemals
 solche Clearances. `ambiguous_create_count` zählt beide offenen
-Create-Fence-Arten.
+Create-Fence-Arten. Auch ein begonnener und danach durch den
+unabhängigen Owner mit dem kanonischen HTTP-202-Status
+`write_outcome_unverified` abgeschlossener Write-Request bleibt als
+`sqlite_quarantined` ein eigener Recovery-Fence, **selbst ohne**
+Create-Checkpoint oder Media-Receipt. Nur eine an Key **und** Request-SHA
+gebundene persistierte Recovery-Clearance nimmt ihn aus diesem Teilinventar.
+`sqlite_quarantined_count` zählt solche Operationen; der konservative
+`ambiguous_create_count` umfasst auch diese potentiell bereits auf
+Kleinanzeigen ausgeführten Aufträge. Ein fehlerhaftes UNKNOWN-Envelope
+wird nicht als gültige Entwarnung akzeptiert.
 
 **Vor jedem Öffnen durch SQLite** werden beide bereits per FD gepinnten
 Datei-Digests gegen die extern im Manifest verankerten Hashes verglichen.
