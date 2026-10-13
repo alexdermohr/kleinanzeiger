@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -61,6 +62,10 @@ from mark_api.private_web_media import (
     PrivateWebMediaSource,
 )
 from mark_api.results import ReadResult, ReadStatus
+from mark_api.fence_witness import (
+    FenceLedger, FenceWitnessClient, FenceWitnessError,
+    FenceWitnessRejected, FenceWitnessServer,
+)
 from mark_api.storage import SnapshotStore
 from mark_api.write_api import (
     WriteApiAccess,
@@ -2814,6 +2819,100 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
 
             self.assertEqual(close_events, ["content"])
 
+    def test_composition_requires_witness_start_before_browser_write(self) -> None:
+        class RefusingWitness:
+            starts: list[tuple[str, str, str]] = []
+
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                self.starts.append((key, sha, action))
+                raise FenceWitnessRejected("synthetic independent pending fence")
+
+            def completed(self, *, key: str, sha: str, response: object) -> str:
+                raise AssertionError("a denied start cannot complete")
+
+            def pending(self) -> bool:
+                return False
+
+            def replay_status(self, *, key: str, sha: str, response_sha: str) -> str:
+                return "never_started"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "runtime.sqlite")
+            reader = OwnerReader(ReadResult.success_nonempty((owner_snapshot(),)))
+            close_events: list[str] = []
+            witness = RefusingWitness()
+            runtime = compose_private_web_write_api_runtime(
+                content_runtime=self._content_runtime(reader, close_events),
+                store=store,
+                access=WriteApiAccess(
+                    principal="runtime-test", bearer_token=self.TOKEN,
+                    capabilities=frozenset({WriteCapability.SET_STATE}),
+                    writes_enabled=True,
+                ),
+                core_writes_enabled=True,
+                fence_witness=witness,
+            )
+            try:
+                status, body = self._request(
+                    runtime, "POST", f"/api/write/ads/{AD_ID}/pause",
+                    idempotency_key="witness-privateweb-denied",
+                )
+                self.assertEqual(status, 503, body)
+                self.assertEqual(body["error"], "witness_write_rejected")
+                self.assertFalse(body["platform_retry_authorized"])
+                self.assertEqual(reader.calls, 0)
+                self.assertEqual(len(witness.starts), 1)
+                self.assertEqual(witness.starts[0][2], "pause")
+            finally:
+                runtime.close()
+            self.assertEqual(close_events, ["content"])
+
+    def test_builder_preserves_witness_without_enabling_new_write_flags(self) -> None:
+        class RefusingWitness:
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                raise FenceWitnessRejected("synthetic independent pending fence")
+
+            def completed(self, *, key: str, sha: str, response: object) -> str:
+                raise AssertionError("unstarted witness must not complete")
+
+            def pending(self) -> bool:
+                return False
+
+            def replay_status(self, *, key: str, sha: str, response_sha: str) -> str:
+                return "never_started"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "runtime.sqlite")
+            reader = OwnerReader(ReadResult.success_nonempty((owner_snapshot(),)))
+            close_events: list[str] = []
+            content = self._content_runtime(reader, close_events)
+            with patch(
+                "mark_api.private_web_runtime.build_private_web_content_runtime",
+                return_value=content,
+            ):
+                runtime = build_private_web_write_api_runtime(
+                    cdp_port=19610,
+                    store=store,
+                    access=WriteApiAccess(
+                        principal="runtime-test", bearer_token=self.TOKEN,
+                        capabilities=frozenset({WriteCapability.SET_STATE}),
+                        writes_enabled=True,
+                    ),
+                    core_writes_enabled=True,
+                    fence_witness=RefusingWitness(),
+                )
+            try:
+                status, body = self._request(
+                    runtime, "POST", f"/api/write/ads/{AD_ID}/pause",
+                    idempotency_key="witness-builder-denied",
+                )
+                self.assertEqual(status, 503, body)
+                self.assertEqual(body["error"], "witness_write_rejected")
+                self.assertEqual(reader.calls, 0)
+            finally:
+                runtime.close()
+            self.assertEqual(close_events, ["content"])
+
     def test_api_gate_can_stay_closed_while_core_gate_is_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -4022,6 +4121,304 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
             replacement_lock.close()
 
 
+
+    def test_media_reconciliation_requires_operator_witness_before_local_clearance(self) -> None:
+        """Executor observations never authorize durable local media recovery."""
+        class ObservedPage:
+            def __init__(self) -> None:
+                self.readbacks = 0
+                self.closed = False
+
+            def reconcile_create_media_submit(self) -> None:
+                self.readbacks += 1
+
+            def close(self) -> None:
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "witness-media.sqlite")
+            key, sha = "witness-media-ambiguous", "a" * 64
+            store.claim_write_api_request(
+                idempotency_key=key, request_sha256=sha,
+                requested_at=NOW, claim_owner="same-runtime",
+            )
+            store.begin_write_api_request(
+                idempotency_key=key, request_sha256=sha,
+                execution_started_at=NOW, claim_owner="same-runtime",
+            )
+            store.complete_write_api_request(
+                idempotency_key=key, request_sha256=sha,
+                response_status=202,
+                response_json=json.dumps({
+                    "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
+                    "media_persistence_confirmed": False,
+                }),
+                completed_at=NOW, claim_owner="same-runtime",
+            )
+            original = store.write_api_request(key)
+            page = ObservedPage()
+
+            class ClearanceWitness:
+                def __init__(self) -> None:
+                    self.cleared_keys: set[tuple[str, str]] = set()
+                    self.poisoned = False
+                    self.reconnects = 0
+                    self.handoffs = 0
+                    self.reads = 0
+
+                def close(self) -> None:
+                    self.handoffs += 1
+                    self.poisoned = True
+
+                def clearance_recorded(self, *, key: str, sha: str) -> bool:
+                    self.reads += 1
+                    if self.poisoned:
+                        raise FenceWitnessError("witness connection is closed")
+                    return (key, sha) in self.cleared_keys
+
+                def resume_from_verified_clearance(self, *, key: str, sha: str) -> bool:
+                    if not self.poisoned or (key, sha) not in self.cleared_keys:
+                        raise FenceWitnessError("operator clearance not verified")
+                    self.reconnects += 1
+                    self.poisoned = False
+                    return True
+
+                def runtime_clear(self, *, key: str, sha: str, evidence: str) -> None:
+                    raise AssertionError(
+                        "compromisable executor must never issue witness clearance"
+                    )
+
+            witness = ClearanceWitness()
+            media = PrivateWebMediaCreateRuntime(
+                page_factory=lambda: (_ for _ in ()).throw(
+                    AssertionError("must not submit media a second time")
+                ),
+            )
+            media._pending_page = page
+            media._submit_unknown_fenced = True
+            media._pending_authorization_reference = "write-api:" + key
+            source_path = Path(tmp) / "photo.jpg"
+            source_path.write_bytes(b"synthetic")
+            events: list[str] = []
+            runtime = compose_private_web_write_api_runtime(
+                content_runtime=self._content_runtime(
+                    OwnerReader(ReadResult.success_empty(())), events,
+                ),
+                media_runtime=media,
+                media_resolver=PrivateWebMediaRefResolver({
+                    "cover": PrivateWebMediaSource(path=str(source_path)),
+                }),
+                store=store,
+                access=WriteApiAccess(
+                    principal="runtime-test", bearer_token=self.TOKEN,
+                    capabilities=frozenset({WriteCapability.CREATE_MEDIA}),
+                ),
+                fence_witness=witness,
+            )
+            # The executor can claim successful media observations, but until
+            # the original operation has a trusted operator clearance the
+            # page/fence and local persisted recovery state MUST remain open.
+            with self.assertRaisesRegex(
+                PrivateWebRuntimeSetupError, "independent operator",
+            ):
+                runtime.reconcile_media_submit()
+            self.assertTrue(runtime.media_reconciliation_required)
+            self.assertFalse(page.closed)
+            self.assertEqual(page.readbacks, 1)
+            self.assertFalse(store.has_write_recovery_clearance(
+                idempotency_key=key, request_sha256=sha,
+            ))
+            self.assertTrue(witness.poisoned)
+            self.assertEqual(witness.handoffs, 1)
+            witness.cleared_keys.add((key, "f" * 64))
+            with self.assertRaisesRegex(
+                FenceWitnessError, "operator clearance not verified",
+            ):
+                runtime.reconcile_media_submit()
+            self.assertFalse(store.has_write_recovery_clearance(
+                idempotency_key=key, request_sha256=sha,
+            ))
+            self.assertEqual(page.readbacks, 1)
+
+            # Simulate the separate privileged operator's durable clearance of
+            # the exact original key/SHA. Losing the local SQLite append must
+            # still preserve browser lifetime and allow persistence-only retry.
+            witness.cleared_keys.add((key, sha))
+            with patch.object(
+                store, "record_write_recovery_clearance",
+                side_effect=sqlite3.OperationalError("local clearance unavailable"),
+            ):
+                with self.assertRaisesRegex(sqlite3.OperationalError, "unavailable"):
+                    runtime.reconcile_media_submit()
+            self.assertFalse(store.has_write_recovery_clearance(
+                idempotency_key=key, request_sha256=sha,
+            ))
+            self.assertTrue(runtime.media_reconciliation_required)
+            self.assertFalse(page.closed)
+            self.assertEqual(page.readbacks, 1)
+
+            # Recover from a lost witness-read response solely by authentic
+            # independent operator-clearance readback. No browser re-submit.
+            witness.poisoned = True
+            runtime.reconcile_media_submit()
+            self.assertTrue(page.closed)
+            self.assertFalse(runtime.media_reconciliation_required)
+            self.assertEqual(page.readbacks, 1)
+            self.assertEqual(witness.reconnects, 2)
+            self.assertTrue(store.has_write_recovery_clearance(
+                idempotency_key=key, request_sha256=sha,
+            ))
+            self.assertEqual(store.write_api_request(key), original)
+            with sqlite3.connect(store.path) as db:
+                row = db.execute(
+                    "SELECT verification_kind,request_sha256 "
+                    "FROM write_recovery_clearances WHERE idempotency_key=?",
+                    (key,),
+                ).fetchone()
+            self.assertEqual(row, ("operator_verified_postread", sha))
+            runtime.close()
+            self.assertEqual(events, ["content"])
+
+    def test_real_witness_media_operator_handoff_seals_original_session(self) -> None:
+        """Real AF_UNIX ledger: an active session cannot receive operator clear."""
+        class PendingPage:
+            def __init__(self) -> None:
+                self.readbacks = 0
+                self.closed = False
+
+            def reconcile_create_media_submit(self) -> None:
+                self.readbacks += 1
+
+            def close(self) -> None:
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_dir, operator_dir = root / "runtime", root / "operator"
+            runtime_dir.mkdir(mode=0o700)
+            runtime_dir.chmod(0o2710)
+            operator_dir.mkdir(mode=0o700)
+            runtime_socket, operator_socket = (
+                runtime_dir / "runtime.sock", operator_dir / "operator.sock",
+            )
+            key, sha = "real-witness-media-ambiguity", "e" * 64
+
+            with FenceLedger(root / "witness.sqlite", initialize=True) as ledger:
+                server = FenceWitnessServer(
+                    ledger=ledger, runtime_socket=runtime_socket,
+                    operator_socket=operator_socket,
+                    runtime_uid=os.geteuid() + 10000,
+                    runtime_gid=os.getegid(), operator_uid=os.geteuid(),
+                )
+                # Only a same-UID functional simulation. True distinct UID
+                # SO_PEERCRED denial is tested in the isolated Docker suite.
+                server._runtime.peer_uid = os.geteuid()
+                server.start()
+                witness = FenceWitnessClient(
+                    runtime_socket, expected_owner_uid=os.geteuid(),
+                )
+                try:
+                    witness.started(key=key, sha=sha, action="create_media")
+                    self.assertEqual(
+                        witness.completed(key=key, sha=sha, response={
+                            "operation_receipt": {
+                                "writer_invoked": True, "outcome": "ambiguous",
+                            },
+                        }), "ambiguous",
+                    )
+                    with FenceWitnessClient(
+                        operator_socket, expected_owner_uid=os.geteuid(),
+                    ) as operator:
+                        with self.assertRaises(FenceWitnessError):
+                            operator.operator_clear(
+                                key=key, sha=sha, evidence="operator:verified-media",
+                            )
+
+                    store = SnapshotStore(root / "media.sqlite")
+                    store.claim_write_api_request(
+                        idempotency_key=key, request_sha256=sha,
+                        requested_at=NOW, claim_owner="runtime-one",
+                    )
+                    store.begin_write_api_request(
+                        idempotency_key=key, request_sha256=sha,
+                        execution_started_at=NOW, claim_owner="runtime-one",
+                    )
+                    store.complete_write_api_request(
+                        idempotency_key=key, request_sha256=sha,
+                        response_status=202,
+                        response_json=json.dumps({
+                            "operation_receipt": {
+                                "outcome": "ambiguous", "writer_invoked": True,
+                            }, "media_persistence_confirmed": False,
+                        }),
+                        completed_at=NOW, claim_owner="runtime-one",
+                    )
+                    page = PendingPage()
+                    media = PrivateWebMediaCreateRuntime(
+                        page_factory=lambda: (_ for _ in ()).throw(
+                            AssertionError("never resubmit the original media create")
+                        ),
+                    )
+                    media._pending_page = page
+                    media._submit_unknown_fenced = True
+                    media._pending_authorization_reference = "write-api:" + key
+                    photo = root / "photo.jpg"
+                    photo.write_bytes(b"synthetic-media-only")
+                    runtime = compose_private_web_write_api_runtime(
+                        content_runtime=self._content_runtime(
+                            OwnerReader(ReadResult.success_empty(())), [],
+                        ),
+                        media_runtime=media,
+                        media_resolver=PrivateWebMediaRefResolver({
+                            "cover": PrivateWebMediaSource(path=str(photo)),
+                        }),
+                        store=store,
+                        access=WriteApiAccess(
+                            principal="runtime-test", bearer_token=self.TOKEN,
+                            capabilities=frozenset({WriteCapability.CREATE_MEDIA}),
+                        ),
+                        fence_witness=witness,
+                    )
+                    sealed = threading.Event()
+                    seal = ledger.seal_session
+
+                    def seal_and_signal(session: str) -> None:
+                        seal(session)
+                        sealed.set()
+
+                    with patch.object(
+                        ledger, "seal_session", side_effect=seal_and_signal,
+                    ):
+                        with self.assertRaisesRegex(
+                            PrivateWebRuntimeSetupError, "independent operator",
+                        ):
+                            runtime.reconcile_media_submit()
+                        self.assertTrue(sealed.wait(3), "session handoff never sealed")
+
+                    self.assertTrue(runtime.media_reconciliation_required)
+                    self.assertFalse(page.closed)
+                    self.assertEqual(page.readbacks, 1)
+                    self.assertFalse(store.has_write_recovery_clearance(
+                        idempotency_key=key, request_sha256=sha,
+                    ))
+                    with FenceWitnessClient(
+                        operator_socket, expected_owner_uid=os.geteuid(),
+                    ) as operator:
+                        operator.operator_clear(
+                            key=key, sha=sha, evidence="operator:verified-media",
+                        )
+                    self.assertTrue(ledger.clearance_recorded(key=key, sha=sha))
+                    runtime.reconcile_media_submit()
+                    self.assertEqual(page.readbacks, 1)
+                    self.assertTrue(page.closed)
+                    self.assertFalse(runtime.media_reconciliation_required)
+                    self.assertTrue(store.has_write_recovery_clearance(
+                        idempotency_key=key, request_sha256=sha,
+                    ))
+                    runtime.close()
+                finally:
+                    witness.close()
+                    server.close()
 
     def test_reconciled_pending_page_persists_exact_clearance(self) -> None:
         class ObservedPendingPage:

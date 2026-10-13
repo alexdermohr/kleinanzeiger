@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import hmac
 import http.client
 import json
@@ -12,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .container_draft import container_draft_denied
 from .analytics import (
     ANALYTICS_DIMENSIONS,
     ANALYTICS_METRICS,
@@ -31,6 +33,8 @@ from .query import (
     summary_to_dict,
 )
 from .storage import SnapshotStore
+from .storage_owner import StorageOwnerClient, StorageOwnerError
+from .strict_json import strict_json_object
 
 
 _MAX_PROXY_JSON_BODY_BYTES = 16 * 1024
@@ -475,6 +479,8 @@ const byId = (id) => document.getElementById(id);
 const display = (value) => value === null || value === undefined ? "—" : String(value);
 const WRITE_TOKEN_STORAGE_KEY = "mark-dashboard-write-token";
 const pendingWrites = new Map();
+// Only this page session may remember an observed terminal result.
+const pendingAckOnly = new Map();
 let writeUiAvailable = false;
 let writeToken = null;
 let pendingRecoveryBlocked = false;
@@ -616,24 +622,33 @@ async function refreshPendingWrites() {
     ) {
       throw new Error("pending recovery unavailable");
     }
-    const acknowledgedEntries = [];
+    // A legacy acknowledged tombstone is not independent evidence of an
+    // external outcome. Keep it visible as a blocking recovery intent.
     for (const entry of payload.pending_writes) {
-      if (entry.acknowledged === true) {
-        acknowledgedEntries.push(entry);
-        continue;
-      }
       if (pendingWrites.has(entry.scope)) {
         throw new Error("duplicate pending scope");
       }
+      const prior = pendingAckOnly.get(entry.scope);
+      if (
+        prior !== undefined
+        && prior.key === entry.key
+        && prior.method === entry.method
+        && prior.path === entry.path
+      ) {
+        entry.acknowledgeOnly = true;
+      }
       pendingWrites.set(entry.scope, entry);
     }
-    for (const entry of acknowledgedEntries) {
-      try {
-        await acknowledgePendingWrite(entry);
-      } catch (_error) {
-        // This GET already proved that a previous browser observed the terminal
-        // write result and durably acknowledged it. If tombstone cleanup did not
-        // reach the server, its retained row still blocks a fresh platform key.
+    // A replaced or absent durable key must not inherit old browser
+    // ACK-only evidence. Failed GET leaves this cache intact and fail-closed.
+    for (const [scope, prior] of pendingAckOnly) {
+      const current = pendingWrites.get(scope);
+      if (
+        current === undefined
+        || current.acknowledgeOnly !== true
+        || current.key !== prior.key
+      ) {
+        pendingAckOnly.delete(scope);
       }
     }
   } catch (_error) {
@@ -670,7 +685,7 @@ function renderWriteAvailability() {
   }
   if (ready && pendingWrites.size > 0) {
     setWriteStatus(
-      "Eine frühere Write-Anfrage bleibt mit ihrem ursprünglichen Idempotency-Key gebunden. Eine manuelle Wiederholung sendet exakt denselben Request; es erfolgt kein automatischer Retry.",
+      "Eine frühere Write-Anfrage bleibt mit ihrem ursprünglichen Idempotency-Key gesperrt. Keine erneute Plattformweiterleitung ohne unabhängige Ergebnisprüfung.",
       "warning",
     );
   }
@@ -705,7 +720,7 @@ function ageDescription(observedAt) {
   return "vor " + days + (days === 1 ? " Tag" : " Tagen");
 }
 
-function renderSyncStatus(sync) {
+function renderSyncStatus(sync, recovery) {
   const view = byId("sync-status");
   if (!sync || typeof sync !== "object") {
     view.textContent = "Sync-Status nicht verfügbar; Datenfrische unbekannt.";
@@ -742,7 +757,21 @@ function renderSyncStatus(sync) {
       + ageDescription(successful.completed_at) + "), Quelle: "
       + successful.source + "."
     : " Keine bestätigte Bestandsgrundlage aus diesem Journal.";
-  view.textContent = headline + baseline
+  let recoveryNote = " Offene ältere Sync-Versuche konnten nicht geprüft werden.";
+  if (recovery && typeof recovery === "object") {
+    const open = recovery.unresolved_count;
+    if (Number.isSafeInteger(open) && open === 0) {
+      recoveryNote = " Zum Abfragezeitpunkt keine offenen Sync-Versuche.";
+    } else if (Number.isSafeInteger(open) && open > 0) {
+      const oldest = recovery.oldest_unresolved_attempt;
+      const oldestId = oldest && Number.isSafeInteger(oldest.id)
+        ? " (ältester Versuch #" + oldest.id + ")" : "";
+      recoveryNote = " Achtung: " + open + " noch nicht abgeschlossene Sync-Versuche"
+        + oldestId + "; möglicherweise noch aktiv oder unterbrochen."
+        + " Unbekannte Ergebnisse dürfen nicht automatisch wiederholt werden.";
+    }
+  }
+  view.textContent = headline + baseline + recoveryNote
     + " Das Alter einzelner Zähler ist separat ausgewiesen.";
 }
 
@@ -1247,6 +1276,26 @@ async function runPlatformWrite(
 ) {
   let entry = pendingWrites.get(scope);
   const retryingPending = entry !== undefined;
+  if (retryingPending && entry.acknowledgeOnly === true) {
+    // A terminal result was already observed *in this browser runtime*.
+    // Retry only the local UI ACK, never the prior platform request.
+    try {
+      await acknowledgePendingWrite(entry);
+      pendingWrites.delete(scope);
+      pendingAckOnly.delete(scope);
+      await refreshAfterSettledWrite();
+      setWriteStatus(
+        "Bereits beobachtetes Write-Ergebnis lokal bestätigt. Keine erneute Plattformweiterleitung.",
+        "warning",
+      );
+    } catch (error) {
+      setWriteStatus(
+        `Der lokale Recovery-ACK bleibt offen: ${error.message}. Kein neuer Plattformrequest.`,
+        "warning",
+      );
+    }
+    return null;
+  }
   if (entry === undefined) {
     entry = {
       scope,
@@ -1291,9 +1340,17 @@ async function runPlatformWrite(
             return completedResult;
           }
         }
+        entry.acknowledgeOnly = true;
+        pendingAckOnly.set(scope, {
+          key: entry.key, method: entry.method, path: entry.path,
+        });
         try {
           await acknowledgePendingWrite(entry);
         } catch (error) {
+          // A denied local ACK must keep the original operation fence, but
+          // must not prevent read-only dashboard refresh after the settled
+          // backend response. Refresh neither retries nor clears the write.
+          await refreshAfterSettledWrite();
           setWriteStatus(
             `Write-Ergebnis ist terminal, aber der lokale Recovery-ACK ist fehlgeschlagen: ${error.message}. Derselbe Request/Key bleibt gebunden.`,
             "warning",
@@ -1301,6 +1358,7 @@ async function runPlatformWrite(
           return {response, payload: responsePayload};
         }
         pendingWrites.delete(scope);
+        pendingAckOnly.delete(scope);
       }
       await refreshAfterSettledWrite();
     } else if (responsePayload.error === "dashboard_pending_write_conflict") {
@@ -1312,6 +1370,10 @@ async function runPlatformWrite(
         retryingPending,
       )
     ) {
+      entry.acknowledgeOnly = true;
+      pendingAckOnly.set(scope, {
+        key: entry.key, method: entry.method, path: entry.path,
+      });
       try {
         await acknowledgePendingWrite(entry);
       } catch (error) {
@@ -1322,11 +1384,12 @@ async function runPlatformWrite(
         return {response, payload: responsePayload};
       }
       pendingWrites.delete(scope);
+      pendingAckOnly.delete(scope);
     }
     return {response, payload: responsePayload};
   } catch (error) {
     setWriteStatus(
-      `Transportstatus unbekannt: ${error.message} Derselbe Idempotency-Key bleibt für eine manuelle Wiederholung gebunden; es erfolgt kein automatischer Retry.`,
+      `Transportstatus unbekannt: ${error.message} Derselbe Idempotency-Key bleibt zur unabhängigen Recovery-Prüfung gebunden; eine erneute Plattformweiterleitung ist nicht autorisiert. Kein automatischer Retry.`,
       "warning",
     );
     return null;
@@ -1640,7 +1703,7 @@ async function runAdAction(
   const scope = `ad:${adId}:${action}`;
   if (existing !== null && existing.scope !== scope) {
     setWriteStatus(
-      `Für diese Anzeige ist bereits „${existing.scope}“ mit unbekanntem/ausstehendem Ergebnis gebunden. Zuerst genau diese Anfrage erneut abfragen.`,
+      `Für diese Anzeige ist bereits „${existing.scope}“ mit unbekanntem/ausstehendem Ergebnis gebunden. Zuerst den ursprünglichen Ausgang unabhängig klären.`,
       "warning",
     );
     return;
@@ -1763,7 +1826,7 @@ async function load() {
     await refreshPendingWrites();
     renderWriteAvailability();
     renderAds(ads);
-    renderSyncStatus(summary.sync_status);
+    renderSyncStatus(summary.sync_status, summary.sync_recovery);
     renderAnalyticsContract(contract);
 
     const metricSelect = byId("metric-select");
@@ -1822,6 +1885,7 @@ def _json_bytes(value: object) -> bytes:
         value,
         ensure_ascii=False,
         sort_keys=True,
+        allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
 
@@ -1837,7 +1901,15 @@ def _dashboard_write_route(path: str, method: str) -> str | None:
     target = urlsplit(path)
     if target.query:
         return None
-    parts = [unquote(item) for item in target.path.split("/") if item]
+    # Reject noncanonical write paths before binding any durable intent.
+    # Otherwise a percent-encoded media route can lose its staging references.
+    raw_parts = target.path.split("/")
+    if (
+        raw_parts[0] != ""
+        or any(not part or unquote(part) != part for part in raw_parts[1:])
+    ):
+        return None
+    parts = raw_parts[1:]
     if parts == ["api", "write", "ads"] and method == "POST":
         return "json"
     if parts == ["api", "write", "media", "stage"] and method == "POST":
@@ -1901,14 +1973,41 @@ def _dashboard_pending_identity(
 
 
 def _handler_factory(
-    store: SnapshotStore,
+    store: SnapshotStore | StorageOwnerClient,
     query: MarkQueryService,
     analytics: AnalyticsService,
     write_proxy: DashboardWriteProxy | None,
+    *,
+    public_origin_port: int | None = None,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "mark-api-readonly/0.1"
         sys_version = ""
+
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            # The public frontend forwards an HTTP Host unchanged. Never
+            # trust DNS aliases or duplicate Host headers, even for GETs:
+            # a browser's Host must identify a literal loopback origin.
+            local_host, local_port = self.server.server_address
+            allowed_ports = {int(local_port)}
+            if public_origin_port is not None:
+                allowed_ports.add(public_origin_port)
+            allowed_hosts = {
+                _dashboard_http_origin("127.0.0.1", port).removeprefix("http://")
+                for port in allowed_ports
+            }
+            hosts = self.headers.get_all("Host") or []
+            if (
+                str(local_host) != "127.0.0.1"
+                or len(hosts) != 1
+                or hosts[0] not in allowed_hosts
+            ):
+                self.close_connection = True
+                self.send_error(421, "Misdirected Request")
+                return False
+            return True
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -1942,9 +2041,16 @@ def _handler_factory(
             self.wfile.write(body)
 
         def _send_json(self, status: int, value: object) -> None:
+            try:
+                encoded = _json_bytes(value)
+            except (TypeError, ValueError, OverflowError, RecursionError):
+                # Never emit JavaScript-invalid NaN/Infinity from metrics
+                # or other service data; invalid data cannot be success.
+                status = 500
+                encoded = b'{"error":"invalid_json_response"}'
             self._send(
                 status,
-                _json_bytes(value),
+                encoded,
                 "application/json; charset=utf-8",
             )
 
@@ -1993,12 +2099,12 @@ def _handler_factory(
                 origins = self.headers.get_all("Origin") or []
                 server_host, server_port = self.server.server_address
                 expected_origin = _dashboard_http_origin(
-                    str(server_host), int(server_port)
+                    str(server_host),
+                    int(server_port) if public_origin_port is None else public_origin_port,
                 )
                 if (
                     len(origins) != 1
-                    or not hmac.compare_digest(origins[0], expected_origin)
-                ):
+                    or not hmac.compare_digest(origins[0], expected_origin)                ):
                     return False
             fetch_sites = self.headers.get_all("Sec-Fetch-Site") or []
             if fetch_sites and (
@@ -2166,6 +2272,20 @@ def _handler_factory(
             headers.update(body_headers)
             headers["Content-Length"] = str(len(body))
 
+            parsed_payload: dict[str, object] | None = None
+            if body_kind in {"json", "local_json"}:
+                try:
+                    parsed_payload = strict_json_object(body)
+                except ValueError as exc:
+                    self._send_json(
+                        400,
+                        {
+                            "error": str(exc),
+                            "platform_retry_authorized": False,
+                        },
+                    )
+                    return
+
             pending_scope: str | None = None
             if platform_write:
                 assert idempotency_key is not None
@@ -2182,31 +2302,24 @@ def _handler_factory(
                 pending_scope, resource_key, pending_ad_id = identity
                 pending_payload_json: str | None = None
                 if body_kind == "json":
+                    assert parsed_payload is not None
                     try:
-                        pending_payload = json.loads(body)
-                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        pending_payload_json = _json_bytes(
+                            parsed_payload
+                        ).decode("utf-8")
+                    except (UnicodeError, ValueError):
+                        # Lone JSON surrogates are not UTF-8. Reject before
+                        # claiming or forwarding instead of dropping the socket.
                         self._send_json(
                             400,
                             {
-                                "error": "invalid_json",
+                                "error": "invalid_unicode_text",
                                 "platform_retry_authorized": False,
                             },
                         )
                         return
-                    if not isinstance(pending_payload, dict):
-                        self._send_json(
-                            400,
-                            {
-                                "error": "json_body_must_be_object",
-                                "platform_retry_authorized": False,
-                            },
-                        )
-                        return
-                    pending_payload_json = _json_bytes(
-                        pending_payload
-                    ).decode("utf-8")
                 try:
-                    store.claim_dashboard_pending_write(
+                    created = store.claim_dashboard_pending_write(
                         scope=pending_scope,
                         resource_key=resource_key,
                         idempotency_key=idempotency_key,
@@ -2215,6 +2328,12 @@ def _handler_factory(
                         payload_json=pending_payload_json,
                         ad_id=pending_ad_id,
                     )
+                    if created is not True:
+                        # An exact duplicate is still an unresolved UI fence:
+                        # after a lost backend ACK it may already have written.
+                        # Never forward that intent again without separate,
+                        # read-only independent reconciliation of the outcome.
+                        raise ValueError("existing pending write is unresolved")
                 except ValueError:
                     self._send_json(
                         409,
@@ -2258,13 +2377,11 @@ def _handler_factory(
                     if not content_type.lower().startswith("application/json"):
                         raise ValueError("write_proxy_response_not_json")
                     try:
-                        response_payload = json.loads(response_body)
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        response_payload = strict_json_object(response_body)
+                    except ValueError as exc:
                         raise ValueError(
                             "write_proxy_response_not_json"
                         ) from exc
-                    if not isinstance(response_payload, dict):
-                        raise ValueError("write_proxy_response_not_json")
                     replayed = (
                         response.getheader("Idempotency-Replayed") == "true"
                     )
@@ -2293,7 +2410,7 @@ def _handler_factory(
         def do_GET(self) -> None:
             try:
                 self._handle_GET()
-            except sqlite3.Error:
+            except (sqlite3.Error, StorageOwnerError):
                 # No database error messages, SQL or filesystem paths on HTTP.
                 self._send_json(503, {"error": "database_unavailable"})
 
@@ -2388,9 +2505,13 @@ def _handler_factory(
             if path == "/api/sync/status":
                 self._send_json(200, store.sync_status())
                 return
+            if path == "/api/sync/recovery":
+                self._send_json(200, store.sync_recovery_status())
+                return
             if path == "/api/summary":
                 payload = summary_to_dict(query.summary())
                 payload["sync_status"] = store.sync_status()
+                payload["sync_recovery"] = store.sync_recovery_status()
                 self._send_json(200, payload)
                 return
             if path == "/api/ads":
@@ -2534,20 +2655,17 @@ def _handler_factory(
                 return
             try:
                 body, _ = self._read_proxy_body("local_json")
-                payload = json.loads(body)
+                payload = strict_json_object(body)
                 if (
-                    not isinstance(payload, dict)
-                    or set(payload) != {"scope", "idempotency_key"}
+                    set(payload) != {"scope", "idempotency_key"}
                     or not isinstance(payload["scope"], str)
                     or not isinstance(payload["idempotency_key"], str)
                 ):
                     raise ValueError("invalid_pending_ack")
-                phase = store.acknowledge_dashboard_pending_write(
-                    scope=payload["scope"],
-                    idempotency_key=payload["idempotency_key"],
-                )
-                if phase == "missing":
-                    raise ValueError("dashboard pending write is missing")
+                # A browser token and matching key do not establish an
+                # independent platform operation outcome. No typed, owner-
+                # verified reconciliation proof is available here yet.
+                # Keep this endpoint fail-closed until that protocol exists.
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 self._send_json(
                     409,
@@ -2567,10 +2685,10 @@ def _handler_factory(
                 )
                 return
             self._send_json(
-                200,
+                409,
                 {
-                    "acknowledged": True,
-                    "finalized": phase == "finalized",
+                    "error": "dashboard_pending_write_reconciliation_required",
+                    "platform_retry_authorized": False,
                 },
             )
 
@@ -2603,12 +2721,13 @@ class LoopbackDashboardServer(ThreadingHTTPServer):
 
 
 def create_server(
-    store: SnapshotStore,
+    store: SnapshotStore | StorageOwnerClient,
     *,
     host: str = "127.0.0.1",
     port: int = 8765,
     analytics_contract: AnalyticsContract | None = None,
     write_proxy: DashboardWriteProxy | None = None,
+    public_origin_port: int | None = None,
 ) -> LoopbackDashboardServer:
     if host != "127.0.0.1":
         raise ValueError("dashboard must bind to 127.0.0.1")
@@ -2618,24 +2737,47 @@ def create_server(
         or not 0 <= port <= 65535
     ):
         raise ValueError("port must be an integer between 0 and 65535")
+    if public_origin_port is not None and (
+        type(public_origin_port) is not int
+        or not 1 <= public_origin_port <= 65535
+    ):
+        raise ValueError("public_origin_port must be an integer between 1 and 65535")
 
+    if isinstance(store, StorageOwnerClient) and write_proxy is not None:
+        # Dashboard pending ACK and independent external Write completion are
+        # not yet mediated. Refuse the entire Write UI before binding HTTP.
+        raise ValueError("independent storage dashboard Writes are not yet attested")
     query = MarkQueryService(store)
     analytics = AnalyticsService(store, contract=analytics_contract)
     return LoopbackDashboardServer(
         (host, port),
-        _handler_factory(store, query, analytics, write_proxy),
+        _handler_factory(
+            store, query, analytics, write_proxy,
+            public_origin_port=public_origin_port,
+        ),
     )
 
 
 def main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints",
+              file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(
         description="Serve the local read-only mark-api dashboard.",
     )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--db", type=Path,
+        help="Trusted offline SQLite database (never mount in untrusted runtime).",
+    )
+    source.add_argument(
+        "--owner-socket", type=Path,
+        help="Read-only analytics over the independent SQLite-owner Unix socket.",
+    )
     parser.add_argument(
-        "--db",
-        type=Path,
-        required=True,
-        help="Path to the mark-api SQLite database.",
+        "--owner-uid", type=int,
+        help="Required exact SO_PEERCRED UID for --owner-socket (no DB fallback).",
     )
     parser.add_argument(
         "--port",
@@ -2668,10 +2810,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    try:
-        store = SnapshotStore(args.db, create_if_missing=args.init_db)
-    except (OSError, sqlite3.Error):
-        parser.error("SQLite database unavailable or not initialized")
+    if args.owner_socket is not None:
+        if args.init_db:
+            parser.error("--init-db is forbidden with --owner-socket")
+        if args.owner_uid is None:
+            parser.error("--owner-uid is required for --owner-socket")
+        try:
+            store = StorageOwnerClient(
+                args.owner_socket, expected_owner_uid=args.owner_uid,
+            )
+            if not store.is_ready():
+                parser.error("independent SQLite owner unavailable")
+        except (StorageOwnerError, OSError):
+            parser.error("independent SQLite owner unavailable")
+    else:
+        if args.owner_uid is not None:
+            parser.error("--owner-uid requires --owner-socket")
+        try:
+            store = SnapshotStore(args.db, create_if_missing=args.init_db)
+        except (OSError, sqlite3.Error):
+            parser.error("SQLite database unavailable or not initialized")
     contract = AnalyticsContract(
         reaction_metric=args.reaction_metric,
         objective_metric=args.objective_metric,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import tempfile
@@ -23,6 +24,9 @@ from mark_api.domain import (
     MediaPostReadStatus,
     OperationOutcome,
     OperationReceipt,
+)
+from mark_api.fence_witness import (
+    FenceWitnessAlreadyRecorded, FenceWitnessError, FenceWitnessRejected,
 )
 from mark_api.storage import SnapshotStore
 from mark_api.write_api import (
@@ -367,6 +371,76 @@ class FakeMediaStager:
 
 
 
+class _RecordingFenceWitness:
+    """Fake protocol sink. This is NOT an independent UID trust boundary."""
+
+    def __init__(self, store: SnapshotStore, *, deny_start: bool = False,
+                 fail_complete: bool = False) -> None:
+        self.store = store
+        self.deny_start = deny_start
+        self.fail_complete = fail_complete
+        self.starts: list[tuple[str, str, str]] = []
+        self.completions: list[tuple[str, str, object]] = []
+        self._pending = False
+
+    def pending(self) -> bool:
+        return self._pending
+
+    def replay_status(self, *, key: str, sha: str, response_sha: str) -> str:
+        """Model committed per-key outcome, not a post-hoc clearance."""
+        for committed_key, committed_sha, response in self.completions:
+            if committed_key != key or committed_sha != sha:
+                continue
+            canonical = json.dumps(
+                response, sort_keys=True, ensure_ascii=True,
+                separators=(",", ":"), allow_nan=False,
+            )
+            if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != response_sha:
+                return "unverified"
+            receipt = response.get("operation_receipt") if isinstance(response, dict) else None
+            if not isinstance(receipt, dict):
+                return "ambiguous"
+            if receipt.get("outcome") == "precondition_failed" and receipt.get("writer_invoked") is False:
+                return "precondition_failed"
+            action = next(a for k, _, a in self.starts if k == key)
+            if receipt.get("outcome") == "confirmed" and receipt.get("writer_invoked") is True:
+                if action != "create_media" or response.get("media_persistence_confirmed") is True:
+                    return "confirmed"
+            return "ambiguous"
+        if not any(recorded_key == key for recorded_key, _, _ in self.starts):
+            return "never_started"
+        return "unverified"
+
+    def started(self, *, key: str, sha: str, action: str) -> None:
+        if self._pending:
+            raise RuntimeError("synthetic earlier independent fence still pending")
+        self.starts.append((key, sha, action))
+        # Commit may succeed while the acknowledgement is lost.
+        self._pending = True
+        if self.deny_start:
+            raise RuntimeError("synthetic witness start ACK lost")
+
+    def completed(self, *, key: str, sha: str, response: object) -> str:
+        record = self.store.write_api_request(key)
+        if record is None or record.state != "completed":
+            raise AssertionError("witness completed before local commit")
+        self.completions.append((key, sha, response))
+        if self.fail_complete:
+            raise RuntimeError("synthetic witness completion ACK lost")
+        receipt = response.get("operation_receipt") if isinstance(response, dict) else None
+        if not isinstance(receipt, dict):
+            return "ambiguous"
+        if receipt.get("outcome") == "precondition_failed" and receipt.get("writer_invoked") is False:
+            self._pending = False
+            return "precondition_failed"
+        action = next(a for k, _, a in self.starts if k == key)
+        if receipt.get("outcome") == "confirmed" and receipt.get("writer_invoked") is True:
+            if action != "create_media" or response.get("media_persistence_confirmed") is True:
+                self._pending = False
+                return "confirmed"
+        return "ambiguous"
+
+
 class WriteApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -391,6 +465,7 @@ class WriteApiTests(unittest.TestCase):
         ),
         writes_enabled: bool = True,
         body_read_timeout_seconds: float = 10.0,
+        fence_witness: _RecordingFenceWitness | None = None,
     ):
         access = WriteApiAccess(
             principal="api-test-owner",
@@ -406,6 +481,7 @@ class WriteApiTests(unittest.TestCase):
             media_stager=media_stager,
             port=0,
             body_read_timeout_seconds=body_read_timeout_seconds,
+            fence_witness=fence_witness,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -453,6 +529,652 @@ class WriteApiTests(unittest.TestCase):
         with response:
             body = json.loads(response.read())
             return response.status, response.headers, body
+
+    def test_write_rejects_ambiguous_or_nonfinite_raw_json_before_claim(self) -> None:
+        # A raw HTTP body is essential here: json.dumps(payload) would
+        # already collapse duplicate object keys in the caller fixture.
+        service = FakeWriteService()
+        invalid = (
+            b'{"title":"original","title":"replaced"}',
+            b'{"title":"ok","nested":{"key":1,"key":2}}',
+            b'{"price_eur":NaN}',
+            b'{"price_eur":Infinity}',
+            b'{"price_eur":-Infinity}',
+            b'{"price_eur":1e999}',
+            b'{"price_eur":-1E999}',
+            b'{"nested":{"price":9e999}}',
+            '{"title":"test"}'.encode("utf-16"),
+            '{"title":"test"}'.encode("utf-16-le"),
+            '{"title":"test"}'.encode("utf-32"),
+            '{"title":"test"}'.encode("utf-32-be"),
+            b'{"description":"Escaped \\" before ","depth":' + (b"[" * 80) + b"0" + (b"]" * 80) + b"}",
+        )
+        with self.server(service) as server:
+            host, port = server.server_address
+            for index, raw in enumerate(invalid):
+                key = f"invalid-json-{index}"
+                for method, route in (
+                    ("POST", "/api/write/ads"),
+                    ("PATCH", "/api/write/ads/1234567890"),
+                ):
+                    with self.subTest(raw=raw, method=method):
+                        request = Request(
+                            f"http://{host}:{port}{route}",
+                            data=raw,
+                            headers={
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {TOKEN}",
+                                "Idempotency-Key": key,
+                            },
+                            method=method,
+                        )
+                        with self.assertRaises(HTTPError) as caught:
+                            self.opener.open(request, timeout=2)
+                        self.assertEqual(caught.exception.code, 400)
+                        self.assertEqual(
+                            json.loads(caught.exception.read())["error"],
+                            "invalid_json",
+                        )
+                        self.assertIsNone(self.store.write_api_request(key))
+        self.assertEqual(service.calls, [])
+
+    def test_witness_started_before_external_pause_and_completed_after_commit(self) -> None:
+        witness = _RecordingFenceWitness(self.store)
+        class OrderedService(FakeWriteService):
+            def pause(inner, ad_id, *, authorization_by=None,
+                      authorization_reference=None):
+                self.assertEqual(len(witness.starts), 1,
+                                 "external mutation preceded durable witness start")
+                return super().pause(
+                    ad_id, authorization_by=authorization_by,
+                    authorization_reference=authorization_reference,
+                )
+        service = OrderedService()
+        with self.server(service, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="witness-pause-first",
+            )
+        self.assertEqual(status, 200, response)
+        self.assertEqual(len(service.calls), 1)
+        self.assertEqual(len(witness.starts), 1)
+        self.assertEqual(witness.starts[0][0], "witness-pause-first")
+        self.assertEqual(witness.starts[0][2], "pause")
+        self.assertEqual(len(witness.starts[0][1]), 64)
+        self.assertEqual(len(witness.completions), 1)
+        self.assertEqual(witness.completions[0][0:2], witness.starts[0][0:2])
+
+    def test_witness_missing_start_ack_never_calls_browser_writer(self) -> None:
+        witness = _RecordingFenceWitness(self.store, deny_start=True)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="witness-denied",
+            )
+        self.assertEqual(status, 500, response)
+        self.assertFalse(response["platform_retry_authorized"])
+        self.assertEqual(service.calls, [])
+        self.assertEqual(witness.completions, [])
+
+    def test_offline_witness_rejects_write_before_local_claim(self) -> None:
+        class ClosedWitness(_RecordingFenceWitness):
+            def pending(self) -> bool:
+                raise FenceWitnessError("witness connection is closed")
+
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                raise AssertionError("should never call started on dead witness")
+
+        witness = ClosedWitness(self.store)
+        service = FakeWriteService()
+        key = "no-local-claim-when-witness-offline"
+        with self.server(service, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+        self.assertEqual(status, 503, response)
+        self.assertEqual(response["error"], "witness_outcome_uncertain")
+        self.assertFalse(response["platform_retry_authorized"])
+        self.assertEqual(service.calls, [])
+        self.assertIsNone(self.store.write_api_request(key))
+
+    def test_lost_witness_start_ack_preserves_unexecuted_unknown_claim(self) -> None:
+        class LostStartAcknowledgement(_RecordingFenceWitness):
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                super().started(key=key, sha=sha, action=action)
+                raise FenceWitnessError("synthetic durable start ACK lost")
+
+        witness = LostStartAcknowledgement(self.store)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="witness-start-ack-unknown",
+            )
+        self.assertEqual(status, 503, response)
+        self.assertEqual(response["error"], "witness_outcome_uncertain")
+        self.assertFalse(response["platform_retry_authorized"])
+        self.assertEqual(service.calls, [])
+        record = self.store.write_api_request("witness-start-ack-unknown")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.state, "in_progress")
+        self.assertIsNotNone(record.execution_started_at)
+
+    def test_witness_replays_only_exact_pre_begin_owner_cancellation(self) -> None:
+        key = "ui:witness:unstarted:cancel"
+        path = "/api/write/ads/1234567890"
+        payload = {"title": "owner did not start"}
+        sha = _request_fingerprint(
+            principal="api-test-owner", method="PATCH",
+            path=path, payload=payload,
+        )
+        self.store.claim_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            requested_at=NOW, claim_owner="runtime:original",
+        )
+        cancelled = self.store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            claim_owner="runtime:original", cancelled_at=NOW,
+        )
+        witness = _RecordingFenceWitness(self.store)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            status, headers, result = self.request(
+                server, "PATCH", path, payload=payload,
+                idempotency_key=key,
+            )
+            self.assertEqual(status, 409, result)
+            self.assertEqual(headers.get("Idempotency-Replayed"), "true")
+            self.assertEqual(result, json.loads(cancelled.response_json))
+            self.assertFalse(result["platform_retry_authorized"])
+            self.assertEqual(service.calls, [])
+            self.assertEqual(witness.starts, [])
+
+            # Even after an artificial "operator cleared" global flag, a
+            # WITNESS start for the original key prevents a false 409 replay.
+            witness.starts.append((key, sha, "update_content"))
+            replay, _, response = self.request(
+                server, "PATCH", path, payload=payload,
+                idempotency_key=key,
+            )
+            self.assertEqual(replay, 503, response)
+            self.assertEqual(response["error"], "witness_outcome_uncertain")
+            self.assertFalse(response["platform_retry_authorized"])
+            self.assertEqual(service.calls, [])
+        self.assertEqual(self.store.write_api_request(key), cancelled)
+
+    def test_unstarted_cancel_tampered_local_response_never_replays(self) -> None:
+        key = "ui:cancel:forged-envelope"
+        path, payload = "/api/write/ads/1234567890", {"title": "original"}
+        sha = _request_fingerprint(
+            principal="api-test-owner", method="PATCH", path=path, payload=payload,
+        )
+        self.store.claim_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            requested_at=NOW, claim_owner="runtime:original",
+        )
+        self.store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            claim_owner="runtime:original", cancelled_at=NOW,
+        )
+        with self.store._connect() as db:
+            db.execute(
+                "UPDATE write_api_requests SET response_json=? "
+                "WHERE idempotency_key=?",
+                (json.dumps({
+                    "error": "write_claim_cancelled_before_begin",
+                    "idempotency_key": key, "platform_retry_authorized": True,
+                }, sort_keys=True, separators=(",", ":")), key),
+            )
+        service = FakeWriteService()
+        witness = _RecordingFenceWitness(self.store)
+        with self.server(service, fence_witness=witness) as server:
+            status, _, body = self.request(
+                server, "PATCH", path, payload=payload, idempotency_key=key,
+            )
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"], "witness_outcome_uncertain")
+        self.assertFalse(body["platform_retry_authorized"])
+        self.assertEqual(service.calls, [])
+
+    def test_witness_lost_completion_ack_does_not_claim_success(self) -> None:
+        witness = _RecordingFenceWitness(self.store, fail_complete=True)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="witness-lost-completion",
+            )
+        self.assertEqual(status, 503, response)
+        self.assertFalse(response["platform_retry_authorized"])
+        self.assertEqual(len(service.calls), 1)
+        self.assertEqual(len(witness.completions), 1)
+
+    def test_witness_ambiguous_media_returns_202_and_blocks_new_key(self) -> None:
+        witness = _RecordingFenceWitness(self.store)
+        service = FakeWriteService()
+        media = FakeMediaWriteService(outcome=OperationOutcome.AMBIGUOUS)
+        payload = {
+            "category_path": ["Haus & Garten", "Dekoration"],
+            "title": "Neue Vase", "description": "Beschreibung",
+            "price_eur": 12, "media_refs": ["photo_01"],
+        }
+        with self.server(
+            service, media_service=media,
+            capabilities=frozenset(WriteCapability), fence_witness=witness,
+        ) as server:
+            first, _, response = self.request(
+                server, "POST", "/api/write/media/ads", payload=payload,
+                idempotency_key="witness-ambiguous-media",
+            )
+            self.assertEqual(first, 202, response)
+            self.assertFalse(response["platform_retry_authorized"])
+            self.assertEqual(len(witness.completions), 1)
+            self.assertTrue(witness.pending())
+            denied, _, blocked = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="witness-new-key-bypass",
+            )
+        self.assertEqual(denied, 503, blocked)
+        self.assertEqual(blocked["error"], "witness_recovery_pending")
+        self.assertFalse(blocked["platform_retry_authorized"])
+        self.assertIsNone(self.store.write_api_request("witness-new-key-bypass"))
+        self.assertEqual(len(media.calls), 1)
+        self.assertEqual(service.calls, [])
+        self.assertEqual(len(witness.starts), 1)
+
+    def test_witness_lost_completion_ack_blocks_local_replay_success(self) -> None:
+        witness = _RecordingFenceWitness(self.store, fail_complete=True)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            first, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="witness-uncertain-replay",
+            )
+            self.assertEqual(first, 503, response)
+            self.assertTrue(witness.pending())
+            replay, _, replay_response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="witness-uncertain-replay",
+            )
+        self.assertEqual(replay, 503, replay_response)
+        self.assertFalse(replay_response["platform_retry_authorized"])
+        self.assertEqual(len(service.calls), 1)
+        self.assertEqual(len(witness.starts), 1)
+        self.assertEqual(len(witness.completions), 1)
+
+    def test_witness_all_six_write_capabilities_are_recorded(self) -> None:
+        base = {"category_path": ["Haus & Garten", "Dekoration"],
+                "title": "Neue Vase", "description": "Beschreibung", "price_eur": 12}
+        actions = (
+            ("create", "POST", "/api/write/ads", base),
+            ("create_media", "POST", "/api/write/media/ads",
+             {**base, "media_refs": ["photo_01"]}),
+            ("update_content", "PATCH", "/api/write/ads/1234567890",
+             {"title": "new"}),
+            ("pause", "POST", "/api/write/ads/1234567890/pause", _MISSING),
+            ("activate", "POST", "/api/write/ads/1234567890/activate", _MISSING),
+            ("delete", "DELETE", "/api/write/ads/1234567890", _MISSING),
+        )
+        for n, (action, method, route, payload) in enumerate(actions):
+            with self.subTest(action=action):
+                self.store = SnapshotStore(
+                    Path(self.tmp.name) / f"witness-six-actions-{n}.sqlite"
+                )
+                witness = _RecordingFenceWitness(self.store)
+                service = FakeWriteService()
+                media = FakeMediaWriteService(
+                    media_persistence_confirmed=True,
+                    media_post_read_status=MediaPostReadStatus.CONFIRMED,
+                )
+                with self.server(
+                    service, media_service=media,
+                    capabilities=frozenset(WriteCapability), fence_witness=witness,
+                ) as server:
+                    status, _, response = self.request(
+                        server, method, route, payload=payload,
+                        idempotency_key=f"witness-six-{n}",
+                    )
+                self.assertEqual(status, 200, (action, response))
+                self.assertEqual(len(witness.starts), 1)
+                self.assertEqual(witness.starts[0][0], f"witness-six-{n}")
+                self.assertEqual(witness.starts[0][2], action)
+                self.assertEqual(len(witness.completions), 1)
+                self.assertFalse(witness.pending())
+                self.assertEqual(len(media.calls) if action == "create_media"
+                                 else len(service.calls), 1)
+
+    def test_witness_writer_entered_but_not_attempted_is_fail_closed(self) -> None:
+        """Writer-called precondition failure is not independent proof of no submit."""
+        witness = _RecordingFenceWitness(self.store)
+
+        class WriterSaidNotAttempted(FakeWriteService):
+            def pause(inner, ad_id, *, authorization_by=None,
+                      authorization_reference=None):
+                inner.calls.append(("pause", ad_id))
+                return replace(
+                    receipt(
+                        "set_state:paused", ad_id,
+                        outcome=OperationOutcome.PRECONDITION_FAILED,
+                        authorization_by=authorization_by,
+                        authorization_reference=authorization_reference,
+                    ),
+                    writer_invoked=True,
+                    writer_error="WriteNotAttemptedError",
+                )
+
+        service = WriterSaidNotAttempted()
+        with self.server(service, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="writer-not-attempted",
+            )
+            self.assertEqual(status, 503, response)
+            self.assertFalse(response["platform_retry_authorized"])
+            self.assertTrue(witness.pending())
+            second, _, blocked = self.request(
+                server, "POST", "/api/write/ads/1234567890/activate",
+                idempotency_key="different-after-writer-noattempt",
+            )
+        self.assertEqual(second, 503, blocked)
+        self.assertEqual(blocked["error"], "witness_recovery_pending")
+        self.assertIsNone(self.store.write_api_request("different-after-writer-noattempt"))
+        self.assertEqual(len(service.calls), 1)
+        self.assertEqual(len(witness.starts), 1)
+        record = self.store.write_api_request("writer-not-attempted")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.response_status, 409)
+
+    def test_witness_operator_clear_without_completion_cannot_replay_200(self) -> None:
+        witness = _RecordingFenceWitness(self.store, fail_complete=True)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            first, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="operator-cleared-without-confirmation",
+            )
+            self.assertEqual(first, 503, response)
+            self.assertEqual(len(service.calls), 1)
+            # Stand-in for a trusted operator clearance after an ACK loss
+            # where the witness never durably recorded completed(K).
+            witness.completions.clear()
+            witness._pending = False
+            replay, _, body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="operator-cleared-without-confirmation",
+            )
+        self.assertEqual(replay, 503, body)
+        self.assertFalse(body["platform_retry_authorized"])
+        self.assertEqual(len(service.calls), 1)
+
+    def test_witness_replay_rejects_tampered_local_confirmed_receipt(self) -> None:
+        witness = _RecordingFenceWitness(self.store)
+        service = FakeWriteService()
+        key = "witness-tampered-local-receipt"
+        with self.server(service, fence_witness=witness) as server:
+            first, _, body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+            self.assertEqual(first, 200, body)
+            falsified = json.loads(self.store.write_api_request(key).response_json)
+            falsified["operation_receipt"]["post_read_status"] = "forged"
+            with self.store._connect() as db:
+                db.execute(
+                    "UPDATE write_api_requests SET response_json=? WHERE idempotency_key=?",
+                    (json.dumps(falsified, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":")), key),
+                )
+            replay, _, result = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+        self.assertEqual(replay, 503, result)
+        self.assertEqual(len(service.calls), 1)
+
+    def test_witness_precondition_writer_invoked_clear_cannot_replay_409(self) -> None:
+        witness = _RecordingFenceWitness(self.store)
+        class WriterNotAttempted(FakeWriteService):
+            def pause(inner, ad_id, *, authorization_by=None, authorization_reference=None):
+                inner.calls.append(("pause", ad_id))
+                return replace(
+                    receipt("set_state:paused", ad_id,
+                            outcome=OperationOutcome.PRECONDITION_FAILED,
+                            authorization_by=authorization_by,
+                            authorization_reference=authorization_reference),
+                    writer_invoked=True,
+                    writer_error="WriteNotAttemptedError",
+                )
+        svc = WriterNotAttempted()
+        with self.server(svc, fence_witness=witness) as server:
+            status, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="writer-invoked-precondition-409",
+            )
+            self.assertEqual(status, 503, response)
+            self.assertTrue(witness.pending())
+            witness._pending = False  # synthetic independent operator clearance
+            replay, _, result = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="writer-invoked-precondition-409",
+            )
+        self.assertEqual(replay, 503, result)
+        self.assertEqual(len(svc.calls), 1)
+
+    def test_witness_definite_start_rejection_is_not_execution_error(self) -> None:
+        class DefiniteReject(_RecordingFenceWitness):
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                raise FenceWitnessRejected("synthetic prior write pending")
+
+        witness = DefiniteReject(self.store)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            status, _, body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="definite-start-rejected",
+            )
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"], "witness_write_rejected")
+        self.assertFalse(body["platform_retry_authorized"])
+        self.assertEqual(service.calls, [])
+        self.assertFalse(witness.pending())
+        record = self.store.write_api_request("definite-start-rejected")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.response_status, 503)
+
+    def test_witness_error_status_with_confirmed_receipt_never_replays(self) -> None:
+        witness = _RecordingFenceWitness(self.store)
+        key = "tampered-http500-with-confirmed"
+        svc = FakeWriteService()
+        with self.server(svc, fence_witness=witness) as server:
+            status, _, first = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+            self.assertEqual(status, 200, first)
+            with self.store._connect() as db:
+                db.execute(
+                    "UPDATE write_api_requests SET response_status=500 "
+                    "WHERE idempotency_key=?", (key,),
+                )
+            replay, _, body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+        self.assertEqual(replay, 503, body)
+        self.assertEqual(body["error"], "witness_outcome_uncertain")
+        self.assertEqual(len(svc.calls), 1)
+
+    def test_witness_local_503_rejection_cannot_hide_previously_confirmed_write(self) -> None:
+        witness = _RecordingFenceWitness(self.store)
+        key = "restored-claim-that-was-confirmed"
+        svc = FakeWriteService()
+        with self.server(svc, fence_witness=witness) as server:
+            first, _, result = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+            self.assertEqual(first, 200, result)
+            misleading = {
+                "error": "witness_write_rejected",
+                "idempotency_key": key,
+                "platform_retry_authorized": False,
+            }
+            with self.store._connect() as db:
+                db.execute(
+                    "UPDATE write_api_requests "
+                    "SET response_status=503,response_json=? "
+                    "WHERE idempotency_key=?",
+                    (json.dumps(misleading, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":")), key),
+                )
+            replay, _, body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+        self.assertEqual(replay, 503, body)
+        self.assertEqual(body["error"], "witness_outcome_uncertain")
+        self.assertEqual(len(svc.calls), 1)
+
+    def test_witness_definite_rejection_replays_only_when_never_started(self) -> None:
+        class KnownReject(_RecordingFenceWitness):
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                raise FenceWitnessRejected("synthetic other key pending")
+
+        witness = KnownReject(self.store)
+        svc = FakeWriteService()
+        with self.server(svc, fence_witness=witness) as server:
+            first, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="never-started-refusal",
+            )
+            self.assertEqual(first, 503, response)
+            self.assertEqual(response["error"], "witness_write_rejected")
+            again, headers, body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key="never-started-refusal",
+            )
+        self.assertEqual(again, 503, body)
+        self.assertEqual(body, response)
+        self.assertEqual(headers.get("Idempotency-Replayed"), "true")
+        self.assertEqual(svc.calls, [])
+
+    def test_witness_prior_key_is_not_misreported_as_never_executed(self) -> None:
+        class EarlierOperation(_RecordingFenceWitness):
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                raise FenceWitnessAlreadyRecorded("synthetic prior external write")
+
+            def replay_status(self, *, key: str, sha: str, response_sha: str) -> str:
+                return "unverified"
+
+        witness = EarlierOperation(self.store)
+        service = FakeWriteService()
+        key = "already-started-after-local-rollback"
+        with self.server(service, fence_witness=witness) as server:
+            first, _, body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+            self.assertEqual(first, 503, body)
+            self.assertEqual(body["error"], "witness_prior_operation_unknown")
+            self.assertFalse(body["platform_retry_authorized"])
+            replay, _, replay_body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+        self.assertEqual(replay, 503, replay_body)
+        self.assertEqual(replay_body["error"], "witness_outcome_uncertain")
+        self.assertEqual(service.calls, [])
+
+    def test_create_stale_local_recovery_must_check_earlier_witness_key(self) -> None:
+        # A restored local SQLite can remember old J's pending state but lose
+        # the later Create K. The witness may still remember K as executed.
+        old_key = "restored-older-J"
+        self.store.claim_write_api_request(
+            idempotency_key=old_key, request_sha256="a" * 64,
+            requested_at=NOW, claim_owner="historical-runtime",
+        )
+        self.store.begin_write_api_request(
+            idempotency_key=old_key, request_sha256="a" * 64,
+            claim_owner="historical-runtime", execution_started_at=NOW,
+        )
+        new_key = "historical-confirmed-create-K"
+
+        class WitnessWithPriorKey(_RecordingFenceWitness):
+            def replay_status(self, *, key: str, sha: str, response_sha: str) -> str:
+                return "unverified" if key == new_key else "never_started"
+
+        witness = WitnessWithPriorKey(self.store)
+        svc = FakeWriteService()
+        payload = {"category_path": ["Haus & Garten", "Dekoration"],
+                   "title": "Neue Vase", "description": "Beschreibung",
+                   "price_eur": 12}
+        with self.server(svc, fence_witness=witness) as server:
+            status, _, body = self.request(
+                server, "POST", "/api/write/ads", payload=payload,
+                idempotency_key=new_key,
+            )
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"], "witness_prior_operation_unknown")
+        self.assertFalse(body["platform_retry_authorized"])
+        self.assertEqual(svc.calls, [])
+        self.assertEqual(witness.starts, [])
+
+    def test_create_stale_local_recovery_without_prior_key_stays_409(self) -> None:
+        self.store.claim_write_api_request(
+            idempotency_key="stale-local-J", request_sha256="a" * 64,
+            requested_at=NOW, claim_owner="historical-runtime",
+        )
+        self.store.begin_write_api_request(
+            idempotency_key="stale-local-J", request_sha256="a" * 64,
+            claim_owner="historical-runtime", execution_started_at=NOW,
+        )
+        witness = _RecordingFenceWitness(self.store)
+        svc = FakeWriteService()
+        payload = {"category_path": ["Haus & Garten", "Dekoration"],
+                   "title": "Neue Vase", "description": "Beschreibung",
+                   "price_eur": 12}
+        with self.server(svc, fence_witness=witness) as server:
+            status, _, body = self.request(
+                server, "POST", "/api/write/ads", payload=payload,
+                idempotency_key="unused-create-K",
+            )
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"], "create_recovery_pending")
+        self.assertEqual(svc.calls, [])
+        self.assertEqual(witness.starts, [])
+
+    def test_witness_never_started_error_body_cannot_forge_retry_authority(self) -> None:
+        class KnownReject(_RecordingFenceWitness):
+            def started(self, *, key: str, sha: str, action: str) -> None:
+                raise FenceWitnessRejected("synthetic independent pending")
+
+        witness = KnownReject(self.store)
+        svc = FakeWriteService()
+        key = "never-started-tampered-error"
+        with self.server(svc, fence_witness=witness) as server:
+            status, _, body = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+            self.assertEqual(status, 503, body)
+            altered = {**body, "platform_retry_authorized": True}
+            with self.store._connect() as db:
+                db.execute(
+                    "UPDATE write_api_requests SET response_json=? "
+                    "WHERE idempotency_key=?",
+                    (json.dumps(altered, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":")), key),
+                )
+            replay, _, response = self.request(
+                server, "POST", "/api/write/ads/1234567890/pause",
+                idempotency_key=key,
+            )
+        self.assertEqual(replay, 503, response)
+        self.assertEqual(response["error"], "witness_outcome_uncertain")
+        self.assertFalse(response["platform_retry_authorized"])
+        self.assertEqual(svc.calls, [])
 
     def test_access_hides_token_and_server_is_loopback_only(self) -> None:
         access = WriteApiAccess(
@@ -920,7 +1642,6 @@ class WriteApiTests(unittest.TestCase):
                 payload=second_payload,
                 idempotency_key="create-once",
             )
-
         self.assertEqual(second_status, 200)
         self.assertEqual(
             second_headers.get("Idempotency-Replayed"),
@@ -1997,7 +2718,6 @@ class WriteApiTests(unittest.TestCase):
         self.assertEqual(second_headers.get("Idempotency-Replayed"), "true")
         self.assertEqual(second_body, first_body)
         self.assertEqual(fresh_service.calls, [])
-
     def test_execution_error_is_sanitized_persisted_and_not_reexecuted(self) -> None:
         service = FakeWriteService(fail=True)
         with self.server(service) as server:

@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .application import MarkService
+from .fence_witness import FenceWitnessError
 from .adapters.management import (
     DEFAULT_SOURCE as MANAGEMENT_SOURCE,
     MANAGEMENT_URL,
@@ -75,6 +76,7 @@ from .write_api import (
     WriteApiAccess,
     WriteCapability,
     _WriteApiStoreLock,
+    _WriteFence,
     acquire_write_api_store_lock,
     create_write_api_server,
 )
@@ -1115,6 +1117,7 @@ class PrivateWebWriteApiRuntime:
         media_service: PrivateWebMediaCreateService | None,
         media_handle_store: PrivateWebMediaHandleStore | None,
         operation_lock: Lock,
+        fence_witness: _WriteFence | None = None,
     ) -> None:
         self._server = server
         self._store = store
@@ -1125,6 +1128,9 @@ class PrivateWebWriteApiRuntime:
         self._media_service = media_service
         self._media_handle_store = media_handle_store
         self._operation_lock = operation_lock
+        # Borrowed connection: the outer launcher/owner closes it only after
+        # all handler and reconciliation operations have fully drained.
+        self._fence_witness = fence_witness
         self._state_lock = Lock()
         self._close_lock = Lock()
         self._server_thread: Thread | None = None
@@ -1186,6 +1192,10 @@ class PrivateWebWriteApiRuntime:
 
             def _persist_verified_settlement() -> None:
                 if operation_reference is None:
+                    if self._fence_witness is not None:
+                        raise PrivateWebRuntimeSetupError(
+                            "witness media recovery lacks original operation binding"
+                        )
                     return
                 if not operation_reference.startswith("write-api:"):
                     raise PrivateWebRuntimeSetupError(
@@ -1197,8 +1207,49 @@ class PrivateWebWriteApiRuntime:
                     raise PrivateWebRuntimeSetupError(
                         "media reconciliation lacks bound write operation"
                     )
-                # If persistence succeeded but memory release failed, never
-                # overwrite or duplicate the immutable clearance record.
+                # The browser/runtime UID may forge any in-process media
+                # observation, including a claimed successful post-read.
+                # The independent witness must already contain an OPERATOR
+                # clearance bound to this original key and fingerprint before
+                # UID50044 may request any local recovery mutation.
+                if self._fence_witness is not None:
+                    try:
+                        independently_cleared = self._fence_witness.clearance_recorded(
+                            key=key, sha=record.request_sha256,
+                        )
+                    except FenceWitnessError:
+                        # Only after a lost/uncertain read on the old socket:
+                        # reconnect through SO_PEERCRED and VERIFY the exact
+                        # existing operator receipt. No second platform write
+                        # and no runtime_clear RPC may ever be sent here.
+                        independently_cleared = (
+                            self._fence_witness.resume_from_verified_clearance(
+                                key=key, sha=record.request_sha256,
+                            )
+                        )
+                    if independently_cleared is not True:
+                        # Operator clearance requires the original started
+                        # session to be SEALED. Dropping our borrowed client
+                        # socket closes only this runtime's write authority;
+                        # the independent server seals on EOF. Keep the media
+                        # page, local DB and pending request untouched. An
+                        # operator can then inspect and clear that exact key.
+                        # A later call may *only* reopen through the verified
+                        # operator-clearance readback path above.
+                        try:
+                            self._fence_witness.close()
+                        except Exception as exc:
+                            raise PrivateWebRuntimeSetupError(
+                                "witness operator handoff could not seal session"
+                            ) from exc
+                        raise PrivateWebRuntimeSetupError(
+                            "independent operator witness clearance required "
+                            "before local media recovery"
+                        )
+
+                # Once the operator-bound witness fact is durably verified,
+                # local persistence may fail/ACK may be lost. Re-check the
+                # immutable local record on later calls; never duplicate it.
                 if not self._store.has_write_recovery_clearance(
                     idempotency_key=key,
                     request_sha256=record.request_sha256,
@@ -1206,8 +1257,16 @@ class PrivateWebWriteApiRuntime:
                     self._store.record_write_recovery_clearance(
                         idempotency_key=key,
                         request_sha256=record.request_sha256,
-                        verification_kind="media_submit_reconciled",
-                        evidence_reference="private-web:observation-only-submit-settlement",
+                        verification_kind=(
+                            "operator_verified_postread"
+                            if self._fence_witness is not None
+                            else "media_submit_reconciled"
+                        ),
+                        evidence_reference=(
+                            "witness:operation-bound-operator-clearance"
+                            if self._fence_witness is not None
+                            else "private-web:observation-only-submit-settlement"
+                        ),
                         observed_at=_utc_now(),
                     )
                 self._server.clear_verified_create_recovery(
@@ -1403,6 +1462,7 @@ def compose_private_web_write_api_runtime(
     port: int = 0,
     clock: Callable[[], datetime] | None = None,
     _store_lock: _WriteApiStoreLock | None = None,
+    fence_witness: _WriteFence | None = None,
 ) -> PrivateWebWriteApiRuntime:
     """Compose already-built PrivateWeb runtimes behind one loopback Write API.
 
@@ -1504,6 +1564,7 @@ def compose_private_web_write_api_runtime(
         clock=runtime_clock,
         execution_lock=operation_lock,
         _store_lock=_store_lock,
+        fence_witness=fence_witness,
     )
     # This composition owns state beyond the HTTP server. Keep the exclusive
     # store lease across server_close() until owned runtimes are fully settled
@@ -1525,6 +1586,7 @@ def compose_private_web_write_api_runtime(
             media_service=media_service,
             media_handle_store=media_handle_store,
             operation_lock=operation_lock,
+            fence_witness=fence_witness,
         )
     except Exception:
         try:
@@ -1552,6 +1614,7 @@ def build_private_web_write_api_runtime(
     port: int = 0,
     timeout_seconds: float = 5.0,
     clock: Callable[[], datetime] | None = None,
+    fence_witness: _WriteFence | None = None,
 ) -> PrivateWebWriteApiRuntime:
     """Build a loopback-only PrivateWeb write runtime for an existing CDP worker.
 
@@ -1672,6 +1735,7 @@ def build_private_web_write_api_runtime(
             port=port,
             clock=clock,
             _store_lock=store_lock,
+            fence_witness=fence_witness,
         )
         store_lock = None
         return runtime

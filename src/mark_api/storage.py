@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from contextlib import AbstractContextManager, closing
@@ -256,6 +257,28 @@ def _sync_attempt_from_row(row: sqlite3.Row) -> SyncAttemptRecord:
     )
 
 
+def _unresolved_sync_attempt_summary(
+    connection: sqlite3.Connection,
+) -> tuple[int, SyncAttemptRecord | None]:
+    """Inspect all open generations in one bounded-memory SQL traversal.
+
+    Checking only the oldest outstanding attempt can conceal a malformed
+    middle generation when a later completed attempt is otherwise healthy.
+    SQL cursors stream rows without materializing private journal history.
+    This read-only check neither settles nor grants retry authorization.
+    """
+    count = 0
+    oldest: SyncAttemptRecord | None = None
+    for row in connection.execute(
+        "SELECT * FROM sync_attempts WHERE outcome='in_progress' ORDER BY id ASC"
+    ):
+        record = _sync_attempt_from_row(row)
+        if oldest is None:
+            oldest = record
+        count += 1
+    return count, oldest
+
+
 def _sync_attempt_to_dict(item: SyncAttemptRecord | None) -> dict[str, object] | None:
     if item is None:
         return None
@@ -314,9 +337,16 @@ def _validated_write_api_claim_owner(value: str) -> str:
 class SnapshotStore:
     """Append-only SQLite storage for normalized observations and write receipts."""
 
-    def __init__(self, path: str | Path, *, create_if_missing: bool = True) -> None:
+    def __init__(
+        self, path: str | Path, *, create_if_missing: bool = True,
+        require_existing_schema: bool = False,
+    ) -> None:
         if not isinstance(create_if_missing, bool):
             raise TypeError("create_if_missing must be bool")
+        if not isinstance(require_existing_schema, bool):
+            raise TypeError("require_existing_schema must be bool")
+        if require_existing_schema and create_if_missing:
+            raise ValueError("strict existing storage cannot initialize a database")
         self.path = Path(path)
         # Each post-start connection must refuse to create a replacement file
         # if the original store is unlinked or temporarily unavailable.
@@ -342,10 +372,15 @@ class SnapshotStore:
             # when the caller explicitly passed --init-db.
             with self._connect() as connection:
                 self._validate_store_schema(
-                    connection, allow_additive_migrations=True
+                    connection,
+                    allow_additive_migrations=not require_existing_schema,
                 )
         self._dashboard_pending_write_lock = RLock()
-        self._initialize()
+        # A separately owned, existing-only SQLite store must not run DDL
+        # (including silently recreating missing optional performance indexes).
+        # The default launcher and historical import paths remain unchanged.
+        if not require_existing_schema:
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._existing_uri, uri=True)
@@ -453,6 +488,9 @@ class SnapshotStore:
                     record = connection.execute(statement).fetchone()
                     if record is not None:
                         _sync_attempt_from_row(record)
+                # A valid oldest open record does not establish that a later
+                # unfinished predecessor is safe. Audit every open generation.
+                _unresolved_sync_attempt_summary(connection)
 
     def is_ready(self) -> bool:
         """Observe complete schema/data without creating or repairing a store."""
@@ -1366,14 +1404,24 @@ class SnapshotStore:
                 return True
             rows = connection.execute(
                 """
-                SELECT w.response_json FROM write_api_requests AS w
+                SELECT w.idempotency_key, w.response_status, w.response_json
+                FROM write_api_requests AS w
                 LEFT JOIN write_recovery_clearances AS c
                   ON c.idempotency_key = w.idempotency_key
                  AND c.request_sha256 = w.request_sha256
                 WHERE w.idempotency_key != ?
                   AND w.state = 'completed'
-                  AND instr(w.response_json, 'media_persistence_confirmed') > 0
                   AND c.idempotency_key IS NULL
+                  AND (
+                    instr(w.response_json, 'media_persistence_confirmed') > 0
+                    OR (
+                      w.response_status = 202
+                      AND substr(
+                        w.response_json, 1,
+                        length('{"error":"write_outcome_unverified",')
+                      ) = '{"error":"write_outcome_unverified",'
+                    )
+                  )
                 """,
                 (exclude_idempotency_key,),
             )
@@ -1382,6 +1430,15 @@ class SnapshotStore:
                     response = json.loads(row["response_json"])
                     if not isinstance(response, dict):
                         raise ValueError("invalid response envelope")
+                    if (
+                        row["response_status"] == 202
+                        and response.get("error") == "write_outcome_unverified"
+                    ):
+                        if row["response_json"] != self._unverified_write_api_response(
+                            row["idempotency_key"]
+                        ):
+                            raise ValueError("unverified response is not exact")
+                        return True
                     if not isinstance(response.get("media_persistence_confirmed"), bool):
                         raise ValueError("invalid media response")
                     receipt = response.get("operation_receipt")
@@ -1442,7 +1499,7 @@ class SnapshotStore:
             row = connection.execute(
                 """
                 SELECT request_sha256, state, execution_started_at,
-                       response_json FROM write_api_requests
+                       response_status, response_json FROM write_api_requests
                 WHERE idempotency_key = ?
                 """, (idempotency_key,),
             ).fetchone()
@@ -1450,7 +1507,19 @@ class SnapshotStore:
                 raise ValueError("write recovery operation binding mismatch")
             if row["execution_started_at"] is None:
                 raise ValueError("write recovery was never executed")
-            if row["state"] == "completed":
+            if (
+                row["state"] == "completed"
+                and row["response_status"] == 202
+                and row["response_json"] == self._unverified_write_api_response(
+                    idempotency_key
+                )
+            ):
+                # The executor cannot use the in-process media observation
+                # path to clear a fixed owner UNKNOWN. Only a separate,
+                # independently authorized operator may later reconcile it.
+                if verification_kind != "operator_verified_postread":
+                    raise ValueError("unknown write requires independent operator")
+            elif row["state"] == "completed":
                 try:
                     response = json.loads(row["response_json"])
                     if not isinstance(response, dict):
@@ -1652,6 +1721,7 @@ class SnapshotStore:
         request_sha256: str,
         claim_owner: str,
         execution_started_at: datetime,
+        strict_owner_fence: bool = False,
     ) -> WriteApiRequestRecord:
         owner = _validated_write_api_claim_owner(claim_owner)
         if (
@@ -1683,6 +1753,56 @@ class SnapshotStore:
                 raise ValueError("write API request is owned by another runtime")
             if record.execution_started_at is not None:
                 raise ValueError("write API request execution already started")
+
+            # The independent owner must not admit a second externally
+            # effectful Begin while any earlier owner-constructed UNKNOWN is
+            # still unresolved. This test and the Begin update share the same
+            # BEGIN IMMEDIATE transaction, including with concurrent
+            # quarantine and trusted operator-clearance commits.
+            #
+            # Only the canonical owner-fixed error envelope is a candidate:
+            # unrelated valid HTTP 202 receipts (including an idempotency key
+            # named write_outcome_unverified) must never be misclassified.
+            if connection.execute(
+                """
+                SELECT 1 FROM write_api_requests AS prior
+                LEFT JOIN write_recovery_clearances AS cleared
+                  ON cleared.idempotency_key = prior.idempotency_key
+                 AND cleared.request_sha256 = prior.request_sha256
+                WHERE prior.idempotency_key != ?
+                  AND prior.state = 'completed'
+                  AND prior.response_status = 202
+                  AND prior.execution_started_at IS NOT NULL
+                  AND cleared.idempotency_key IS NULL
+                  AND substr(
+                    prior.response_json, 1,
+                    length('{"error":"write_outcome_unverified",')
+                  ) = '{"error":"write_outcome_unverified",'
+                LIMIT 1
+                """, (idempotency_key,),
+            ).fetchone() is not None:
+                raise ValueError("unresolved owner write quarantine blocks Begin")
+
+            # The untrusted browser executor may crash or deliberately omit
+            # quarantine_started after Begin. For the independent owner,
+            # a still-in-progress earlier execution is already UNKNOWN.
+            # Keep this opt-in: legacy SnapshotStore callers currently support
+            # concurrent non-Create actions until the owner cutover is complete.
+            # Both checks and the new Begin remain one IMMEDIATE transaction.
+            if strict_owner_fence and connection.execute(
+                """
+                SELECT 1 FROM write_api_requests AS prior
+                LEFT JOIN write_recovery_clearances AS cleared
+                  ON cleared.idempotency_key = prior.idempotency_key
+                 AND cleared.request_sha256 = prior.request_sha256
+                WHERE prior.idempotency_key != ?
+                  AND prior.state = 'in_progress'
+                  AND prior.execution_started_at IS NOT NULL
+                  AND cleared.idempotency_key IS NULL
+                LIMIT 1
+                """, (idempotency_key,),
+            ).fetchone() is not None:
+                raise ValueError("unresolved started owner write blocks Begin")
 
             updated = connection.execute(
                 """
@@ -1717,6 +1837,130 @@ class SnapshotStore:
             ).fetchone()
             assert row is not None
             return self._write_api_request_record(row)
+
+    def cancel_unstarted_write_api_request(
+        self,
+        *,
+        idempotency_key: str,
+        request_sha256: str,
+        claim_owner: str,
+        cancelled_at: datetime,
+    ) -> WriteApiRequestRecord:
+        """Retire only an exact claim that never crossed the owner Begin gate.
+
+        This is NOT external platform reconciliation, a write success or retry
+        authorization. The owner constructs the entire immutable failure
+        response; neither a browser executor nor an RPC client chooses its
+        status or contents. Historical started operations remain untouched.
+        """
+        if (
+            not isinstance(idempotency_key, str) or not idempotency_key
+            or not isinstance(request_sha256, str)
+            or len(request_sha256) != 64
+            or any(ch not in "0123456789abcdef" for ch in request_sha256)
+        ):
+            raise ValueError("exact write claim identity required")
+        owner = _validated_write_api_claim_owner(claim_owner)
+        if (
+            not isinstance(cancelled_at, datetime)
+            or cancelled_at.tzinfo is None
+            or cancelled_at.utcoffset() is None
+        ):
+            raise ValueError("cancelled_at must be timezone-aware")
+        response_json = json.dumps(
+            {
+                "error": "write_claim_cancelled_before_begin",
+                "idempotency_key": idempotency_key,
+                "platform_retry_authorized": False,
+            },
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._validate_store_schema(connection)
+            row = connection.execute(
+                """
+                SELECT idempotency_key, request_sha256, state, requested_at,
+                       claim_owner, execution_started_at, completed_at,
+                       response_status, response_json
+                FROM write_api_requests
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("write API claim is absent")
+            record = self._write_api_request_record(row)
+            if (
+                record.request_sha256 != request_sha256
+                or record.claim_owner != owner
+            ):
+                raise ValueError("write API claim binding mismatch")
+            if record.execution_started_at is not None:
+                raise ValueError("begun write cannot be cancelled")
+            if record.state == "completed":
+                if (
+                    record.response_status == 409
+                    and record.response_json == response_json
+                ):
+                    return record
+                raise ValueError("write API claim has another terminal outcome")
+            if record.state != "in_progress":
+                raise ValueError("write API claim state invalid")
+            changed = connection.execute(
+                """
+                UPDATE write_api_requests
+                SET state='completed', completed_at=?,
+                    response_status=409, response_json=?
+                WHERE idempotency_key=? AND request_sha256=?
+                  AND claim_owner=? AND state='in_progress'
+                  AND execution_started_at IS NULL
+                """,
+                (
+                    cancelled_at.isoformat(), response_json, idempotency_key,
+                    request_sha256, owner,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError("unstarted claim cancellation lost binding")
+            row = connection.execute(
+                """
+                SELECT idempotency_key, request_sha256, state, requested_at,
+                       claim_owner, execution_started_at, completed_at,
+                       response_status, response_json
+                FROM write_api_requests
+                WHERE idempotency_key=?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            assert row is not None
+            return self._write_api_request_record(row)
+
+    @staticmethod
+    def _unverified_write_api_response(key: str) -> str:
+        return json.dumps({
+            "error": "write_outcome_unverified",
+            "idempotency_key": key,
+            "platform_retry_authorized": False,
+        }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    def quarantine_started_write_api_request(
+        self, *, idempotency_key: str, request_sha256: str,
+        claim_owner: str, quarantined_at: datetime,
+    ) -> WriteApiRequestRecord:
+        """Persist owner-constructed UNKNOWN only after a bound Begin.
+
+        No executor-selectable response, success, clearance or retry right.
+        A lost reply requires readback of the original persisted operation.
+        """
+        return self.complete_write_api_request(
+            idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
+            claim_owner=claim_owner,
+            response_status=202,
+            response_json=self._unverified_write_api_response(idempotency_key),
+            completed_at=quarantined_at,
+        )
 
     def complete_write_api_request(
         self,
@@ -1851,6 +2095,39 @@ class SnapshotStore:
             for row in rows
         )
 
+    def dashboard_pending_writes_page(
+        self, *, after: str = "", limit: int = 16,
+    ) -> tuple[tuple[DashboardPendingWrite, ...], bool]:
+        """Bound pending-write reads without granting recovery-clearance authority.
+
+        This is a read-only advisory view, not a witness or clearance.
+        Concurrent insertions/deletions may affect later pages.
+        """
+        if (
+            type(after) is not str or len(after) > 128
+            or any(character.isspace() for character in after)
+        ):
+            raise ValueError("invalid pending-write cursor")
+        if type(limit) is not int or not 1 <= limit <= 16:
+            raise ValueError("invalid pending-write page capacity")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT scope, resource_key, idempotency_key, method, path,
+                       payload_json, ad_id, acknowledged
+                FROM dashboard_pending_writes
+                WHERE scope > ?
+                ORDER BY scope
+                LIMIT ?
+                """,
+                (after, limit + 1),
+            ).fetchall()
+        return (
+            tuple(self._dashboard_pending_write_record(row)
+                  for row in rows[:limit]),
+            len(rows) > limit,
+        )
+
     def claim_dashboard_pending_write(
         self,
         *,
@@ -1882,9 +2159,37 @@ class SnapshotStore:
         if payload_json is not None:
             if not isinstance(payload_json, str) or len(payload_json) > 64 * 1024:
                 raise ValueError("payload_json is invalid")
+            def unique_members(
+                members: list[tuple[str, object]],
+            ) -> dict[str, object]:
+                # The owner readback rejects duplicate object members. Do not
+                # durably admit a pending fence that its reader cannot decode.
+                values: dict[str, object] = {}
+                for key, value in members:
+                    if key in values:
+                        raise ValueError("duplicate JSON member")
+                    values[key] = value
+                return values
+
+            def reject_nonfinite_constant(_literal: str) -> object:
+                raise ValueError("nonfinite JSON constant")
+
+            def finite_json_float(literal: str) -> float:
+                # JSON 1e999 is syntactically valid but CPython parses it
+                # as infinity without invoking parse_constant. Reject it
+                # before durable pending writes can poison UI readback.
+                value = float(literal)
+                if not math.isfinite(value):
+                    raise ValueError("nonfinite JSON number")
+                return value
+
             try:
-                payload = json.loads(payload_json)
-            except json.JSONDecodeError as exc:
+                payload = json.loads(
+                    payload_json, object_pairs_hook=unique_members,
+                    parse_constant=reject_nonfinite_constant,
+                    parse_float=finite_json_float,
+                )
+            except (ValueError, RecursionError) as exc:
                 raise ValueError("payload_json is invalid") from exc
             if not isinstance(payload, dict):
                 raise ValueError("payload_json is invalid")
@@ -2006,15 +2311,34 @@ class SnapshotStore:
                 )
             return "finalized"
 
-    def begin_sync_attempt(self, *, source: str, started_at: datetime) -> int:
-        """Record intent durably before any owner-inventory network read."""
+    def begin_sync_attempt(
+        self, *, source: str, started_at: datetime,
+        require_no_unresolved: bool = False,
+    ) -> int:
+        """Journal intent; the isolated owner also fences *older* open attempts.
+
+        BEGIN IMMEDIATE makes the unresolved-attempt check and insertion one
+        serialized SQLite transaction across owner generations/processes.
+        Historical local import callers retain their existing journal contract.
+        An open attempt is never silently settled or cleared by a new read.
+        """
         if not isinstance(source, str) or not source.strip():
             raise ValueError("sync source must not be empty")
+        if type(require_no_unresolved) is not bool:
+            raise TypeError("sync recovery fence flag must be bool")
+        started = _sync_time(started_at)
         with self._connect() as connection:
+            if require_no_unresolved:
+                connection.execute("BEGIN IMMEDIATE")
+                if connection.execute(
+                    "SELECT 1 FROM sync_attempts "
+                    "WHERE outcome='in_progress' LIMIT 1"
+                ).fetchone() is not None:
+                    raise RuntimeError("unresolved inventory sync requires reconciliation")
             record = connection.execute(
                 "INSERT INTO sync_attempts (source, started_at, outcome) "
                 "VALUES (?, ?, 'in_progress')",
-                (source, _sync_time(started_at)),
+                (source, started),
             )
             if record.lastrowid is None:
                 raise sqlite3.DatabaseError("sync attempt insert failed")
@@ -2103,6 +2427,9 @@ class SnapshotStore:
                 "WHERE outcome IN ('success_empty', 'success_nonempty') "
                 "ORDER BY completed_at DESC, id DESC LIMIT 1"
             ).fetchone()
+            # Do not claim a newer success if any older open recovery
+            # row is malformed, even when the oldest such row is valid.
+            _unresolved_sync_attempt_summary(connection)
         latest_item = _sync_attempt_from_row(latest) if latest is not None else None
         success_item = (
             _sync_attempt_from_row(successful) if successful is not None else None
@@ -2111,6 +2438,21 @@ class SnapshotStore:
             "state": latest_item.outcome if latest_item is not None else "never_attempted",
             "latest_attempt": _sync_attempt_to_dict(latest_item),
             "last_successful_attempt": _sync_attempt_to_dict(success_item),
+        }
+
+    def sync_recovery_status(self) -> dict[str, object]:
+        """Read every unresolved sync generation, not only the latest start.
+
+        A completed newer attempt cannot conceal an older in_progress journal
+        row. Count and oldest record come from one SQLite read transaction.
+        This method never settles, replays, authorizes or clears an attempt.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            count, oldest = _unresolved_sync_attempt_summary(connection)
+        return {
+            "unresolved_count": count,
+            "oldest_unresolved_attempt": _sync_attempt_to_dict(oldest),
         }
 
     def append_inventory_result(
@@ -2176,6 +2518,63 @@ class SnapshotStore:
                 )
         return len(snapshots) + len(absent_ids)
 
+    def ad_history_page(
+        self, ad_id: str, *, after_id: int, watermark: int | None,
+        limit: int = 16,
+    ) -> tuple[int, tuple[tuple[int, AdSnapshot], ...], bool]:
+        """Read one bounded append-only observation page in insertion order.
+
+        The high-water mark is pinned on the first page in the same SQLite
+        read transaction. Later appends cannot change this logical snapshot;
+        the consumer sorts the pinned rows by (actual instant, insertion ID).
+        No caller-supplied SQL, table name or unlimited LIMIT is accepted.
+        """
+        if not isinstance(ad_id, str) or not ad_id.strip():
+            raise ValueError("ad history ID is invalid")
+        if (type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or type(limit) is not int or not 1 <= limit <= 32
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))):
+            raise ValueError("ad history page cursor is invalid")
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            if watermark is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS bound "
+                    "FROM ad_snapshots WHERE ad_id = ?", (ad_id,),
+                ).fetchone()
+                assert row is not None
+                watermark = int(row["bound"])
+            rows = conn.execute(
+                """SELECT id, ad_id, observed_at, source, lifecycle_state,
+                          title, description, views, watch_count, reply_count,
+                          metric_source
+                   FROM ad_snapshots
+                   WHERE ad_id = ? AND id > ? AND id <= ?
+                   ORDER BY id ASC LIMIT ?""",
+                (ad_id, after_id, watermark, limit + 1),
+            ).fetchall()
+        more = len(rows) > limit
+        page = tuple(
+            (
+                int(row["id"]),
+                AdSnapshot(
+                    ad_id=row["ad_id"],
+                    observed_at=datetime.fromisoformat(row["observed_at"]),
+                    source=row["source"], metric_source=row["metric_source"],
+                    lifecycle_state=LifecycleState(row["lifecycle_state"]),
+                    title=row["title"], description=row["description"],
+                    views=row["views"], watch_count=row["watch_count"],
+                    reply_count=row["reply_count"],
+                ),
+            )
+            for row in rows[:limit]
+        )
+        return watermark, page, more
+
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
         """Return observations by actual instant, then insertion ID for ties."""
 
@@ -2228,6 +2627,57 @@ class SnapshotStore:
             ).fetchall()
         return tuple(str(row["ad_id"]) for row in rows)
 
+    def reaction_history_page(
+        self, ad_id: str, *, after_id: int, watermark: int | None,
+        limit: int = 16,
+    ) -> tuple[int, tuple[tuple[int, ReactionSnapshot], ...], bool]:
+        """Read one bounded immutable-generation reaction page in insertion order.
+
+        The first page pins MAX(id) inside its read transaction. Later appends
+        cannot enter this generation; no caller-supplied SQL is evaluated.
+        """
+        if not isinstance(ad_id, str) or not ad_id.strip():
+            raise ValueError("reaction history ID is invalid")
+        if (type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or type(limit) is not int or not 1 <= limit <= 32
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))):
+            raise ValueError("reaction history page cursor is invalid")
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            if watermark is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS bound "
+                    "FROM reaction_snapshots WHERE ad_id = ?", (ad_id,),
+                ).fetchone()
+                assert row is not None
+                watermark = int(row["bound"])
+            rows = conn.execute(
+                """SELECT id, ad_id, observed_at, source,
+                          conversation_count, unique_buyer_count,
+                          inbound_message_count
+                   FROM reaction_snapshots
+                   WHERE ad_id = ? AND id > ? AND id <= ?
+                   ORDER BY id ASC LIMIT ?""",
+                (ad_id, after_id, watermark, limit + 1),
+            ).fetchall()
+        more = len(rows) > limit
+        page = tuple((
+            int(row["id"]),
+            ReactionSnapshot(
+                ad_id=row["ad_id"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+                source=row["source"],
+                conversation_count=row["conversation_count"],
+                unique_buyer_count=row["unique_buyer_count"],
+                inbound_message_count=row["inbound_message_count"],
+            ),
+        ) for row in rows[:limit])
+        return watermark, page, more
+
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -2251,6 +2701,80 @@ class SnapshotStore:
             )
             for row in rows
         )
+
+    def inbound_message_page(
+        self, ad_id: str, *, after_id: int, watermark: int | None,
+        limit: int = 16,
+    ) -> tuple[int, tuple[tuple[int, InboundMessageEvent], ...], bool]:
+        """Bounded immutable-generation inbox read ordered by insertion id."""
+        if not isinstance(ad_id, str) or not ad_id.strip() or len(ad_id) > 160:
+            raise ValueError("inbound history ID is invalid")
+        if (type(after_id) is not int or not 0 <= after_id <= 2**63 - 1
+                or type(limit) is not int or not 1 <= limit <= 32
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                    or watermark < after_id
+                ))):
+            raise ValueError("inbound history page cursor is invalid")
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            if watermark is None:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS bound "
+                    "FROM inbound_message_events WHERE ad_id = ?", (ad_id,),
+                ).fetchone()
+                assert row is not None
+                watermark = int(row["bound"])
+            rows = connection.execute(
+                """SELECT id, ad_id, conversation_id, provider_message_id,
+                          observed_at, source
+                   FROM inbound_message_events
+                   WHERE ad_id = ? AND id > ? AND id <= ?
+                   ORDER BY id ASC LIMIT ?""",
+                (ad_id, after_id, watermark, limit + 1),
+            ).fetchall()
+        more = len(rows) > limit
+        page = tuple((
+            int(row["id"]),
+            InboundMessageEvent(
+                ad_id=row["ad_id"], conversation_id=row["conversation_id"],
+                provider_message_id=row["provider_message_id"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+                source=row["source"],
+            ),
+        ) for row in rows[:limit])
+        return watermark, page, more
+
+    def inbound_message_ad_ids_page(
+        self, *, after: str, watermark: int | None,
+        limit: int = 64,
+    ) -> tuple[int, tuple[str, ...], bool]:
+        """List imported email-only and tracked IDs with a pinned generation."""
+        if (type(after) is not str or len(after) > 160
+                or (after and not after.strip())
+                or type(limit) is not int or not 1 <= limit <= 64
+                or (watermark is not None and (
+                    type(watermark) is not int
+                    or not 0 <= watermark <= 2**63 - 1
+                ))):
+            raise ValueError("inbound ad-ID page cursor is invalid")
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            if watermark is None:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS bound FROM inbound_message_events",
+                ).fetchone()
+                assert row is not None
+                watermark = int(row["bound"])
+            rows = connection.execute(
+                """SELECT DISTINCT ad_id
+                   FROM inbound_message_events
+                   WHERE id <= ? AND ad_id > ?
+                   ORDER BY ad_id ASC LIMIT ?""",
+                (watermark, after, limit + 1),
+            ).fetchall()
+        return watermark, tuple(row["ad_id"] for row in rows[:limit]), len(rows) > limit
 
     def inbound_message_history(
         self,
@@ -2345,6 +2869,45 @@ class SnapshotStore:
                 title_type=row["title_type"],
             )
             for row in ordered_rows
+        )
+
+    def latest_classification_bounded(
+        self, ad_id: str, *, max_records: int = 200000,
+    ) -> AdClassification | None:
+        """Select latest real observation instant in bounded constant memory.
+
+        This yields the same (observed_at, insertion-ID) winner as the existing
+        classification_history sort without materializing arbitrary history.
+        """
+        if (type(ad_id) is not str or not ad_id.strip() or len(ad_id) > 160
+                or type(max_records) is not int or not 1 <= max_records <= 200000):
+            raise ValueError("classification lookup bound is invalid")
+        selected: sqlite3.Row | None = None
+        selected_key: tuple[datetime, int] | None = None
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """SELECT id, ad_id, observed_at, source, image_type, city,
+                          text_type, title_type
+                   FROM ad_classifications WHERE ad_id = ?
+                   ORDER BY id ASC""", (ad_id,),
+            )
+            for count, row in enumerate(cursor, start=1):
+                if count > max_records:
+                    raise ValueError("classification history capacity exceeded")
+                when = datetime.fromisoformat(row["observed_at"])
+                key = when, int(row["id"])
+                if selected_key is None or key > selected_key:
+                    selected, selected_key = row, key
+        if selected is None:
+            return None
+        return AdClassification(
+            ad_id=selected["ad_id"],
+            observed_at=datetime.fromisoformat(selected["observed_at"]),
+            source=selected["source"],
+            image_type=selected["image_type"],
+            city=selected["city"],
+            text_type=selected["text_type"],
+            title_type=selected["title_type"],
         )
 
     def latest_classification(self, ad_id: str) -> AdClassification | None:

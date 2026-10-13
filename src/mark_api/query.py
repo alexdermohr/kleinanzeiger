@@ -6,6 +6,7 @@ from datetime import datetime
 
 from .domain import AdSnapshot, LifecycleState, ReactionSnapshot
 from .storage import SnapshotStore
+from .storage_owner import StorageOwnerClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +92,7 @@ def _last_metric_with_evidence(
 class MarkQueryService:
     """Read-only projections over the append-only SQLite history."""
 
-    def __init__(self, store: SnapshotStore) -> None:
+    def __init__(self, store: SnapshotStore | StorageOwnerClient) -> None:
         self._store = store
 
     def latest_ads(self) -> tuple[AdView, ...]:
@@ -135,7 +136,10 @@ class MarkQueryService:
         history = self._store.inbound_message_history(ad_id)
         if not history:
             return None
-        conversations, messages = self._store.inbound_message_counts(ad_id)
+        # Use the same pinned event generation for counts and provenance.
+        # A concurrent import after the history read must not inflate totals.
+        conversations = len({event.conversation_id for event in history})
+        messages = len(history)
         return EmailReactionView(
             ad_id=ad_id,
             conversation_count=conversations,

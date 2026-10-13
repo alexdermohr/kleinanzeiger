@@ -2,7 +2,7 @@
 # Do not enable until an authenticated loopback CDP endpoint and an existing
 # verified database have been set up. Never run with --init-db.
 [Unit]
-Description=Mark Kleinanzeigen product runtime (trusted database owner)
+Description=Mark Kleinanzeigen retired legacy runtime (NOT SQLite storage owner)
 After=network.target
 StartLimitIntervalSec=300
 StartLimitBurst=3
@@ -18,10 +18,15 @@ RuntimeDirectoryMode=0700
 UMask=0077
 # First code: native OS Python trust scan, then /usr/bin/python3 -I -S preflight.
 # Refuse an untrusted bootstrap file before executing it.
-ExecCondition=/usr/bin/find -P / /etc /etc/mark-api /etc/mark-api/bootstrap.sh -maxdepth 0 ( ! -uid 0 -o -perm /022 -o -type l ) -exec /usr/bin/false {} +
+# This legacy unit must not run even a trusted bootstrap before migration.
+# Replacement: independently attested UID50046 SQLite owner, UID50044 browser executor, UID50043 witness.
+ExecCondition=/usr/bin/false
 ExecStartPre=/bin/sh /etc/mark-api/bootstrap.sh --db /var/lib/mark-api/mark.sqlite --backup-dir /var/lib/mark-api-backups
-ExecStart=/opt/mark-api/venv/bin/python -I -m mark_api.launcher --db /var/lib/mark-api/mark.sqlite --cdp-port 9222 --dashboard-port 8875 --write-port 8876
-Restart=on-failure
+# LEGACY SECURITY RETIREMENT: an unwitnessed 50042 runtime could use host CDP
+# directly, outside the separated 50044 owner + 50043 witness boundary.
+# Do not re-enable until root-owned independently attested replacement exists.
+ExecStart=/usr/bin/false
+Restart=no
 RestartSec=10s
 
 # mark-api-launch prints its process-scoped bearer and dashboard-fragment URL.
