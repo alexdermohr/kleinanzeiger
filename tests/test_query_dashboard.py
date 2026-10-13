@@ -796,21 +796,35 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
             method="POST",
             headers=self.write_headers(content_type="application/json"),
         )
-        with urlopen(ack, timeout=2) as response:
+        for _ in range(2):
+            with self.assertRaises(HTTPError) as ack_error:
+                urlopen(ack, timeout=2)
+            self.assertEqual(ack_error.exception.code, 409)
             self.assertEqual(
-                json.loads(response.read()),
-                {"acknowledged": True, "finalized": False},
+                json.loads(ack_error.exception.read()),
+                {
+                    "error": "dashboard_pending_write_reconciliation_required",
+                    "platform_retry_authorized": False,
+                },
             )
-        pending_after_ack = self.store.dashboard_pending_writes()
-        self.assertEqual(len(pending_after_ack), 1)
-        self.assertTrue(pending_after_ack[0].acknowledged)
+            self.assertEqual(self.store.dashboard_pending_writes(), pending)
 
-        with urlopen(ack, timeout=2) as response:
-            self.assertEqual(
-                json.loads(response.read()),
-                {"acknowledged": True, "finalized": True},
-            )
-        self.assertEqual(self.store.dashboard_pending_writes(), ())
+        # A forged browser-only ACK must not permit a new mutation key
+        # against the same resource, even after observing HTTP 200.
+        another = Request(
+            self.base + "/api/write/ads/2",
+            data=json.dumps(payload).encode("utf-8"),
+            method="PATCH",
+            headers=self.write_headers(
+                content_type="application/json",
+                idempotency_key="ui:test-forward-2",
+            ),
+        )
+        with self.assertRaises(HTTPError) as denied:
+            urlopen(another, timeout=2)
+        self.assertEqual(denied.exception.code, 409)
+        self.assertEqual(len(self.backend.requests), 1)
+        self.assertEqual(self.store.dashboard_pending_writes(), pending)
 
     def test_proxy_media_stage_keeps_bytes_local_and_uses_no_idempotency_key(self) -> None:
         media = b"\x89PNG\r\n\x1a\nlocal-test"
@@ -902,6 +916,34 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
             captured["authorization"],
             f"Bearer {self.BACKEND_TOKEN}",
         )
+
+    def test_proxy_does_not_forward_identical_unacknowledged_key_twice(self) -> None:
+        request = Request(
+            self.base + "/api/write/ads/789",
+            data=b'{"title":"Neu"}',
+            method="PATCH",
+            headers=self.write_headers(
+                content_type="application/json",
+                idempotency_key="ui:same-key-no-blind-retry",
+            ),
+        )
+        with urlopen(request, timeout=2) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(len(self.backend.requests), 1)
+        before = self.store.dashboard_pending_writes()
+        self.assertEqual(len(before), 1)
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(
+            json.loads(raised.exception.read()),
+            {
+                "error": "dashboard_pending_write_conflict",
+                "platform_retry_authorized": False,
+            },
+        )
+        self.assertEqual(self.backend.requests.__len__(), 1)
+        self.assertEqual(self.store.dashboard_pending_writes(), before)
 
     def test_proxy_persists_unknown_request_and_recovers_exactly_after_restart(self) -> None:
         self.backend.close()
@@ -1027,50 +1069,20 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
                 "Idempotency-Key": "ui:test-transport-unknown",
             },
         )
-        with urlopen(retry, timeout=2) as response:
-            replay_payload = json.loads(response.read())
+        with self.assertRaises(HTTPError) as retry_error:
+            urlopen(retry, timeout=2)
+        self.assertEqual(retry_error.exception.code, 409)
         self.assertEqual(
-            replay_payload["idempotency_key"],
-            "ui:test-transport-unknown",
-        )
-        self.assertEqual(len(replacement_backend.requests), 1)
-        self.assertEqual(
-            replacement_backend.requests[0]["idempotency_key"],
-            "ui:test-transport-unknown",
-        )
-        self.assertEqual(len(self.store.dashboard_pending_writes()), 1)
-
-        ack = Request(
-            replacement_base + "/api/dashboard/pending-writes/ack",
-            data=json.dumps(
-                {
-                    "scope": "ad:2:update",
-                    "idempotency_key": "ui:test-transport-unknown",
-                }
-            ).encode("utf-8"),
-            method="POST",
-            headers={
-                "Origin": replacement_base,
-                "X-Mark-Dashboard-Write": "1",
-                "X-Mark-Dashboard-Token": replacement_token,
-                "Content-Type": "application/json",
+            json.loads(retry_error.exception.read()),
+            {
+                "error": "dashboard_pending_write_conflict",
+                "platform_retry_authorized": False,
             },
         )
-        with urlopen(ack, timeout=2) as response:
-            self.assertEqual(
-                json.loads(response.read()),
-                {"acknowledged": True, "finalized": False},
-            )
-        pending_after_ack = self.store.dashboard_pending_writes()
-        self.assertEqual(len(pending_after_ack), 1)
-        self.assertTrue(pending_after_ack[0].acknowledged)
-
-        with urlopen(ack, timeout=2) as response:
-            self.assertEqual(
-                json.loads(response.read()),
-                {"acknowledged": True, "finalized": True},
-            )
-        self.assertEqual(self.store.dashboard_pending_writes(), ())
+        # This is a re-sent *identical* idempotency key after a transport
+        # unknown; accepting it would rely on unproven backend storage state.
+        self.assertEqual(replacement_backend.requests, [])
+        self.assertEqual(self.store.dashboard_pending_writes(), pending)
 
 
 class SeededStoreMixin:
@@ -2588,7 +2600,7 @@ globalThis.fetch = async (path, options) => {
             msg=f"node stderr:\n{completed.stderr}\nnode stdout:\n{completed.stdout}",
         )
 
-    def test_write_runtime_finalizes_observed_ack_tombstone_without_platform_retry(self) -> None:
+    def test_write_runtime_retains_legacy_ack_tombstone_without_platform_retry(self) -> None:
         _, _, js_body = self.get("/dashboard.js")
         javascript = js_body.decode("utf-8")
         definitions, marker, _ = javascript.partition(
@@ -2626,30 +2638,18 @@ globalThis.fetch = async (path, options) => {
       },
     };
   }
-  if (path === "/api/dashboard/pending-writes/ack") {
-    assert.deepEqual(
-      JSON.parse(options.body),
-      {scope: tombstone.scope, idempotency_key: tombstone.key},
-    );
-    return {
-      status: 200,
-      ok: true,
-      async text() {
-        return JSON.stringify({acknowledged: true, finalized: true});
-      },
-    };
-  }
   throw new Error("unexpected platform request: " + path);
 };
 
 (async () => {
   await refreshPendingWrites();
   assert.equal(pendingRecoveryBlocked, false);
-  assert.equal(pendingWrites.size, 0);
+  assert.equal(pendingWrites.size, 1);
+  assert.equal(pendingWrites.get("create").acknowledged, true);
   assert.equal(writeUiReady(), true);
   assert.deepEqual(
     calls.map((item) => item.path),
-    ["/api/dashboard/pending-writes", "/api/dashboard/pending-writes/ack"],
+    ["/api/dashboard/pending-writes"],
   );
 })().catch((error) => {
   console.error(error);
@@ -3445,9 +3445,9 @@ globalThis.fetch = async (path, options) => {
 
   ackFails = false;
   await submitCreate({preventDefault() {}});
-  assert.equal(createCalls, 2);
+  assert.equal(createCalls, 1, "ACK-only recovery must not create again");
   assert.equal(ackCalls, 2);
-  assert.equal(keys[1], pendingKey);
+  assert.deepEqual(keys, [pendingKey]);
   assert.equal(pendingWrites.has("create"), false);
   assert.equal(fields.get("create-category").value, "");
   assert.equal(fields.get("create-title").value, "");
@@ -3782,6 +3782,194 @@ globalThis.fetch = async (path, options) => {
         self.assertEqual(
             completed.returncode,
             0,
+            msg=f"node stderr:\n{completed.stderr}\nnode stdout:\n{completed.stdout}",
+        )
+
+    def test_write_runtime_refreshes_views_but_keeps_fences_on_denied_ack(self) -> None:
+        _, _, js_body = self.get("/dashboard.js")
+        definitions, marker, _ = js_body.decode("utf-8").partition(
+            'byId("reload").addEventListener',
+        )
+        self.assertTrue(marker)
+        harness = definitions + r"""
+const assert = require("node:assert/strict");
+const status = {textContent: "", className: ""};
+globalThis.document = {
+  getElementById(id) {
+    if (id === "write-status") return status;
+    throw new Error("unexpected element: " + id);
+  },
+  querySelectorAll() { return []; },
+};
+writeUiAvailable = true;
+writeToken = "dashboard-write-token-00000001";
+let readOnlyRefreshes = 0;
+load = async () => { readOnlyRefreshes += 1; };
+const requests = [];
+globalThis.fetch = async (path, options) => {
+  requests.push(path);
+  if (path === "/api/dashboard/pending-writes/ack") {
+    return {status: 409, ok: false, async text() {
+      return JSON.stringify({
+        error: "dashboard_pending_write_reconciliation_required",
+        platform_retry_authorized: false,
+      });
+    }};
+  }
+  assert.match(path, /^\/api\/write\/ads\/(123|124)\/pause$/);
+  const confirmed = path.includes("/123/");
+  return {status: confirmed ? 200 : 202, ok: true, async text() {
+    return JSON.stringify({
+      idempotency_key: options.headers["Idempotency-Key"],
+      operation_receipt: {
+        outcome: confirmed ? "confirmed" : "ambiguous",
+        writer_invoked: true,
+      },
+      platform_retry_authorized: false,
+    });
+  }};
+};
+(async () => {
+  for (const [id, expected] of [["123", 200], ["124", 202]]) {
+    const scope = `ad:${id}:pause`;
+    const result = await runPlatformWrite(
+      scope, "POST", `/api/write/ads/${id}/pause`, null, {adId: id},
+    );
+    assert.equal(result.response.status, expected);
+    assert.equal(pendingWrites.get(scope).acknowledgeOnly, true);
+    assert.equal(readOnlyRefreshes, id === "123" ? 1 : 2);
+    assert.match(status.textContent, /Recovery-ACK ist fehlgeschlagen/);
+  }
+  const beforeRetry = requests.filter(p => p.startsWith("/api/write/"));
+  assert.deepEqual(beforeRetry, [
+    "/api/write/ads/123/pause", "/api/write/ads/124/pause",
+  ]);
+  await runPlatformWrite(
+    "ad:123:pause", "POST", "/api/write/ads/123/pause", null, {adId: "123"},
+  );
+  assert.deepEqual(
+    requests.filter(p => p.startsWith("/api/write/")), beforeRetry,
+    "ACK-only retries must never forward to the backend",
+  );
+  assert.equal(readOnlyRefreshes, 2);
+  assert.equal(pendingWrites.size, 2, "both original recovery fences remain");
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+        completed = subprocess.run(
+            ["node"], input=harness, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(
+            completed.returncode, 0,
+            msg=f"node stderr:\n{completed.stderr}\nnode stdout:\n{completed.stdout}",
+        )
+
+    def test_write_runtime_retry_after_terminal_ack_failure_is_ack_only(self) -> None:
+        _, _, js_body = self.get("/dashboard.js")
+        definitions, marker, _ = js_body.decode("utf-8").partition(
+            'byId("reload").addEventListener',
+        )
+        self.assertTrue(marker)
+        harness = definitions + r"""
+const assert = require("node:assert/strict");
+const writeStatus = {textContent: "", className: ""};
+globalThis.document = {
+  getElementById(id) {
+    if (id === "write-status") return writeStatus;
+    throw new Error("unexpected element: " + id);
+  },
+  querySelectorAll() { return []; },
+};
+writeUiAvailable = true;
+writeToken = "dashboard-write-token-00000001";
+let refreshes = 0;
+load = async () => { refreshes += 1; };
+const calls = [];
+let acknowledgements = 0;
+let failRead = true;
+globalThis.fetch = async (path, options) => {
+  calls.push({path, options});
+  if (path === "/api/dashboard/pending-writes") {
+    if (failRead) throw new Error("pending list transport lost");
+    const original = pendingAckOnly.get("ad:123:update");
+    return {status: 200, ok: true, async text() {
+      return JSON.stringify({pending_writes: [{
+        scope: "ad:123:update", key: original.key,
+        method: original.method, path: original.path,
+        payload: {title: "once"}, adId: "123", acknowledged: false,
+      }]});
+    }};
+  }
+  if (path === "/api/dashboard/pending-writes/ack") {
+    acknowledgements += 1;
+    if (acknowledgements === 1) throw new Error("ACK transport lost");
+    return {status: 200, ok: true, async text() {
+      return JSON.stringify({acknowledged: true, finalized: false});
+    }};
+  }
+  assert.equal(path, "/api/write/ads/123");
+  const pending = pendingWrites.get("ad:123:update");
+  return {status: 200, ok: true, async text() {
+    return JSON.stringify({
+      idempotency_key: pending.key,
+      operation_receipt: {outcome: "confirmed"},
+      platform_retry_authorized: false,
+    });
+  }};
+};
+(async () => {
+  const scope = "ad:123:update";
+  const payload = {title: "once"};
+  const result = await runPlatformWrite(
+    scope, "PATCH", "/api/write/ads/123", payload, {adId: "123"},
+  );
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(
+    calls.map((item) => item.path),
+    ["/api/write/ads/123", "/api/dashboard/pending-writes/ack"],
+  );
+  const pending = pendingWrites.get(scope);
+  assert.ok(pending);
+  assert.equal(pending.acknowledgeOnly, true);
+  assert.equal(refreshes, 1);
+  await refreshPendingWrites();
+  assert.equal(pendingRecoveryBlocked, true);
+  assert.equal(pendingWrites.size, 0);
+  failRead = false;
+  await refreshPendingWrites();
+  assert.equal(pendingRecoveryBlocked, false);
+  assert.equal(pendingWrites.get(scope).acknowledgeOnly, true);
+  const afterAck = await runPlatformWrite(
+    scope, "PATCH", "/api/write/ads/999", {title: "must not send"}, {adId: "999"},
+  );
+  assert.equal(afterAck, null);
+  assert.deepEqual(
+    calls.map((item) => item.path),
+    [
+      "/api/write/ads/123",
+      "/api/dashboard/pending-writes/ack",
+      "/api/dashboard/pending-writes",
+      "/api/dashboard/pending-writes",
+      "/api/dashboard/pending-writes/ack",
+    ],
+  );
+  assert.deepEqual(JSON.parse(calls[4].options.body), {
+    scope, idempotency_key: pending.key,
+  });
+  assert.equal(pendingWrites.has(scope), false);
+  assert.equal(refreshes, 2);
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+        completed = subprocess.run(
+            ["node"], input=harness, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(
+            completed.returncode, 0,
             msg=f"node stderr:\n{completed.stderr}\nnode stdout:\n{completed.stdout}",
         )
 

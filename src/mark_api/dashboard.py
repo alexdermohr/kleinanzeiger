@@ -479,6 +479,8 @@ const byId = (id) => document.getElementById(id);
 const display = (value) => value === null || value === undefined ? "—" : String(value);
 const WRITE_TOKEN_STORAGE_KEY = "mark-dashboard-write-token";
 const pendingWrites = new Map();
+// Only this page session may remember an observed terminal result.
+const pendingAckOnly = new Map();
 let writeUiAvailable = false;
 let writeToken = null;
 let pendingRecoveryBlocked = false;
@@ -620,24 +622,33 @@ async function refreshPendingWrites() {
     ) {
       throw new Error("pending recovery unavailable");
     }
-    const acknowledgedEntries = [];
+    // A legacy acknowledged tombstone is not independent evidence of an
+    // external outcome. Keep it visible as a blocking recovery intent.
     for (const entry of payload.pending_writes) {
-      if (entry.acknowledged === true) {
-        acknowledgedEntries.push(entry);
-        continue;
-      }
       if (pendingWrites.has(entry.scope)) {
         throw new Error("duplicate pending scope");
       }
+      const prior = pendingAckOnly.get(entry.scope);
+      if (
+        prior !== undefined
+        && prior.key === entry.key
+        && prior.method === entry.method
+        && prior.path === entry.path
+      ) {
+        entry.acknowledgeOnly = true;
+      }
       pendingWrites.set(entry.scope, entry);
     }
-    for (const entry of acknowledgedEntries) {
-      try {
-        await acknowledgePendingWrite(entry);
-      } catch (_error) {
-        // This GET already proved that a previous browser observed the terminal
-        // write result and durably acknowledged it. If tombstone cleanup did not
-        // reach the server, its retained row still blocks a fresh platform key.
+    // A replaced or absent durable key must not inherit old browser
+    // ACK-only evidence. Failed GET leaves this cache intact and fail-closed.
+    for (const [scope, prior] of pendingAckOnly) {
+      const current = pendingWrites.get(scope);
+      if (
+        current === undefined
+        || current.acknowledgeOnly !== true
+        || current.key !== prior.key
+      ) {
+        pendingAckOnly.delete(scope);
       }
     }
   } catch (_error) {
@@ -674,7 +685,7 @@ function renderWriteAvailability() {
   }
   if (ready && pendingWrites.size > 0) {
     setWriteStatus(
-      "Eine frühere Write-Anfrage bleibt mit ihrem ursprünglichen Idempotency-Key gebunden. Eine manuelle Wiederholung sendet exakt denselben Request; es erfolgt kein automatischer Retry.",
+      "Eine frühere Write-Anfrage bleibt mit ihrem ursprünglichen Idempotency-Key gesperrt. Keine erneute Plattformweiterleitung ohne unabhängige Ergebnisprüfung.",
       "warning",
     );
   }
@@ -1265,6 +1276,26 @@ async function runPlatformWrite(
 ) {
   let entry = pendingWrites.get(scope);
   const retryingPending = entry !== undefined;
+  if (retryingPending && entry.acknowledgeOnly === true) {
+    // A terminal result was already observed *in this browser runtime*.
+    // Retry only the local UI ACK, never the prior platform request.
+    try {
+      await acknowledgePendingWrite(entry);
+      pendingWrites.delete(scope);
+      pendingAckOnly.delete(scope);
+      await refreshAfterSettledWrite();
+      setWriteStatus(
+        "Bereits beobachtetes Write-Ergebnis lokal bestätigt. Keine erneute Plattformweiterleitung.",
+        "warning",
+      );
+    } catch (error) {
+      setWriteStatus(
+        `Der lokale Recovery-ACK bleibt offen: ${error.message}. Kein neuer Plattformrequest.`,
+        "warning",
+      );
+    }
+    return null;
+  }
   if (entry === undefined) {
     entry = {
       scope,
@@ -1309,9 +1340,17 @@ async function runPlatformWrite(
             return completedResult;
           }
         }
+        entry.acknowledgeOnly = true;
+        pendingAckOnly.set(scope, {
+          key: entry.key, method: entry.method, path: entry.path,
+        });
         try {
           await acknowledgePendingWrite(entry);
         } catch (error) {
+          // A denied local ACK must keep the original operation fence, but
+          // must not prevent read-only dashboard refresh after the settled
+          // backend response. Refresh neither retries nor clears the write.
+          await refreshAfterSettledWrite();
           setWriteStatus(
             `Write-Ergebnis ist terminal, aber der lokale Recovery-ACK ist fehlgeschlagen: ${error.message}. Derselbe Request/Key bleibt gebunden.`,
             "warning",
@@ -1319,6 +1358,7 @@ async function runPlatformWrite(
           return {response, payload: responsePayload};
         }
         pendingWrites.delete(scope);
+        pendingAckOnly.delete(scope);
       }
       await refreshAfterSettledWrite();
     } else if (responsePayload.error === "dashboard_pending_write_conflict") {
@@ -1330,6 +1370,10 @@ async function runPlatformWrite(
         retryingPending,
       )
     ) {
+      entry.acknowledgeOnly = true;
+      pendingAckOnly.set(scope, {
+        key: entry.key, method: entry.method, path: entry.path,
+      });
       try {
         await acknowledgePendingWrite(entry);
       } catch (error) {
@@ -1340,11 +1384,12 @@ async function runPlatformWrite(
         return {response, payload: responsePayload};
       }
       pendingWrites.delete(scope);
+      pendingAckOnly.delete(scope);
     }
     return {response, payload: responsePayload};
   } catch (error) {
     setWriteStatus(
-      `Transportstatus unbekannt: ${error.message} Derselbe Idempotency-Key bleibt für eine manuelle Wiederholung gebunden; es erfolgt kein automatischer Retry.`,
+      `Transportstatus unbekannt: ${error.message} Derselbe Idempotency-Key bleibt zur unabhängigen Recovery-Prüfung gebunden; eine erneute Plattformweiterleitung ist nicht autorisiert. Kein automatischer Retry.`,
       "warning",
     );
     return null;
@@ -1658,7 +1703,7 @@ async function runAdAction(
   const scope = `ad:${adId}:${action}`;
   if (existing !== null && existing.scope !== scope) {
     setWriteStatus(
-      `Für diese Anzeige ist bereits „${existing.scope}“ mit unbekanntem/ausstehendem Ergebnis gebunden. Zuerst genau diese Anfrage erneut abfragen.`,
+      `Für diese Anzeige ist bereits „${existing.scope}“ mit unbekanntem/ausstehendem Ergebnis gebunden. Zuerst den ursprünglichen Ausgang unabhängig klären.`,
       "warning",
     );
     return;
@@ -2254,7 +2299,7 @@ def _handler_factory(
                         parsed_payload
                     ).decode("utf-8")
                 try:
-                    store.claim_dashboard_pending_write(
+                    created = store.claim_dashboard_pending_write(
                         scope=pending_scope,
                         resource_key=resource_key,
                         idempotency_key=idempotency_key,
@@ -2263,6 +2308,12 @@ def _handler_factory(
                         payload_json=pending_payload_json,
                         ad_id=pending_ad_id,
                     )
+                    if created is not True:
+                        # An exact duplicate is still an unresolved UI fence:
+                        # after a lost backend ACK it may already have written.
+                        # Never forward that intent again without separate,
+                        # read-only independent reconciliation of the outcome.
+                        raise ValueError("existing pending write is unresolved")
                 except ValueError:
                     self._send_json(
                         409,
@@ -2591,12 +2642,10 @@ def _handler_factory(
                     or not isinstance(payload["idempotency_key"], str)
                 ):
                     raise ValueError("invalid_pending_ack")
-                phase = store.acknowledge_dashboard_pending_write(
-                    scope=payload["scope"],
-                    idempotency_key=payload["idempotency_key"],
-                )
-                if phase == "missing":
-                    raise ValueError("dashboard pending write is missing")
+                # A browser token and matching key do not establish an
+                # independent platform operation outcome. No typed, owner-
+                # verified reconciliation proof is available here yet.
+                # Keep this endpoint fail-closed until that protocol exists.
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 self._send_json(
                     409,
@@ -2616,10 +2665,10 @@ def _handler_factory(
                 )
                 return
             self._send_json(
-                200,
+                409,
                 {
-                    "acknowledged": True,
-                    "finalized": phase == "finalized",
+                    "error": "dashboard_pending_write_reconciliation_required",
+                    "platform_retry_authorized": False,
                 },
             )
 
