@@ -530,6 +530,49 @@ class WriteApiTests(unittest.TestCase):
             body = json.loads(response.read())
             return response.status, response.headers, body
 
+    def test_write_rejects_ambiguous_or_nonfinite_raw_json_before_claim(self) -> None:
+        # A raw HTTP body is essential here: json.dumps(payload) would
+        # already collapse duplicate object keys in the caller fixture.
+        service = FakeWriteService()
+        invalid = (
+            b'{"title":"original","title":"replaced"}',
+            b'{"title":"ok","nested":{"key":1,"key":2}}',
+            b'{"price_eur":NaN}',
+            b'{"price_eur":Infinity}',
+            b'{"price_eur":-Infinity}',
+            b'{"price_eur":1e999}',
+            b'{"price_eur":-1E999}',
+            b'{"nested":{"price":9e999}}',
+        )
+        with self.server(service) as server:
+            host, port = server.server_address
+            for index, raw in enumerate(invalid):
+                key = f"invalid-json-{index}"
+                for method, route in (
+                    ("POST", "/api/write/ads"),
+                    ("PATCH", "/api/write/ads/1234567890"),
+                ):
+                    with self.subTest(raw=raw, method=method):
+                        request = Request(
+                            f"http://{host}:{port}{route}",
+                            data=raw,
+                            headers={
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {TOKEN}",
+                                "Idempotency-Key": key,
+                            },
+                            method=method,
+                        )
+                        with self.assertRaises(HTTPError) as caught:
+                            self.opener.open(request, timeout=2)
+                        self.assertEqual(caught.exception.code, 400)
+                        self.assertEqual(
+                            json.loads(caught.exception.read())["error"],
+                            "invalid_json",
+                        )
+                        self.assertIsNone(self.store.write_api_request(key))
+        self.assertEqual(service.calls, [])
+
     def test_witness_started_before_external_pause_and_completed_after_commit(self) -> None:
         witness = _RecordingFenceWitness(self.store)
         class OrderedService(FakeWriteService):
@@ -1517,7 +1560,6 @@ class WriteApiTests(unittest.TestCase):
                 payload=second_payload,
                 idempotency_key="create-once",
             )
-
         self.assertEqual(second_status, 200)
         self.assertEqual(
             second_headers.get("Idempotency-Replayed"),
