@@ -750,7 +750,11 @@ Voraussetzung: physisch unabhängiger Host-Cutover, kein vorbestehendes
 writable FD/MAP_SHARED, vollständiger gestoppter Storage-/Witness-Writer,
 beide Quellen in einem privaten Operator-Verzeichnis (`0700`) als
 einzelne UID-eigene reguläre Dateien (`0600`). Keine Sidecars,
-Symlinks oder offenen Witness-Owner-Leases.
+Symlinks oder offenen Witness-Owner-Leases. Die ursprüngliche
+`witness.sqlite.lock` muss als reguläre, UID-eigene Datei mit Modus
+`0600` **bereits vor dem Scan vorhanden** sein. Die Prüfung hält
+während des gesamten Scans ein exklusives `flock` und verweigert
+fehlende/unsichere Locks; sie erzeugt oder repariert diese nicht.
 
 Das kanonische JSON-Manifest hat die Felder `schema_version=1`,
 `generation` (32 lowercase hex), `sqlite_sha256`, `witness_sha256`
@@ -761,7 +765,14 @@ Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
 vollständige File-Digests, SQLite-Integrität/Schemata, die Witness-
 Hashkette, Operation-/Key-/SHA-Übereinstimmung und den Erhalt aller
-im extern verankerten Manifest enthaltenen Pending-Fences.
+im extern verankerten Manifest enthaltenen Pending-Fences. Ein vor dem
+Media-Postread dauerhaft geschriebenes Create-Checkpoint trägt
+`outcome=confirmed` und bleibt bei Prozessabsturz **ohne** passendes
+abschließendes Media-Receipt offen. Auch ein fremdes Receipt oder ein
+Media-Receipt ohne nachgewiesene lokale Media-Persistenz kann diesen
+Checkpoint nicht aus dem Offline-Pending-Inventar entfernen. Ein
+zugehöriges bestätigtes Receipt bedeutet dabei **keine** unabhängige
+Bestätigung des tatsächlichen Kleinanzeigen-Zustands.
 
 Der Aufruf erfolgt **erst nach** Bereitstellung aller vertrauenswürdig
 erzeugten Kopien und des Digest-Ankers außerhalb der DB-/Witness-Volumes:

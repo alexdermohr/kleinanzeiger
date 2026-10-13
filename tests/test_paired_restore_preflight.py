@@ -13,11 +13,17 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 
-from mark_api.fence_witness import FenceLedger
+from mark_api.domain import (
+    AdSnapshot, CreateOperationReceipt, LifecycleState,
+    MediaPostReadStatus, OperationOutcome,
+)
+from mark_api.fence_witness import FenceLedger, FenceWitnessError
 from mark_api.paired_restore_preflight import (
     PairPreflightError, inspect_offline_pair, verify_offline_pair, main,
+    _witness_owner_absent,
 )
 from mark_api.storage import SnapshotStore
 
@@ -76,6 +82,98 @@ class PairedRestorePreflightTests(unittest.TestCase):
         self.manifest.write_bytes(raw)
         os.chmod(self.manifest, 0o600)
         return hashlib.sha256(raw).hexdigest()
+
+    def _create_checkpoint(self, *, reference: str = "write-api:paired-create") -> tuple[CreateOperationReceipt, int]:
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        observed = AdSnapshot(
+            ad_id="201", observed_at=AT, source="management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Restore test vase", description="Synthetic item",
+        )
+        receipt = CreateOperationReceipt(
+            operation="create", started_at=AT, completed_at=AT,
+            outcome=OperationOutcome.CONFIRMED,
+            pre_read_status="success_empty",
+            confirmation_pre_read_status="success_empty",
+            post_read_status="success_nonempty",
+            confirmation_post_read_status="success_nonempty",
+            content_post_read_status="success_nonempty",
+            writer_invoked=True, created_ad_id="201",
+            authorization_by="offline-test-owner",
+            authorization_reference=reference,
+            post_snapshot=observed,
+            confirmation_post_snapshot=observed,
+            content_post_snapshot=observed,
+        )
+        checkpoint_id = store.append_create_operation_checkpoint(receipt)
+        return receipt, checkpoint_id
+
+    def test_missing_witness_lock_fails_closed_without_recreating_lock(self) -> None:
+        lock = self.ledger.with_name(self.ledger.name + ".lock")
+        lock.unlink()
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertFalse(lock.exists(), "read-only verifier must not create a lock")
+
+    def test_held_offline_lock_rejects_new_witness_owner_after_scan_starts(self) -> None:
+        with _witness_owner_absent(self.ledger):
+            with self.assertRaises(FenceWitnessError):
+                FenceLedger(self.ledger)
+
+    def test_witness_lock_mode_must_match_owner_protocol(self) -> None:
+        lock = self.ledger.with_name(self.ledger.name + ".lock")
+        os.chmod(lock, 0o400)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_confirmed_create_checkpoint_without_final_receipt_is_unresolved(self) -> None:
+        receipt, checkpoint = self._create_checkpoint()
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["ambiguous_creates"], [checkpoint])
+        externally_anchored = self._pin()
+        observed = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=externally_anchored,
+        )
+        self.assertEqual(observed["ambiguous_create_count"], 1)
+        final = replace(
+            receipt,
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).append_create_operation_receipt(final)
+        after = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(after["fences"]["ambiguous_creates"], [])
+        # The old externally pinned manifest never silently accepts a newer
+        # different source generation even if both are locally consistent.
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=externally_anchored,
+            )
+
+    def test_other_receipt_cannot_settle_a_crashed_checkpoint(self) -> None:
+        receipt, checkpoint = self._create_checkpoint()
+        foreign_final = replace(
+            receipt,
+            authorization_reference="write-api:unrelated",
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).append_create_operation_receipt(foreign_final)
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [checkpoint],
+        )
+
+    def test_unconfirmed_media_receipt_does_not_settle_checkpoint(self) -> None:
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(receipt, media_persistence_confirmed=False)
+        SnapshotStore(self.sqlite, create_if_missing=False).append_create_operation_receipt(final)
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [checkpoint],
+        )
 
     def test_empty_pair_with_explicit_external_anchor_is_read_only(self) -> None:
         expected = self._pin()

@@ -178,10 +178,17 @@ def _witness_owner_absent(path: Path) -> Iterator[None]:
     lock_path = path.with_name(path.name + ".lock")
     try:
         lock_path.lstat()
-    except FileNotFoundError:
-        yield
-        return
+    except FileNotFoundError as exc:
+        # The owner's protocol can create a missing .lock with O_CREAT and
+        # acquire it while our inspection is in flight. A private staged
+        # candidate without the original lock is NOT attestably quiescent.
+        # We cannot safely create one here: the verifier is read-only.
+        raise PairPreflightError(
+            "offline witness owner lock is missing; quiescence is unverified"
+        ) from exc
     with _pinned_file(lock_path) as fd:
+        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+            raise PairPreflightError("witness lock mode is not protocol-compatible")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -246,10 +253,33 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     ]
     if any(type(row[3]) is not int or row[3] not in (0, 1) for row in dashboard):
         raise PairPreflightError("SQLite dashboard pending fence invalid")
+    # A durable before_media_post_read checkpoint always has
+    # outcome='confirmed' (SnapshotStore.append_create_operation_checkpoint).
+    # The browser executor may crash BEFORE persisting its final receipt.
+    # Only a narrowly matched and media-confirmed final receipt settles
+    # this local checkpoint; claimed browser results do NOT independently
+    # establish an external platform outcome or recovery clearance.
     ambiguous = [
         int(row[0]) for row in _rows(
-            conn, "SELECT id FROM create_operation_checkpoints "
-            "WHERE outcome='ambiguous' AND writer_invoked=1 ORDER BY id",
+            conn,
+            "SELECT c.id FROM create_operation_checkpoints AS c "
+            "WHERE NOT EXISTS ("
+            "SELECT 1 FROM create_operation_receipts AS r "
+            "WHERE c.operation=r.operation "
+            "AND c.created_ad_id=r.created_ad_id "
+            "AND c.started_at=r.started_at "
+            "AND c.authorization_by IS NOT NULL "
+            "AND c.authorization_by=r.authorization_by "
+            "AND c.authorization_reference IS NOT NULL "
+            "AND c.authorization_reference=r.authorization_reference "
+            "AND c.post_snapshot_json IS r.post_snapshot_json "
+            "AND c.confirmation_post_snapshot_json IS r.confirmation_post_snapshot_json "
+            "AND c.content_post_snapshot_json IS r.content_post_snapshot_json "
+            "AND r.outcome='confirmed' "
+            "AND r.writer_invoked=1 "
+            "AND r.media_persistence_confirmed=1 "
+            "AND r.media_post_read_status='confirmed'"
+            ") ORDER BY c.id",
         )
     ]
     if any(row <= 0 for row in ambiguous):
