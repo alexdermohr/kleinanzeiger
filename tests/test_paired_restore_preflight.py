@@ -412,6 +412,27 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_world_writable_nonsticky_staging_ancestor_is_rejected(self) -> None:
+        ancestor = self.source.parent
+        old_mode = ancestor.stat().st_mode & 0o7777
+        try:
+            os.chmod(ancestor, 0o777)
+            with self.assertRaises(PairPreflightError):
+                inspect_offline_pair(self.sqlite, self.ledger)
+        finally:
+            os.chmod(ancestor, old_mode)
+
+    def test_uid_owned_sticky_writable_ancestor_is_still_rejected(self) -> None:
+        # Root-owned /tmp 1777 is allowed, but caller-owned 1777 is not.
+        ancestor = self.source.parent
+        old_mode = ancestor.stat().st_mode & 0o7777
+        try:
+            os.chmod(ancestor, 0o1777)
+            with self.assertRaises(PairPreflightError):
+                inspect_offline_pair(self.sqlite, self.ledger)
+        finally:
+            os.chmod(ancestor, old_mode)
+
     def test_offline_private_parent_requires_protocol_mode_0700(self) -> None:
         try:
             os.chmod(self.source, 0o500)

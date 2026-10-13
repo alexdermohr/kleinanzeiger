@@ -22,7 +22,10 @@ import sys
 from typing import Iterator
 
 from .container_draft import container_draft_denied
-from .fence_witness import FenceLedger, FenceWitnessError
+from .fence_witness import (
+    FenceLedger, FenceWitnessError,
+    _private_directory as _witness_private_directory,
+)
 from .storage import SnapshotStore
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -107,22 +110,17 @@ def _private_path(path: Path) -> Path:
         or path != Path(os.path.normpath(path))
     ):
         raise PairPreflightError("offline path must be absolute and normalized")
-    # The immediate parent may look private while a grandparent is a
-    # symlink. Check every lexical ancestor without following it. The
-    # separate FD-bound parser eliminates later ancestor-swap races.
-    for ancestor in path.parents:
-        try:
-            component = ancestor.lstat()
-        except OSError as exc:
-            raise PairPreflightError("offline source ancestor unavailable") from exc
-        if not stat.S_ISDIR(component.st_mode):
-            raise PairPreflightError("offline path has a symlink or invalid ancestor")
-    parent = path.parent.lstat()
-    if (
-        parent.st_uid != os.geteuid()
-        or stat.S_IMODE(parent.st_mode) != 0o700
-    ):
-        raise PairPreflightError("offline source directory must be private")
+    # Apply the actual Witness owner policy, not merely a symlink check.
+    # An attacker-writable grandparent can replace the entire 0700 staging
+    # directory between flock and DB open, decoupling lock and witness. The
+    # shared helper rejects non-root/non-caller owners, group/other-writable
+    # ancestors and symlinks, while allowing root-owned sticky /tmp 01777.
+    try:
+        _witness_private_directory(path.parent, os.geteuid(), mode=0o700)
+    except FenceWitnessError as exc:
+        raise PairPreflightError(
+            "offline source directory ancestry is not owner-safe"
+        ) from exc
     return path
 
 

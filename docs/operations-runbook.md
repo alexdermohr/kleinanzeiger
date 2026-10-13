@@ -754,6 +754,15 @@ Quellbilder brauchen schon **vor dem SQLite-Parser** den SQLite-Header
 für den DELETE-Journal-Modus (`01 01`); ein WAL-Header (`02 02`) ist
 auch bei fehlenden `-wal`-/`-shm`-Dateien unzulässig. Keine Sidecars,
 Symlinks oder offenen Witness-Owner-Leases. Die ursprüngliche
+Jeder lexikalische Vorfahre des privaten Staging-Verzeichnisses
+muss zudem ein echtes Verzeichnis unter Root- oder derselben Operator-UID
+sein, ohne unsichere Gruppen-/Fremdschreibrechte oder Symlink-Komponente.
+Nur ein **root-besessenes Sticky-Verzeichnis** (etwa `/tmp` mit `1777`)
+ist als Ausnahme zulässig; ein fremd- oder nutzerbesessenes, allgemein
+beschreibbares Vorfahrenverzeichnis ist kein sicherer Lock-/Image-Anker.
+Die Prüfung verwendet dieselbe Vorgängerpfad-Richtlinie wie der
+Witness-Owner. Der unabhängige Root-/Host-Cutover bleibt trotzdem eine
+separate notwendige Sicherheitsgrenze.
 `witness.sqlite.lock` muss als reguläre, UID-eigene Datei mit Modus
 `0600` **bereits vor dem Scan vorhanden** sein. Die Prüfung hält
 während des gesamten Scans ein exklusives `flock` und verweigert
