@@ -764,6 +764,168 @@ else:
                 "pending lookups must not scale quadratically with clearances",
             )
 
+    def test_operator_pending_page_covers_legacy_claims_and_bounded_pages(self) -> None:
+        """One root-only review queue must not infer success from runtime events."""
+        session = self.owner.open_session()
+        # A v1 ledger could retain multiple historically 'completed' starts.
+        # Construct their hash-valid event chain without external operations.
+        with self.owner._guard, closing(self.owner._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            for number in range(18):
+                key = f"legacy-op-{number:02d}"
+                self.owner._append(
+                    db, session=session, kind="started", key=key,
+                    sha=_SHA, action="create_media",
+                )
+                self.owner._append(
+                    db, session=session, kind="completed", key=key,
+                    sha=_SHA, outcome="confirmed", response_sha="d" * 64,
+                )
+                self.owner._append(
+                    db, session=session, kind="runtime_cleared", key=key,
+                    sha=_SHA, evidence="legacy:untrusted-executor",
+                )
+            db.commit()
+        active = self.owner.pending_page(after_seq=0)
+        self.assertEqual(set(active), {"rows", "more", "next_after_seq"})
+        self.assertEqual(len(active["rows"]), 16)
+        self.assertTrue(active["more"])
+        self.assertTrue(all(not row["session_sealed"] for row in active["rows"]))
+        self.assertEqual(
+            [row["key"] for row in active["rows"]],
+            [f"legacy-op-{number:02d}" for number in range(16)],
+        )
+        self.assertTrue(all(row["sha"] == _SHA for row in active["rows"]))
+        self.assertTrue(all(row["action"] == "create_media" for row in active["rows"]))
+        self.assertTrue(all(row["session"] == session for row in active["rows"]))
+        self.assertTrue(all(row["started_at"] for row in active["rows"]))
+        last = self.owner.pending_page(after_seq=active["next_after_seq"])
+        self.assertFalse(last["more"])
+        self.assertEqual([row["key"] for row in last["rows"]],
+                         ["legacy-op-16", "legacy-op-17"])
+        self.assertGreater(last["next_after_seq"], active["next_after_seq"])
+        with self.assertRaisesRegex(FenceWitnessError, "sealed"):
+            self.owner.operator_clearance(
+                key="legacy-op-00", sha=_SHA, evidence="operator:real-review-required",
+            )
+        self.owner.seal_session(session)
+        sealed = self.owner.pending_page(after_seq=0)
+        self.assertTrue(all(row["session_sealed"] for row in sealed["rows"]))
+        self.owner.operator_clearance(
+            key="legacy-op-00", sha=_SHA, evidence="operator:synthetic-postread",
+        )
+        self.assertNotIn("legacy-op-00", [
+            row["key"] for row in self.owner.pending_page(after_seq=0)["rows"]
+        ])
+        self.assertTrue(self.owner.fence_pending())
+        for cursor in (True, -1, 2 ** 63, "0", None):
+            with self.subTest(cursor=cursor), self.assertRaises(FenceWitnessError):
+                self.owner.pending_page(after_seq=cursor)
+        self.owner.close()
+        with FenceLedger(self.ledger_file) as restarted:
+            all_keys: list[str] = []
+            cursor = 0
+            while True:
+                page = restarted.pending_page(after_seq=cursor)
+                all_keys.extend(row["key"] for row in page["rows"])
+                if not page["more"]:
+                    break
+                self.assertGreater(page["next_after_seq"], cursor)
+                cursor = page["next_after_seq"]
+            self.assertEqual(len(all_keys), 17)
+            self.assertNotIn("legacy-op-00", all_keys)
+            self.assertEqual(len(all_keys), len(set(all_keys)))
+
+    def test_operator_pending_page_rejects_malformed_actions_and_closes(self) -> None:
+        """JSON lists/maps cannot bypass malformed-reply poisoning via TypeError."""
+        for invalid_action in ([], {}, 7, None, True):
+            with self.subTest(action=invalid_action):
+                # The server peer is authenticated on a real socket in another
+                # test; this isolated seam injects a malicious reply AFTER the
+                # IPC parser so strict client validation is independently tested.
+                client = object.__new__(FenceWitnessClient)
+                payload = {
+                    "rows": [{
+                        "seq": 1, "key": "synthetic-pending-op",
+                        "sha": _SHA, "action": invalid_action,
+                        "session": "0" * 32,
+                        "started_at": "2026-10-13T10:00:00+00:00",
+                        "session_sealed": False,
+                    }],
+                    "more": False, "next_after_seq": 1,
+                }
+                with patch.object(client, "_call", return_value=payload):
+                    with patch.object(client, "close") as closed:
+                        with self.assertRaisesRegex(
+                            FenceWitnessError, "pending page is invalid",
+                        ):
+                            client.pending_page(after_seq=0)
+                        closed.assert_called_once_with()
+
+    def test_operator_pending_page_only_on_operator_socket_and_readonly(self) -> None:
+        runtime_dir = self.root / "page-runtime-socket"
+        operator_dir = self.root / "page-operator-socket"
+        runtime_dir.mkdir(mode=0o700)
+        runtime_dir.chmod(0o2710)
+        operator_dir.mkdir(mode=0o700)
+        runtime_path = runtime_dir / "witness.sock"
+        operator_path = operator_dir / "operator.sock"
+        server = FenceWitnessServer(
+            ledger=self.owner, runtime_socket=runtime_path,
+            operator_socket=operator_path,
+            runtime_uid=os.geteuid() + 100000,
+            runtime_gid=os.getegid(), operator_uid=os.geteuid(),
+        )
+        # Same-UID functional seam; real distinct UID kernel denial is
+        # independently tested in the installed-image Multi-UID suite.
+        server._runtime.peer_uid = os.geteuid()
+        server.start()
+        self.addCleanup(server.close)
+        sealed = threading.Event()
+        prior_seal = self.owner.seal_session
+
+        def signal_seal(session: str) -> None:
+            prior_seal(session)
+            sealed.set()
+
+        with patch.object(self.owner, "seal_session", side_effect=signal_seal):
+            with FenceWitnessClient(
+                runtime_path, expected_owner_uid=os.geteuid(),
+            ) as runtime:
+                runtime.started(key="pending-socket-op", sha=_SHA, action="pause")
+                with self.assertRaises(FenceWitnessError):
+                    runtime.pending_page(after_seq=0)
+            self.assertTrue(sealed.wait(3), "runtime socket did not seal session")
+        with closing(sqlite3.connect(self.ledger_file)) as db:
+            count_before = db.execute("SELECT count(*) FROM events").fetchone()[0]
+        with FenceWitnessClient(
+            operator_path, expected_owner_uid=os.geteuid(),
+        ) as operator:
+            page = operator.pending_page(after_seq=0)
+            self.assertEqual(len(page["rows"]), 1)
+            self.assertEqual(page["rows"][0]["key"], "pending-socket-op")
+            self.assertTrue(page["rows"][0]["session_sealed"])
+            self.assertFalse(page["more"])
+        with closing(sqlite3.connect(self.ledger_file)) as db:
+            self.assertEqual(
+                db.execute("SELECT count(*) FROM events").fetchone()[0],
+                count_before,
+            )
+        self.assertTrue(self.owner.fence_pending())
+        with FenceWitnessClient(
+            operator_path, expected_owner_uid=os.geteuid(),
+        ) as operator:
+            with self.assertRaises(FenceWitnessError):
+                operator.pending_page(after_seq=-1)
+        with FenceWitnessClient(
+            operator_path, expected_owner_uid=os.geteuid(),
+        ) as operator:
+            operator.operator_clear(
+                key="pending-socket-op", sha=_SHA,
+                evidence="operator:synthetic-independent-postread",
+            )
+        self.assertFalse(self.owner.fence_pending())
+
     def test_rejects_unbound_evidence_and_invalid_request_fields(self) -> None:
         session = self.owner.open_session()
         for key, sha, action in (

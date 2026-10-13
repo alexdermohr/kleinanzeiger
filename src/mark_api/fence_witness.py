@@ -49,6 +49,7 @@ class FenceWitnessAlreadyRecorded(FenceWitnessError):
 
 _VERSION = 1  # Wire protocol; ledger schema has its own explicit version.
 _LEDGER_SCHEMA_VERSION = 2
+_OPERATOR_PAGE_LIMIT = 16
 _MAX_FRAME = 32 * 1024
 _KEY = re.compile(r"[A-Za-z0-9._:-]{1,160}\Z", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
@@ -596,6 +597,49 @@ class FenceLedger:
                 conn.rollback()
                 raise
 
+    def pending_page(self, *, after_seq: int = 0) -> dict[str, object]:
+        """Bounded, operator-only triage of ORIGINAL uncleared write starts.
+
+        A legacy claimed 'confirmed', precondition_failed or runtime_cleared
+        event is still unresolved until exact operator clearance. This method
+        never modifies the ledger or interprets an executor result as truth.
+        Only the distinct root-authenticated operator socket exposes it.
+        """
+        if type(after_seq) is not int or not 0 <= after_seq < (1 << 63):
+            raise FenceWitnessError("invalid operator pending cursor")
+        self._ensure_owner_pid()
+        with self._guard, closing(self._connect()) as conn:
+            rows = conn.execute("""
+                SELECT s.seq,s.request_key,s.request_sha256,s.action,
+                       s.session_id,s.created_at,session.state
+                FROM events AS s
+                LEFT JOIN sessions AS session ON session.id=s.session_id
+                WHERE s.kind='started' AND s.seq>?
+                  AND NOT EXISTS(
+                      SELECT 1 FROM events AS clearance
+                      WHERE clearance.kind='operator_cleared'
+                        AND clearance.request_key=s.request_key
+                        AND clearance.request_sha256=s.request_sha256
+                        AND clearance.session_id=s.session_id
+                  )
+                ORDER BY s.seq LIMIT ?
+            """, (after_seq, _OPERATOR_PAGE_LIMIT + 1)).fetchall()
+            visible = rows[:_OPERATOR_PAGE_LIMIT]
+            result = [{
+                "seq": seq,
+                "key": key,
+                "sha": sha,
+                "action": action,
+                "session": session,
+                "started_at": created_at,
+                "session_sealed": state == "sealed",
+            } for seq, key, sha, action, session, created_at, state in visible]
+            return {
+                "rows": result,
+                "more": len(rows) > _OPERATOR_PAGE_LIMIT,
+                "next_after_seq": result[-1]["seq"] if result else after_seq,
+            }
+
     @staticmethod
     def _is_pending(conn: sqlite3.Connection) -> bool:
         # Includes legacy "confirmed"/"precondition_failed" and runtime_cleared
@@ -955,6 +999,10 @@ class _WitnessUnixHandler(socketserver.StreamRequestHandler):
                 )
                 return {"recorded": True}
         elif server.role == "operator":
+            if op == "pending_page" and set(request) == {
+                "version", "op", "after_seq",
+            }:
+                return server.ledger.pending_page(after_seq=request["after_seq"])
             if op == "pending" and set(request) == {"version", "op"}:
                 return {"pending": server.ledger.fence_pending()}
             if op == "operator_clear" and set(request) == {
@@ -1209,6 +1257,57 @@ class FenceWitnessClient:
             self.close()
             raise FenceWitnessError("witness pending result is invalid")
         return result["pending"]
+
+    def pending_page(self, *, after_seq: int = 0) -> dict[str, object]:
+        """One bounded operator-only read; never an executor recovery right."""
+        if type(after_seq) is not int or not 0 <= after_seq < (1 << 63):
+            raise FenceWitnessError("invalid operator pending cursor")
+        result = self._call("pending_page", after_seq=after_seq)
+        rows = result.get("rows")
+        more = result.get("more")
+        next_cursor = result.get("next_after_seq")
+        invalid = (
+            set(result) != {"rows", "more", "next_after_seq"}
+            or not isinstance(rows, list)
+            or not 0 <= len(rows) <= _OPERATOR_PAGE_LIMIT
+            or type(more) is not bool
+            or type(next_cursor) is not int
+            or not after_seq <= next_cursor < (1 << 63)
+            or (more and not rows)
+        )
+        if not invalid:
+            previous = after_seq
+            for row in rows:
+                if not isinstance(row, dict) or set(row) != {
+                    "seq", "key", "sha", "action", "session", "started_at",
+                    "session_sealed",
+                }:
+                    invalid = True
+                    break
+                seq = row["seq"]
+                if (
+                    type(seq) is not int or not previous < seq < (1 << 63)
+                    or not isinstance(row["key"], str)
+                    or _KEY.fullmatch(row["key"]) is None
+                    or not isinstance(row["sha"], str)
+                    or _SHA.fullmatch(row["sha"]) is None
+                    or not isinstance(row["action"], str)
+                    or row["action"] not in _ACTIONS
+                    or not isinstance(row["session"], str)
+                    or re.fullmatch(r"[0-9a-f]{32}", row["session"]) is None
+                    or not isinstance(row["started_at"], str)
+                    or not 1 <= len(row["started_at"]) <= 64
+                    or type(row["session_sealed"]) is not bool
+                ):
+                    invalid = True
+                    break
+                previous = seq
+            if not invalid and next_cursor != previous:
+                invalid = True
+        if invalid:
+            self.close()
+            raise FenceWitnessError("witness operator pending page is invalid")
+        return result
 
     def replay_status(self, *, key: str, sha: str, response_sha: str) -> str:
         result = self._call(
