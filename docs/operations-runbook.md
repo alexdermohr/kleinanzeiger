@@ -765,6 +765,21 @@ und `fences`. `fences` enthält genau `sqlite_started`,
 `sqlite_sync_open`, `dashboard_pending`, `ambiguous_creates`,
 `ambiguous_final_creates`, `witness_started`, `witness_unresolved`,
 `witness_chain_tip`, `sqlite_quarantined`, `sqlite_media_unresolved`.
+Auch das SQLite-Store-Schema muss **exakt** der aktuell im Code
+aus `SnapshotStore._initialize()` erzeugten Version-2-Referenz
+entsprechen. Das Read-only-Preflight verifiziert die vollständige Menge
+aller 22 `sqlite_master`-Objekte samt Typ, Zuordnung und
+SHA-256 der unveränderten DDL-Definitionen. Hinzugefügte oder versteckte
+Trigger, abweichende `CHECK`-Constraints und gefälschte Indizes werden
+verweigert, auch wenn die geforderten Spalten weiter vorhanden sind.
+Die Digest-Referenz wird **nicht aus dem Kandidaten** gelernt.
+Ein legitimer, historisch additiv migrierter v2-Bestand mit
+abweichendem DDL-Layout besteht diese konservative Prüfung ebenfalls
+**nicht automatisch**: er erfordert eine gesonderte, autorisierte
+Offline-Schema-Migration und erneute unabhängige Paarattestierung,
+keinesfalls ein automatisches Reparieren oder Freigeben durch den
+Checker.
+
 Die Witness-DDL-Prüfung verlangt die vollständigen, unveränderten
 Tabellen-, UNIQUE-Partial-Index- und RAISE-Abbruch-Trigger-Semantiken
 einschließlich exakter SQL-Literalwerte und Token-Grenzen. Zusätzlich

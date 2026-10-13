@@ -610,6 +610,48 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_unexpected_sqlite_store_insert_veto_trigger_is_rejected(self) -> None:
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "CREATE TRIGGER deny_write BEFORE INSERT ON write_api_requests "
+                "BEGIN SELECT RAISE(ABORT, 'recovery write sabotaged'); END"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_sqlite_store_weakened_recovery_clearance_constraint_is_rejected(self) -> None:
+        # The old structure validator checked columns, not whether the
+        # requirement for exact 64-character request SHA still exists.
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute("PRAGMA writable_schema=ON")
+            row = connection.execute(
+                "UPDATE sqlite_master SET sql=replace(sql,"
+                "'CHECK(length(request_sha256) = 64)',"
+                "'CHECK(length(request_sha256) >= 0)') "
+                "WHERE name='write_recovery_clearances' AND type='table'"
+            )
+            self.assertEqual(row.rowcount, 1)
+            connection.execute("PRAGMA schema_version=92")
+            connection.execute("PRAGMA writable_schema=OFF")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_reserved_sqlite_prefix_trigger_in_store_is_rejected(self) -> None:
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute("PRAGMA writable_schema=ON")
+            connection.execute(
+                "INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) "
+                "VALUES('trigger','sqlite_write_veto','write_api_requests',0,?)",
+                (
+                    "CREATE TRIGGER sqlite_write_veto BEFORE INSERT "
+                    "ON write_api_requests BEGIN SELECT RAISE(IGNORE); END",
+                ),
+            )
+            connection.execute("PRAGMA schema_version=93")
+            connection.execute("PRAGMA writable_schema=OFF")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_witness_reserved_sqlite_prefix_trigger_must_never_be_hidden(self) -> None:
         # A hostile writable_schema snapshot can contain a reserved sqlite_
         # name even though normal CREATE would reject that name. This trigger
