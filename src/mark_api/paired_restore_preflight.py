@@ -120,7 +120,7 @@ def _private_path(path: Path) -> Path:
     parent = path.parent.lstat()
     if (
         parent.st_uid != os.geteuid()
-        or stat.S_IMODE(parent.st_mode) & 0o077
+        or stat.S_IMODE(parent.st_mode) != 0o700
     ):
         raise PairPreflightError("offline source directory must be private")
     return path
@@ -129,7 +129,7 @@ def _private_path(path: Path) -> Path:
 def _private_file(info: os.stat_result) -> bool:
     return (
         stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
-        and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) & 0o077 == 0
+        and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
     )
 
 

@@ -401,6 +401,24 @@ class PairedRestorePreflightTests(unittest.TestCase):
             )
         self.assertNotEqual(old_sha, hashlib.sha256(old_bytes).hexdigest())
 
+    def test_offline_candidate_sqlite_must_use_exact_protocol_mode_0600(self) -> None:
+        os.chmod(self.sqlite, 0o400)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_offline_candidate_witness_must_use_exact_protocol_mode_0600(self) -> None:
+        os.chmod(self.ledger, 0o700)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_offline_private_parent_requires_protocol_mode_0700(self) -> None:
+        try:
+            os.chmod(self.source, 0o500)
+            with self.assertRaises(PairPreflightError):
+                inspect_offline_pair(self.sqlite, self.ledger)
+        finally:
+            os.chmod(self.source, 0o700)
+
     def test_missing_witness_lock_fails_closed_without_recreating_lock(self) -> None:
         lock = self.ledger.with_name(self.ledger.name + ".lock")
         lock.unlink()
