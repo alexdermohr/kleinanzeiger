@@ -6,8 +6,9 @@ creating any host user, changing ownership, or contacting Kleinanzeigen.
 from __future__ import annotations
 
 import configparser
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 import importlib.util
+from io import StringIO
 import os
 from pathlib import Path
 import shlex
@@ -312,28 +313,40 @@ class MarkDeploymentBoundaryTests(unittest.TestCase):
         ):
             yield
 
-    def test_separate_browser_owner_account_is_explicitly_allowlisted(self) -> None:
+    def test_only_independent_storage_account_can_attest_private_sqlite(self) -> None:
+        """A browser/CDP executor must never be the trusted database owner."""
         with TemporaryDirectory() as tmp:
             db, backups = self._trusted_paths(Path(tmp))
+            before = db.read_bytes()
             with self._trusted_identity():
                 boundary.check_deployment(
-                    db, backups, service_account="mark-api-owner",
+                    db, backups, service_account="mark-api-storage",
                 )
-                boundary.pwd.getpwnam.assert_called_once_with("mark-api-owner")
-                with self.assertRaisesRegex(
-                    boundary.DeploymentBoundaryError,
-                    "unsupported service account",
-                ):
-                    boundary.check_deployment(
-                        db, backups, service_account="root",
-                    )
-                with self.assertRaisesRegex(
-                    boundary.DeploymentBoundaryError,
-                    "unsupported service account",
-                ):
-                    boundary.check_deployment(
-                        db, backups, service_account="mark-api",
-                    )
+                boundary.pwd.getpwnam.assert_called_once_with("mark-api-storage")
+                for forbidden in ("mark-api-owner", "root", "mark-api"):
+                    with self.subTest(forbidden=forbidden), self.assertRaisesRegex(
+                        boundary.DeploymentBoundaryError,
+                        "unsupported service account",
+                    ):
+                        boundary.check_deployment(
+                            db, backups, service_account=forbidden,
+                        )
+            self.assertEqual(db.read_bytes(), before)
+
+    def test_bootstrap_cli_rejects_executor_account_before_filesystem_checks(self) -> None:
+        """CLI admission itself must reject the compromised browser UID."""
+        with patch.object(
+            boundary, "_check_bootstrap_installation",
+            side_effect=AssertionError("installer must never run"),
+        ) as installer, redirect_stderr(StringIO()) as errors:
+            with self.assertRaises(SystemExit) as rejected:
+                boundary.main([
+                    "--db", SOURCE_DB, "--backup-dir", BACKUP_DIR,
+                    "--service-account", "mark-api-owner",
+                ])
+            installer.assert_not_called()
+        self.assertEqual(rejected.exception.code, 2)
+        self.assertIn("invalid choice", errors.getvalue())
 
     def test_valid_private_store_preflight_does_not_modify_data(self) -> None:
         with TemporaryDirectory() as tmp:

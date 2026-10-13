@@ -332,10 +332,10 @@ def _require_private_path(
 
 
 def check_deployment(
-    db: Path, backup_dir: Path, *, service_account: str = "mark-api-owner",
+    db: Path, backup_dir: Path, *, service_account: str = "mark-api-storage",
 ) -> None:
     """Check exact allowed service identity and private DB before SQLite."""
-    if service_account != "mark-api-owner":
+    if service_account != "mark-api-storage":
         raise DeploymentBoundaryError("unsupported service account")
     try:
         account = pwd.getpwnam(service_account)
@@ -394,9 +394,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", required=True, type=Path)
     parser.add_argument("--backup-dir", required=True, type=Path)
     parser.add_argument(
-        "--service-account", choices=("mark-api-owner",),
-        default="mark-api-owner",
-        help="Only the separately isolated browser/database owner UID 50044",
+        "--service-account", choices=("mark-api-storage",),
+        default="mark-api-storage",
+        help="Only the dedicated independent SQLite storage owner UID 50046",
     )
     args = parser.parse_args(argv)
     try:

@@ -295,7 +295,7 @@ mit `ExecCondition=/usr/bin/false` bereits vor dem Bootstrap den Start;
 `ExecStart=/usr/bin/false` bleibt als zweite Sperre erhalten. Vorhandene
 alte, eventuell installierte Units sind separat auf dem Zielhost zu inventarisieren.
 UID 50042 darf keine Datenbank und WAL-/SHM-Dateien besitzen. Der installierte
-DB-Preflight akzeptiert nur den separaten Owner `mark-api-owner` (UID 50044).
+DB-Preflight akzeptiert nur den unabhängigen SQLite-Owner `mark-api-storage` (UID 50046); der Browser-/Write-Executor `mark-api-owner` (UID 50044) wird abgewiesen.
 
 Ein eigener Unix-Besitzer, `chown`, Snapshot-Hash oder Docker-`pause`
 entziehen keine bereits offenen fremden FDs oder writable

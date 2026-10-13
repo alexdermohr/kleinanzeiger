@@ -124,21 +124,37 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn('! getent group "$MARK_GID"', image)
         self.assertIn('install -d -o mark-api-owner -g mark-api-owner -m 0700', image)
 
-    def test_trusted_browser_owner_and_backup_use_exact_owner_preflight(self) -> None:
+    def test_storage_preflight_rejects_executor_db_ownership(self) -> None:
+        """UID 50044 may not attest raw SQLite; 50046 owns DB and backups."""
         dockerfile = _read("mark-api-container.Dockerfile")
         start = _read("mark-api-container-start.sh")
         backup = _read("mark-api-container-backup.sh")
+        storage = _read("mark-api-container-storage.sh")
         preflight = _read("mark-api-preflight.py")
         self.assertIn('! getent passwd 50044', dockerfile)
         self.assertIn('! getent group 50044', dockerfile)
         self.assertIn('groupadd --gid 50044 mark-api-owner', dockerfile)
         self.assertIn('useradd --uid 50044 --gid 50044', dockerfile)
-        self.assertIn('--service-account mark-api-owner', start)
-        self.assertIn('--service-account mark-api-owner', backup)
-        self.assertIn('"mark-api-owner"', preflight)
-        self.assertIn('service_account != "mark-api-owner"', preflight)
+        self.assertIn('groupadd --gid 50046 mark-api-storage', dockerfile)
+        self.assertIn('useradd --uid 50046 --gid 50046', dockerfile)
+        # The legacy executor entrypoint remains hard-stopped until its
+        # raw-SQLite arguments are replaced by storage-owner RPC.
+        self.assertIn("\nexit 1\n", start)
+        self.assertLess(
+            start.index("\nexit 1\n"),
+            start.index("exec /opt/mark-api/venv/bin/python -I -m mark_api.launcher"),
+        )
+        self.assertIn('--service-account mark-api-storage', backup)
+        # The storage service's own _attested_database validates private UID50046
+        # data; it does not mount the backup directory or need backup preflight.
+        self.assertIn('mark_api.storage_owner', storage)
+        self.assertNotIn('--service-account mark-api-owner', backup + storage)
+        self.assertIn('service_account != "mark-api-storage"', preflight)
+        self.assertIn('choices=("mark-api-storage",)', preflight)
         self.assertNotIn('service_account not in ("mark-api", "mark-api-owner")', preflight)
-        self.assertNotIn('--service-account root', start + backup)
+        self.assertLess(storage.index("exit 1"),
+                        storage.index("exec /opt/mark-api/venv/bin/python"))
+        self.assertNotIn('--service-account root', start + backup + storage)
 
     def test_release_wheel_is_noneditable_and_deps_explicit(self) -> None:
         image = _read("mark-api-container.Dockerfile")
