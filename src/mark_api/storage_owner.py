@@ -7,8 +7,10 @@ typed request-claim/start/read, read-only status/clearance lookups and
 transactional, in-memory-staged owner-inventory/sync journaling are exposed.
 Executor-supplied inventory is observation data, NOT independent platform
 attestation, and cannot manufacture write-recovery evidence or clear fences.
-There is NO arbitrary SQL, completion, clearance issuance, file, migration,
-backup or general method-dispatch RPC.
+There is NO arbitrary SQL, executor-selected completion/success, clearance,
+file, migration, backup or general method-dispatch RPC. The sole started-write
+completion primitive records a fixed owner-constructed UNKNOWN/HTTP202 and
+retains its unresolved recovery fence.
 
 A lost acknowledgement of claim/start is UNKNOWN: inspect the persisted key
 and independent witness before deciding what happened, never blindly retry.
@@ -1193,6 +1195,19 @@ class StorageOwnerServer(
                 cancelled_at=_timestamp(request["at"]),
             )
             return {"record": _record_as_json(record)}
+        if op == "quarantine_started" and set(request) == {
+            "version", "op", "key", "sha", "owner", "at",
+        }:
+            # The executor never selects a result, success status, response,
+            # clearance or retry authority. Only the original started claim
+            # can receive the SQLite owner's fixed unverified observation.
+            record = self.store.quarantine_started_write_api_request(
+                idempotency_key=_validated(request["key"], _KEY),
+                request_sha256=_validated(request["sha"], _SHA),
+                claim_owner=_validated(request["owner"], _OWNER),
+                quarantined_at=_timestamp(request["at"]),
+            )
+            return {"record": _record_as_json(record)}
         if op == "begin" and set(request) == {
             "version", "op", "key", "sha", "owner", "at",
         }:
@@ -1912,6 +1927,42 @@ class StorageOwnerClient:
             raise StorageOwnerError("storage start operation binding mismatch")
         if record.execution_started_at is None:
             raise StorageOwnerError("storage start not persisted")
+        return record
+
+
+
+    def quarantine_started(
+        self, *, key: str, sha: str, owner: str, at: datetime,
+    ) -> WriteApiRequestRecord:
+        """Owner-fixed HTTP202 UNKNOWN, not independent platform settlement."""
+        key = _validated(key, _KEY)
+        sha = _validated(sha, _SHA)
+        owner = _validated(owner, _OWNER)
+        if type(at) is not datetime:
+            raise StorageOwnerError("quarantine timestamp invalid")
+        at = _timestamp(at.isoformat())
+        answer = self._call(
+            "quarantine_started", key=key, sha=sha, owner=owner,
+            at=at.isoformat(),
+        )
+        if set(answer) != {"record"}:
+            raise StorageOwnerError("write quarantine reply invalid")
+        record = _record_from_json(answer["record"])
+        expected = _canonical_json({
+            "error": "write_outcome_unverified",
+            "idempotency_key": key,
+            "platform_retry_authorized": False,
+        })
+        if (
+            (record.idempotency_key, record.request_sha256, record.claim_owner)
+            != (key, sha, owner)
+            or record.state != "completed"
+            or record.execution_started_at is None
+            or record.completed_at is None
+            or record.response_status != 202
+            or record.response_json != expected
+        ):
+            raise StorageOwnerError("write quarantine is not operation-bound")
         return record
 
 

@@ -469,6 +469,236 @@ class StorageOwnerUnitTests(unittest.TestCase):
             .write_api_request("ui:claim:1").state, "in_progress",
         )
 
+    def test_owner_quarantines_only_exact_started_write_with_fixed_unknown(self) -> None:
+        """An executor cannot mint HTTP success or retire a possible effect."""
+        service = self.make_service()
+
+        def rpc(op: str, **fields: object) -> dict[str, object]:
+            return service.dispatch({"version": _VERSION, "op": op, **fields})
+
+        key, owner = "ui:ambiguous:maybe-started", "runtime:one"
+        args = dict(key=key, sha=SHA, owner=owner, at=NOW.isoformat())
+        rpc("claim", **args)
+        with self.assertRaises(ValueError):
+            rpc("quarantine_started", **args)
+        self.assertIsNone(service.store.write_api_request(key).execution_started_at)
+        rpc("begin", **args)
+        for override in (
+            {"sha": "b" * 64},
+            {"owner": "runtime:other"},
+            {"status": 200},
+            {"response_status": 200},
+            {"response_json": '{"operation_receipt":{"outcome":"confirmed"}}'},
+            {"outcome": "confirmed"},
+            {"platform_retry_authorized": True},
+            {"sql": "DELETE FROM write_api_requests"},
+            {"clearance": True},
+        ):
+            with self.subTest(override=override), self.assertRaises(
+                (StorageOwnerError, ValueError)
+            ):
+                rpc("quarantine_started", **(args | override))
+        self.assertEqual(service.store.write_api_request(key).state, "in_progress")
+        receipt = rpc("quarantine_started", **args)["record"]
+        expected = {
+            "error": "write_outcome_unverified",
+            "idempotency_key": key, "platform_retry_authorized": False,
+        }
+        self.assertEqual(receipt["state"], "completed")
+        self.assertIsNotNone(receipt["execution_started_at"])
+        self.assertEqual(receipt["response_status"], 202)
+        self.assertEqual(json.loads(receipt["response_json"]), expected)
+        self.assertEqual(
+            rpc("quarantine_started", **(args | {
+                "at": (NOW + timedelta(hours=4)).isoformat(),
+            }))["record"], receipt,
+        )
+        self.assertTrue(rpc(
+            "create_pending", exclude_key="next-create", owner=owner,
+        )["pending"])
+        self.assertFalse(service.store.has_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+        ))
+        with self.assertRaisesRegex(ValueError, "already completed"):
+            service.store.complete_write_api_request(
+                idempotency_key=key, request_sha256=SHA, claim_owner=owner,
+                response_status=200,
+                response_json='{"operation_receipt":{"outcome":"confirmed"}}',
+                completed_at=NOW,
+            )
+        # Root-owned operator review is a separate LOCAL method, never the
+        # executor's typed RPC. Reconciliation must match the original key/SHA
+        # and independently confirmed outcome before unblocking another create.
+        with self.assertRaises(ValueError):
+            service.store.record_write_recovery_clearance(
+                idempotency_key=key, request_sha256=SHA,
+                verification_kind="media_submit_reconciled",
+                evidence_reference="runtime:untrusted-media-observation",
+                observed_at=NOW,
+            )
+        service.store.record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="operator:synthetic-external-review",
+            observed_at=NOW,
+        )
+        self.assertTrue(service.store.has_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+        ))
+        self.assertFalse(rpc(
+            "create_pending", exclude_key="next-create", owner=owner,
+        )["pending"])
+        with self.assertRaises(ValueError):
+            rpc("begin", **args)
+        self.assertEqual(
+            SnapshotStore(self.database, create_if_missing=False).write_api_request(key),
+            service.store.write_api_request(key),
+        )
+
+    def test_owner_quarantine_client_validates_exact_fixed_unknown_receipt(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()  # Functional framing test, not real UID authority
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        key, owner = "socket:started:unknown", "runtime:one"
+        client.claim(key=key, sha=SHA, owner=owner, at=NOW)
+        with self.assertRaises(StorageOwnerError):
+            client.quarantine_started(key=key, sha=SHA, owner=owner, at=NOW)
+        self.assertIsNone(client.read_request(key).execution_started_at)
+        client.begin(key=key, sha=SHA, owner=owner, at=NOW)
+        quarantined = client.quarantine_started(key=key, sha=SHA, owner=owner, at=NOW)
+        self.assertEqual(client.read_request(key), quarantined)
+        self.assertEqual(quarantined.response_status, 202)
+        self.assertEqual(json.loads(quarantined.response_json)["error"],
+                         "write_outcome_unverified")
+        self.assertEqual(
+            client.quarantine_started(
+                key=key, sha=SHA, owner=owner, at=NOW + timedelta(days=1),
+            ), quarantined,
+        )
+        for mutation in (
+            {"response_status": 200},
+            {"request_sha256": "b" * 64},
+            {"claim_owner": "other"},
+            {"response_json": '{"error":"success"}'},
+            {"execution_started_at": None},
+        ):
+            with self.subTest(mutation=mutation):
+                raw = service.dispatch({
+                    "version": _VERSION, "op": "read_request", "key": key,
+                })["record"]
+                with patch.object(client, "_call", return_value={
+                    "record": raw | mutation,
+                }):
+                    with self.assertRaises(StorageOwnerError):
+                        client.quarantine_started(
+                            key=key, sha=SHA, owner=owner, at=NOW,
+                        )
+
+    def test_started_quarantine_lost_response_preserves_original_unknown(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()  # Only trusted socket framing seam
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        key, owner = "socket:quarantine:lost-ack", "runtime:original"
+        client.claim(key=key, sha=SHA, owner=owner, at=NOW)
+        client.begin(key=key, sha=SHA, owner=owner, at=NOW)
+        attempted = 0
+        transport = client._call
+
+        def lose_only_the_commit_reply(op: str, **fields: object) -> dict[str, object]:
+            nonlocal attempted
+            if op == "quarantine_started":
+                attempted += 1
+                service.dispatch({"version": _VERSION, "op": op, **fields})
+                raise OSError("synthetic response lost after durable commit")
+            return transport(op, **fields)
+
+        with patch.object(client, "_call", side_effect=lose_only_the_commit_reply):
+            with self.assertRaisesRegex(OSError, "response lost"):
+                client.quarantine_started(key=key, sha=SHA, owner=owner, at=NOW)
+        self.assertEqual(attempted, 1)
+        original = client.read_request(key)
+        self.assertIsNotNone(original)
+        self.assertEqual(original.response_status, 202)
+        self.assertEqual(json.loads(original.response_json), {
+            "error": "write_outcome_unverified",
+            "idempotency_key": key, "platform_retry_authorized": False,
+        })
+        self.assertTrue(client.create_pending(
+            exclude_key="another-create", owner=owner,
+        ))
+        fresh = SnapshotStore(self.database, create_if_missing=False)
+        self.assertEqual(fresh.write_api_request(key), original)
+        self.assertTrue(fresh.create_recovery_pending(
+            exclude_idempotency_key="another-create", claim_owner=owner,
+        ))
+        self.assertFalse(fresh.has_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+        ))
+
+    def test_legacy_media_key_containing_unknown_label_is_not_quarantine(self) -> None:
+        """Never misclassify an ordinary media 202 based on arbitrary key text."""
+        service = self.make_service()
+        key, owner = "media-write_outcome_unverified-1", "runtime:one"
+        service.store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            requested_at=NOW, claim_owner=owner,
+        )
+        service.store.begin_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            execution_started_at=NOW, claim_owner=owner,
+        )
+        service.store.complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner=owner, response_status=202,
+            response_json=json.dumps({
+                "idempotency_key": key,
+                "operation_receipt": {
+                    "writer_invoked": True, "outcome": "confirmed",
+                },
+                "media_persistence_confirmed": False,
+                "platform_retry_authorized": False,
+            }, sort_keys=True, separators=(",", ":")),
+            completed_at=NOW,
+        )
+        # Existing media semantics: this is NOT an owner-fixed UNKNOWN.
+        # The new quarantine path must not turn unrelated key text into an
+        # unremovable recovery fence or a service/database error.
+        self.assertFalse(service.store.create_recovery_pending(
+            exclude_idempotency_key="different-create", claim_owner=owner,
+        ))
+
+    def test_unverified_label_in_nonmedia_202_key_does_not_block_create(self) -> None:
+        """A legitimate ambiguous pause is not an owner-issued quarantine."""
+        service = self.make_service()
+        key, owner = "write_outcome_unverified", "runtime:one"
+        service.store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            requested_at=NOW, claim_owner=owner,
+        )
+        service.store.begin_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            execution_started_at=NOW, claim_owner=owner,
+        )
+        payload = json.dumps({
+            "idempotency_key": key, "operation_receipt": {
+                "writer_invoked": True, "outcome": "ambiguous",
+            }, "platform_retry_authorized": False,
+        }, sort_keys=True, separators=(",", ":"))
+        service.store.complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner=owner,
+            response_status=202, response_json=payload, completed_at=NOW,
+        )
+        self.assertFalse(service.store.create_recovery_pending(
+            exclude_idempotency_key="new-create", claim_owner=owner,
+        ))
+        self.assertFalse(SnapshotStore(
+            self.database, create_if_missing=False,
+        ).create_recovery_pending(
+            exclude_idempotency_key="new-create", claim_owner=owner,
+        ))
+
     def test_closed_rpc_table_denies_sql_clearances_completion_and_paths(self) -> None:
         service = self.make_service()
         calls = [

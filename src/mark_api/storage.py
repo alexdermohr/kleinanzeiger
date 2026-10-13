@@ -1404,14 +1404,24 @@ class SnapshotStore:
                 return True
             rows = connection.execute(
                 """
-                SELECT w.response_json FROM write_api_requests AS w
+                SELECT w.idempotency_key, w.response_status, w.response_json
+                FROM write_api_requests AS w
                 LEFT JOIN write_recovery_clearances AS c
                   ON c.idempotency_key = w.idempotency_key
                  AND c.request_sha256 = w.request_sha256
                 WHERE w.idempotency_key != ?
                   AND w.state = 'completed'
-                  AND instr(w.response_json, 'media_persistence_confirmed') > 0
                   AND c.idempotency_key IS NULL
+                  AND (
+                    instr(w.response_json, 'media_persistence_confirmed') > 0
+                    OR (
+                      w.response_status = 202
+                      AND substr(
+                        w.response_json, 1,
+                        length('{"error":"write_outcome_unverified",')
+                      ) = '{"error":"write_outcome_unverified",'
+                    )
+                  )
                 """,
                 (exclude_idempotency_key,),
             )
@@ -1420,6 +1430,15 @@ class SnapshotStore:
                     response = json.loads(row["response_json"])
                     if not isinstance(response, dict):
                         raise ValueError("invalid response envelope")
+                    if (
+                        row["response_status"] == 202
+                        and response.get("error") == "write_outcome_unverified"
+                    ):
+                        if row["response_json"] != self._unverified_write_api_response(
+                            row["idempotency_key"]
+                        ):
+                            raise ValueError("unverified response is not exact")
+                        return True
                     if not isinstance(response.get("media_persistence_confirmed"), bool):
                         raise ValueError("invalid media response")
                     receipt = response.get("operation_receipt")
@@ -1480,7 +1499,7 @@ class SnapshotStore:
             row = connection.execute(
                 """
                 SELECT request_sha256, state, execution_started_at,
-                       response_json FROM write_api_requests
+                       response_status, response_json FROM write_api_requests
                 WHERE idempotency_key = ?
                 """, (idempotency_key,),
             ).fetchone()
@@ -1488,7 +1507,19 @@ class SnapshotStore:
                 raise ValueError("write recovery operation binding mismatch")
             if row["execution_started_at"] is None:
                 raise ValueError("write recovery was never executed")
-            if row["state"] == "completed":
+            if (
+                row["state"] == "completed"
+                and row["response_status"] == 202
+                and row["response_json"] == self._unverified_write_api_response(
+                    idempotency_key
+                )
+            ):
+                # The executor cannot use the in-process media observation
+                # path to clear a fixed owner UNKNOWN. Only a separate,
+                # independently authorized operator may later reconcile it.
+                if verification_kind != "operator_verified_postread":
+                    raise ValueError("unknown write requires independent operator")
+            elif row["state"] == "completed":
                 try:
                     response = json.loads(row["response_json"])
                     if not isinstance(response, dict):
@@ -1853,6 +1884,32 @@ class SnapshotStore:
             ).fetchone()
             assert row is not None
             return self._write_api_request_record(row)
+
+    @staticmethod
+    def _unverified_write_api_response(key: str) -> str:
+        return json.dumps({
+            "error": "write_outcome_unverified",
+            "idempotency_key": key,
+            "platform_retry_authorized": False,
+        }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    def quarantine_started_write_api_request(
+        self, *, idempotency_key: str, request_sha256: str,
+        claim_owner: str, quarantined_at: datetime,
+    ) -> WriteApiRequestRecord:
+        """Persist owner-constructed UNKNOWN only after a bound Begin.
+
+        No executor-selectable response, success, clearance or retry right.
+        A lost reply requires readback of the original persisted operation.
+        """
+        return self.complete_write_api_request(
+            idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
+            claim_owner=claim_owner,
+            response_status=202,
+            response_json=self._unverified_write_api_response(idempotency_key),
+            completed_at=quarantined_at,
+        )
 
     def complete_write_api_request(
         self,
