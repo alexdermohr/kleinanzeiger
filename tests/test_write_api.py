@@ -543,6 +543,11 @@ class WriteApiTests(unittest.TestCase):
             b'{"price_eur":1e999}',
             b'{"price_eur":-1E999}',
             b'{"nested":{"price":9e999}}',
+            '{"title":"test"}'.encode("utf-16"),
+            '{"title":"test"}'.encode("utf-16-le"),
+            '{"title":"test"}'.encode("utf-32"),
+            '{"title":"test"}'.encode("utf-32-be"),
+            b'{"description":"Escaped \\" before ","depth":' + (b"[" * 80) + b"0" + (b"]" * 80) + b"}",
         )
         with self.server(service) as server:
             host, port = server.server_address

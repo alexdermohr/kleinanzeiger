@@ -34,6 +34,7 @@ from .query import (
 )
 from .storage import SnapshotStore
 from .storage_owner import StorageOwnerClient, StorageOwnerError
+from .strict_json import strict_json_object
 
 
 _MAX_PROXY_JSON_BODY_BYTES = 16 * 1024
@@ -1839,6 +1840,7 @@ def _json_bytes(value: object) -> bytes:
         value,
         ensure_ascii=False,
         sort_keys=True,
+        allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
 
@@ -1986,9 +1988,16 @@ def _handler_factory(
             self.wfile.write(body)
 
         def _send_json(self, status: int, value: object) -> None:
+            try:
+                encoded = _json_bytes(value)
+            except (TypeError, ValueError, OverflowError, RecursionError):
+                # Never emit JavaScript-invalid NaN/Infinity from metrics
+                # or other service data; invalid data cannot be success.
+                status = 500
+                encoded = b'{"error":"invalid_json_response"}'
             self._send(
                 status,
-                _json_bytes(value),
+                encoded,
                 "application/json; charset=utf-8",
             )
 
@@ -2210,6 +2219,20 @@ def _handler_factory(
             headers.update(body_headers)
             headers["Content-Length"] = str(len(body))
 
+            parsed_payload: dict[str, object] | None = None
+            if body_kind in {"json", "local_json"}:
+                try:
+                    parsed_payload = strict_json_object(body)
+                except ValueError as exc:
+                    self._send_json(
+                        400,
+                        {
+                            "error": str(exc),
+                            "platform_retry_authorized": False,
+                        },
+                    )
+                    return
+
             pending_scope: str | None = None
             if platform_write:
                 assert idempotency_key is not None
@@ -2226,28 +2249,9 @@ def _handler_factory(
                 pending_scope, resource_key, pending_ad_id = identity
                 pending_payload_json: str | None = None
                 if body_kind == "json":
-                    try:
-                        pending_payload = json.loads(body)
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        self._send_json(
-                            400,
-                            {
-                                "error": "invalid_json",
-                                "platform_retry_authorized": False,
-                            },
-                        )
-                        return
-                    if not isinstance(pending_payload, dict):
-                        self._send_json(
-                            400,
-                            {
-                                "error": "json_body_must_be_object",
-                                "platform_retry_authorized": False,
-                            },
-                        )
-                        return
+                    assert parsed_payload is not None
                     pending_payload_json = _json_bytes(
-                        pending_payload
+                        parsed_payload
                     ).decode("utf-8")
                 try:
                     store.claim_dashboard_pending_write(
@@ -2302,13 +2306,11 @@ def _handler_factory(
                     if not content_type.lower().startswith("application/json"):
                         raise ValueError("write_proxy_response_not_json")
                     try:
-                        response_payload = json.loads(response_body)
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        response_payload = strict_json_object(response_body)
+                    except ValueError as exc:
                         raise ValueError(
                             "write_proxy_response_not_json"
                         ) from exc
-                    if not isinstance(response_payload, dict):
-                        raise ValueError("write_proxy_response_not_json")
                     replayed = (
                         response.getheader("Idempotency-Replayed") == "true"
                     )
@@ -2582,10 +2584,9 @@ def _handler_factory(
                 return
             try:
                 body, _ = self._read_proxy_body("local_json")
-                payload = json.loads(body)
+                payload = strict_json_object(body)
                 if (
-                    not isinstance(payload, dict)
-                    or set(payload) != {"scope", "idempotency_key"}
+                    set(payload) != {"scope", "idempotency_key"}
                     or not isinstance(payload["scope"], str)
                     or not isinstance(payload["idempotency_key"], str)
                 ):

@@ -23,6 +23,7 @@ from mark_api.classification_cli import main as classification_main
 from mark_api.dashboard import (
     DashboardWriteProxy,
     _dashboard_http_origin,
+    _json_bytes,
     create_server,
     main as dashboard_main,
 )
@@ -42,6 +43,7 @@ from mark_api.query import (
 )
 from mark_api.results import ReadResult
 from mark_api.storage import SnapshotStore
+from mark_api.strict_json import strict_json_object
 
 
 T0 = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
@@ -78,6 +80,7 @@ class RecordingWriteBackend:
     def __init__(self) -> None:
         self.requests: list[dict[str, object]] = []
         self.closed = False
+        self.response_body: bytes | None = None
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -119,7 +122,11 @@ class RecordingWriteBackend:
                         "operation_receipt": {"outcome": "confirmed"},
                         "platform_retry_authorized": False,
                     }
-                encoded = json.dumps(payload).encode("utf-8")
+                encoded = (
+                    owner.response_body
+                    if owner.response_body is not None
+                    else json.dumps(payload).encode("utf-8")
+                )
                 self.send_response(200)
                 self.send_header(
                     "Content-Type",
@@ -561,6 +568,171 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
             self.backend.requests[0]["idempotency_key"],
             "ui:db-missing-no-write",
         )
+
+    def test_strict_json_allows_brackets_in_strings_but_never_nonfinite_output(self) -> None:
+        self.assertEqual(
+            strict_json_object(b'{"text":"[{}] NaN Infinity","number":1.25}'),
+            {"text": "[{}] NaN Infinity", "number": 1.25},
+        )
+        self.assertEqual(
+            strict_json_object(b'{"max":1.7976931348623157e308}')["max"],
+            1.7976931348623157e308,
+        )
+        for number in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(number=str(number)):
+                with self.assertRaises(ValueError):
+                    _json_bytes({"unsafe": number})
+
+    def test_utf8_decoder_scans_the_same_text_it_parses(self) -> None:
+        payload = {"description": 'Escaped " followed by ' + "[" * 70}
+        raw = json.dumps(payload).encode("utf-8")
+        self.assertEqual(strict_json_object(raw), payload)
+        self.assertEqual(
+            strict_json_object(b'{"value":[1, {"quoted":"\\"[][]"}]}'),
+            {"value": [1, {"quoted": '"[][]'}]},
+        )
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be", "utf-32"):
+            with self.subTest(encoding=encoding):
+                with self.assertRaisesRegex(ValueError, "invalid_json"):
+                    strict_json_object(json.dumps(payload).encode(encoding))
+        ambiguous = (
+            b'{"description":"Escaped \\" before ", "depth":'
+            + b"[" * 80 + b"0" + b"]" * 80 + b"}"
+        )
+        with self.assertRaisesRegex(ValueError, "invalid_json"):
+            strict_json_object(ambiguous)
+
+    def test_proxy_rejects_ambiguous_nonfinite_and_deep_raw_json_before_claim(self) -> None:
+        invalid = (
+            b'{"title":"original","title":"replaced"}',
+            br'{"title":"original","\u0074itle":"replaced"}',
+            b'{"title":"ok","nested":{"x":1,"x":2}}',
+            b'{"media_refs":[{"x":1,"x":2}]}',
+            b'{"price_eur":NaN}',
+            b'{"price_eur":Infinity}',
+            b'{"price_eur":-Infinity}',
+            b'{"price_eur":1e999}',
+            b'{"price_eur":-1E999}',
+            b'{"nested":{"value":1e999}}',
+            b'{"depth":' + (b"[" * 65) + b"0" + (b"]" * 65) + b"}",
+            '{"title":"test"}'.encode("utf-16"),
+            '{"title":"test"}'.encode("utf-16-le"),
+            '{"title":"test"}'.encode("utf-32"),
+            '{"title":"test"}'.encode("utf-32-be"),
+        )
+        routes = (
+            ("POST", "/api/write/ads", True),
+            ("PATCH", "/api/write/ads/2", True),
+            ("POST", "/api/write/media/ads", True),
+            ("POST", "/api/write/media/discard", False),
+        )
+        for index, raw in enumerate(invalid):
+            for method, route, platform_write in routes:
+                with self.subTest(raw=raw[:60], method=method, route=route):
+                    request = Request(
+                        self.base + route,
+                        data=raw,
+                        method=method,
+                        headers=self.write_headers(
+                            content_type="application/json",
+                            idempotency_key=(
+                                f"ui:invalid-wire-{index}" if platform_write else None
+                            ),
+                        ),
+                    )
+                    with self.assertRaises(HTTPError) as caught:
+                        urlopen(request, timeout=2)
+                    self.assertEqual(caught.exception.code, 400)
+                    response = json.loads(caught.exception.read())
+                    self.assertEqual(response["error"], "invalid_json")
+                    self.assertIs(response["platform_retry_authorized"], False)
+                    self.assertEqual(self.store.dashboard_pending_writes(), ())
+                    self.assertEqual(self.backend.requests, [])
+
+    def test_proxy_valid_finite_json_keeps_wire_and_claim_identity(self) -> None:
+        raw = b'{"title":"NaN is text","description":"[{}]","price_eur":1.25}'
+        request = Request(
+            self.base + "/api/write/ads/2",
+            data=raw,
+            method="PATCH",
+            headers=self.write_headers(
+                content_type="application/json",
+                idempotency_key="ui:finite-exact-wire",
+            ),
+        )
+        with urlopen(request, timeout=2) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(len(self.backend.requests), 1)
+        self.assertEqual(self.backend.requests[0]["body"], raw)
+        pending = self.store.dashboard_pending_writes()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(json.loads(pending[0].payload_json), json.loads(raw))
+
+    def test_proxy_malformed_backend_json_keeps_unknown_pending_write(self) -> None:
+        invalid = (
+            b'{"outcome":"confirmed","outcome":"other"}',
+            b'{"outcome":NaN}',
+            b'{"outcome":1e999}',
+            '{"outcome":"confirmed"}'.encode("utf-16"),
+            b'{"value":' + (b"[" * 65) + b"0" + (b"]" * 65) + b"}",
+        )
+        for index, raw in enumerate(invalid):
+            with self.subTest(raw=raw[:60]):
+                self.backend.response_body = raw
+                request = Request(
+                    self.base + f"/api/write/ads/{100 + index}",
+                    data=b'{"title":"test"}',
+                    method="PATCH",
+                    headers=self.write_headers(
+                        content_type="application/json",
+                        idempotency_key=f"ui:bad-backend-{index}",
+                    ),
+                )
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(request, timeout=2)
+                self.assertEqual(caught.exception.code, 502)
+                response = json.loads(caught.exception.read())
+                self.assertEqual(response["error"], "write_proxy_transport_unknown")
+                self.assertIs(response["platform_retry_authorized"], False)
+                self.assertEqual(len(self.backend.requests), index + 1)
+                pending = self.store.dashboard_pending_writes()
+                self.assertEqual(len(pending), index + 1)
+                self.assertFalse(any(record.acknowledged for record in pending))
+
+    def test_pending_ack_rejects_duplicate_and_nonfinite_wire_json(self) -> None:
+        self.store.claim_dashboard_pending_write(
+            scope="ad:2:update",
+            resource_key="ad:2",
+            idempotency_key="ui:protected-ack",
+            method="PATCH",
+            path="/api/write/ads/2",
+            payload_json='{"title":"test"}',
+            ad_id="2",
+        )
+        before = self.store.dashboard_pending_writes()
+        invalid = (
+            b'{"scope":"ad:2:update","scope":"other","idempotency_key":"ui:protected-ack"}',
+            b'{"scope":"ad:2:update","idempotency_key":"ui:protected-ack","x":NaN}',
+            b'{"scope":"ad:2:update","idempotency_key":"ui:protected-ack","x":1e999}',
+            '{"scope":"ad:2:update","idempotency_key":"ui:protected-ack"}'.encode("utf-16"),
+        )
+        for raw in invalid:
+            with self.subTest(raw=raw):
+                request = Request(
+                    self.base + "/api/dashboard/pending-writes/ack",
+                    data=raw,
+                    method="POST",
+                    headers=self.write_headers(content_type="application/json"),
+                )
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(request, timeout=2)
+                self.assertEqual(caught.exception.code, 409)
+                self.assertIs(
+                    json.loads(caught.exception.read())["platform_retry_authorized"],
+                    False,
+                )
+                self.assertEqual(self.store.dashboard_pending_writes(), before)
+                self.assertEqual(self.backend.requests, [])
 
     def test_proxy_forwards_exact_write_contract_and_hides_ui_secret(self) -> None:
         payload = {"title": "Neu", "description": "Beschreibung"}

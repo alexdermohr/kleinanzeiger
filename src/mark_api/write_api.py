@@ -4,7 +4,6 @@ from contextlib import nullcontext
 import hashlib
 import hmac
 import json
-import math
 import os
 import re
 import secrets
@@ -32,6 +31,7 @@ from .fence_witness import (
     FenceWitnessAlreadyRecorded, FenceWitnessError, FenceWitnessRejected,
 )
 from .storage import SnapshotStore
+from .strict_json import strict_json_object
 
 
 _MAX_BODY_BYTES = 16 * 1024
@@ -39,28 +39,6 @@ _MAX_MEDIA_BODY_BYTES = 25 * 1024 * 1024
 _BODY_READ_TIMEOUT_SECONDS = 10.0
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MEDIA_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-
-
-def _strict_json_object_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """A wire object with duplicate names cannot define one write intent."""
-    values: dict[str, object] = {}
-    for name, value in pairs:
-        if name in values:
-            raise ValueError("duplicate JSON object member")
-        values[name] = value
-    return values
-
-
-def _finite_json_number(raw: str) -> float:
-    value = float(raw)
-    if not math.isfinite(value):
-        # 1e999 is valid JSON syntax but CPython would parse it as infinity.
-        raise ValueError("nonfinite JSON number")
-    return value
-
-
-def _reject_json_constant(_literal: str) -> object:
-    raise ValueError("nonfinite JSON constant")
 
 
 class _RequestBodyTimeoutError(ValueError):
@@ -655,18 +633,7 @@ def _handler_factory(
             raw = self._read_request_body(length)
             if len(raw) != length:
                 raise ValueError("incomplete_request_body")
-            try:
-                value = json.loads(
-                    raw,
-                    object_pairs_hook=_strict_json_object_members,
-                    parse_constant=_reject_json_constant,
-                    parse_float=_finite_json_number,
-                )
-            except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-                raise ValueError("invalid_json") from exc
-            if not isinstance(value, dict):
-                raise ValueError("json_body_must_be_object")
-            return value
+            return strict_json_object(raw)
 
         def _read_media_upload(self) -> tuple[str, bytes]:
             filename_values = self.headers.get_all("X-Mark-Media-Filename") or []
