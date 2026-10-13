@@ -1721,6 +1721,7 @@ class SnapshotStore:
         request_sha256: str,
         claim_owner: str,
         execution_started_at: datetime,
+        strict_owner_fence: bool = False,
     ) -> WriteApiRequestRecord:
         owner = _validated_write_api_claim_owner(claim_owner)
         if (
@@ -1781,6 +1782,27 @@ class SnapshotStore:
                 """, (idempotency_key,),
             ).fetchone() is not None:
                 raise ValueError("unresolved owner write quarantine blocks Begin")
+
+            # The untrusted browser executor may crash or deliberately omit
+            # quarantine_started after Begin. For the independent owner,
+            # a still-in-progress earlier execution is already UNKNOWN.
+            # Keep this opt-in: legacy SnapshotStore callers currently support
+            # concurrent non-Create actions until the owner cutover is complete.
+            # Both checks and the new Begin remain one IMMEDIATE transaction.
+            if strict_owner_fence and connection.execute(
+                """
+                SELECT 1 FROM write_api_requests AS prior
+                LEFT JOIN write_recovery_clearances AS cleared
+                  ON cleared.idempotency_key = prior.idempotency_key
+                 AND cleared.request_sha256 = prior.request_sha256
+                WHERE prior.idempotency_key != ?
+                  AND prior.state = 'in_progress'
+                  AND prior.execution_started_at IS NOT NULL
+                  AND cleared.idempotency_key IS NULL
+                LIMIT 1
+                """, (idempotency_key,),
+            ).fetchone() is not None:
+                raise ValueError("unresolved started owner write blocks Begin")
 
             updated = connection.execute(
                 """

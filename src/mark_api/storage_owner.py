@@ -1216,6 +1216,7 @@ class StorageOwnerServer(
                 request_sha256=_validated(request["sha"], _SHA),
                 claim_owner=_validated(request["owner"], _OWNER),
                 execution_started_at=_timestamp(request["at"]),
+                strict_owner_fence=True,
             )
             return {"record": _record_as_json(rec)}
         raise StorageOwnerError("storage operation is not exposed")
