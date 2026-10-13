@@ -652,6 +652,41 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_witness_uppercase_schema_type_cannot_hide_active_trigger(self) -> None:
+        # SQLite can load a writable_schema-injected uppercase type whose SQL
+        # still installs a real event veto. The verifier must not filter by
+        # case-sensitive sqlite_master.type before inspecting every row.
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("PRAGMA writable_schema=ON")
+            connection.execute(
+                "INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) "
+                "VALUES('TRIGGER','uppercase_veto','events',0,?)",
+                (
+                    "CREATE TRIGGER uppercase_veto BEFORE INSERT ON events "
+                    "WHEN NEW.kind='started' BEGIN SELECT RAISE(IGNORE); END",
+                ),
+            )
+            connection.execute("PRAGMA schema_version=115")
+            connection.execute("PRAGMA writable_schema=OFF")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_forged_trigger_parent_table_cannot_be_ignored(self) -> None:
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("PRAGMA writable_schema=ON")
+            connection.execute(
+                "INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) "
+                "VALUES('TRIGGER','cross_table_veto','other',0,?)",
+                (
+                    "CREATE TRIGGER cross_table_veto BEFORE INSERT ON events "
+                    "BEGIN SELECT RAISE(IGNORE); END",
+                ),
+            )
+            connection.execute("PRAGMA schema_version=116")
+            connection.execute("PRAGMA writable_schema=OFF")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_witness_reserved_sqlite_prefix_trigger_must_never_be_hidden(self) -> None:
         # A hostile writable_schema snapshot can contain a reserved sqlite_
         # name even though normal CREATE would reject that name. This trigger

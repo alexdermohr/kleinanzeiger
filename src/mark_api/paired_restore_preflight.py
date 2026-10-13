@@ -622,28 +622,37 @@ def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
         ),
     }
     expected = {
-        key: _witness_ddl_tokens(ddl) for key, ddl in expected_sql.items()
+        (kind, name, name if kind == "table" else "events"):
+            _witness_ddl_tokens(ddl)
+        for (kind, name), ddl in expected_sql.items()
     }
-    observed: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
+    observed: dict[tuple[str, str, str], tuple[tuple[str, str], ...]] = {}
     internal: set[tuple[str, str, str]] = set()
+    # Scan *every* sqlite_master row, not only case-sensitive type matches:
+    # writable_schema can inject type='TRIGGER' with executable CREATE TRIGGER
+    # SQL. SQLite may still install and run that trigger after deserialization.
     for kind, name, table_name, ddl in conn.execute(
-        "SELECT type,name,tbl_name,sql FROM sqlite_master "
-        "WHERE type IN ('table','index','trigger','view')"
+        "SELECT type,name,tbl_name,sql FROM sqlite_master"
     ):
-        kind, name, table_name = str(kind), str(name), str(table_name)
+        if (
+            not isinstance(kind, str) or kind not in {"table", "index", "trigger"}
+            or not isinstance(name, str) or not isinstance(table_name, str)
+        ):
+            raise PairPreflightError("unexpected Witness schema object type")
+        key = (kind, name, table_name)
         if name.lower().startswith("sqlite_"):
-            # An attacker can inject otherwise reserved names through
-            # writable_schema on an offline image; SQLite will still load
-            # and execute such a forged trigger. Ignore nothing by prefix.
-            # The real v2 schema has exactly this one internal PK index.
+            # The trusted v2 schema allows exactly one SQLite-generated
+            # primary-key autoindex; any other internal-looking row is unsafe.
             if (
-                kind != "index" or name != "sqlite_autoindex_sessions_1"
-                or table_name != "sessions" or ddl is not None
+                key != ("index", "sqlite_autoindex_sessions_1", "sessions")
+                or ddl is not None or key in internal
             ):
                 raise PairPreflightError("unknown SQLite-reserved witness schema object")
-            internal.add((kind, name, table_name))
+            internal.add(key)
             continue
-        observed[(kind, name)] = _witness_ddl_tokens(ddl)
+        if key in observed or not isinstance(ddl, str):
+            raise PairPreflightError("duplicate or malformed Witness schema object")
+        observed[key] = _witness_ddl_tokens(ddl)
     if (
         observed != expected
         or internal != {("index", "sqlite_autoindex_sessions_1", "sessions")}
