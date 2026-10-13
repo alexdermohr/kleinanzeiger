@@ -205,9 +205,24 @@ def _readonly(path: Path) -> sqlite3.Connection:
     # is NEVER suitable for reading live WAL/SHM or proving historic FD loss.
     uri = "file:" + quote(str(path), safe="/") + "?mode=ro&immutable=1"
     conn = sqlite3.connect(uri, uri=True, timeout=3)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only=ON")
-    return conn
+    try:
+        # Never evaluate schema-defined expressions from a candidate with
+        # SQLite's default trusted_schema=ON. Even after the externally pinned
+        # digest matches, the selected trusted operator must remain isolated
+        # from SQLITE functions/views embedded in the image.
+        conn.execute("PRAGMA trusted_schema=OFF")
+        trusted = conn.execute("PRAGMA trusted_schema").fetchone()
+        if trusted is None or trusted[0] != 0:
+            raise PairPreflightError("SQLite trusted_schema isolation unavailable")
+        conn.execute("PRAGMA query_only=ON")
+        readonly = conn.execute("PRAGMA query_only").fetchone()
+        if readonly is None or readonly[0] != 1:
+            raise PairPreflightError("SQLite read-only query fence unavailable")
+        conn.row_factory = sqlite3.Row
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _rows(conn: sqlite3.Connection, sql: str) -> list[sqlite3.Row]:
@@ -379,8 +394,26 @@ def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def inspect_offline_pair(sqlite_image: Path, witness_image: Path) -> dict[str, object]:
-    """Observe two private quiescent offline copies, *without* minting proof."""
+def inspect_offline_pair(
+    sqlite_image: Path, witness_image: Path, *,
+    expected_sqlite_sha256: str | None = None,
+    expected_witness_sha256: str | None = None,
+) -> dict[str, object]:
+    """Observe private quiescent copies without minting backup authority.
+
+    If given, BOTH independent SHA anchors must match the pinned file bytes
+    BEFORE opening either file with SQLite. Unanchored calls are diagnostic,
+    not acceptable for admitting an untrusted external restore candidate.
+    """
+    if (expected_sqlite_sha256 is None) != (expected_witness_sha256 is None):
+        raise ValueError("both external image digests must be supplied together")
+    if expected_sqlite_sha256 is not None and (
+        not isinstance(expected_sqlite_sha256, str)
+        or _SHA.fullmatch(expected_sqlite_sha256) is None
+        or not isinstance(expected_witness_sha256, str)
+        or _SHA.fullmatch(expected_witness_sha256) is None
+    ):
+        raise ValueError("external candidate image SHA-256 digests are invalid")
     sql, witness = _private_path(sqlite_image), _private_path(witness_image)
     if sql == witness:
         raise PairPreflightError("paired images must be distinct")
@@ -395,6 +428,16 @@ def inspect_offline_pair(sqlite_image: Path, witness_image: Path) -> dict[str, o
             if (sql_info.st_dev, sql_info.st_ino) == (wit_info.st_dev, wit_info.st_ino):
                 raise PairPreflightError("paired images resolve to same inode")
             sql_hash, wit_hash = _sha256_fd(sql_fd), _sha256_fd(wit_fd)
+            if expected_sqlite_sha256 is not None and (
+                sql_hash != expected_sqlite_sha256
+                or wit_hash != expected_witness_sha256
+            ):
+                # This is the trust boundary: do not open or parse either
+                # untrusted candidate image before BOTH separately pinned
+                # source-file digests have matched the trusted manifest.
+                raise PairPreflightError(
+                    "offline candidate content differs from independent image digest anchors"
+                )
             with closing(_readonly(sql)) as sql_db, closing(_readonly(witness)) as wit_db:
                 sql_fences = _sqlite_inventory(sql_db)
                 wit_fences = _witness_inventory(wit_db)
@@ -441,7 +484,11 @@ def verify_offline_pair(
             os.lseek(fd, 0, os.SEEK_SET)
             anchored = _manifest(os.read(fd, _MAX_MANIFEST + 1),
                                  expected_manifest_sha256)
-            observed = inspect_offline_pair(sqlite_image, witness_image)
+            observed = inspect_offline_pair(
+                sqlite_image, witness_image,
+                expected_sqlite_sha256=anchored["sqlite_sha256"],
+                expected_witness_sha256=anchored["witness_sha256"],
+            )
             if {
                 key: anchored[key] for key in (
                     "sqlite_sha256", "witness_sha256", "fences",

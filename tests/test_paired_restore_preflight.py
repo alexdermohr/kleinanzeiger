@@ -382,6 +382,51 @@ class PairedRestorePreflightTests(unittest.TestCase):
                         expected_manifest_sha256=invalid,
                     )
 
+    def test_bad_anchored_sqlite_digest_does_not_enter_sqlite_parser(self) -> None:
+        pinned = self._pin()
+        # Modify an otherwise valid source header after external attestation.
+        # A parser trap proves that no SQLite connection may precede its digest.
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute("PRAGMA application_id = 12345")
+        from unittest.mock import patch
+        with patch(
+            "mark_api.paired_restore_preflight._readonly",
+            side_effect=AssertionError("untrusted SQLite parser reached"),
+        ):
+            with self.assertRaises(PairPreflightError):
+                verify_offline_pair(
+                    self.sqlite, self.ledger, self.manifest,
+                    expected_manifest_sha256=pinned,
+                )
+
+    def test_bad_anchored_witness_digest_does_not_enter_sqlite_parser(self) -> None:
+        pinned = self._pin()
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("PRAGMA application_id = 12345")
+        from unittest.mock import patch
+        with patch(
+            "mark_api.paired_restore_preflight._readonly",
+            side_effect=AssertionError("untrusted Witness parser reached"),
+        ):
+            with self.assertRaises(PairPreflightError):
+                verify_offline_pair(
+                    self.sqlite, self.ledger, self.manifest,
+                    expected_manifest_sha256=pinned,
+                )
+
+    def test_readonly_sqlite_connections_disable_trusted_schema_before_reads(self) -> None:
+        from mark_api.paired_restore_preflight import _readonly
+        connection = _readonly(self.sqlite)
+        try:
+            result = connection.execute("PRAGMA trusted_schema").fetchone()
+            self.assertIsNotNone(result)
+            self.assertEqual(result[0], 0)
+            self.assertEqual(
+                connection.execute("PRAGMA query_only").fetchone()[0], 1,
+            )
+        finally:
+            connection.close()
+
     def test_sidecars_rejected_even_for_zero_byte_wal(self) -> None:
         expected = self._pin()
         wal = self.source / "mark.sqlite-wal"

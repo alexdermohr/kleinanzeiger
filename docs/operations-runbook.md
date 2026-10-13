@@ -785,6 +785,15 @@ dieses Teilinventar ausnehmen. Der Offline-Checker vergibt niemals
 solche Clearances. `ambiguous_create_count` zählt beide offenen
 Create-Fence-Arten.
 
+**Vor jedem Öffnen durch SQLite** werden beide bereits per FD gepinnten
+Datei-Digests gegen die extern im Manifest verankerten Hashes verglichen.
+Ein abweichender SHA führt unmittelbar zum Abbruch, noch vor
+`integrity_check` oder sonstigem Schema-Parsing. Bei passenden Hashes
+wird die SQLite-Verbindung ausschließlich `query_only=ON` sowie
+`trusted_schema=OFF` ausgeführt. Der ungebundene Diagnoseaufruf
+`inspect_offline_pair()` ohne erwartete Hashes bleibt ausdrücklich
+**keine** vertrauenswürdige Restore-Aufnahmeprüfung.
+
 Der Aufruf erfolgt **erst nach** Bereitstellung aller vertrauenswürdig
 erzeugten Kopien und des Digest-Ankers außerhalb der DB-/Witness-Volumes:
 
