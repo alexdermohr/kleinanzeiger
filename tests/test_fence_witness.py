@@ -27,6 +27,7 @@ from mark_api.fence_witness import (
     FenceLedger,
     FenceWitnessClient,
     FenceWitnessError,
+    FenceWitnessRejected,
     FenceWitnessServer,
 )
 
@@ -369,45 +370,40 @@ else:
             key="ambiguous-pause-no-self-clear", sha=_SHA,
         ))
 
-    def test_pending_media_reconciles_only_exact_current_session(self) -> None:
+    def test_pending_media_cannot_self_clear_even_after_in_process_postread(self) -> None:
         session = self.owner.open_session()
         self.owner.execution_started(session, key=_KEY, sha=_SHA, action="create_media")
         self.assertTrue(self.owner.fence_pending())
-        # A witness clearance before recording an ambiguous completed
-        # operation must never remove the only durable execution fence.
-        with self.assertRaisesRegex(FenceWitnessError, "completed ambiguous"):
+        with self.assertRaisesRegex(FenceWitnessError, "independent proof"):
             self.owner.runtime_clearance(
-                session, key=_KEY, sha=_SHA, evidence="early:untrusted-claim",
+                session, key=_KEY, sha=_SHA, evidence="runtime:claimed-postread",
             )
+        self.assertEqual(self.owner.execution_completed(
+            session, key=_KEY, sha=_SHA, response=_UNKNOWN_MEDIA,
+        ), "ambiguous")
+        with self.assertRaisesRegex(FenceWitnessError, "independent proof"):
+            self.owner.runtime_clearance(
+                session, key=_KEY, sha=_SHA, evidence="runtime:forged-postread",
+            )
+        self.assertFalse(self.owner.clearance_recorded(key=_KEY, sha=_SHA))
         self.assertTrue(self.owner.fence_pending())
-        with self.assertRaises(FenceWitnessError):
-            self.owner.execution_started(session, key=_KEY, sha=_SHA, action="create_media")
-        self.assertEqual(
-            self.owner.execution_completed(
-                session, key=_KEY, sha=_SHA, response=_UNKNOWN_MEDIA,
-            ),
-            "ambiguous",
-        )
-        self.assertTrue(self.owner.fence_pending())
-        with self.assertRaises(FenceWitnessError):
-            self.owner.runtime_clearance(
-                session, key=_KEY, sha="b" * 64, evidence="postread:evidence-1",
-            )
-        self.owner.runtime_clearance(
-            session, key=_KEY, sha=_SHA, evidence="postread:evidence-1",
-        )
-        self.assertFalse(self.owner.fence_pending())
-        with self.assertRaises(FenceWitnessError):
-            self.owner.runtime_clearance(
-                session, key=_KEY, sha=_SHA, evidence="postread:evidence-1",
-            )
         self.owner.seal_session(session)
         self.owner.close()
         reopened = FenceLedger(self.ledger_file)
         self.addCleanup(reopened.close)
+        self.assertTrue(reopened.fence_pending())
+        new_session = reopened.open_session()
+        with self.assertRaisesRegex(FenceWitnessError, "earlier write"):
+            reopened.execution_started(
+                new_session, key="new-without-recovery", sha=_SHA, action="create",
+            )
+        # The operator socket is a separate privileged authority, not
+        # independent platform success evidence or a general executor RPC.
+        reopened.operator_clearance(
+            key=_KEY, sha=_SHA, evidence="operator:synthetic-independent-review",
+        )
         self.assertFalse(reopened.fence_pending())
         with self.assertRaisesRegex(FenceWitnessError, "already"):
-            new_session = reopened.open_session()
             reopened.execution_started(
                 new_session, key=_KEY, sha=_SHA, action="create_media",
             )
@@ -432,7 +428,7 @@ else:
                 old_session, key="old-in-progress", sha=_SHA,
                 response=_GOOD_MEDIA,
             )
-        with self.assertRaisesRegex(FenceWitnessError, "not active"):
+        with self.assertRaisesRegex(FenceWitnessError, "independent proof"):
             reopened.runtime_clearance(
                 old_session, key="old-in-progress", sha=_SHA,
                 evidence="stale-browser:could-be-forged",
@@ -454,149 +450,319 @@ else:
         )
         self.assertTrue(reopened.fence_pending())
 
-    def test_replay_status_requires_exact_committed_response_not_just_clearance(self) -> None:
+    def test_replay_status_records_exact_executor_claim_but_never_success(self) -> None:
         session = self.owner.open_session()
-        response = {"operation_receipt": {"writer_invoked": True,
-                                           "outcome": "confirmed"}}
+        response = {"operation_receipt": {
+            "writer_invoked": True, "outcome": "confirmed",
+        }}
         response_sha = hashlib.sha256(json.dumps(
             response, sort_keys=True, ensure_ascii=True,
             separators=(",", ":"), allow_nan=False,
         ).encode("utf-8")).hexdigest()
-        self.assertEqual(
-            self.owner.replay_status(
-                key="never-started", sha=_SHA, response_sha=response_sha,
-            ), "never_started",
-        )
+        self.assertEqual(self.owner.replay_status(
+            key="never-started", sha=_SHA, response_sha=response_sha,
+        ), "never_started")
         self.owner.execution_started(
-            session, key="real-completion", sha=_SHA, action="pause",
+            session, key="executor-claimed-completion", sha=_SHA, action="pause",
         )
-        self.assertEqual(
-            self.owner.replay_status(
-                key="real-completion", sha=_SHA, response_sha=response_sha,
-            ), "unverified",
-        )
-        self.owner.execution_completed(
-            session, key="real-completion", sha=_SHA, response=response,
-        )
-        self.assertEqual(
-            self.owner.replay_status(
-                key="real-completion", sha=_SHA, response_sha=response_sha,
-            ), "confirmed",
-        )
-        self.assertEqual(
-            self.owner.replay_status(
-                key="real-completion", sha=_SHA, response_sha="b" * 64,
-            ), "unverified",
-        )
-        # Operator clearance without a durable completion must never turn
-        # a historical local 200 into verified external success.
-        self.owner.execution_started(
-            session, key="cleared-no-completion", sha=_SHA, action="pause",
-        )
-        with self.assertRaisesRegex(FenceWitnessError, "already"):
-            self.owner.execution_started(
-                session, key="cleared-no-completion", sha=_SHA, action="pause",
-            )
+        self.assertEqual(self.owner.replay_status(
+            key="executor-claimed-completion", sha=_SHA,
+            response_sha=response_sha,
+        ), "unverified")
+        self.assertEqual(self.owner.execution_completed(
+            session, key="executor-claimed-completion", sha=_SHA,
+            response=response,
+        ), "ambiguous")
+        self.assertEqual(self.owner.replay_status(
+            key="executor-claimed-completion", sha=_SHA,
+            response_sha=response_sha,
+        ), "ambiguous")
+        self.assertEqual(self.owner.replay_status(
+            key="executor-claimed-completion", sha=_SHA,
+            response_sha="b" * 64,
+        ), "unverified")
+        self.assertTrue(self.owner.fence_pending())
         self.owner.seal_session(session)
+        self.owner.operator_clearance(
+            key="executor-claimed-completion", sha=_SHA,
+            evidence="operator:synthetic-outcome-review",
+        )
+        self.assertFalse(self.owner.fence_pending())
+        # An operator's later clearance never upgrades an old claimed 200.
+        self.assertEqual(self.owner.replay_status(
+            key="executor-claimed-completion", sha=_SHA,
+            response_sha=response_sha,
+        ), "ambiguous")
+        new_session = self.owner.open_session()
+        self.owner.execution_started(
+            new_session, key="cleared-no-completion", sha=_SHA, action="pause",
+        )
+        self.owner.seal_session(new_session)
         self.owner.operator_clearance(
             key="cleared-no-completion", sha=_SHA,
             evidence="operator:synthetic-negative-postread",
         )
         self.assertFalse(self.owner.fence_pending())
-        self.assertEqual(
-            self.owner.replay_status(
-                key="cleared-no-completion", sha=_SHA, response_sha=response_sha,
-            ), "unverified",
-        )
+        self.assertEqual(self.owner.replay_status(
+            key="cleared-no-completion", sha=_SHA,
+            response_sha=response_sha,
+        ), "unverified")
 
-    def test_runtime_clearance_readback_requires_exact_ambiguous_operation(self) -> None:
+    def test_runtime_media_clearance_is_not_independent_even_when_exact(self) -> None:
         session = self.owner.open_session()
         key = "media-ambiguous-clearance-readback"
         self.owner.execution_started(session, key=key, sha=_SHA, action="create_media")
+        self.assertEqual(self.owner.execution_completed(
+            session, key=key, sha=_SHA, response=_UNKNOWN_MEDIA,
+        ), "ambiguous")
+        for evidence in ("synthetic:verified-media-settlement", "runtime:forged"):
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(
+                FenceWitnessError, "independent proof",
+            ):
+                self.owner.runtime_clearance(
+                    session, key=key, sha=_SHA, evidence=evidence,
+                )
         self.assertFalse(self.owner.clearance_recorded(key=key, sha=_SHA))
-        self.assertEqual(
-            self.owner.execution_completed(
-                session, key=key, sha=_SHA, response=_UNKNOWN_MEDIA,
-            ), "ambiguous",
-        )
-        self.assertFalse(self.owner.clearance_recorded(key=key, sha=_SHA))
-        self.owner.runtime_clearance(
-            session, key=key, sha=_SHA,
-            evidence="synthetic:verified-media-settlement",
+        self.assertFalse(self.owner.clearance_recorded(key=key, sha="f" * 64))
+        self.assertTrue(self.owner.fence_pending())
+        self.owner.seal_session(session)
+        self.owner.operator_clearance(
+            key=key, sha=_SHA, evidence="operator:synthetic-external-review",
         )
         self.assertTrue(self.owner.clearance_recorded(key=key, sha=_SHA))
-        self.assertFalse(self.owner.clearance_recorded(key=key, sha="f" * 64))
-        self.assertFalse(self.owner.clearance_recorded(key="another-key", sha=_SHA))
         self.assertFalse(self.owner.fence_pending())
 
-    def test_same_key_never_reexecutes_after_completed_response_or_lost_local_db(self) -> None:
+    def test_same_key_never_reexecutes_after_unverified_claim_or_restart(self) -> None:
         session = self.owner.open_session()
         self.owner.execution_started(session, key="confirmed-key", sha=_SHA, action="create")
-        self.assertEqual(
-            self.owner.execution_completed(
-                session, key="confirmed-key", sha=_SHA,
-                response={
-                    "operation_receipt": {
-                        "writer_invoked": True, "outcome": "confirmed",
-                    },
-                },
-            ),
-            "confirmed",
-        )
-        self.assertFalse(self.owner.fence_pending())
-        with self.assertRaisesRegex(FenceWitnessError, "already"):
-            self.owner.execution_started(
-                session, key="confirmed-key", sha=_SHA, action="create",
-            )
-        with self.assertRaisesRegex(FenceWitnessError, "already"):
-            self.owner.execution_started(
-                session, key="confirmed-key", sha="b" * 64, action="create",
-            )
+        self.assertEqual(self.owner.execution_completed(
+            session, key="confirmed-key", sha=_SHA,
+            response={"operation_receipt": {
+                "writer_invoked": True, "outcome": "confirmed",
+            }},
+        ), "ambiguous")
+        self.assertTrue(self.owner.fence_pending())
+        for sha in (_SHA, "b" * 64):
+            with self.assertRaisesRegex(FenceWitnessError, "already"):
+                self.owner.execution_started(
+                    session, key="confirmed-key", sha=sha, action="create",
+                )
         self.owner.seal_session(session)
         self.owner.close()
-        current = FenceLedger(self.ledger_file)
-        self.addCleanup(current.close)
-        next_session = current.open_session()
+        reopened = FenceLedger(self.ledger_file)
+        self.addCleanup(reopened.close)
+        self.assertTrue(reopened.fence_pending())
+        next_session = reopened.open_session()
         with self.assertRaisesRegex(FenceWitnessError, "already"):
-            current.execution_started(
+            reopened.execution_started(
                 next_session, key="confirmed-key", sha=_SHA, action="create",
             )
+        with self.assertRaisesRegex(FenceWitnessError, "earlier write"):
+            reopened.execution_started(
+                next_session, key="different-key", sha=_SHA, action="create",
+            )
 
-    def test_conclusive_response_requires_exact_flags_and_media_persistence(self) -> None:
+    def test_all_executor_confirmations_stay_ambiguous_even_with_media_flags(self) -> None:
         session = self.owner.open_session()
-        for number, response in enumerate((
+        responses = (
             {"operation_receipt": {"writer_invoked": True, "outcome": "confirmed"},
              "media_persistence_confirmed": False},
             {"operation_receipt": {"writer_invoked": False, "outcome": "confirmed"},
              "media_persistence_confirmed": True},
             {"operation_receipt": {"writer_invoked": "true", "outcome": "confirmed"},
              "media_persistence_confirmed": True},
-        )):
-            key = f"ambiguous-{number}"
+            {"operation_receipt": {"writer_invoked": False, "outcome": "precondition_failed"},
+             "media_persistence_confirmed": True},
+        )
+        for number, response in enumerate(responses):
+            key = f"untrusted-response-{number}"
             self.owner.execution_started(
                 session, key=key, sha=_SHA, action="create_media",
             )
-            self.assertEqual(
-                self.owner.execution_completed(
-                    session, key=key, sha=_SHA, response=response,
-                ),
-                "ambiguous",
-            )
+            self.assertEqual(self.owner.execution_completed(
+                session, key=key, sha=_SHA, response=response,
+            ), "ambiguous")
             self.assertTrue(self.owner.fence_pending())
-            self.owner.runtime_clearance(
-                session, key=key, sha=_SHA,
-                evidence=f"verified:browser-observation-{number}",
+            with self.assertRaisesRegex(FenceWitnessError, "independent proof"):
+                self.owner.runtime_clearance(
+                    session, key=key, sha=_SHA,
+                    evidence=f"runtime:forged-{number}",
+                )
+            self.owner.seal_session(session)
+            self.owner.operator_clearance(
+                key=key, sha=_SHA,
+                evidence=f"operator:synthetic-clearance-{number}",
             )
+            session = self.owner.open_session()
+        key = "media-looks-fully-confirmed"
         self.owner.execution_started(
-            session, key="media-confirmed", sha=_SHA, action="create_media",
+            session, key=key, sha=_SHA, action="create_media",
         )
-        self.assertEqual(
-            self.owner.execution_completed(
-                session, key="media-confirmed", sha=_SHA,
-                response=_GOOD_MEDIA,
-            ), "confirmed",
-        )
-        self.assertFalse(self.owner.fence_pending())
+        self.assertEqual(self.owner.execution_completed(
+            session, key=key, sha=_SHA, response=_GOOD_MEDIA,
+        ), "ambiguous")
+        self.assertTrue(self.owner.fence_pending())
+        self.assertFalse(self.owner.clearance_recorded(key=key, sha=_SHA))
+
+    def test_historical_chained_executor_confirmed_and_runtime_cleared_stay_pending(self) -> None:
+        # Valid legacy events must not be grandfathered into independent
+        # confirmations on a new witness binary or restored ledger.
+        session = self.owner.open_session()
+        key = "legacy-runtime-claimed-success"
+        self.owner.execution_started(session, key=key, sha=_SHA, action="pause")
+        with self.owner._guard, closing(self.owner._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.owner._append(
+                db, session=session, kind="completed", key=key,
+                sha=_SHA, outcome="confirmed", response_sha="b" * 64,
+            )
+            self.owner._append(
+                db, session=session, kind="runtime_cleared", key=key,
+                sha=_SHA, evidence="old:runtime-self-reported-postread",
+            )
+            db.commit()
+        self.assertTrue(self.owner.fence_pending())
+        self.assertFalse(self.owner.clearance_recorded(key=key, sha=_SHA))
+        self.assertEqual(self.owner.replay_status(
+            key=key, sha=_SHA, response_sha="b" * 64,
+        ), "ambiguous")
+        self.owner.seal_session(session)
+        self.owner.close()
+        with FenceLedger(self.ledger_file) as reopened:
+            self.assertTrue(reopened.fence_pending())
+            self.assertEqual(reopened.replay_status(
+                key=key, sha=_SHA, response_sha="b" * 64,
+            ), "ambiguous")
+            next_session = reopened.open_session()
+            with self.assertRaisesRegex(FenceWitnessError, "earlier write"):
+                reopened.execution_started(
+                    next_session, key="new-after-legacy", sha=_SHA,
+                    action="create",
+                )
+
+    def test_v1_runtime_clearance_requires_explicit_migration_then_operator_override(self) -> None:
+        """A valid legacy clearance cannot permanently block operator recovery."""
+        session = self.owner.open_session()
+        key = "v1-legacy-claimed-success"
+        self.owner.execution_started(session, key=key, sha=_SHA, action="create")
+        with self.owner._guard, closing(self.owner._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.owner._append(
+                db, session=session, kind="completed", key=key, sha=_SHA,
+                outcome="confirmed", response_sha="b" * 64,
+            )
+            self.owner._append(
+                db, session=session, kind="runtime_cleared", key=key,
+                sha=_SHA, evidence="legacy:executor-postread",
+            )
+            db.commit()
+        self.owner.seal_session(session)
+        self.owner.close()
+
+        # Synthetic historical schema: original unique index and version 1.
+        # This fixture simulates old bytes, never a production migration.
+        with closing(sqlite3.connect(self.ledger_file)) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DROP INDEX one_runtime_clearance_per_key")
+            db.execute("DROP INDEX one_operator_clearance_per_key")
+            db.execute("CREATE UNIQUE INDEX one_clearance_per_key "
+                       "ON events(request_key) "
+                       "WHERE kind IN ('runtime_cleared', 'operator_cleared')")
+            db.execute("PRAGMA user_version=1")
+            db.commit()
+            before = db.execute(
+                "SELECT seq,kind,request_key,session_id,request_sha256,"
+                "previous_sha256,row_sha256 FROM events ORDER BY seq"
+            ).fetchall()
+
+        with self.assertRaisesRegex(FenceWitnessError, "explicit.*migration"):
+            FenceLedger(self.ledger_file)
+        with FenceLedger(self.ledger_file, migrate_legacy=True) as restored:
+            self.assertTrue(restored.fence_pending())
+            self.assertFalse(restored.clearance_recorded(key=key, sha=_SHA))
+            self.assertEqual(restored.replay_status(
+                key=key, sha=_SHA, response_sha="b" * 64,
+            ), "ambiguous")
+            with self.assertRaisesRegex(FenceWitnessError, "operation-bound"):
+                restored.operator_clearance(
+                    key=key, sha="c" * 64, evidence="operator:incorrect-request",
+                )
+            restored.operator_clearance(
+                key=key, sha=_SHA, evidence="operator:independently-reviewed",
+            )
+            self.assertFalse(restored.fence_pending())
+            self.assertTrue(restored.clearance_recorded(key=key, sha=_SHA))
+            with self.assertRaisesRegex(FenceWitnessError, "already cleared"):
+                restored.operator_clearance(
+                    key=key, sha=_SHA, evidence="operator:duplicate",
+                )
+            next_session = restored.open_session()
+            with self.assertRaisesRegex(FenceWitnessError, "already"):
+                restored.execution_started(
+                    next_session, key=key, sha=_SHA, action="create",
+                )
+            restored.seal_session(next_session)
+        with closing(sqlite3.connect(self.ledger_file)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            after = db.execute(
+                "SELECT seq,kind,request_key,session_id,request_sha256,"
+                "previous_sha256,row_sha256 FROM events ORDER BY seq"
+            ).fetchall()
+            self.assertEqual(after[:len(before)], before)
+            self.assertEqual(
+                db.execute(
+                    "SELECT count(*) FROM events WHERE request_key=? "
+                    "AND kind='runtime_cleared'", (key,),
+                ).fetchone()[0], 1,
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT count(*) FROM events WHERE request_key=? "
+                    "AND kind='operator_cleared'", (key,),
+                ).fetchone()[0], 1,
+            )
+        with FenceLedger(self.ledger_file) as reopened:
+            self.assertFalse(reopened.fence_pending())
+
+    def test_operator_clearance_pending_query_has_index_plan_at_scale(self) -> None:
+        """High-cardinality finished ledgers cannot scan every clearance."""
+        session = self.owner.open_session()
+        self.owner.seal_session(session)
+        with self.owner._guard, closing(self.owner._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            for number in range(5000):
+                key = f"bulk-reviewed-operation-{number}"
+                self.owner._append(
+                    db, session=session, kind="started", key=key,
+                    sha=_SHA, action="pause",
+                )
+                self.owner._append(
+                    db, session=session, kind="operator_cleared", key=key,
+                    sha=_SHA, evidence="operator:synthetic-bulk-proof",
+                )
+            db.commit()
+            sql: list[str] = []
+            db.set_trace_callback(sql.append)
+            try:
+                self.assertFalse(FenceLedger._is_pending(db))
+            finally:
+                db.set_trace_callback(None)
+            pending_sql = next(
+                item for item in sql if "SELECT 1 FROM events AS started" in item
+            )
+            plan = db.execute("EXPLAIN QUERY PLAN " + pending_sql).fetchall()
+            self.assertTrue(
+                any("SEARCH cleared USING INDEX one_operator_clearance_per_key"
+                    in detail for _, _, _, detail in plan),
+                plan,
+            )
+            started = time.monotonic()
+            for _ in range(5):
+                self.assertFalse(FenceLedger._is_pending(db))
+            self.assertLess(
+                time.monotonic() - started, 2.0,
+                "pending lookups must not scale quadratically with clearances",
+            )
 
     def test_rejects_unbound_evidence_and_invalid_request_fields(self) -> None:
         session = self.owner.open_session()
@@ -771,8 +937,7 @@ else:
             with self.assertRaisesRegex(FenceWitnessError, "shutdown could not seal"):
                 server.close()
 
-    def test_known_pending_rejection_keeps_runtime_session_for_reconciliation(self) -> None:
-        """A definite pre-commit refusal must not poison the live socket."""
+    def test_definite_pending_rejection_keeps_readback_but_no_runtime_clear(self) -> None:
         runtime_dir = self.root / "known-rejection-runtime"
         operator_dir = self.root / "known-rejection-operator"
         runtime_dir.mkdir(mode=0o700)
@@ -786,62 +951,44 @@ else:
             runtime_gid=os.getegid(), operator_uid=os.geteuid(),
         )
         self.addCleanup(server.close)
-        # This isolated test alone deliberately allows the current UID.
-        server._runtime.peer_uid = os.geteuid()
+        server._runtime.peer_uid = os.geteuid()  # Test-only same-UID seam.
         server.start()
         with FenceWitnessClient(
             runtime_dir / "runtime.sock", expected_owner_uid=os.geteuid(),
         ) as client:
             client.started(key="live-ambiguous", sha=_SHA, action="create_media")
-            self.assertEqual(
-                client.completed(
-                    key="live-ambiguous", sha=_SHA, response=_UNKNOWN_MEDIA,
-                ), "ambiguous",
-            )
-            with self.assertRaises(FenceWitnessError):
+            self.assertEqual(client.completed(
+                key="live-ambiguous", sha=_SHA, response=_UNKNOWN_MEDIA,
+            ), "ambiguous")
+            with self.assertRaises(FenceWitnessRejected):
                 client.started(key="known-refused-key", sha=_SHA, action="create")
             with self.assertRaisesRegex(FenceWitnessError, "already recorded"):
                 client.started(key="live-ambiguous", sha=_SHA, action="create_media")
-            # A truly rejected request was not committed; the same connection
-            # must still permit safe read and exact in-session clearance.
             self.assertTrue(client.pending())
-            client.runtime_clear(
-                key="live-ambiguous", sha=_SHA,
-                evidence="synthetic:observed-existing-submit",
-            )
-            self.assertTrue(client.clearance_recorded(
-                key="live-ambiguous", sha=_SHA,
-            ))
-            self.assertFalse(client.clearance_recorded(
-                key="live-ambiguous", sha="f" * 64,
-            ))
-            self.assertFalse(client.pending())
-            serialized = json.dumps(
+            encoded = json.dumps(
                 _UNKNOWN_MEDIA, sort_keys=True, ensure_ascii=True,
                 separators=(",", ":"), allow_nan=False,
             )
-            response_sha = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-            self.assertEqual(
-                client.replay_status(
-                    key="live-ambiguous", sha=_SHA, response_sha=response_sha,
-                ), "ambiguous",
-            )
-            self.assertEqual(
-                client.replay_status(
-                    key="known-refused-key", sha=_SHA, response_sha=response_sha,
-                ), "never_started",
-            )
-            client.close()
-            self.assertTrue(client.resume_from_verified_clearance(
-                key="live-ambiguous", sha=_SHA,
-            ))
-            self.assertFalse(client.pending())
-            client.started(key="new-after-clearance", sha=_SHA, action="pause")
-            self.assertTrue(client.pending())
+            digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            self.assertEqual(client.replay_status(
+                key="live-ambiguous", sha=_SHA, response_sha=digest,
+            ), "ambiguous")
+            self.assertEqual(client.replay_status(
+                key="known-refused-key", sha=_SHA, response_sha=digest,
+            ), "never_started")
+            with self.assertRaisesRegex(FenceWitnessError, "outcome uncertain"):
+                client.runtime_clear(
+                    key="live-ambiguous", sha=_SHA,
+                    evidence="runtime:forged-independent-postread",
+                )
+            self.assertIsNone(client._socket)
+        self.assertFalse(self.owner.clearance_recorded(
+            key="live-ambiguous", sha=_SHA,
+        ))
+        self.assertTrue(self.owner.fence_pending())
         server.close()
 
-    def test_lost_runtime_clear_ack_rebinds_only_after_durable_readback(self) -> None:
-        """A lost ACK poisons IPC; recovery uses a new authenticated socket."""
+    def test_runtime_forged_clearance_lost_response_never_grants_recovery(self) -> None:
         runtime_dir = self.root / "lost-clearance-runtime"
         operator_dir = self.root / "lost-clearance-operator"
         runtime_dir.mkdir(mode=0o700)
@@ -855,7 +1002,6 @@ else:
             runtime_gid=os.getegid(), operator_uid=os.geteuid(),
         )
         self.addCleanup(server.close)
-        # Isolated synthetic server; production still requires distinct UIDs.
         server._runtime.peer_uid = os.geteuid()
         server.start()
         with FenceWitnessClient(
@@ -867,37 +1013,29 @@ else:
             ), "ambiguous")
             receive = client._receive
 
-            def discard_durable_ack() -> dict[str, object]:
-                frame = receive()  # Server already committed before replying.
-                if frame == {"ok": True, "result": {"recorded": True}}:
-                    raise OSError("synthetic lost clearance response")
-                return frame
+            def discard_denied_reply() -> dict[str, object]:
+                answer = receive()
+                if answer == {"ok": False, "error": "request_denied"}:
+                    raise OSError("synthetic lost denial frame")
+                return answer
 
-            with patch.object(client, "_receive", side_effect=discard_durable_ack):
-                with self.assertRaisesRegex(
-                    FenceWitnessError, "outcome uncertain",
-                ):
+            with patch.object(client, "_receive", side_effect=discard_denied_reply):
+                with self.assertRaisesRegex(FenceWitnessError, "outcome uncertain"):
                     client.runtime_clear(
                         key="lost-clearance-ack", sha=_SHA,
-                        evidence="synthetic:observed-existing-submit",
+                        evidence="runtime:claimed-existing-submit",
                     )
-            self.assertTrue(self.owner.clearance_recorded(
-                key="lost-clearance-ack", sha=_SHA,
-            ))
             self.assertIsNone(client._socket)
-            self.assertTrue(client.resume_from_verified_clearance(
+            self.assertFalse(self.owner.clearance_recorded(
                 key="lost-clearance-ack", sha=_SHA,
             ))
-            self.assertFalse(client.pending())
-            # Never append a second clearance or resubmit anything external.
+            self.assertTrue(self.owner.fence_pending())
             with self.assertRaises(FenceWitnessError):
-                client.runtime_clear(
+                client.resume_from_verified_clearance(
                     key="lost-clearance-ack", sha=_SHA,
-                    evidence="synthetic:repeat-clearance-not-allowed",
                 )
-            self.assertTrue(self.owner.clearance_recorded(
-                key="lost-clearance-ack", sha=_SHA,
-            ))
+            self.assertIsNone(client._socket)
+            self.assertTrue(self.owner.fence_pending())
         server.close()
 
     def test_shutdown_does_not_block_on_continuous_runtime_session(self) -> None:

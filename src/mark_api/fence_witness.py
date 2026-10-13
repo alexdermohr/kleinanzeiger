@@ -47,7 +47,8 @@ class FenceWitnessAlreadyRecorded(FenceWitnessError):
     """This key has a prior start; its external result must not be guessed."""
 
 
-_VERSION = 1
+_VERSION = 1  # Wire protocol; ledger schema has its own explicit version.
+_LEDGER_SCHEMA_VERSION = 2
 _MAX_FRAME = 32 * 1024
 _KEY = re.compile(r"[A-Za-z0-9._:-]{1,160}\Z", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
@@ -158,34 +159,29 @@ def _file_identity(path: Path, uid: int) -> os.stat_result:
     return info
 
 
-def _derived_outcome(action: str, response: object) -> str:
-    """Fail closed when an untrusted runtime's claimed result is incomplete."""
-    if not isinstance(response, dict):
-        return "ambiguous"
-    receipt = response.get("operation_receipt")
-    if not isinstance(receipt, dict):
-        return "ambiguous"
-    outcome = receipt.get("outcome")
-    invoked = receipt.get("writer_invoked")
-    if type(invoked) is not bool or not isinstance(outcome, str):
-        return "ambiguous"
-    if outcome == "precondition_failed" and not invoked:
-        return "precondition_failed"
-    if outcome == "confirmed" and invoked:
-        if action == "create_media" and response.get("media_persistence_confirmed") is not True:
-            return "ambiguous"
-        return "confirmed"
+def _derived_outcome(_action: str, _response: object) -> str:
+    """Runtime reports are *never* independent external platform evidence.
+
+    UID-isolated durable hashes establish what UID50044 asserted, not whether
+    Kleinanzeigen performed that operation. No response/body flag can turn a
+    compromised executor's claim into a verified Witness completion.
+    """
     return "ambiguous"
 
 
 class FenceLedger:
-    """Private SQLite v1 journal; only its distinct owner UID may open files."""
+    """Private append-only journal; only its distinct owner UID may open files."""
 
-    def __init__(self, path: Path, *, initialize: bool = False) -> None:
+    def __init__(
+        self, path: Path, *, initialize: bool = False,
+        migrate_legacy: bool = False,
+    ) -> None:
         if not isinstance(path, Path) or not path.is_absolute():
             raise TypeError("ledger path must be an absolute Path")
-        if not isinstance(initialize, bool):
-            raise TypeError("initialize must be a boolean")
+        if not isinstance(initialize, bool) or not isinstance(migrate_legacy, bool):
+            raise TypeError("ledger mode flags must be booleans")
+        if initialize and migrate_legacy:
+            raise FenceWitnessError("cannot initialize and migrate the same ledger")
         self.path = path
         self._uid = os.geteuid()
         self._guard = RLock()
@@ -252,13 +248,15 @@ class FenceLedger:
                             WHERE kind = 'started';
                         CREATE UNIQUE INDEX one_completion_per_key ON events(request_key)
                             WHERE kind = 'completed';
-                        CREATE UNIQUE INDEX one_clearance_per_key ON events(request_key)
-                            WHERE kind IN ('runtime_cleared', 'operator_cleared');
+                        CREATE UNIQUE INDEX one_runtime_clearance_per_key
+                            ON events(request_key) WHERE kind='runtime_cleared';
+                        CREATE UNIQUE INDEX one_operator_clearance_per_key
+                            ON events(request_key) WHERE kind='operator_cleared';
                         CREATE TRIGGER events_no_update BEFORE UPDATE ON events
                             BEGIN SELECT RAISE(ABORT, 'append-only events'); END;
                         CREATE TRIGGER events_no_delete BEFORE DELETE ON events
                             BEGIN SELECT RAISE(ABORT, 'append-only events'); END;
-                        PRAGMA user_version = 1;
+                        PRAGMA user_version = 2;
                         COMMIT;
                     """)
                 # Persist first-time directory entry, not only the SQLite pages.
@@ -278,14 +276,44 @@ class FenceLedger:
                 necessary = {
                     ("table", "sessions"), ("table", "events"),
                     ("index", "one_start_per_key"), ("index", "one_completion_per_key"),
-                    ("index", "one_clearance_per_key"),
                     ("trigger", "events_no_update"), ("trigger", "events_no_delete"),
                 }
-                if version != _VERSION or not necessary.issubset(objects):
+                if not necessary.issubset(objects):
+                    raise FenceWitnessError("ledger recovery schema is damaged")
+                if version == 1 and not migrate_legacy:
+                    # Normal serve and --init-ledger MUST NOT silently migrate
+                    # a persisted ledger, even if a caller can name its path.
+                    raise FenceWitnessError(
+                        "legacy witness ledger requires explicit offline migration"
+                    )
+                if migrate_legacy and version != 1:
+                    raise FenceWitnessError(
+                        "legacy migration requires an existing schema v1 ledger"
+                    )
+                if version not in (1, _LEDGER_SCHEMA_VERSION):
                     raise FenceWitnessError("ledger recovery schema is damaged")
                 if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise FenceWitnessError("ledger integrity is invalid")
                 self._verify_chain(conn)
+                if migrate_legacy:
+                    self._migrate_legacy_schema(conn, objects)
+                    objects = {
+                        (row[0], row[1]) for row in conn.execute(
+                            "SELECT type,name FROM sqlite_master "
+                            "WHERE type IN ('table','index','trigger')"
+                        )
+                    }
+                expected_indexes = {
+                    ("index", "one_runtime_clearance_per_key"),
+                    ("index", "one_operator_clearance_per_key"),
+                }
+                if not expected_indexes.issubset(objects):
+                    raise FenceWitnessError("ledger recovery schema is damaged")
+                if conn.execute("PRAGMA user_version").fetchone()[0] != _LEDGER_SCHEMA_VERSION:
+                    raise FenceWitnessError("ledger recovery schema is damaged")
+                # The unique partial-index shape is a safety gate, not a mere
+                # performance hint; a counterfeit index name proves nothing.
+                self._verify_operator_index(conn)
                 # After an owner crash, no old socket session may gain new writes.
                 conn.execute("BEGIN IMMEDIATE")
                 self._seal_orphaned_sessions(conn)
@@ -422,6 +450,76 @@ class FenceLedger:
         )
 
     @staticmethod
+    def _verify_operator_index(conn: sqlite3.Connection) -> None:
+        expected = {
+            "one_runtime_clearance_per_key": "runtime_cleared",
+            "one_operator_clearance_per_key": "operator_cleared",
+        }
+        for name, kind in expected.items():
+            definition = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                (name,),
+            ).fetchone()
+            sql = "".join(definition[0].lower().split()) if (
+                definition and isinstance(definition[0], str)
+            ) else ""
+            wanted = (
+                f"createuniqueindex{name}onevents(request_key)"
+                f"wherekind='{kind}'"
+            )
+            if sql != wanted:
+                raise FenceWitnessError("ledger clearance index is invalid")
+
+    @staticmethod
+    def _migrate_legacy_schema(
+        conn: sqlite3.Connection, objects: set[tuple[str, str]],
+    ) -> None:
+        """Explicit owner-only, crash-atomic v1->v2 transition; never rewrite events.
+
+        Requires the pre-existing exclusive witness flock, file UID checks,
+        chain verification and SQLite integrity check in the caller. Backup
+        policy is external: production use must await a validated paired
+        SQLite/Witness backup and offline owner-controlled change window.
+        """
+        if ("index", "one_clearance_per_key") not in objects or (
+            ("index", "one_operator_clearance_per_key") in objects
+            or ("index", "one_runtime_clearance_per_key") in objects
+        ):
+            raise FenceWitnessError("legacy ledger clearance indexes are invalid")
+        source = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='one_clearance_per_key'"
+        ).fetchone()
+        definition = "".join(source[0].lower().split()) if (
+            source and isinstance(source[0], str)
+        ) else ""
+        if definition != (
+            "createuniqueindexone_clearance_per_keyonevents(request_key)"
+            "wherekindin('runtime_cleared','operator_cleared')"
+        ):
+            raise FenceWitnessError("legacy ledger clearance index is invalid")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP INDEX one_clearance_per_key")
+            conn.execute(
+                "CREATE UNIQUE INDEX one_runtime_clearance_per_key "
+                "ON events(request_key) WHERE kind='runtime_cleared'"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX one_operator_clearance_per_key "
+                "ON events(request_key) WHERE kind='operator_cleared'"
+            )
+            conn.execute("PRAGMA user_version = 2")
+            FenceLedger._verify_operator_index(conn)
+            FenceLedger._verify_chain(conn)
+            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise FenceWitnessError("migrated ledger integrity is invalid")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+
+    @staticmethod
     def _verify_chain(conn: sqlite3.Connection) -> None:
         previous = "0" * 64
         rows = conn.execute(
@@ -500,19 +598,18 @@ class FenceLedger:
 
     @staticmethod
     def _is_pending(conn: sqlite3.Connection) -> bool:
+        # Includes legacy "confirmed"/"precondition_failed" and runtime_cleared
+        # records. They are executor assertions and can never independently
+        # retire an externally effectful started write after a rollback.
         return conn.execute("""
             SELECT 1 FROM events AS started
             WHERE started.kind='started'
               AND NOT EXISTS(
                  SELECT 1 FROM events AS cleared
                  WHERE cleared.request_key=started.request_key
-                   AND cleared.kind IN ('runtime_cleared','operator_cleared')
-              )
-              AND NOT EXISTS(
-                 SELECT 1 FROM events AS completed
-                 WHERE completed.request_key=started.request_key
-                   AND completed.kind='completed'
-                   AND completed.outcome IN ('confirmed','precondition_failed')
+                   AND cleared.request_sha256=started.request_sha256
+                   AND cleared.session_id=started.session_id
+                   AND cleared.kind='operator_cleared'
               )
             LIMIT 1
         """).fetchone() is not None
@@ -624,7 +721,10 @@ class FenceLedger:
                 or completed[3] not in (*_SAFE_OUTCOMES, "ambiguous")
             ):
                 return "unverified"
-            return completed[3]
+            # The matching digest proves only the runtime's reported bytes,
+            # never independent platform settlement. Even legacy outcomes
+            # stored as "confirmed" or "precondition_failed" are unverified.
+            return "ambiguous"
 
     def clearance_recorded(self, *, key: str, sha: str) -> bool:
         """Prove a durable clearance for this exact original operation.
@@ -643,7 +743,7 @@ class FenceLedger:
                 "AND start.request_sha256=clear.request_sha256 "
                 "WHERE start.kind='started' AND start.request_key=? "
                 "AND start.request_sha256=? "
-                "AND clear.kind IN ('runtime_cleared','operator_cleared') "
+                "AND clear.kind='operator_cleared' "
                 "LIMIT 1", (key, sha),
             ).fetchone() is not None
 
@@ -658,6 +758,12 @@ class FenceLedger:
 
     def _clear(self, *, key: str, sha: str, evidence: str,
                session: str, operator: bool) -> None:
+        if not operator:
+            # A compromised executor can forge any in-process CDP/readback
+            # evidence reference. No runtime-only clearance is trustworthy.
+            raise FenceWitnessError(
+                "runtime-reported media observation is not independent proof"
+            )
         key = _required_string(key, _KEY, "idempotency key")
         sha = _required_string(sha, _SHA, "request SHA-256")
         evidence = _evidence(evidence)
@@ -697,9 +803,12 @@ class FenceLedger:
                         raise FenceWitnessError(
                             "runtime clearance requires completed ambiguous outcome"
                         )
+                # A historical runtime_cleared is an untrusted observation;
+                # keep it forever but allow ONE verified operator override.
+                # The new partial unique operator index rejects double clears.
                 if conn.execute(
-                    "SELECT 1 FROM events WHERE request_key=? AND kind IN "
-                    "('runtime_cleared','operator_cleared')",
+                    "SELECT 1 FROM events WHERE request_key=? "
+                    "AND kind='operator_cleared'",
                     (key,),
                 ).fetchone():
                     raise FenceWitnessError("write recovery was already cleared")
@@ -1222,7 +1331,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-uid", type=_positive_uid, required=True)
     parser.add_argument("--runtime-gid", type=_positive_uid, required=True)
     parser.add_argument("--operator-uid", type=int, default=0)
-    parser.add_argument("--init-ledger", action="store_true")
+    ledger_actions = parser.add_mutually_exclusive_group()
+    ledger_actions.add_argument("--init-ledger", action="store_true")
+    ledger_actions.add_argument("--migrate-ledger", action="store_true")
     args = parser.parse_args(argv)
     if os.geteuid() == 0 or os.geteuid() == args.runtime_uid:
         parser.error("witness requires a separate non-root service UID")
@@ -1233,6 +1344,16 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("ledger already exists; never silently reinitialize")
         try:
             FenceLedger(args.ledger, initialize=True)
+        except (FenceWitnessError, OSError, sqlite3.Error) as exc:
+            parser.error(str(exc))
+        return 0
+    if args.migrate_ledger:
+        # Standalone, explicit *offline* operator activity. The exclusive
+        # witness flock prevents a migration during an active serve process.
+        # Never expose migration over the executor or operator RPC sockets.
+        try:
+            with FenceLedger(args.ledger, migrate_legacy=True):
+                pass
         except (FenceWitnessError, OSError, sqlite3.Error) as exc:
             parser.error(str(exc))
         return 0
