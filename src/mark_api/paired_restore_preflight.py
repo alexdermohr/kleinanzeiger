@@ -462,56 +462,101 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
-    """Accept only the real v2 Witness tables, UNIQUE indexes and abort triggers.
+_DDL_LEXEME = re.compile(r"[A-Za-z_][A-Za-z_0-9]*|[0-9]+|[(),;=]")
 
-    SQLite integrity_check and a valid hash chain alone cannot prove the
-    append-only schema: a same-named no-op trigger or ordinary index can
-    remain structurally present. Unexpected extra triggers can also change
-    the semantics of DELETE/UPDATE. Fail closed on every such variation.
+
+def _witness_ddl_tokens(sql: str) -> tuple[tuple[str, str], ...]:
+    """Tokenize only the canonical v2 DDL subset; do not normalize literals.
+
+    A lossy lower()/split() comparison also normalizes the contents of
+    single-quoted SQL literals and merges identifier/keyword boundaries.
+    This tokenization rejects comments, quoted identifiers, SQL operators,
+    Unicode lookalikes and anything outside the actually emitted DDL.
     """
-    expected = {
+    if not isinstance(sql, str) or not 0 < len(sql) <= 16384:
+        raise PairPreflightError("witness DDL length or type invalid")
+    tokens: list[tuple[str, str]] = []
+    offset = 0
+    while offset < len(sql):
+        c = sql[offset]
+        if c in " \t\r\n\f\v":
+            offset += 1
+            continue
+        if c == "'":
+            begin = offset
+            offset += 1
+            while offset < len(sql):
+                if sql[offset] != "'":
+                    offset += 1
+                    continue
+                if offset + 1 < len(sql) and sql[offset + 1] == "'":
+                    offset += 2
+                    continue
+                offset += 1
+                tokens.append(("literal", sql[begin:offset]))
+                break
+            else:
+                raise PairPreflightError("unterminated witness SQL literal")
+            continue
+        match = _DDL_LEXEME.match(sql, offset)
+        if match is None:
+            raise PairPreflightError("unsupported witness DDL token")
+        tokens.append(("sql", match.group(0).upper()))
+        offset = match.end()
+    return tuple(tokens)
+
+
+def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
+    """Check full v2 tables/indexes/triggers, not attacker-chosen names alone.
+
+    Canonical expected definitions reproduce FenceLedger initialization.
+    Token sequences preserve string-literal case/content and word boundaries,
+    while ignoring harmless source formatting and SQL keyword case.
+    """
+    expected_sql = {
         ("table", "sessions"): (
-            "createtablesessions(idtextprimarykey,"
-            "statetextnotnullcheck(statein('active','sealed')),"
-            "opened_attextnotnull,sealed_attext)"
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, "
+            "state TEXT NOT NULL CHECK(state IN ('active','sealed')), "
+            "opened_at TEXT NOT NULL, sealed_at TEXT)"
         ),
         ("table", "events"): (
-            "createtableevents(seqintegerprimarykey,"
-            "session_idtextnotnull,kindtextnotnull,request_keytext,"
-            "request_sha256text,actiontext,outcometext,response_sha256text,"
-            "evidence_referencetext,created_attextnotnull,"
-            "previous_sha256textnotnull,row_sha256textnotnull)"
+            "CREATE TABLE events (seq INTEGER PRIMARY KEY, "
+            "session_id TEXT NOT NULL, kind TEXT NOT NULL, "
+            "request_key TEXT, request_sha256 TEXT, action TEXT, "
+            "outcome TEXT, response_sha256 TEXT, evidence_reference TEXT, "
+            "created_at TEXT NOT NULL, previous_sha256 TEXT NOT NULL, "
+            "row_sha256 TEXT NOT NULL)"
         ),
         ("index", "one_start_per_key"): (
-            "createuniqueindexone_start_per_keyonevents(request_key)"
-            "wherekind='started'"
+            "CREATE UNIQUE INDEX one_start_per_key ON events(request_key) "
+            "WHERE kind='started'"
         ),
         ("index", "one_completion_per_key"): (
-            "createuniqueindexone_completion_per_keyonevents(request_key)"
-            "wherekind='completed'"
+            "CREATE UNIQUE INDEX one_completion_per_key ON events(request_key) "
+            "WHERE kind='completed'"
         ),
         ("index", "one_runtime_clearance_per_key"): (
-            "createuniqueindexone_runtime_clearance_per_keyonevents(request_key)"
-            "wherekind='runtime_cleared'"
+            "CREATE UNIQUE INDEX one_runtime_clearance_per_key "
+            "ON events(request_key) WHERE kind='runtime_cleared'"
         ),
         ("index", "one_operator_clearance_per_key"): (
-            "createuniqueindexone_operator_clearance_per_keyonevents(request_key)"
-            "wherekind='operator_cleared'"
+            "CREATE UNIQUE INDEX one_operator_clearance_per_key "
+            "ON events(request_key) WHERE kind='operator_cleared'"
         ),
         ("trigger", "events_no_update"): (
-            "createtriggerevents_no_updatebeforeupdateonevents"
-            "beginselectraise(abort,'append-onlyevents');end"
+            "CREATE TRIGGER events_no_update BEFORE UPDATE ON events "
+            "BEGIN SELECT RAISE(ABORT,'append-only events'); END"
         ),
         ("trigger", "events_no_delete"): (
-            "createtriggerevents_no_deletebeforedeleteonevents"
-            "beginselectraise(abort,'append-onlyevents');end"
+            "CREATE TRIGGER events_no_delete BEFORE DELETE ON events "
+            "BEGIN SELECT RAISE(ABORT,'append-only events'); END"
         ),
     }
+    expected = {
+        key: _witness_ddl_tokens(ddl) for key, ddl in expected_sql.items()
+    }
     observed = {
-        (str(kind), str(name)): (
-            "".join(ddl.lower().split()) if isinstance(ddl, str) else ""
-        )
+        (str(kind), str(name)): _witness_ddl_tokens(ddl)
         for kind, name, ddl in conn.execute(
             "SELECT type,name,sql FROM sqlite_master "
             "WHERE type IN ('table','index','trigger','view') "
@@ -522,6 +567,29 @@ def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
         raise PairPreflightError(
             "witness recovery schema has missing, altered or unexpected security objects"
         )
+    # Non-textual SQLite properties also bind the expected rowid and exact
+    # four partial UNIQUE indexes. Names or SQL text alone are insufficient.
+    primary = [
+        row for row in conn.execute("PRAGMA table_xinfo('events')")
+        if row[5] != 0
+    ]
+    if (
+        len(primary) != 1 or primary[0][1] != "seq"
+        or primary[0][2] != "INTEGER" or primary[0][5] != 1
+        or primary[0][6] != 0
+    ):
+        raise PairPreflightError("witness event sequence is not rowid primary key")
+    indexes = {
+        str(row[1]): (int(row[2]), str(row[3]), int(row[4]))
+        for row in conn.execute("PRAGMA index_list('events')")
+    }
+    if indexes != {
+        "one_start_per_key": (1, "c", 1),
+        "one_completion_per_key": (1, "c", 1),
+        "one_runtime_clearance_per_key": (1, "c", 1),
+        "one_operator_clearance_per_key": (1, "c", 1),
+    }:
+        raise PairPreflightError("witness partial UNIQUE index properties invalid")
 
 
 def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:

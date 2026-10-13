@@ -526,6 +526,42 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 expected_manifest_sha256=expected,
             )
 
+    def test_witness_partial_start_index_uppercase_literal_does_not_attest(self) -> None:
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("DROP INDEX one_start_per_key")
+            connection.execute(
+                "CREATE UNIQUE INDEX one_start_per_key ON events(request_key) "
+                "WHERE kind='STARTED'"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_partial_start_index_literal_with_space_does_not_attest(self) -> None:
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("DROP INDEX one_start_per_key")
+            connection.execute(
+                "CREATE UNIQUE INDEX one_start_per_key ON events(request_key) "
+                "WHERE kind='start ed'"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_seq_integer_primarykey_token_is_not_rowid_primary_key(self) -> None:
+        # Change the table SQL in the staged untrusted candidate, keeping the
+        # same normalized characters: integer primarykey != integer primary key.
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("PRAGMA writable_schema=ON")
+            cursor = connection.execute(
+                "UPDATE sqlite_master SET sql=replace("
+                "sql,'seq INTEGER PRIMARY KEY','seq INTEGER PRIMARYKEY') "
+                "WHERE name='events' AND type='table'"
+            )
+            self.assertEqual(cursor.rowcount, 1)
+            connection.execute("PRAGMA schema_version=71")
+            connection.execute("PRAGMA writable_schema=OFF")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_witness_noop_delete_trigger_cannot_imitate_secure_schema(self) -> None:
         with sqlite3.connect(self.ledger) as connection:
             connection.execute("DROP TRIGGER events_no_delete")
