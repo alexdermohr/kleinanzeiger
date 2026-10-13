@@ -699,6 +699,65 @@ class StorageOwnerUnitTests(unittest.TestCase):
             exclude_idempotency_key="new-create", claim_owner=owner,
         ))
 
+    def test_owner_refuses_new_begin_until_earlier_unknown_is_operator_cleared(self) -> None:
+        """An unresolved independent-owner UNKNOWN must fence a new Begin."""
+        service = self.make_service()
+
+        def call(op: str, *, key: str, sha: str = SHA) -> dict[str, object]:
+            return service.dispatch({
+                "version": _VERSION, "op": op, "key": key, "sha": sha,
+                "owner": "runtime:one", "at": NOW.isoformat(),
+            })
+
+        old_key, next_key = "write:quarantined:older", "write:next:blocked"
+        call("claim", key=old_key)
+        call("begin", key=old_key)
+        call("quarantine_started", key=old_key)
+        self.assertTrue(service.store.create_recovery_pending(
+            exclude_idempotency_key=next_key, claim_owner="runtime:one",
+        ))
+        call("claim", key=next_key)
+        with self.assertRaisesRegex(ValueError, "unresolved.*quarantine"):
+            call("begin", key=next_key)
+        next_record = service.store.write_api_request(next_key)
+        self.assertEqual(next_record.state, "in_progress")
+        self.assertIsNone(next_record.execution_started_at)
+        # A separate SnapshotStore connection must preserve the same fence
+        # across a process restart and while the owner transaction is idle.
+        restarted = SnapshotStore(self.database, create_if_missing=False)
+        with self.assertRaisesRegex(ValueError, "unresolved.*quarantine"):
+            restarted.begin_write_api_request(
+                idempotency_key=next_key, request_sha256=SHA,
+                claim_owner="runtime:one", execution_started_at=NOW,
+            )
+        with self.assertRaises(ValueError):
+            service.store.record_write_recovery_clearance(
+                idempotency_key=old_key, request_sha256="b" * 64,
+                verification_kind="operator_verified_postread",
+                evidence_reference="operator:wrong-original-sha",
+                observed_at=NOW,
+            )
+        with self.assertRaisesRegex(ValueError, "unresolved.*quarantine"):
+            call("begin", key=next_key)
+        # An unused claim may safely cancel without fabricating any platform
+        # response; it does not unblock the original unresolved write.
+        rejected = call("cancel_unstarted", key=next_key)["record"]
+        self.assertEqual(rejected["response_status"], 409)
+        self.assertIsNone(rejected["execution_started_at"])
+        new_key = "write:after:operator-review"
+        call("claim", key=new_key)
+        with self.assertRaisesRegex(ValueError, "unresolved.*quarantine"):
+            call("begin", key=new_key)
+        service.store.record_write_recovery_clearance(
+            idempotency_key=old_key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="operator:synthetic-postread",
+            observed_at=NOW,
+        )
+        begun = call("begin", key=new_key)["record"]
+        self.assertIsNotNone(begun["execution_started_at"])
+        self.assertEqual(begun["state"], "in_progress")
+
     def test_closed_rpc_table_denies_sql_clearances_completion_and_paths(self) -> None:
         service = self.make_service()
         calls = [

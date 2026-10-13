@@ -1753,6 +1753,35 @@ class SnapshotStore:
             if record.execution_started_at is not None:
                 raise ValueError("write API request execution already started")
 
+            # The independent owner must not admit a second externally
+            # effectful Begin while any earlier owner-constructed UNKNOWN is
+            # still unresolved. This test and the Begin update share the same
+            # BEGIN IMMEDIATE transaction, including with concurrent
+            # quarantine and trusted operator-clearance commits.
+            #
+            # Only the canonical owner-fixed error envelope is a candidate:
+            # unrelated valid HTTP 202 receipts (including an idempotency key
+            # named write_outcome_unverified) must never be misclassified.
+            if connection.execute(
+                """
+                SELECT 1 FROM write_api_requests AS prior
+                LEFT JOIN write_recovery_clearances AS cleared
+                  ON cleared.idempotency_key = prior.idempotency_key
+                 AND cleared.request_sha256 = prior.request_sha256
+                WHERE prior.idempotency_key != ?
+                  AND prior.state = 'completed'
+                  AND prior.response_status = 202
+                  AND prior.execution_started_at IS NOT NULL
+                  AND cleared.idempotency_key IS NULL
+                  AND substr(
+                    prior.response_json, 1,
+                    length('{"error":"write_outcome_unverified",')
+                  ) = '{"error":"write_outcome_unverified",'
+                LIMIT 1
+                """, (idempotency_key,),
+            ).fetchone() is not None:
+                raise ValueError("unresolved owner write quarantine blocks Begin")
+
             updated = connection.execute(
                 """
                 UPDATE write_api_requests
