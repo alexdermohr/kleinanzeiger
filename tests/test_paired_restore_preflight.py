@@ -427,6 +427,94 @@ class PairedRestorePreflightTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_symlinked_directory_ancestor_must_be_rejected(self) -> None:
+        alias = self.source.parent / "alias-ancestor"
+        alias.symlink_to(self.source.parent, target_is_directory=True)
+        # Immediate parent resolves as a private real directory, but a
+        # grandparent is the attacker-controlled link.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(alias / self.source.name / self.sqlite.name, self.ledger)
+
+    def test_oversized_sparse_image_is_rejected_before_hashing(self) -> None:
+        from mark_api.paired_restore_preflight import _MAX_IMAGE_BYTES, _sha256_fd
+        oversized = self.source / "oversized.sqlite"
+        with oversized.open("wb") as target:
+            target.truncate(_MAX_IMAGE_BYTES + 1)
+        with oversized.open("rb") as source:
+            with self.assertRaisesRegex(PairPreflightError, "bounded"):
+                _sha256_fd(source.fileno())
+
+    def test_witness_wal_header_not_accepted_after_deserialization(self) -> None:
+        with sqlite3.connect(self.ledger) as source:
+            mode = source.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            self.assertEqual(str(mode).lower(), "wal")
+        with self.ledger.open("rb") as raw:
+            raw.seek(18)
+            self.assertEqual(raw.read(2), bytes((2, 2)))
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_parser_must_consume_pinned_fd_bytes_during_directory_swap(self) -> None:
+        pinned = self._pin()
+        attacker = self.source.parent / "attacker-copy"
+        attacker.mkdir(mode=0o700)
+        other = SnapshotStore(attacker / self.sqlite.name)
+        other.claim_write_api_request(
+            idempotency_key="attacker-unmatched-start", request_sha256=SHA,
+            requested_at=AT, claim_owner="attacker",
+        )
+        other.begin_write_api_request(
+            idempotency_key="attacker-unmatched-start", request_sha256=SHA,
+            claim_owner="attacker", execution_started_at=AT,
+        )
+        parked = self.source.parent / "temporarily-parked-origin"
+        from mark_api import paired_restore_preflight as pair
+        from unittest.mock import patch
+        original = pair._readonly
+        intervened = False
+
+        def swap_exactly_before_parse(path, *args, **kwargs):
+            nonlocal intervened
+            if path == self.sqlite and not intervened:
+                intervened = True
+                self.source.rename(parked)
+                attacker.rename(self.source)
+                try:
+                    return original(path, *args, **kwargs)
+                finally:
+                    self.source.rename(attacker)
+                    parked.rename(self.source)
+            return original(path, *args, **kwargs)
+
+        with patch.object(pair, "_readonly", side_effect=swap_exactly_before_parse):
+            verified = verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=pinned,
+            )
+        self.assertTrue(intervened)
+        self.assertEqual(verified["sqlite_started_count"], 0)
+        self.assertEqual(verified["witness_unresolved_count"], 0)
+
+    def test_installed_parser_never_reopens_a_filepath_after_digest(self) -> None:
+        pinned = self._pin()
+        from unittest.mock import patch
+        original_connect = sqlite3.connect
+
+        def reject_named_db_reopen(database, *args, **kwargs):
+            if str(database).startswith("file:"):
+                raise AssertionError("SQLite reopened mutable source path")
+            return original_connect(database, *args, **kwargs)
+
+        with patch(
+            "mark_api.paired_restore_preflight.sqlite3.connect",
+            side_effect=reject_named_db_reopen,
+        ):
+            report = verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=pinned,
+            )
+        self.assertEqual(report["manifest_sha256"], pinned)
+
     def test_sidecars_rejected_even_for_zero_byte_wal(self) -> None:
         expected = self._pin()
         wal = self.source / "mark.sqlite-wal"

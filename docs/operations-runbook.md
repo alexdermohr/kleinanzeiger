@@ -789,8 +789,16 @@ Create-Fence-Arten.
 Datei-Digests gegen die extern im Manifest verankerten Hashes verglichen.
 Ein abweichender SHA führt unmittelbar zum Abbruch, noch vor
 `integrity_check` oder sonstigem Schema-Parsing. Bei passenden Hashes
-wird die SQLite-Verbindung ausschließlich `query_only=ON` sowie
-`trusted_schema=OFF` ausgeführt. Der ungebundene Diagnoseaufruf
+werden die **exakt per Datei-Descriptor gepinnten Bytes** (nicht
+ein erneut geöffneter, umbenennbarer Pfad) größenbegrenzt in eine
+In-Memory-SQLite-Datenbank deserialisiert. Beide Verbindungen erzwingen
+`query_only=ON` und `trusted_schema=OFF`; der ursprüngliche
+Witness-DELETE-Journalmodus wird separat aus dem gepinnten
+SQLite-Dateiheader geprüft. Dateien über 512 MiB sind für diesen
+begrenzten Prüfpfad nicht freigegeben; es erfolgt kein unsicherer
+Dateipfad-Fallback. Symlink-Ahnen und zwischenzeitlich vertauschte
+Quellpfade werden nicht als unabhängige Provenienz akzeptiert.
+Der ungebundene Diagnoseaufruf
 `inspect_offline_pair()` ohne erwartete Hashes bleibt ausdrücklich
 **keine** vertrauenswürdige Restore-Aufnahmeprüfung.
 

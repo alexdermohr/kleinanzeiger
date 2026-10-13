@@ -20,7 +20,6 @@ import sqlite3
 import stat
 import sys
 from typing import Iterator
-from urllib.parse import quote
 
 from .container_draft import container_draft_denied
 from .fence_witness import FenceLedger, FenceWitnessError
@@ -30,6 +29,9 @@ _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _GENERATION = re.compile(r"[0-9a-f]{32}\Z")
 _MAX_MANIFEST = 16 * 1024 * 1024
 _MAX_ROWS = 250_000
+# A deliberately bounded in-memory copy is safer than reopening a mutable
+# pathname; oversized restore candidates require a different attested path.
+_MAX_IMAGE_BYTES = 512 * 1024 * 1024
 _FENCE_KEYS = frozenset({
     "sqlite_started", "sqlite_sync_open", "dashboard_pending",
     "ambiguous_creates", "ambiguous_final_creates",
@@ -103,12 +105,19 @@ def _private_path(path: Path) -> Path:
         or path != Path(os.path.normpath(path))
     ):
         raise PairPreflightError("offline path must be absolute and normalized")
-    try:
-        parent = path.parent.lstat()
-    except OSError as exc:
-        raise PairPreflightError("offline source directory unavailable") from exc
+    # The immediate parent may look private while a grandparent is a
+    # symlink. Check every lexical ancestor without following it. The
+    # separate FD-bound parser eliminates later ancestor-swap races.
+    for ancestor in path.parents:
+        try:
+            component = ancestor.lstat()
+        except OSError as exc:
+            raise PairPreflightError("offline source ancestor unavailable") from exc
+        if not stat.S_ISDIR(component.st_mode):
+            raise PairPreflightError("offline path has a symlink or invalid ancestor")
+    parent = path.parent.lstat()
     if (
-        not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid()
+        parent.st_uid != os.geteuid()
         or stat.S_IMODE(parent.st_mode) & 0o077
     ):
         raise PairPreflightError("offline source directory must be private")
@@ -155,6 +164,11 @@ def _pinned_file(path: Path) -> Iterator[int]:
 
 
 def _sha256_fd(fd: int) -> str:
+    # Fail before CPU-expensive hashing or SQLite allocation. Avoid parsing
+    # huge sparse attacker-provided images, even in diagnostic mode.
+    size = os.fstat(fd).st_size
+    if not 100 <= size <= _MAX_IMAGE_BYTES:
+        raise PairPreflightError("offline image exceeds bounded verification size")
     os.lseek(fd, 0, os.SEEK_SET)
     digest = hashlib.sha256()
     while data := os.read(fd, 1024 * 1024):
@@ -200,17 +214,53 @@ def _witness_owner_absent(path: Path) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_UN)
 
 
-def _readonly(path: Path) -> sqlite3.Connection:
-    # Both copies are required to be inert single-file images. immutable=1
-    # is NEVER suitable for reading live WAL/SHM or proving historic FD loss.
-    uri = "file:" + quote(str(path), safe="/") + "?mode=ro&immutable=1"
-    conn = sqlite3.connect(uri, uri=True, timeout=3)
+def _read_pinned_image(fd: int) -> bytes:
+    """Materialize one size-bounded source inode; no path-based reopen."""
+    info = os.fstat(fd)
+    if not 100 <= info.st_size <= _MAX_IMAGE_BYTES:
+        raise PairPreflightError("offline image exceeds bounded in-memory reader")
+    blocks: list[bytes] = []
+    offset = 0
+    while offset < info.st_size:
+        block = os.pread(fd, min(1024 * 1024, info.st_size - offset), offset)
+        if not block:
+            raise PairPreflightError("pinned image shortened during read")
+        blocks.append(block)
+        offset += len(block)
+    return b"".join(blocks)
+
+
+def _readonly(
+    path: Path, *, pinned_fd: int | None = None,
+    expected_sha256: str | None = None,
+) -> sqlite3.Connection:
+    """Parse only verified FD-sourced SQLite bytes in a private memory DB.
+
+    Do not point SQLite at /proc/self/fd/N: some VFS versions resolve it to
+    a replaceable textual pathname, reintroducing the directory-swap bug.
+    """
+    if pinned_fd is None:
+        with _pinned_file(path) as descriptor:
+            return _readonly(
+                path, pinned_fd=descriptor, expected_sha256=expected_sha256,
+            )
+    if type(pinned_fd) is not int or pinned_fd < 0:
+        raise PairPreflightError("pinned source descriptor is invalid")
+    raw = _read_pinned_image(pinned_fd)
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, str)
+        or _SHA.fullmatch(expected_sha256) is None
+        or hashlib.sha256(raw).hexdigest() != expected_sha256
+    ):
+        # A transient write between FD-hash and deserialization must not
+        # change the exact contents that the memory connection parses.
+        raise PairPreflightError("in-memory image differs from pinned digest")
+    conn = sqlite3.connect(":memory:")
     try:
-        # Never evaluate schema-defined expressions from a candidate with
-        # SQLite's default trusted_schema=ON. Even after the externally pinned
-        # digest matches, the selected trusted operator must remain isolated
-        # from SQLITE functions/views embedded in the image.
         conn.execute("PRAGMA trusted_schema=OFF")
+        if not callable(getattr(conn, "deserialize", None)):
+            raise PairPreflightError("pinned SQLite deserialization unavailable")
+        conn.deserialize(raw)
         trusted = conn.execute("PRAGMA trusted_schema").fetchone()
         if trusted is None or trusted[0] != 0:
             raise PairPreflightError("SQLite trusted_schema isolation unavailable")
@@ -223,6 +273,16 @@ def _readonly(path: Path) -> sqlite3.Connection:
     except BaseException:
         conn.close()
         raise
+
+
+def _require_witness_delete_header(fd: int) -> None:
+    """Check original rollback journal bytes (memory DB uses journal=memory)."""
+    header = os.pread(fd, 20, 0)
+    if (
+        len(header) != 20 or header[:16] != b"SQLite format 3\x00"
+        or header[18:20] != b"\x01\x01"
+    ):
+        raise PairPreflightError("Witness file is not a DELETE-journal SQLite image")
 
 
 def _rows(conn: sqlite3.Connection, sql: str) -> list[sqlite3.Row]:
@@ -334,10 +394,13 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
 def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
         raise PairPreflightError("Witness integrity check failed")
+    # The exact original DELETE-journal source header was checked on its
+    # pinned FD. Deserialized in-memory SQLite reports journal_mode=memory,
+    # which must not be confused with a WAL-mode source that lacked sidecars.
     journal = conn.execute("PRAGMA journal_mode").fetchone()
     if (
         conn.execute("PRAGMA user_version").fetchone()[0] != 2
-        or journal is None or journal[0].lower() != "delete"
+        or journal is None or journal[0].lower() != "memory"
     ):
         raise PairPreflightError("unsupported witness schema or journal")
     objects = {
@@ -438,7 +501,15 @@ def inspect_offline_pair(
                 raise PairPreflightError(
                     "offline candidate content differs from independent image digest anchors"
                 )
-            with closing(_readonly(sql)) as sql_db, closing(_readonly(witness)) as wit_db:
+            _require_witness_delete_header(wit_fd)
+            with (
+                closing(_readonly(
+                    sql, pinned_fd=sql_fd, expected_sha256=sql_hash,
+                )) as sql_db,
+                closing(_readonly(
+                    witness, pinned_fd=wit_fd, expected_sha256=wit_hash,
+                )) as wit_db,
+            ):
                 sql_fences = _sqlite_inventory(sql_db)
                 wit_fences = _witness_inventory(wit_db)
             if sql_fences["sqlite_started"] != wit_fences["witness_started"]:
