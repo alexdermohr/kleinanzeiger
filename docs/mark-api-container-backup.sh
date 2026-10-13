@@ -16,7 +16,7 @@ exit 1
 /bin/sh /etc/mark-api/bootstrap.sh \
     --db /var/lib/mark-api/mark.sqlite \
     --backup-dir /var/lib/mark-api-backups \
-    --service-account mark-api-owner
+    --service-account mark-api-storage
 exec /opt/mark-api/venv/bin/python -I -m mark_api.backup_cli \
     --db /var/lib/mark-api/mark.sqlite \
     --backup "/var/lib/mark-api-backups/mark-${instance}.sqlite"
