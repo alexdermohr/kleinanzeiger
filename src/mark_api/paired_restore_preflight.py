@@ -34,6 +34,7 @@ _MAX_ROWS = 250_000
 _MAX_IMAGE_BYTES = 512 * 1024 * 1024
 _FENCE_KEYS = frozenset({
     "sqlite_started", "sqlite_sync_open", "sqlite_quarantined",
+    "sqlite_media_unresolved",
     "dashboard_pending",
     "ambiguous_creates", "ambiguous_final_creates",
     "witness_started", "witness_unresolved",
@@ -84,7 +85,7 @@ def _manifest(raw: bytes, expected_sha: str) -> dict[str, object]:
             "witness_sha256", "fences",
         }
         or type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 3
+        or manifest["schema_version"] != 4
         or not isinstance(manifest["generation"], str)
         or _GENERATION.fullmatch(manifest["generation"]) is None
         or any(
@@ -337,6 +338,50 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
             if response != SnapshotStore._unverified_write_api_response(key):
                 raise PairPreflightError("SQLite owner quarantine response invalid")
             quarantined.append([key, sha])
+    # HTTP-completed media Writes are a SECOND independent durable source of
+    # ambiguity. The browser/executor may fail after invoking the platform,
+    # persisting e.g. HTTP 500 without ever writing a Create checkpoint or
+    # create_operation_receipts row. Mirror the exact media response
+    # classification of SnapshotStore.create_recovery_pending(), not HTTP
+    # status alone. Do not mistake response persistence for external proof.
+    media_unresolved = []
+    for row in _rows(
+        conn,
+        "SELECT w.idempotency_key,w.request_sha256,w.response_json "
+        "FROM write_api_requests AS w "
+        "LEFT JOIN write_recovery_clearances AS c "
+        "ON c.idempotency_key=w.idempotency_key "
+        "AND c.request_sha256=w.request_sha256 "
+        "WHERE w.state='completed' AND c.idempotency_key IS NULL "
+        "AND instr(w.response_json,'media_persistence_confirmed')>0 "
+        "ORDER BY w.idempotency_key",
+    ):
+        key, sha, response = row
+        key, sha = _text(key), _text(sha)
+        if _SHA.fullmatch(sha) is None or not isinstance(response, str):
+            raise PairPreflightError("SQLite media recovery identity invalid")
+        try:
+            envelope = json.loads(response, object_pairs_hook=_unique_object)
+        except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+            raise PairPreflightError("SQLite media response malformed") from exc
+        if (
+            not isinstance(envelope, dict)
+            or not isinstance(envelope.get("media_persistence_confirmed"), bool)
+        ):
+            raise PairPreflightError("SQLite media response outcome invalid")
+        receipt = envelope.get("operation_receipt")
+        if receipt is None:
+            media_unresolved.append([key, sha])
+            continue
+        if not isinstance(receipt, dict):
+            raise PairPreflightError("SQLite media receipt invalid")
+        outcome, invoked = receipt.get("outcome"), receipt.get("writer_invoked")
+        if not isinstance(outcome, str) or not isinstance(invoked, bool):
+            raise PairPreflightError("SQLite media receipt outcome invalid")
+        if outcome not in {"confirmed", "ambiguous", "precondition_failed"}:
+            raise PairPreflightError("SQLite media outcome unsupported")
+        if invoked and outcome == "ambiguous":
+            media_unresolved.append([key, sha])
     pending_sync = [
         int(row[0]) for row in _rows(
             conn, "SELECT id FROM sync_attempts WHERE outcome='in_progress' ORDER BY id",
@@ -410,6 +455,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         "sqlite_started": starts,
         "sqlite_sync_open": pending_sync,
         "sqlite_quarantined": quarantined,
+        "sqlite_media_unresolved": media_unresolved,
         "dashboard_pending": dashboard,
         "ambiguous_creates": ambiguous,
         "ambiguous_final_creates": ambiguous_final,
@@ -651,8 +697,10 @@ def verify_offline_pair(
                     len(fences["ambiguous_creates"])
                     + len(fences["ambiguous_final_creates"])
                     + len(fences["sqlite_quarantined"])
+                    + len(fences["sqlite_media_unresolved"])
                 ),
                 "sqlite_quarantined_count": len(fences["sqlite_quarantined"]),
+                "sqlite_media_unresolved_count": len(fences["sqlite_media_unresolved"]),
                 "ambiguous_final_create_count": len(fences["ambiguous_final_creates"]),
                 "offline_only": True,
                 "restore_authorized": False,

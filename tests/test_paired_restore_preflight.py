@@ -77,7 +77,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def _pin(self, *, generation: str = GENERATION) -> str:
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
-        manifest = {"schema_version": 3, "generation": generation, **inspected}
+        manifest = {"schema_version": 4, "generation": generation, **inspected}
         raw = _canonical(manifest)
         self.manifest.write_bytes(raw)
         os.chmod(self.manifest, 0o600)
@@ -197,7 +197,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
     def test_v1_manifest_not_accepted_after_fence_inventory_schema_upgrade(self) -> None:
         expected = self._pin()
         loaded = json.loads(self.manifest.read_bytes())
-        self.assertEqual(loaded["schema_version"], 3)
+        self.assertEqual(loaded["schema_version"], 4)
         loaded["schema_version"] = 1
         older = _canonical(loaded)
         self.manifest.write_bytes(older)
@@ -207,6 +207,121 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 expected_manifest_sha256=hashlib.sha256(older).hexdigest(),
             )
         self.assertNotEqual(hashlib.sha256(older).hexdigest(), expected)
+
+    def _persist_media_http_response(
+        self, *, key: str, status: int, envelope: dict[str, object],
+    ) -> None:
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=status,
+            response_json=json.dumps(
+                envelope, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+            ),
+            completed_at=AT,
+        )
+
+    def test_http500_missing_media_receipt_is_an_unresolved_restore_fence(self) -> None:
+        key = "media:executor-failure"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={"media_persistence_confirmed": False, "operation_receipt": None},
+        )
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="different-key", claim_owner="separate-owner",
+        ))
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["sqlite_quarantined"], [])
+        self.assertEqual(inspected["fences"]["ambiguous_final_creates"], [])
+        self.assertEqual(inspected["fences"]["sqlite_media_unresolved"], [[key, SHA]])
+        manifest_sha = self._pin()
+        report = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=manifest_sha,
+        )
+        self.assertEqual(report["sqlite_media_unresolved_count"], 1)
+        self.assertEqual(report["ambiguous_create_count"], 1)
+        self.assertFalse(report["restore_authorized"])
+
+    def test_ambiguous_media_receipt_in_http500_response_is_fenced(self) -> None:
+        key = "media:unknown-500"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={
+                "media_persistence_confirmed": False,
+                "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
+            },
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["sqlite_media_unresolved"],
+            [[key, SHA]],
+        )
+
+    def test_valid_confirmed_media_http_response_is_not_a_new_media_fence(self) -> None:
+        key = "media:final-confirmed"
+        self._persist_media_http_response(
+            key=key, status=200,
+            envelope={
+                "media_persistence_confirmed": True,
+                "operation_receipt": {"outcome": "confirmed", "writer_invoked": True},
+            },
+        )
+        self.assertFalse(SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).create_recovery_pending(
+            exclude_idempotency_key="different-key", claim_owner="separate-owner",
+        ))
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["sqlite_media_unresolved"],
+            [],
+        )
+
+    def test_malformed_completed_media_result_cannot_yield_empty_fence_inventory(self) -> None:
+        self._persist_media_http_response(
+            key="media:bad500", status=500,
+            envelope={
+                "media_persistence_confirmed": "false",
+                "operation_receipt": None,
+            },
+        )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_only_exact_clearance_removes_failed_media_http_response_fence(self) -> None:
+        key = "media:failed-clear"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={"media_persistence_confirmed": False, "operation_receipt": None},
+        )
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic-test-only:media-operator-postread",
+            observed_at=AT,
+        )
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="different-key", claim_owner="separate-owner",
+        ))
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["sqlite_media_unresolved"],
+            [],
+        )
+
+    def test_v3_manifest_rejected_after_media_recovery_fence_upgrade(self) -> None:
+        expected = self._pin()
+        manifest = json.loads(self.manifest.read_bytes())
+        self.assertEqual(manifest["schema_version"], 4)
+        manifest["schema_version"] = 3
+        downgraded = _canonical(manifest)
+        self.manifest.write_bytes(downgraded)
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=hashlib.sha256(downgraded).hexdigest(),
+            )
+        self.assertNotEqual(expected, hashlib.sha256(downgraded).hexdigest())
 
     def test_owner_quarantined_write_is_a_distinct_unresolved_restore_fence(self) -> None:
         self._start(key="quarantine:no-create-receipt")
@@ -275,7 +390,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
     def test_v2_manifest_rejected_when_quarantine_fence_schema_is_upgraded(self) -> None:
         old_sha = self._pin()
         raw = json.loads(self.manifest.read_bytes())
-        self.assertEqual(raw["schema_version"], 3)
+        self.assertEqual(raw["schema_version"], 4)
         raw["schema_version"] = 2
         old_bytes = _canonical(raw)
         self.manifest.write_bytes(old_bytes)

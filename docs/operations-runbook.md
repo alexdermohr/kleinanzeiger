@@ -756,12 +756,13 @@ Symlinks oder offenen Witness-Owner-Leases. Die ursprüngliche
 während des gesamten Scans ein exklusives `flock` und verweigert
 fehlende/unsichere Locks; sie erzeugt oder repariert diese nicht.
 
-Das kanonische JSON-Manifest hat die Felder `schema_version=3`,
+Das kanonische JSON-Manifest hat die Felder `schema_version=4`,
 `generation` (32 lowercase hex), `sqlite_sha256`, `witness_sha256`
 und `fences`. `fences` enthält genau `sqlite_started`,
 `sqlite_sync_open`, `dashboard_pending`, `ambiguous_creates`,
 `ambiguous_final_creates`, `witness_started`, `witness_unresolved`,
-`witness_chain_tip`, `sqlite_quarantined`. Die bisherigen Schema-v1/v2-Manifeste bleiben nach dieser
+`witness_chain_tip`, `sqlite_quarantined`, `sqlite_media_unresolved`.
+Die bisherigen Schema-v1/v2/v3-Manifeste bleiben nach dieser
 sicherheitsrelevanten Erweiterung grundsätzlich ungültig.
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
@@ -793,6 +794,17 @@ gebundene persistierte Recovery-Clearance nimmt ihn aus diesem Teilinventar.
 `ambiguous_create_count` umfasst auch diese potentiell bereits auf
 Kleinanzeigen ausgeführten Aufträge. Ein fehlerhaftes UNKNOWN-Envelope
 wird nicht als gültige Entwarnung akzeptiert.
+Unabhängig davon wird jede bereits HTTP-abgeschlossene Media-Write-
+Antwort mit ungelöstem Outcome aus `write_api_requests` als eigenes
+`sqlite_media_unresolved`-Fence attestiert. Dies gilt insbesondere für
+HTTP 500 nach Browser-Submit, wenn ein `operation_receipt` fehlt,
+sowie für einen persistierten aufgerufenen `ambiguous`-Receipt.
+Nur eine tatsächlich an denselben Write-Key und Request-SHA gebundene
+unabhängige Recovery-Clearance nimmt die Operation aus dem Inventar.
+Ungültige oder untypisierte Media-Response-Envelopes werden verweigert;
+`sqlite_media_unresolved_count` und `ambiguous_create_count`
+zählen diese offenen Vorgänge konservativ. Es wird kein HTTP-Status
+zur unabhängigen Bestätigung eines Kleinanzeigen-Ergebnisses erhoben.
 
 **Vor jedem Öffnen durch SQLite** werden beide bereits per FD gepinnten
 Datei-Digests gegen die extern im Manifest verankerten Hashes verglichen.
