@@ -127,7 +127,7 @@ for invalid in (
 ):
     try:
         client.claim_dashboard_pending_write(
-            scope='hostile:payload',resource_key='hostile:payload',
+            scope='create',resource_key='create',
             idempotency_key='uid:hostile:json',method='POST',
             path='/api/write/ads',payload_json=invalid,ad_id=None,
         )

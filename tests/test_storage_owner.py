@@ -132,36 +132,118 @@ class StorageOwnerUnitTests(unittest.TestCase):
         self.assertEqual(client.dashboard_pending_writes(), ())
         for number in range(22):
             details = dict(
-                scope=f"scope:{number:03}", resource_key=f"resource:{number:03}",
-                idempotency_key=f"pending:{number:03}", method="POST",
-                path="/api/write/ads", payload_json='{"title":"known"}',
-                ad_id=None,
+                scope=f"ad:{100 + number}:update",
+                resource_key=f"ad:{100 + number}",
+                idempotency_key=f"pending:{number:03}", method="PATCH",
+                path=f"/api/write/ads/{100 + number}",
+                payload_json='{"title":"known"}',
+                ad_id=str(100 + number),
             )
             self.assertTrue(client.claim_dashboard_pending_write(**details))
             self.assertFalse(client.claim_dashboard_pending_write(**details))
         pending = client.dashboard_pending_writes()
         self.assertEqual(len(pending), 22)
         self.assertEqual([item.scope for item in pending],
-                         [f"scope:{number:03}" for number in range(22)])
+                         [f"ad:{100 + number}:update" for number in range(22)])
         self.assertEqual(pending[0].payload_json, '{"title":"known"}')
         self.assertFalse(any(item.acknowledged for item in pending))
         with self.assertRaises(StorageOwnerError):
             service.dispatch({
                 "version": 1, "op": "dashboard_pending_ack",
-                "scope": "scope:000", "key": "pending:000",
+                "scope": "ad:100:update", "key": "pending:000",
             })
         with self.assertRaises(StorageOwnerError):
             service.dispatch({
                 "version": 1, "op": "dashboard_pending_claim",
-                "scope": "scope:023", "resource_key": "resource:023",
-                "key": "pending:023", "method": "POST", "path": "/api/write/ads",
-                "payload_json": None, "ad_id": None,
+                "scope": "ad:123:update", "resource_key": "ad:123",
+                "key": "pending:023", "method": "PATCH",
+                "path": "/api/write/ads/123",
+                "payload_json": '{"title":"known"}', "ad_id": "123",
                 "sql": "DELETE FROM write_recovery_clearances",
             })
         self.assertEqual(len(client.dashboard_pending_writes()), 22)
         self.assertFalse(service.store.has_write_recovery_clearance(
             idempotency_key="pending:000", request_sha256=SHA,
         ))
+
+    def test_pending_owner_rejects_forged_route_identity_before_any_claim(self) -> None:
+        service = self.make_service()
+        good = {
+            "version": 1, "op": "dashboard_pending_claim",
+            "scope": "ad:123:update", "resource_key": "ad:123",
+            "key": "pending:unchanged", "method": "PATCH",
+            "path": "/api/write/ads/123", "ad_id": "123",
+            "payload_json": '{"title":"safe"}',
+        }
+        invalid = (
+            {"scope": "create"},
+            {"scope": "ad:124:update"},
+            {"resource_key": "create"},
+            {"resource_key": "ad:124"},
+            {"ad_id": "124"},
+            {"ad_id": None},
+            {"method": "DELETE"},
+            {"path": "/api/write/ads/124"},
+            {"path": "/api/write/ads/123?ignored=1"},
+            {"path": "/api/write/ads/%31%32%33"},
+            {"path": "/api/write/ads/123/activate"},
+            {"path": "/api/write/media/discard"},
+            {"path": "/api/write/media/stage"},
+            {"path": "/api/write/ads/123/../123"},
+            {"payload_json": None},
+            {"payload_json": '{"title":"ok","title":"different"}'},
+            {"payload_json": '{"title":NaN}'},
+            {"payload_json": '{"price":1e999}'},
+            {"payload_json": '{"title":"\\ud800"}'},
+            {"payload_json": '{"z":2, "a":1}'},
+            {"payload_json": '{"a":' + '[' * 65 + '0' + ']' * 65 + '}'},
+        )
+        for changes in invalid:
+            with self.subTest(changes=changes):
+                with patch.object(service.store, "claim_dashboard_pending_write") as writer:
+                    with self.assertRaises(StorageOwnerError):
+                        service.dispatch({**good, **changes})
+                    writer.assert_not_called()
+                self.assertEqual(
+                    SnapshotStore(self.database, create_if_missing=False)
+                    .dashboard_pending_writes(), (),
+                )
+        # The valid exact claim remains allowed after all failed attempts.
+        self.assertEqual(service.dispatch(good), {"created": True})
+        self.assertEqual(service.dispatch(good), {"created": False})
+        self.assertEqual(len(service.store.dashboard_pending_writes()), 1)
+
+    def test_pending_owner_accepts_only_six_actual_platform_write_routes(self) -> None:
+        service = self.make_service()
+        from mark_api.storage_owner import _dashboard_pending_contract
+        expected = (
+            ("POST", "/api/write/ads", ("create", "create", None, True)),
+            ("POST", "/api/write/media/ads", ("create-media", "create", None, True)),
+            ("PATCH", "/api/write/ads/123", ("ad:123:update", "ad:123", "123", True)),
+            ("DELETE", "/api/write/ads/124", ("ad:124:delete", "ad:124", "124", False)),
+            ("POST", "/api/write/ads/125/pause", ("ad:125:pause", "ad:125", "125", False)),
+            ("POST", "/api/write/ads/126/activate", ("ad:126:activate", "ad:126", "126", False)),
+        )
+        for index, (method, path, binding) in enumerate(expected):
+            with self.subTest(method=method, path=path):
+                self.assertEqual(_dashboard_pending_contract(method, path), binding)
+                # Direct owner dispatch is the authoritative trust boundary,
+                # not the HTTP dashboard helper.
+                scope, resource, ad_id, has_body = binding
+                if index == 1:
+                    # The earlier Create fence must block simultaneous media
+                    # Create; test classification without weakening the fence.
+                    continue
+                response = service.dispatch({
+                    "version": 1, "op": "dashboard_pending_claim",
+                    "scope": scope, "resource_key": resource,
+                    "key": f"ui:platform:{index}", "method": method,
+                    "path": path,
+                    "payload_json": '{"title":"safe"}' if has_body else None,
+                    "ad_id": ad_id,
+                })
+                self.assertEqual(response, {"created": True})
+        self.assertEqual(len(service.store.dashboard_pending_writes()), 5)
 
     def test_dashboard_pending_owner_rejects_json_bombs_before_persistence(self) -> None:
         service = self.make_service()

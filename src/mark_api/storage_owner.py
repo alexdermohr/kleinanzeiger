@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -36,6 +37,7 @@ from typing import Any, Iterable
 from urllib.parse import quote
 
 from .container_draft import container_draft_denied
+from .strict_json import strict_json_object
 from .fence_witness import (
     _canonical_json, _file_identity, _private_directory,
     _strict_json, FenceWitnessError,
@@ -62,6 +64,10 @@ _MAX_SYNC_ITEMS = 2048
 _MAX_INBOX_BATCH = 4
 _MAX_INBOX_ITEMS = 2048
 _TRACKED_PAGE = 64
+_PENDING_AD_PATH = re.compile(
+    r"/api/write/ads/([0-9]{1,32})(?:/(pause|activate))?\Z", re.ASCII,
+)
+
 _MAX_HISTORY_PAGE = 16
 _MAX_HISTORY_RECORDS = 200000
 _SYNC_DIGEST_SEED = hashlib.sha256(b"mark-storage-owner-sync-v1").hexdigest()
@@ -156,6 +162,54 @@ def _record_from_json(value: object) -> WriteApiRequestRecord:
         claim_owner=claimed, execution_started_at=started, completed_at=completed,
         response_status=status, response_json=response_json,
     )
+
+
+def _dashboard_pending_contract(
+    method: object, path: object,
+) -> tuple[str, str, str | None, bool] | None:
+    """Independent owner admission: only exact platform Write route identities.
+
+    The browser executor cannot choose a recovery scope, resource, ad identity,
+    or local-media route. No wildcard, percent-encoded or query-path aliases.
+    """
+    if type(method) is not str or type(path) is not str:
+        return None
+    if method == "POST" and path == "/api/write/ads":
+        return ("create", "create", None, True)
+    if method == "POST" and path == "/api/write/media/ads":
+        return ("create-media", "create", None, True)
+    match = _PENDING_AD_PATH.fullmatch(path)
+    if match is None:
+        return None
+    ad_id, state_action = match.groups()
+    if state_action is not None:
+        if method != "POST":
+            return None
+        return (f"ad:{ad_id}:{state_action}", f"ad:{ad_id}", ad_id, False)
+    if method == "PATCH":
+        return (f"ad:{ad_id}:update", f"ad:{ad_id}", ad_id, True)
+    if method == "DELETE":
+        return (f"ad:{ad_id}:delete", f"ad:{ad_id}", ad_id, False)
+    return None
+
+
+def _validate_pending_wire_body(payload_json: str | None) -> None:
+    if payload_json is None:
+        return
+    try:
+        # The dashboard canonicalizes after strict wire decoding. Reject deep,
+        # ambiguous or noncanonical serialized intents before persistence.
+        data = strict_json_object(payload_json.encode("utf-8"))
+        canonical = json.dumps(
+            data, ensure_ascii=False, sort_keys=True,
+            allow_nan=False, separators=(",", ":"),
+        )
+        canonical.encode("utf-8")  # No unpaired surrogate scalars.
+    except (UnicodeError, ValueError, OverflowError, RecursionError) as exc:
+        raise StorageOwnerError("invalid pending write JSON") from exc
+    if canonical != payload_json:
+        raise StorageOwnerError("pending write JSON is not canonical")
+
 
 
 def _pending_as_json(record: DashboardPendingWrite) -> dict[str, object]:
@@ -1093,15 +1147,16 @@ class StorageOwnerServer(
             payload = _limited_text(request["payload_json"], bound=64 * 1024,
                                     optional=True, allow_linebreaks=True)
             ad_id = _limited_text(request["ad_id"], bound=32, optional=True)
+            expected = _dashboard_pending_contract(method, path)
             if (
-                len(key) > 128 or method not in ("POST", "PATCH", "DELETE")
+                len(key) > 128
                 or any(ch.isspace() for text in (scope, resource_key, key, path)
                        for ch in text)
-                or (ad_id is not None and (
-                    not ad_id.isascii() or not ad_id.isdigit()
-                ))
+                or expected is None
+                or (scope, resource_key, ad_id, payload is not None) != expected
             ):
-                raise StorageOwnerError("pending claim fields invalid")
+                raise StorageOwnerError("pending claim operation binding invalid")
+            _validate_pending_wire_body(payload)
             created = self.store.claim_dashboard_pending_write(
                 scope=scope, resource_key=resource_key, idempotency_key=key,
                 method=method, path=path, payload_json=payload, ad_id=ad_id,
