@@ -32,7 +32,8 @@ _MAX_MANIFEST = 16 * 1024 * 1024
 _MAX_ROWS = 250_000
 _FENCE_KEYS = frozenset({
     "sqlite_started", "sqlite_sync_open", "dashboard_pending",
-    "ambiguous_creates", "witness_started", "witness_unresolved",
+    "ambiguous_creates", "ambiguous_final_creates",
+    "witness_started", "witness_unresolved",
     "witness_chain_tip",
 })
 
@@ -80,7 +81,7 @@ def _manifest(raw: bytes, expected_sha: str) -> dict[str, object]:
             "witness_sha256", "fences",
         }
         or type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 1
+        or manifest["schema_version"] != 2
         or not isinstance(manifest["generation"], str)
         or _GENERATION.fullmatch(manifest["generation"]) is None
         or any(
@@ -284,11 +285,34 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     ]
     if any(row <= 0 for row in ambiguous):
         raise PairPreflightError("SQLite ambiguous create identity invalid")
+    # Checkpoints are not the only root of a Create recovery fence: a media
+    # submit can durably persist an AMBIGUOUS final receipt directly, without
+    # any earlier confirmed checkpoint. Mirror SnapshotStore's exact
+    # create_recovery_pending predicate, including its operation-bound
+    # independent clearance join. A missing source request/claim is NOT an
+    # implicit clearance: the unmatched receipt remains an unresolved root.
+    ambiguous_final = [
+        int(row[0]) for row in _rows(
+            conn,
+            "SELECT r.id FROM create_operation_receipts AS r "
+            "LEFT JOIN write_api_requests AS w "
+            "ON r.authorization_reference = ('write-api:' || w.idempotency_key) "
+            "LEFT JOIN write_recovery_clearances AS c "
+            "ON c.idempotency_key = w.idempotency_key "
+            "AND c.request_sha256 = w.request_sha256 "
+            "WHERE r.operation='create' AND r.outcome='ambiguous' "
+            "AND r.writer_invoked=1 AND r.media_post_read_status IS NOT NULL "
+            "AND c.idempotency_key IS NULL ORDER BY r.id",
+        )
+    ]
+    if any(row <= 0 for row in ambiguous_final):
+        raise PairPreflightError("SQLite ambiguous final create identity invalid")
     return {
         "sqlite_started": starts,
         "sqlite_sync_open": pending_sync,
         "dashboard_pending": dashboard,
         "ambiguous_creates": ambiguous,
+        "ambiguous_final_creates": ambiguous_final,
     }
 
 
@@ -432,7 +456,11 @@ def verify_offline_pair(
                 "witness_unresolved_count": len(fences["witness_unresolved"]),
                 "dashboard_pending_count": len(fences["dashboard_pending"]),
                 "sync_open_count": len(fences["sqlite_sync_open"]),
-                "ambiguous_create_count": len(fences["ambiguous_creates"]),
+                "ambiguous_create_count": (
+                    len(fences["ambiguous_creates"])
+                    + len(fences["ambiguous_final_creates"])
+                ),
+                "ambiguous_final_create_count": len(fences["ambiguous_final_creates"]),
                 "offline_only": True,
                 "restore_authorized": False,
                 "external_write_authorized": False,

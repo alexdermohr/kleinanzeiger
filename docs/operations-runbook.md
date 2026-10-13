@@ -756,11 +756,13 @@ Symlinks oder offenen Witness-Owner-Leases. Die ursprüngliche
 während des gesamten Scans ein exklusives `flock` und verweigert
 fehlende/unsichere Locks; sie erzeugt oder repariert diese nicht.
 
-Das kanonische JSON-Manifest hat die Felder `schema_version=1`,
+Das kanonische JSON-Manifest hat die Felder `schema_version=2`,
 `generation` (32 lowercase hex), `sqlite_sha256`, `witness_sha256`
 und `fences`. `fences` enthält genau `sqlite_started`,
 `sqlite_sync_open`, `dashboard_pending`, `ambiguous_creates`,
-`witness_started`, `witness_unresolved`, `witness_chain_tip`.
+`ambiguous_final_creates`, `witness_started`, `witness_unresolved`,
+`witness_chain_tip`. Die vorigen Schema-v1-Manifeste bleiben nach dieser
+sicherheitsrelevanten Erweiterung grundsätzlich ungültig.
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
 vollständige File-Digests, SQLite-Integrität/Schemata, die Witness-
@@ -773,6 +775,15 @@ Media-Receipt ohne nachgewiesene lokale Media-Persistenz kann diesen
 Checkpoint nicht aus dem Offline-Pending-Inventar entfernen. Ein
 zugehöriges bestätigtes Receipt bedeutet dabei **keine** unabhängige
 Bestätigung des tatsächlichen Kleinanzeigen-Zustands.
+Auch ein **bereits abschließend persistiertes** Media-Create-Receipt mit
+`outcome=ambiguous`, `writer_invoked=1` und vorhandenem Media-Postread
+bleibt ein eigenständiges offenes Fence, selbst **ohne** Checkpoint.
+Das Inventar `ambiguous_final_creates` speichert die betroffenen
+Receipt-Zeilen-IDs; nur eine exakt an den ursprünglichen begonnenen
+Write-Request samt SHA gebundene unabhängige Recovery-Clearance kann
+dieses Teilinventar ausnehmen. Der Offline-Checker vergibt niemals
+solche Clearances. `ambiguous_create_count` zählt beide offenen
+Create-Fence-Arten.
 
 Der Aufruf erfolgt **erst nach** Bereitstellung aller vertrauenswürdig
 erzeugten Kopien und des Digest-Ankers außerhalb der DB-/Witness-Volumes:

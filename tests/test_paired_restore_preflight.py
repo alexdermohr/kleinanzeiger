@@ -77,7 +77,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def _pin(self, *, generation: str = GENERATION) -> str:
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
-        manifest = {"schema_version": 1, "generation": generation, **inspected}
+        manifest = {"schema_version": 2, "generation": generation, **inspected}
         raw = _canonical(manifest)
         self.manifest.write_bytes(raw)
         os.chmod(self.manifest, 0o600)
@@ -107,6 +107,106 @@ class PairedRestorePreflightTests(unittest.TestCase):
         )
         checkpoint_id = store.append_create_operation_checkpoint(receipt)
         return receipt, checkpoint_id
+
+    def _ambiguous_final_create(
+        self, *, reference: str = "write-api:media-unverified",
+        media_status: MediaPostReadStatus | None = MediaPostReadStatus.UNKNOWN,
+    ) -> int:
+        """Browser wrote an ambiguous final media receipt without any checkpoint."""
+        receipt = CreateOperationReceipt(
+            operation="create", started_at=AT, completed_at=AT,
+            outcome=OperationOutcome.AMBIGUOUS,
+            pre_read_status="success_empty",
+            confirmation_pre_read_status="success_empty",
+            post_read_status="unknown",
+            confirmation_post_read_status="unknown",
+            content_post_read_status="unknown",
+            writer_invoked=True, created_ad_id=None,
+            authorization_by="offline-test-owner",
+            authorization_reference=reference,
+            media_post_read_status=media_status,
+            media_persistence_confirmed=False,
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).append_create_operation_receipt(receipt)
+        with sqlite3.connect(self.sqlite) as connection:
+            return int(connection.execute(
+                "SELECT MAX(id) FROM create_operation_receipts",
+            ).fetchone()[0])
+
+    def test_ambiguous_final_media_receipt_without_checkpoint_is_manifested(self) -> None:
+        receipt_id = self._ambiguous_final_create()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new", claim_owner="another-runtime",
+        ))
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["ambiguous_creates"], [])
+        self.assertEqual(inspected["fences"]["ambiguous_final_creates"], [receipt_id])
+        pinned = self._pin()
+        receipt = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=pinned,
+        )
+        self.assertEqual(receipt["ambiguous_create_count"], 1)
+        self.assertEqual(receipt["ambiguous_final_create_count"], 1)
+
+    def test_nonmedia_ambiguous_final_create_is_not_media_recovery_fence(self) -> None:
+        self._ambiguous_final_create(media_status=None)
+        self.assertFalse(SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).create_recovery_pending(
+            exclude_idempotency_key="new", claim_owner="another-runtime",
+        ))
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_final_creates"], [],
+        )
+
+    def test_unrelated_operator_clearance_cannot_hide_ambiguous_final_receipt(self) -> None:
+        receipt_id = self._ambiguous_final_create(reference="write-api:unrelated")
+        self._start(key="separate-write")
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.record_write_recovery_clearance(
+            idempotency_key="separate-write", request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic-only:operator-outcome", observed_at=AT,
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new", claim_owner="another-runtime",
+        ))
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_final_creates"],
+            [receipt_id],
+        )
+
+    def test_exact_cleared_final_receipt_no_longer_adds_unresolved_media_fence(self) -> None:
+        self._start(key="media-exact")
+        self._ambiguous_final_create(reference="write-api:media-exact")
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.record_write_recovery_clearance(
+            idempotency_key="media-exact", request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic-only:independent-review", observed_at=AT,
+        )
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="new", claim_owner="another-runtime",
+        ))
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["ambiguous_final_creates"], [])
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [["media-exact", SHA]])
+
+    def test_v1_manifest_not_accepted_after_fence_inventory_schema_upgrade(self) -> None:
+        expected = self._pin()
+        loaded = json.loads(self.manifest.read_bytes())
+        self.assertEqual(loaded["schema_version"], 2)
+        loaded["schema_version"] = 1
+        older = _canonical(loaded)
+        self.manifest.write_bytes(older)
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=hashlib.sha256(older).hexdigest(),
+            )
+        self.assertNotEqual(hashlib.sha256(older).hexdigest(), expected)
 
     def test_missing_witness_lock_fails_closed_without_recreating_lock(self) -> None:
         lock = self.ledger.with_name(self.ledger.name + ".lock")
