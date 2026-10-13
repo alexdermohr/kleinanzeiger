@@ -1027,6 +1027,21 @@ def _handler_factory(
                                     outcome == "never_started"
                                     and restored == exact_error
                                 )
+                            elif (
+                                status == 409
+                                and error == "write_claim_cancelled_before_begin"
+                            ):
+                                # The owner, not the browser, persisted this
+                                # fixed failure without a Begin record. Only
+                                # the exact error and a witness with no prior
+                                # start for THIS operation permit HTTP 409
+                                # replay. This never authorizes platform retry
+                                # or implies independent external observation.
+                                verified = (
+                                    record.execution_started_at is None
+                                    and outcome == "never_started"
+                                    and restored == exact_error
+                                )
                             elif status == 500 and error == "write_execution_error":
                                 verified = (
                                     outcome in {"ambiguous", "never_started"}

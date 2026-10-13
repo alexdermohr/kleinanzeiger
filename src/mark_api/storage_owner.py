@@ -1181,6 +1181,18 @@ class StorageOwnerServer(
                 allow_abandoned_takeover=False,
             )
             return {"created": claim.created, "record": _record_as_json(claim.record)}
+        if op == "cancel_unstarted" and set(request) == {
+            "version", "op", "key", "sha", "owner", "at",
+        }:
+            # No executor-selected outcome, response, receipt or clearance.
+            # A begun operation (including lost Begin ACK) can never retire.
+            record = self.store.cancel_unstarted_write_api_request(
+                idempotency_key=_validated(request["key"], _KEY),
+                request_sha256=_validated(request["sha"], _SHA),
+                claim_owner=_validated(request["owner"], _OWNER),
+                cancelled_at=_timestamp(request["at"]),
+            )
+            return {"record": _record_as_json(record)}
         if op == "begin" and set(request) == {
             "version", "op", "key", "sha", "owner", "at",
         }:
@@ -1828,6 +1840,39 @@ class StorageOwnerClient:
         if set(answer) != {"created"} or type(answer["created"]) is not bool:
             raise StorageOwnerError("pending write claim reply invalid")
         return answer["created"]
+
+    def cancel_unstarted(
+        self, *, key: str, sha: str, owner: str, at: datetime,
+    ) -> WriteApiRequestRecord:
+        """Record a fixed pre-Begin failure, never a platform success/retry."""
+        key = _validated(key, _KEY)
+        sha = _validated(sha, _SHA)
+        owner = _validated(owner, _OWNER)
+        if type(at) is not datetime:
+            raise StorageOwnerError("cancellation timestamp invalid")
+        at = _timestamp(at.isoformat())
+        answer = self._call(
+            "cancel_unstarted", key=key, sha=sha, owner=owner,
+            at=at.isoformat(),
+        )
+        if set(answer) != {"record"}:
+            raise StorageOwnerError("unstarted cancellation reply invalid")
+        record = _record_from_json(answer["record"])
+        expected = _canonical_json({
+            "error": "write_claim_cancelled_before_begin",
+            "idempotency_key": key, "platform_retry_authorized": False,
+        })
+        if (
+            (record.idempotency_key, record.request_sha256, record.claim_owner)
+            != (key, sha, owner)
+            or record.state != "completed"
+            or record.execution_started_at is not None
+            or record.completed_at is None
+            or record.response_status != 409
+            or record.response_json != expected
+        ):
+            raise StorageOwnerError("unstarted cancellation receipt not bound")
+        return record
 
     def create_pending(self, *, exclude_key: str, owner: str) -> bool:
         answer = self._call("create_pending", exclude_key=_validated(exclude_key, _KEY),

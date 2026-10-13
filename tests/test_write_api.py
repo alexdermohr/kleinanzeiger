@@ -661,6 +661,83 @@ class WriteApiTests(unittest.TestCase):
         self.assertEqual(record.state, "in_progress")
         self.assertIsNotNone(record.execution_started_at)
 
+    def test_witness_replays_only_exact_pre_begin_owner_cancellation(self) -> None:
+        key = "ui:witness:unstarted:cancel"
+        path = "/api/write/ads/1234567890"
+        payload = {"title": "owner did not start"}
+        sha = _request_fingerprint(
+            principal="api-test-owner", method="PATCH",
+            path=path, payload=payload,
+        )
+        self.store.claim_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            requested_at=NOW, claim_owner="runtime:original",
+        )
+        cancelled = self.store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            claim_owner="runtime:original", cancelled_at=NOW,
+        )
+        witness = _RecordingFenceWitness(self.store)
+        service = FakeWriteService()
+        with self.server(service, fence_witness=witness) as server:
+            status, headers, result = self.request(
+                server, "PATCH", path, payload=payload,
+                idempotency_key=key,
+            )
+            self.assertEqual(status, 409, result)
+            self.assertEqual(headers.get("Idempotency-Replayed"), "true")
+            self.assertEqual(result, json.loads(cancelled.response_json))
+            self.assertFalse(result["platform_retry_authorized"])
+            self.assertEqual(service.calls, [])
+            self.assertEqual(witness.starts, [])
+
+            # Even after an artificial "operator cleared" global flag, a
+            # WITNESS start for the original key prevents a false 409 replay.
+            witness.starts.append((key, sha, "update_content"))
+            replay, _, response = self.request(
+                server, "PATCH", path, payload=payload,
+                idempotency_key=key,
+            )
+            self.assertEqual(replay, 503, response)
+            self.assertEqual(response["error"], "witness_outcome_uncertain")
+            self.assertFalse(response["platform_retry_authorized"])
+            self.assertEqual(service.calls, [])
+        self.assertEqual(self.store.write_api_request(key), cancelled)
+
+    def test_unstarted_cancel_tampered_local_response_never_replays(self) -> None:
+        key = "ui:cancel:forged-envelope"
+        path, payload = "/api/write/ads/1234567890", {"title": "original"}
+        sha = _request_fingerprint(
+            principal="api-test-owner", method="PATCH", path=path, payload=payload,
+        )
+        self.store.claim_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            requested_at=NOW, claim_owner="runtime:original",
+        )
+        self.store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            claim_owner="runtime:original", cancelled_at=NOW,
+        )
+        with self.store._connect() as db:
+            db.execute(
+                "UPDATE write_api_requests SET response_json=? "
+                "WHERE idempotency_key=?",
+                (json.dumps({
+                    "error": "write_claim_cancelled_before_begin",
+                    "idempotency_key": key, "platform_retry_authorized": True,
+                }, sort_keys=True, separators=(",", ":")), key),
+            )
+        service = FakeWriteService()
+        witness = _RecordingFenceWitness(self.store)
+        with self.server(service, fence_witness=witness) as server:
+            status, _, body = self.request(
+                server, "PATCH", path, payload=payload, idempotency_key=key,
+            )
+        self.assertEqual(status, 503, body)
+        self.assertEqual(body["error"], "witness_outcome_uncertain")
+        self.assertFalse(body["platform_retry_authorized"])
+        self.assertEqual(service.calls, [])
+
     def test_witness_lost_completion_ack_does_not_claim_success(self) -> None:
         witness = _RecordingFenceWitness(self.store, fail_complete=True)
         service = FakeWriteService()

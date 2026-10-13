@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 import os
 import socket
 import sqlite3
@@ -308,6 +309,130 @@ class StorageOwnerUnitTests(unittest.TestCase):
         }):
             with self.assertRaises(StorageOwnerError):
                 client.dashboard_pending_writes()
+
+    def test_owner_cancels_only_exact_unstarted_claim_with_fixed_failure(self) -> None:
+        service = self.make_service()
+        def call(op: str, **kwargs: object) -> dict[str, object]:
+            return service.dispatch({"version": 1, "op": op, **kwargs})
+
+        key, owner = "ui:never-began:1", "runtime:one"
+        call("claim", key=key, sha=SHA, owner=owner, at=NOW.isoformat())
+        for kwargs in (
+            {"sha": "b" * 64}, {"owner": "runtime:other"},
+            {"response_status": 200},
+            {"response": {"operation_receipt": {"outcome": "confirmed"}}},
+            {"clearance": True}, {"sql": "DELETE FROM write_api_requests"},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(
+                (ValueError, StorageOwnerError)
+            ):
+                call("cancel_unstarted", **dict(
+                    key=key, sha=SHA, owner=owner, at=NOW.isoformat(),
+                ) | kwargs)
+        self.assertIsNone(service.store.write_api_request(key).completed_at)
+        with patch.object(
+            service.store, "complete_write_api_request",
+            side_effect=AssertionError("executor arbitrary completion reached"),
+        ), patch.object(
+            service.store, "record_write_recovery_clearance",
+            side_effect=AssertionError("unsafe clearance reached"),
+        ):
+            receipt = call(
+                "cancel_unstarted", key=key, sha=SHA, owner=owner,
+                at=NOW.isoformat(),
+            )["record"]
+        self.assertEqual(receipt["state"], "completed")
+        self.assertIsNone(receipt["execution_started_at"])
+        self.assertEqual(receipt["response_status"], 409)
+        self.assertEqual(json.loads(receipt["response_json"]), {
+            "error": "write_claim_cancelled_before_begin",
+            "idempotency_key": key, "platform_retry_authorized": False,
+        })
+        self.assertEqual(
+            call(
+                "cancel_unstarted", key=key, sha=SHA, owner=owner,
+                at=(NOW + timedelta(hours=2)).isoformat(),
+            )["record"], receipt,
+        )
+        with self.assertRaises(ValueError):
+            call("begin", key=key, sha=SHA, owner=owner, at=NOW.isoformat())
+        self.assertFalse(service.store.has_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+        ))
+
+        other = "ui:maybe-started:2"
+        call("claim", key=other, sha=SHA, owner=owner, at=NOW.isoformat())
+        started = call("begin", key=other, sha=SHA, owner=owner, at=NOW.isoformat())
+        with self.assertRaisesRegex(ValueError, "begun"):
+            call("cancel_unstarted", key=other, sha=SHA,
+                 owner=owner, at=NOW.isoformat())
+        self.assertEqual(call("read_request", key=other), started)
+
+    def test_client_unstarted_cancel_receipt_is_bound_and_unforgeable(self) -> None:
+        service = self.make_service()
+        service.runtime_uid = os.geteuid()  # Framing only.
+        service.start()
+        client = StorageOwnerClient(self.sock, expected_owner_uid=os.geteuid())
+        key, owner = "ui:socket-cancel", "runtime:one"
+        claim = client.claim(key=key, sha=SHA, owner=owner, at=NOW)
+        self.assertTrue(claim.created)
+        cancelled = client.cancel_unstarted(key=key, sha=SHA, owner=owner, at=NOW)
+        self.assertEqual(client.read_request(key), cancelled)
+        self.assertIsNone(cancelled.execution_started_at)
+        self.assertEqual(cancelled.response_status, 409)
+        self.assertEqual(
+            client.cancel_unstarted(
+                key=key, sha=SHA, owner=owner,
+                at=NOW + timedelta(days=1),
+            ), cancelled,
+        )
+        with self.assertRaises(StorageOwnerError):
+            client.begin(key=key, sha=SHA, owner=owner, at=NOW)
+        baseline = service.dispatch({
+            "version": 1, "op": "read_request", "key": key,
+        })["record"]
+        for altered in (
+            {"response_status": 200}, {"claim_owner": "runtime:other"},
+            {"response_json": '{"error":"success"}'},
+            {"execution_started_at": NOW.isoformat()},
+        ):
+            with self.subTest(altered=altered):
+                with patch.object(client, "_call", return_value={
+                    "record": {**baseline, **altered},
+                }):
+                    with self.assertRaises(StorageOwnerError):
+                        client.cancel_unstarted(
+                            key=key, sha=SHA, owner=owner, at=NOW,
+                        )
+
+    def test_begin_and_unstarted_cancel_serialize_one_exclusive_transition(self) -> None:
+        service = self.make_service()
+        service.dispatch({
+            "version": 1, "op": "claim", "key": "ui:race:1",
+            "sha": SHA, "owner": "runtime:race", "at": NOW.isoformat(),
+        })
+        def attempt(op: str) -> bool:
+            try:
+                service.dispatch({
+                    "version": 1, "op": op, "key": "ui:race:1",
+                    "sha": SHA, "owner": "runtime:race", "at": NOW.isoformat(),
+                })
+            except ValueError:
+                return False
+            return True
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(attempt, ("begin", "cancel_unstarted")))
+        self.assertEqual(outcomes.count(True), 1)
+        record = service.store.write_api_request("ui:race:1")
+        if record.execution_started_at is not None:
+            self.assertEqual(record.state, "in_progress")
+            self.assertIsNone(record.completed_at)
+        else:
+            self.assertEqual(record.state, "completed")
+            self.assertEqual(record.response_status, 409)
+        self.assertFalse(service.store.has_write_recovery_clearance(
+            idempotency_key="ui:race:1", request_sha256=SHA,
+        ))
 
     def test_exact_write_claim_and_start_persist_without_clearance(self) -> None:
         service = self.make_service()

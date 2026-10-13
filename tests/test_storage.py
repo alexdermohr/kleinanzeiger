@@ -1255,6 +1255,90 @@ class SnapshotStoreTests(unittest.TestCase):
                 execution_started_at=NOW + timedelta(seconds=2),
             )
 
+    def test_unstarted_claim_cancellation_is_exact_terminal_failure_only(self) -> None:
+        store = self.make_store()
+        key, sha, owner = "ui:unstarted:1", "d" * 64, "runtime:one"
+        store.claim_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            requested_at=NOW, claim_owner=owner,
+        )
+        for kwargs in (
+            {"request_sha256": "e" * 64},
+            {"claim_owner": "runtime:other"},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                store.cancel_unstarted_write_api_request(
+                    **dict(
+                        idempotency_key=key, request_sha256=sha,
+                        claim_owner=owner, cancelled_at=NOW,
+                    ) | kwargs
+                )
+            self.assertEqual(store.write_api_request(key).state, "in_progress")
+
+        cancelled = store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            claim_owner=owner, cancelled_at=NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(cancelled.state, "completed")
+        self.assertIsNone(cancelled.execution_started_at)
+        self.assertEqual(cancelled.completed_at, NOW + timedelta(minutes=1))
+        self.assertEqual(cancelled.response_status, 409)
+        self.assertEqual(json.loads(cancelled.response_json), {
+            "error": "write_claim_cancelled_before_begin",
+            "idempotency_key": key, "platform_retry_authorized": False,
+        })
+        self.assertEqual(
+            store.cancel_unstarted_write_api_request(
+                idempotency_key=key, request_sha256=sha,
+                claim_owner=owner, cancelled_at=NOW + timedelta(days=1),
+            ),
+            cancelled,
+        )
+        with self.assertRaises(ValueError):
+            store.begin_write_api_request(
+                idempotency_key=key, request_sha256=sha,
+                claim_owner=owner, execution_started_at=NOW,
+            )
+        with self.assertRaises(ValueError):
+            store.complete_write_api_request(
+                idempotency_key=key, request_sha256=sha, claim_owner=owner,
+                response_status=200, response_json='{"success":true}',
+                completed_at=NOW,
+            )
+        claimed_again = store.claim_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            requested_at=NOW + timedelta(days=1),
+            claim_owner="runtime:other", allow_abandoned_takeover=True,
+        )
+        self.assertFalse(claimed_again.created)
+        self.assertEqual(claimed_again.record, cancelled)
+        self.assertFalse(store.has_write_recovery_clearance(
+            idempotency_key=key, request_sha256=sha,
+        ))
+
+    def test_unstarted_cancellation_rejects_executed_or_unknown_claim(self) -> None:
+        store = self.make_store()
+        key, sha, owner = "ui:started:1", "f" * 64, "runtime:one"
+        with self.assertRaises(ValueError):
+            store.cancel_unstarted_write_api_request(
+                idempotency_key=key, request_sha256=sha,
+                claim_owner=owner, cancelled_at=NOW,
+            )
+        store.claim_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            requested_at=NOW, claim_owner=owner,
+        )
+        started = store.begin_write_api_request(
+            idempotency_key=key, request_sha256=sha,
+            claim_owner=owner, execution_started_at=NOW,
+        )
+        with self.assertRaisesRegex(ValueError, "begun"):
+            store.cancel_unstarted_write_api_request(
+                idempotency_key=key, request_sha256=sha,
+                claim_owner=owner, cancelled_at=NOW + timedelta(seconds=1),
+            )
+        self.assertEqual(store.write_api_request(key), started)
+
     def test_write_api_completion_requires_execution_start(self) -> None:
         store = self.make_store()
         fingerprint = "c" * 64

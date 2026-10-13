@@ -1756,6 +1756,104 @@ class SnapshotStore:
             assert row is not None
             return self._write_api_request_record(row)
 
+    def cancel_unstarted_write_api_request(
+        self,
+        *,
+        idempotency_key: str,
+        request_sha256: str,
+        claim_owner: str,
+        cancelled_at: datetime,
+    ) -> WriteApiRequestRecord:
+        """Retire only an exact claim that never crossed the owner Begin gate.
+
+        This is NOT external platform reconciliation, a write success or retry
+        authorization. The owner constructs the entire immutable failure
+        response; neither a browser executor nor an RPC client chooses its
+        status or contents. Historical started operations remain untouched.
+        """
+        if (
+            not isinstance(idempotency_key, str) or not idempotency_key
+            or not isinstance(request_sha256, str)
+            or len(request_sha256) != 64
+            or any(ch not in "0123456789abcdef" for ch in request_sha256)
+        ):
+            raise ValueError("exact write claim identity required")
+        owner = _validated_write_api_claim_owner(claim_owner)
+        if (
+            not isinstance(cancelled_at, datetime)
+            or cancelled_at.tzinfo is None
+            or cancelled_at.utcoffset() is None
+        ):
+            raise ValueError("cancelled_at must be timezone-aware")
+        response_json = json.dumps(
+            {
+                "error": "write_claim_cancelled_before_begin",
+                "idempotency_key": idempotency_key,
+                "platform_retry_authorized": False,
+            },
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._validate_store_schema(connection)
+            row = connection.execute(
+                """
+                SELECT idempotency_key, request_sha256, state, requested_at,
+                       claim_owner, execution_started_at, completed_at,
+                       response_status, response_json
+                FROM write_api_requests
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("write API claim is absent")
+            record = self._write_api_request_record(row)
+            if (
+                record.request_sha256 != request_sha256
+                or record.claim_owner != owner
+            ):
+                raise ValueError("write API claim binding mismatch")
+            if record.execution_started_at is not None:
+                raise ValueError("begun write cannot be cancelled")
+            if record.state == "completed":
+                if (
+                    record.response_status == 409
+                    and record.response_json == response_json
+                ):
+                    return record
+                raise ValueError("write API claim has another terminal outcome")
+            if record.state != "in_progress":
+                raise ValueError("write API claim state invalid")
+            changed = connection.execute(
+                """
+                UPDATE write_api_requests
+                SET state='completed', completed_at=?,
+                    response_status=409, response_json=?
+                WHERE idempotency_key=? AND request_sha256=?
+                  AND claim_owner=? AND state='in_progress'
+                  AND execution_started_at IS NULL
+                """,
+                (
+                    cancelled_at.isoformat(), response_json, idempotency_key,
+                    request_sha256, owner,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError("unstarted claim cancellation lost binding")
+            row = connection.execute(
+                """
+                SELECT idempotency_key, request_sha256, state, requested_at,
+                       claim_owner, execution_started_at, completed_at,
+                       response_status, response_json
+                FROM write_api_requests
+                WHERE idempotency_key=?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            assert row is not None
+            return self._write_api_request_record(row)
+
     def complete_write_api_request(
         self,
         *,
