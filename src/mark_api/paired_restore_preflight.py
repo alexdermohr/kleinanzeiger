@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, closing, contextmanager
+from datetime import datetime, timedelta
 import fcntl
 import hashlib
 import json
@@ -72,6 +73,27 @@ def _write_key(value: object) -> str:
         or _STORAGE_KEY.fullmatch(value) is None
     ):
         raise PairPreflightError("write recovery idempotency key invalid")
+    return value
+
+
+def _witness_utc_timestamp(value: object) -> str:
+    """Demand the UTC ISO time produced by FenceLedger._now().
+
+    The persistent Witness chain authenticates bytes, not field validity.
+    Its operator pending_page protocol accepts at most 64 characters for
+    started_at; bogus or long, rehashed timestamps are not recoverable.
+    """
+    if not isinstance(value, str) or not 1 <= len(value) <= 64:
+        raise PairPreflightError("Witness session/event time is outside protocol bounds")
+    try:
+        observed = datetime.fromisoformat(value)
+    except (ValueError, OverflowError) as exc:
+        raise PairPreflightError("Witness session/event time is not ISO") from exc
+    if (
+        observed.tzinfo is None or observed.utcoffset() != timedelta(0)
+        or observed.isoformat() != value
+    ):
+        raise PairPreflightError("Witness session/event time must be canonical UTC")
     return value
 
 
@@ -889,6 +911,9 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
             or (state == "active" and sealed_at is not None)
         ):
             raise PairPreflightError("witness session state invalid")
+        _witness_utc_timestamp(opened_at)
+        if sealed_at is not None:
+            _witness_utc_timestamp(sealed_at)
         sessions[sid] = state
 
     opened: set[str] = set()
@@ -913,6 +938,7 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
             )
         ):
             raise PairPreflightError("witness event identity or sequence invalid")
+        _witness_utc_timestamp(at)
         if kind == "opened":
             if (
                 sid in opened or active is not None

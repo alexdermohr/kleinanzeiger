@@ -753,7 +753,7 @@ einzelne UID-eigene reguläre Dateien (`0600`). Beide unveränderten
 Quellbilder brauchen schon **vor dem SQLite-Parser** den SQLite-Header
 für den DELETE-Journal-Modus (`01 01`); ein WAL-Header (`02 02`) ist
 auch bei fehlenden `-wal`-/`-shm`-Dateien unzulässig. Keine Sidecars,
-Symlinks oder offenen Witness-Owner-Leases. Die ursprüngliche
+Symlinks oder offenen Witness-Owner-Leases.
 Jeder lexikalische Vorfahre des privaten Staging-Verzeichnisses
 muss zudem ein echtes Verzeichnis unter Root- oder derselben Operator-UID
 sein, ohne unsichere Gruppen-/Fremdschreibrechte oder Symlink-Komponente.
@@ -768,12 +768,13 @@ separate notwendige Sicherheitsgrenze.
 während des gesamten Scans ein exklusives `flock` und verweigert
 fehlende/unsichere Locks; sie erzeugt oder repariert diese nicht.
 
-Das kanonische JSON-Manifest hat die Felder `schema_version=4`,
+Das kanonische JSON-Manifest hat die Felder `schema_version=5`,
 `generation` (32 lowercase hex), `sqlite_sha256`, `witness_sha256`
 und `fences`. `fences` enthält genau `sqlite_started`,
 `sqlite_sync_open`, `dashboard_pending`, `ambiguous_creates`,
 `ambiguous_final_creates`, `witness_started`, `witness_unresolved`,
-`witness_chain_tip`, `sqlite_quarantined`, `sqlite_media_unresolved`.
+`witness_chain_tip`, `sqlite_quarantined`, `sqlite_media_unresolved`,
+`sqlite_unverified_replay`.
 Auch das SQLite-Store-Schema muss **exakt** der aktuell im Code
 aus `SnapshotStore._initialize()` erzeugten Version-2-Referenz
 entsprechen. Das Read-only-Preflight verifiziert die vollständige Menge
@@ -800,6 +801,12 @@ Ursprungs-`sessions`-Zeile verweisen. Ein hashkonsistentes
 wiederherstellbar: die unabhängige Operator-Clearance verlangt eine
 versiegelte Ursprungssession. Die Prüfung lehnt auch verwaiste
 `opened`- und `sealed`-Events ab.
+
+Alle Witness-Session-/Event-Zeitpunkte müssen die von `FenceLedger._now()`
+erzeugte kanonische UTC-ISO-Form mit maximal 64 Zeichen tragen. Auch
+eine neu gehashte Eventkette mit einem überlangen oder unlesbaren
+`started_at` ist nicht wiederherstellbar: der unabhängige
+`FenceWitnessClient.pending_page()` lehnt sie ab.
 
 Auch eine kryptografisch konsistente Witness-Hashkette wird als
 **nicht wiederherstellbar** verworfen, wenn die dauerhaften Event-Sequenzen

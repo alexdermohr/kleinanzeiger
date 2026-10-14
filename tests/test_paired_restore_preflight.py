@@ -82,6 +82,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         legacy_media_completion: str | None = None,
         legacy_media_response: dict[str, object] | None = None,
         forged_completed_outcome: str | None = None,
+        forged_started_timestamp: str | None = None,
     ) -> None:
         """Test-only adversary reconstructs a self-consistent event hash chain.
 
@@ -112,6 +113,10 @@ class PairedRestorePreflightTests(unittest.TestCase):
                         row[2] = started_key
                         found = True
                 self.assertTrue(found)
+            if forged_started_timestamp is not None:
+                started = [row for row in events if row[1] == "started"]
+                self.assertEqual(len(started), 1)
+                started[0][8] = forged_started_timestamp
             if legacy_media_completion is not None:
                 # Forge an otherwise hash-consistent historical media sequence.
                 self.assertIn(legacy_media_completion, ("confirmed", "ambiguous"))
@@ -161,6 +166,29 @@ class PairedRestorePreflightTests(unittest.TestCase):
             # cryptographic verifier; the new preflight must supply the
             # independently necessary semantic ordering validation.
             FenceLedger._verify_chain(connection)
+
+    def test_forged_witness_started_timestamp_must_be_runtime_readable(self) -> None:
+        # A re-hashed, internally consistent event can still fail the
+        # independent operator's pending_page started_at contract (<=64).
+        self._start()
+        for forged in (
+            "2026-10-14T09:00:00+00:00" + "Z" * 65,
+            "not-a-datetime",
+            "2026-10-14T09:00:00",
+            "2026-10-14T09:00:00-04:00",
+        ):
+            with self.subTest(forged=forged):
+                self._rewrite_witness_events(forged_started_timestamp=forged)
+                with self.assertRaises(PairPreflightError):
+                    inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_forged_witness_session_timestamp_is_rejected(self) -> None:
+        self._start()
+        # Session rows are NOT part of the hashed event chain.
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("UPDATE sessions SET opened_at='invalid'")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
 
     def _pin(self, *, generation: str = GENERATION) -> str:
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
