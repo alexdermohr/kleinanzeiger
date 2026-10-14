@@ -1491,6 +1491,43 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_forged_checkpoint_domain_contract_cannot_be_settled_by_valid_final(self) -> None:
+        # Even the EXACT matching final receipt cannot hide a forged durable
+        # checkpoint whose values append_create_operation_checkpoint could
+        # never have accepted. Every subcase recreates a trusted source pair.
+        bad_rows = (
+            ("outcome", "ambiguous"),
+            ("writer_invoked", 0),
+            ("completed_at", "not-an-iso-date"),
+            ("completed_at", "2026-10-13T15:59:59+00:00"),
+            ("pre_read_status", ""),
+            ("confirmation_pre_read_status", ""),
+            ("content_post_read_status", ""),
+            ("authorization_by", ""),
+            ("post_snapshot_json", '{"ad_id":"unrelated"}'),
+        )
+        for field_name, bad_value in bad_rows:
+            with self.subTest(field=field_name, bad=bad_value):
+                # Recreate the pair for each input to avoid hidden dependencies.
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute("DELETE FROM create_operation_checkpoints")
+                    db.execute("DELETE FROM create_operation_receipts")
+                receipt, _ = self._create_checkpoint()
+                final = replace(
+                    receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+                    media_persistence_confirmed=True,
+                )
+                SnapshotStore(
+                    self.sqlite, create_if_missing=False,
+                ).append_create_operation_receipt(final)
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_checkpoints SET {field_name}=?",
+                        (bad_value,),
+                    )
+                with self.assertRaises(PairPreflightError):
+                    inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_other_receipt_cannot_settle_a_crashed_checkpoint(self) -> None:
         receipt, checkpoint = self._create_checkpoint()
         foreign_final = replace(

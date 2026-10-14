@@ -674,6 +674,98 @@ def _validate_sqlite_create_receipts(conn: sqlite3.Connection) -> None:
             ) from exc
 
 
+
+def _validate_sqlite_create_checkpoints(conn: sqlite3.Connection) -> None:
+    """Validate every durable pre-media checkpoint before final-receipt matching.
+
+    A later receipt must never erase a checkpoint whose persisted values
+    append_create_operation_checkpoint() could not have produced. Reuse the
+    actual CreateOperationReceipt invariants, without assuming a platform
+    response, changing recovery state, or inventing owner evidence.
+    """
+    fields = (
+        "id", "checkpoint_kind", "operation", "created_ad_id",
+        "started_at", "completed_at", "outcome", "pre_read_status",
+        "confirmation_pre_read_status", "post_read_status",
+        "confirmation_post_read_status", "content_post_read_status",
+        "writer_invoked", "authorization_by", "authorization_reference",
+        "writer_error", "post_snapshot_json",
+        "confirmation_post_snapshot_json", "content_post_snapshot_json",
+    )
+
+    def persisted_time(raw: object) -> datetime:
+        if type(raw) is not str or not 1 <= len(raw) <= 80:
+            raise ValueError("checkpoint timestamp length or type invalid")
+        value = datetime.fromisoformat(raw)
+        if (
+            value.tzinfo is None or value.utcoffset() is None
+            or value.isoformat() != raw
+        ):
+            raise ValueError("checkpoint timestamp not canonical timezone-aware ISO")
+        return value
+
+    for row in _rows(
+        conn, "SELECT " + ",".join(fields)
+        + " FROM create_operation_checkpoints ORDER BY id",
+    ):
+        rec = dict(zip(fields, row))
+        try:
+            if (
+                type(rec["id"]) is not int or rec["id"] <= 0
+                or rec["checkpoint_kind"] != "before_media_post_read"
+                or type(rec["writer_invoked"]) is not int
+                or rec["writer_invoked"] != 1
+                or rec["outcome"] != OperationOutcome.CONFIRMED.value
+            ):
+                raise ValueError("checkpoint state cannot be created by owner")
+            receipt = CreateOperationReceipt(
+                operation=rec["operation"],
+                created_ad_id=rec["created_ad_id"],
+                started_at=persisted_time(rec["started_at"]),
+                completed_at=persisted_time(rec["completed_at"]),
+                outcome=OperationOutcome(rec["outcome"]),
+                pre_read_status=rec["pre_read_status"],
+                confirmation_pre_read_status=rec["confirmation_pre_read_status"],
+                post_read_status=rec["post_read_status"],
+                confirmation_post_read_status=rec["confirmation_post_read_status"],
+                content_post_read_status=rec["content_post_read_status"],
+                writer_invoked=True,
+                authorization_by=rec["authorization_by"],
+                authorization_reference=rec["authorization_reference"],
+                writer_error=rec["writer_error"],
+                media_post_read_status=None,
+                media_persistence_confirmed=False,
+            )
+            for name in (
+                "post_snapshot_json",
+                "confirmation_post_snapshot_json",
+                "content_post_snapshot_json",
+            ):
+                raw_snapshot = rec[name]
+                if raw_snapshot is None:
+                    continue
+                if type(raw_snapshot) is not str:
+                    raise ValueError("checkpoint snapshot must be JSON text")
+                snapshot = json.loads(
+                    raw_snapshot, object_pairs_hook=_unique_object,
+                    parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+                )
+                if (
+                    not isinstance(snapshot, dict)
+                    or snapshot.get("ad_id") != receipt.created_ad_id
+                ):
+                    raise ValueError("checkpoint snapshot ad identity mismatch")
+        except PairPreflightError:
+            raise
+        except (
+            AttributeError, KeyError, TypeError, ValueError,
+            OverflowError, UnicodeError, RecursionError,
+        ) as exc:
+            raise PairPreflightError(
+                "SQLite create checkpoint violates original owner contract"
+            ) from exc
+
+
 def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
         raise PairPreflightError("SQLite integrity check failed")
@@ -684,6 +776,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     _validate_sqlite_write_request_records(conn)
     _validate_sqlite_clearances(conn)
     _validate_sqlite_create_receipts(conn)
+    _validate_sqlite_create_checkpoints(conn)
     starts = [
         [_write_key(row[0]), _text(row[1])] for row in _rows(
             conn, "SELECT idempotency_key,request_sha256 "

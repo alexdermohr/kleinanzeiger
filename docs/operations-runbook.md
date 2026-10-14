@@ -1002,6 +1002,15 @@ Snapshot-Anzeigenidentitäten. Ein künstlich geänderter Final-Receipt,
 der lediglich die für den SQL-Join verwendeten Spalten erfüllt,
 darf einen offenen Create-Checkpoint nicht verbergen.
 
+Auch **jede persistierte ursprüngliche** `create_operation_checkpoints`-Zeile
+wird unabhängig von späteren finalen Receipts auf den von
+`append_create_operation_checkpoint()` zugelassenen Zustand geprüft:
+`before_media_post_read`, bestätigter ausgeführter Create mit Anzeigen-ID,
+zeitzonenbewusste und korrekt geordnete Zeitpunkte, gültige Pflichtstatus
+und die unveränderten Snapshot-Anzeigenidentitäten. Eine nachträglich
+manipulierte Ursprungszeile darf daher auch bei passend erscheinendem
+finalen Receipt keine verschwundene Recovery-Fence ergeben.
+
 Ein vor dem
 Media-Postread dauerhaft geschriebenes Create-Checkpoint trägt
 `outcome=confirmed` und bleibt bei Prozessabsturz **ohne** passendes
