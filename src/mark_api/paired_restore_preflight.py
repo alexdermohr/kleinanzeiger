@@ -1169,33 +1169,25 @@ def inspect_offline_pair(
                         "ORDER BY idempotency_key",
                     )
                 }
-                # SnapshotStore has no SQLite recovery-clearance API for
-                # ANY completed, non-media reply other than its canonical
-                # owner-202 UNKNOWN. A legitimate post-crash Witness operator
-                # clearance can therefore settle the independent start alone,
-                # but cannot attest the SQLite reply as a safe replay.
-                # Mirror the actual SQLite clearance contract, NOT one HTTP
-                # status or response envelope. Every persisted completed
-                # response has already been owner-decoded and checked for
-                # strict canonical JSON by _validate_sqlite_write_request_records.
-                nonmedia_without_sqlite_clearance = set()
-                for key, sha, status, response in _rows(
-                    sql_db,
-                    "SELECT idempotency_key,request_sha256,"
-                    "response_status,response_json "
-                    "FROM write_api_requests WHERE state='completed' "
-                    "AND execution_started_at IS NOT NULL "
-                    "ORDER BY idempotency_key",
-                ):
-                    if (
-                        status == 202
-                        and response == SnapshotStore._unverified_write_api_response(key)
-                    ):
-                        continue
-                    if "media_persistence_confirmed" not in json.loads(response):
-                        nonmedia_without_sqlite_clearance.add(
-                            (_write_key(key), _text(sha))
-                        )
+                # SnapshotStore accepts an independent SQLite clearance
+                # only for in_progress, the exact owner-202 UNKNOWN, or a
+                # locally ambiguous media result. The inventory immediately
+                # above already mirrors the latter TWO completed-reply
+                # predicates. No second response-grammar or status guess:
+                # a completed confirmed/precondition media reply has no
+                # local recovery fence, just like any completed nonmedia
+                # reply, and its SQLite clearance API is unavailable.
+                # An independently operator-cleared Witness still cannot
+                # attest safe replay or actual external platform success.
+                sqlite_local_reply_fences = {
+                    tuple(operation)
+                    for category in ("sqlite_quarantined", "sqlite_media_unresolved")
+                    for operation in sql_fences[category]
+                }
+                replies_without_sqlite_clearance = {
+                    (key, sha) for key, sha, _ in sql_completed
+                    if (key, sha) not in sqlite_local_reply_fences
+                }
             if sql_fences["sqlite_started"] != wit_fences["witness_started"]:
                 raise PairPreflightError("pair has unmatched durable write starts")
             # UID50044 may crash AFTER persisting the SQLite response but
@@ -1226,6 +1218,18 @@ def inspect_offline_pair(
                     raise PairPreflightError(
                         "SQLite clearance lacks an independent Witness clearance"
                     )
+                # Even when a matching Witness response was durably completed,
+                # only a separate operator postread can retire an SQLite media
+                # fence after independent Witness operator clearance. The
+                # executor's media_submit_reconciled is NOT operator authority.
+                if (
+                    not witness_pending
+                    and sqlite_kind is not None
+                    and sqlite_kind != "operator_verified_postread"
+                ):
+                    raise PairPreflightError(
+                        "SQLite executor clearance cannot replace independent operator"
+                    )
                 if (
                     key not in sqlite_by_key and not witness_pending
                     and sqlite_kind != "operator_verified_postread"
@@ -1244,11 +1248,12 @@ def inspect_offline_pair(
                     # start. After sealed Witness operator settlement, SQLite
                     # must also have independently operator-settled every
                     # local recovery fence (owner 202 UNKNOWN or media).
-                    # Completed non-media replies, regardless of 2xx/4xx/5xx
-                    # status, have no SQLite clearance path or local recovery
-                    # fence. Preserve those as sqlite_unverified_replay after
-                    # independent Witness operator evidence, without ever
-                    # certifying safe HTTP replay, a success, or a new write.
+                    # Completed replies lacking a local recovery fence
+                    # (including nonmedia and non-ambiguous media) cannot
+                    # obtain an SQLite clearance. Preserve these as
+                    # sqlite_unverified_replay after independent Witness
+                    # operator evidence, without ever certifying safe HTTP
+                    # replay, platform success, or a new write.
                     # Executor-only local clearance never substitutes for
                     # independent operator evidence.
                     if (
@@ -1258,7 +1263,7 @@ def inspect_offline_pair(
                             and sqlite_clearance_kind != "operator_verified_postread"
                             and not (
                                 sqlite_clearance_kind is None
-                                and operation in nonmedia_without_sqlite_clearance
+                                and operation in replies_without_sqlite_clearance
                             )
                         )
                     ):

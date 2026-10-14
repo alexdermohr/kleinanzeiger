@@ -845,6 +845,50 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_witness_completion_plus_operator_cannot_hide_executor_only_media_clearance(self) -> None:
+        # Independent reviewer P2: a completed Witness reply exists, so the
+        # missing-completion-only check used to skip a forged local settlement.
+        key = "media:witness-completion-executor-only"
+        response = {
+            "media_persistence_confirmed": False,
+            "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
+        }
+        self._completed_response_pair(key=key, status=500, response=response)
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="media_submit_reconciled",
+            evidence_reference="synthetic:executor-only-media-observation", observed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:operator-witness-only",
+            )
+        # Executor-only evidence cannot retire the independent SQLite media
+        # fence, regardless of presence of a Witness completion or clearance.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_matching_witness_completion_with_dual_operator_media_clearance_remains_diagnosable(self) -> None:
+        key = "media:completed-dual-operator"
+        response = {
+            "media_persistence_confirmed": False,
+            "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
+        }
+        self._completed_response_pair(key=key, status=500, response=response)
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:independent-operator-check", observed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-operator-check",
+            )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["sqlite_media_unresolved"], [])
+        self.assertEqual(observed["fences"]["witness_unresolved"], [])
+        self.assertEqual(observed["fences"]["sqlite_unverified_replay"], [])
+
     def test_executor_clearance_cannot_replace_sqlite_operator_clearance_after_witness_operator(self) -> None:
         # A runtime media_submit_reconciled row is NOT an independent operator
         # clearance. Both authorities must be operator-cleared before a crash
@@ -1036,6 +1080,80 @@ class PairedRestorePreflightTests(unittest.TestCase):
         self.assertEqual(
             inspect_offline_pair(self.sqlite, self.ledger)["fences"]["sqlite_media_unresolved"],
             [],
+        )
+
+    def test_confirmed_media_crash_can_be_witness_cleared_without_sqlite_clearance(self) -> None:
+        # RED: confirmed HTTP 200 persisted before independent Witness
+        # completion. After external/operator reconciliation, SnapshotStore
+        # correctly rejects an SQLite clearance: no ambiguous local media
+        # recovery fence exists. The pair must still be inspectable, while
+        # permanently retaining the *unverified* SQLite reply.
+        key = "media:confirmed-crash-after-response"
+        envelope = {
+            "media_persistence_confirmed": True,
+            "operation_receipt": {"outcome": "confirmed", "writer_invoked": True},
+        }
+        self._persist_media_http_response(key=key, status=200, envelope=envelope)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        with self.assertRaisesRegex(ValueError, "no ambiguous media outcome"):
+            store.record_write_recovery_clearance(
+                idempotency_key=key, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:independent-confirmed-postread",
+                observed_at=AT,
+            )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-confirmed-postread",
+            )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["sqlite_media_unresolved"], [])
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertEqual(
+            inspected["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
+        digest = self._pin()
+        verified = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=digest,
+        )
+        self.assertEqual(verified["sqlite_unverified_replay_count"], 1)
+        self.assertFalse(verified["restore_authorized"])
+        with FenceLedger(self.ledger) as witness:
+            self.assertEqual(
+                witness.replay_status(
+                    key=key, sha=SHA,
+                    response_sha=hashlib.sha256(_canonical(envelope)).hexdigest(),
+                ), "unverified",
+            )
+
+    def test_precondition_media_crash_after_witness_clearance_needs_no_sqlite_clearance(self) -> None:
+        # A completed, non-ambiguous 409 media precondition is equally outside
+        # SnapshotStore's SQLite recovery-clearance contract. Its persisted
+        # response still cannot be independently replay-attested.
+        key = "media:precondition-crash-after-response"
+        envelope = {
+            "media_persistence_confirmed": False,
+            "operation_receipt": {"outcome": "precondition_failed", "writer_invoked": False},
+        }
+        self._persist_media_http_response(key=key, status=409, envelope=envelope)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        with self.assertRaisesRegex(ValueError, "no ambiguous media outcome"):
+            store.record_write_recovery_clearance(
+                idempotency_key=key, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:independent-precondition-readback",
+                observed_at=AT,
+            )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-precondition-readback",
+            )
+        report = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(report["fences"]["sqlite_media_unresolved"], [])
+        self.assertEqual(report["fences"]["witness_unresolved"], [])
+        self.assertEqual(
+            report["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
         )
 
     def test_malformed_completed_media_result_cannot_yield_empty_fence_inventory(self) -> None:
