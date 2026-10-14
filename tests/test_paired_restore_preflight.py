@@ -921,23 +921,18 @@ class PairedRestorePreflightTests(unittest.TestCase):
             witness.operator_clearance(
                 key=key, sha=SHA, evidence="synthetic:operator-witness-only",
             )
-        # The historically admissible executor row cannot be upgraded by
-        # SnapshotStore's append-only unique clearance API. It remains an
-        # explicit local recovery fence even after independent Witness
-        # settlement; a matching completion does NOT certify it as cleared.
-        observed = inspect_offline_pair(self.sqlite, self.ledger)
-        self.assertEqual(
-            observed["fences"]["sqlite_media_unresolved"], [[key, SHA]],
-        )
-        self.assertEqual(observed["fences"]["witness_unresolved"], [])
-        self.assertEqual(observed["fences"]["sqlite_unverified_replay"], [])
-        digest = self._pin()
-        verified = verify_offline_pair(
-            self.sqlite, self.ledger, self.manifest,
-            expected_manifest_sha256=digest,
-        )
-        self.assertFalse(verified["restore_authorized"])
-        self.assertEqual(verified["sqlite_media_unresolved_count"], 1)
+        # A restored generation with this executor-only SQLite settlement
+        # would be UNSAFE: actual SnapshotStore.create_recovery_pending()
+        # already treats it as cleared and would admit another Create now
+        # that Witness was independently operator-cleared. Until those two
+        # authorities have a shared production fence protocol, preflight
+        # MUST refuse this generation rather than diagnose it as restorable.
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="different-key", claim_owner="next-runtime",
+        ))
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_matching_witness_completion_with_dual_operator_media_clearance_remains_diagnosable(self) -> None:
         key = "media:completed-dual-operator"
@@ -978,22 +973,19 @@ class PairedRestorePreflightTests(unittest.TestCase):
             witness.operator_clearance(
                 key=key, sha=SHA, evidence="synthetic:independent-postread",
             )
-        # Independent Witness settlement permits offline diagnosis, not
-        # retirement of this local executor-only media fence or safe replay.
-        inspected = inspect_offline_pair(self.sqlite, self.ledger)
-        self.assertEqual(
-            inspected["fences"]["sqlite_media_unresolved"], [[key, SHA]],
+        # Even with independent Witness operator evidence, an already
+        # recorded executor-only local clearance is accepted by the *live*
+        # runtime and suppresses its Create-fence: the apparent open offline
+        # fence would disappear on restart. Reject this pair until runtime
+        # and independent Witness share a proven secure release contract.
+        self.assertFalse(
+            SnapshotStore(self.sqlite, create_if_missing=False)
+            .create_recovery_pending(
+                exclude_idempotency_key="new-create", claim_owner="next-runtime",
+            )
         )
-        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
-        self.assertEqual(
-            inspected["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
-        )
-        expected = self._pin()
-        verified = verify_offline_pair(
-            self.sqlite, self.ledger, self.manifest,
-            expected_manifest_sha256=expected,
-        )
-        self.assertFalse(verified["restore_authorized"])
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_executor_clearance_without_witness_completion_keeps_witness_pending(self) -> None:
         key = "complete:executor-clearance-witness-pending"
@@ -1813,6 +1805,70 @@ class PairedRestorePreflightTests(unittest.TestCase):
             )
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_unstarted_owner_cancellation_is_recoverable_without_witness(self) -> None:
+        # Only the independent StorageOwner can complete an unstarted
+        # request. It constructs an exact HTTP 409 cancellation envelope.
+        key = "cancel:owner-before-begin"
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        claim = store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", requested_at=AT,
+        )
+        self.assertTrue(claim.created)
+        receipt = store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", cancelled_at=AT,
+        )
+        self.assertIsNone(receipt.execution_started_at)
+        self.assertEqual(receipt.response_status, 409)
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["sqlite_started"], [])
+        self.assertEqual(observed["fences"]["witness_started"], [])
+        anchor = self._pin()
+        verified = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=anchor,
+        )
+        self.assertTrue(verified["offline_only"])
+        self.assertFalse(verified["restore_authorized"])
+
+    def test_unstarted_completed_claim_must_match_exact_owner_cancel(self) -> None:
+        key = "cancel:forged-no-begin"
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertTrue(store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", requested_at=AT,
+        ).created)
+        store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", cancelled_at=AT,
+        )
+        # These forged rows are canonical response JSON with supported HTTP
+        # status values. No Witness start must never mask their invalidity.
+        cases = (
+            (200, {"success": True, "idempotency_key": key}),
+            (500, {"error": "write_execution_error", "idempotency_key": key,
+                   "platform_retry_authorized": False}),
+            (409, {"error": "write_claim_cancelled_before_begin",
+                   "idempotency_key": key, "platform_retry_authorized": False,
+                   "debug": "non-owner-extra"}),
+            (409, {"error": "write_claim_cancelled_before_begin",
+                   "idempotency_key": "different-key",
+                   "platform_retry_authorized": False}),
+            (409, {"error": "create_recovery_pending",
+                   "idempotency_key": key, "platform_retry_authorized": False}),
+        )
+        for status, response in cases:
+            with self.subTest(status=status, response=response):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        "UPDATE write_api_requests SET response_status=?,"
+                        "response_json=? WHERE idempotency_key=?",
+                        (status, _canonical(response).decode("ascii"), key),
+                    )
+                with self.assertRaises(PairPreflightError):
+                    inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_unstarted_unreadable_requested_at_cannot_restore_claim(self) -> None:
         store = SnapshotStore(self.sqlite, create_if_missing=False)

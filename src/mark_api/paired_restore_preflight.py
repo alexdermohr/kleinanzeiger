@@ -523,9 +523,23 @@ def _validate_sqlite_write_request_records(
         except (TypeError, ValueError, UnicodeError,
                 RecursionError, OverflowError) as exc:
             raise PairPreflightError("SQLite completed response cannot replay") from exc
-        # A completed precondition that never entered the platform writer does
-        # not have a Witness start. Only genuinely started requests are paired.
-        if record.execution_started_at is not None:
+        # A completed claim that never crossed the owner Begin gate cannot
+        # have a Witness start. The *only* owner-reachable terminal transition
+        # is cancel_unstarted_write_api_request(), whose entire HTTP 409
+        # response is constructed by SnapshotStore rather than the executor.
+        # Arbitrary canonical 2xx/4xx/5xx responses here are impossible and
+        # must never be accepted as a legitimately replayable restored row.
+        if record.execution_started_at is None:
+            cancellation = _canonical({
+                "error": "write_claim_cancelled_before_begin",
+                "idempotency_key": record.idempotency_key,
+                "platform_retry_authorized": False,
+            }).decode("ascii")
+            if record.response_status != 409 or response != cancellation:
+                raise PairPreflightError(
+                    "SQLite unstarted completion violates owner cancellation contract"
+                )
+        else:
             completed.append([
                 record.idempotency_key, record.request_sha256, response_sha,
             ])
@@ -603,8 +617,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         "LEFT JOIN write_recovery_clearances AS c "
         "ON c.idempotency_key=w.idempotency_key "
         "AND c.request_sha256=w.request_sha256 "
-        "WHERE w.state='completed' AND "
-        "(c.idempotency_key IS NULL OR c.verification_kind='media_submit_reconciled') "
+        "WHERE w.state='completed' AND c.idempotency_key IS NULL "
         "AND json_type(w.response_json,'$.media_persistence_confirmed') IS NOT NULL "
         "ORDER BY w.idempotency_key",
     ):
@@ -1182,11 +1195,12 @@ def inspect_offline_pair(
                 # reply, and its SQLite clearance API is unavailable.
                 # An independently operator-cleared Witness still cannot
                 # attest safe replay or actual external platform success.
-                # A legacy executor-only clearance is valid persisted evidence
-                # but never independently retires an ambiguous local Media fence.
-                sqlite_media_open_fences = {
-                    tuple(operation) for operation in sql_fences["sqlite_media_unresolved"]
-                }
+                # Executor-only media clearances are recognized as valid
+                # historical SQLite rows but cannot be treated as an open
+                # pair-restore fence: the actual runtime would suppress it
+                # and permit a new Create after the Witness was operator-cleared.
+                # Therefore the pair must fail closed below until runtime and
+                # independent Witness enforce a shared recovery contract.
                 sqlite_local_reply_fences = {
                     tuple(operation)
                     for category in ("sqlite_quarantined", "sqlite_media_unresolved")
@@ -1226,18 +1240,14 @@ def inspect_offline_pair(
                     raise PairPreflightError(
                         "SQLite clearance lacks an independent Witness clearance"
                     )
-                # A matching Witness completion does not make executor-only
-                # media evidence an independent SQLite operator clearance.
-                # This remains DIAGNOSABLE only if the media fence is STILL
-                # present in the manifest; it never becomes a safe replay.
+                # A matching Witness completion is not independent SQLite
+                # operator evidence. Reject executor-only media settlements
+                # even after Witness operator clearance: SnapshotStore would
+                # otherwise clear the runtime fence during a host cutover.
                 if (
                     not witness_pending
                     and sqlite_kind is not None
                     and sqlite_kind != "operator_verified_postread"
-                    and not (
-                        sqlite_kind == "media_submit_reconciled"
-                        and operation in sqlite_media_open_fences
-                    )
                 ):
                     raise PairPreflightError(
                         "SQLite executor clearance cannot replace independent operator"
@@ -1258,8 +1268,9 @@ def inspect_offline_pair(
                     # No Witness completion ever proves the SQLite reply.
                     # With both copies still pending, retain the unresolved
                     # start. After sealed Witness operator settlement, a local
-                    # fence either has independent operator clearance or stays
-                    # explicitly OPEN if its row is only executor-reconciled.
+                    # recovery fence requires independent SQLite operator
+                    # evidence. Executor-only settlement cannot be restored
+                    # because the live runtime would incorrectly retire it.
                     # Completed replies lacking a local recovery fence
                     # (including nonmedia and non-ambiguous media) cannot
                     # obtain an SQLite clearance. Preserve these as
@@ -1274,12 +1285,8 @@ def inspect_offline_pair(
                             not witness_pending
                             and sqlite_clearance_kind != "operator_verified_postread"
                             and not (
-                                (sqlite_clearance_kind is None
-                                 and operation in replies_without_sqlite_clearance)
-                                or (
-                                    sqlite_clearance_kind == "media_submit_reconciled"
-                                    and operation in sqlite_media_open_fences
-                                )
+                                sqlite_clearance_kind is None
+                                and operation in replies_without_sqlite_clearance
                             )
                         )
                     ):
