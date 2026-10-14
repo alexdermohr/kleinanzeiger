@@ -248,6 +248,64 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 "SELECT MAX(id) FROM create_operation_receipts",
             ).fetchone()[0])
 
+    def test_sqlite_operator_clearance_invalid_observed_at_fails_before_attestation(self) -> None:
+        # A forged SQLite clearance can match the operation SHA and have a
+        # separate sealed Witness operator clearance, yet still be unreadable
+        # by the runtime's strict timezone-aware _sync_time contract.
+        key = "clearance:bad-observed-at"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:independent-operator", observed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-operator",
+            )
+        for forged in (
+            "broken",
+            "2026-10-14T11:17:00",
+            "2026-10-14T11:17:00-04:00",
+            "2026-10-14T11:17:00+00:00" + "X" * 65,
+        ):
+            with self.subTest(observed_at=forged):
+                with sqlite3.connect(self.sqlite) as connection:
+                    connection.execute(
+                        "UPDATE write_recovery_clearances SET observed_at=? "
+                        "WHERE idempotency_key=?", (forged, key),
+                    )
+                with self.assertRaises(PairPreflightError):
+                    inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_operator_clearance_without_sqlite_clearance_in_progress_fails(self) -> None:
+        key = "inprogress:witness-operator-only"
+        self._start(key=key)
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:operator-on-witness",
+            )
+        # The SQLite in_progress record remains recovery-blocking. A valid
+        # digest-paired start alone must not make that one-sided clearance safe.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_dual_operator_clearances_with_in_progress_request_are_recoverable(self) -> None:
+        key = "inprogress:dual-operator-clearance"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:external-postread", observed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:external-postread",
+            )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertEqual(inspected["fences"]["sqlite_unverified_replay"], [])
+
     def test_forged_clearance_for_never_executed_write_cannot_hide_media_fence(self) -> None:
         # Attack: staged pair has a valid but unstarted request, a separate
         # ambiguous media receipt, and an unauthorized forged clearance. The
@@ -578,6 +636,41 @@ class PairedRestorePreflightTests(unittest.TestCase):
             owner.operator_clearance(
                 key=key, sha=SHA, evidence="synthetic:independent-check",
             )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_executor_clearance_cannot_replace_sqlite_operator_clearance_after_witness_operator(self) -> None:
+        # A runtime media_submit_reconciled row is NOT an independent operator
+        # clearance. Both authorities must be operator-cleared before a crash
+        # between the SQLite reply and missing Witness completion can attest.
+        key = "complete:executor-vs-operator"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={"media_persistence_confirmed": False, "operation_receipt": None},
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="media_submit_reconciled",
+            evidence_reference="synthetic:executor-only-media", observed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-postread",
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_executor_clearance_without_witness_completion_keeps_witness_pending(self) -> None:
+        key = "complete:executor-clearance-witness-pending"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={"media_persistence_confirmed": False, "operation_receipt": None},
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="media_submit_reconciled",
+            evidence_reference="synthetic:executor-only-media", observed_at=AT,
+        )
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 

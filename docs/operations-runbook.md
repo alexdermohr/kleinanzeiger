@@ -864,7 +864,13 @@ Operator-Recovery bleibt der ursprüngliche Witness-Fence offen.
 Nach einer tatsächlich an dieselbe Ursprungsoperation (Key/SHA/Session)
 gebundenen unabhängigen Operator-Clearance **in Witness und SQLite**
 darf dieses Fence geschlossen sein; das unbestätigte Replay bleibt
-weiterhin im Manifest sichtbar. Eine nur einseitige Clearance wird
+weiterhin im Manifest sichtbar. Die SQLite-Clearance muss dabei
+`operator_verified_postread` sein: ein `media_submit_reconciled`-
+Executor-Eintrag ist keine unabhängige Operator-Evidenz und kann eine
+fehlende Witness-Completion auch dann nicht freigeben, wenn der Witness
+seinerseits operatorseitig geklärt wurde. Solange der Witness-Fence
+offen ist, darf auf SQLite-Seite **überhaupt keine** Clearance für diese
+nicht verifizierte Antwort vorliegen. Eine nur einseitige Clearance wird
 abgewiesen. Ist ein Witness-Completion-Digest inkonsistent, fehlt der
 SQLite-Gegenpart oder fehlt bei unbestätigtem SQLite-Ergebnis eine
 gültige offene oder beidseitig geklärte Witness-/SQLite-Bindung, wird

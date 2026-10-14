@@ -76,24 +76,19 @@ def _write_key(value: object) -> str:
     return value
 
 
-def _witness_utc_timestamp(value: object) -> str:
-    """Demand the UTC ISO time produced by FenceLedger._now().
-
-    The persistent Witness chain authenticates bytes, not field validity.
-    Its operator pending_page protocol accepts at most 64 characters for
-    started_at; bogus or long, rehashed timestamps are not recoverable.
-    """
+def _canonical_utc_timestamp(value: object, *, label: str) -> str:
+    """Require bounded canonical UTC ISO time readable by runtime protocols."""
     if not isinstance(value, str) or not 1 <= len(value) <= 64:
-        raise PairPreflightError("Witness session/event time is outside protocol bounds")
+        raise PairPreflightError(f"{label} time is outside protocol bounds")
     try:
         observed = datetime.fromisoformat(value)
     except (ValueError, OverflowError) as exc:
-        raise PairPreflightError("Witness session/event time is not ISO") from exc
+        raise PairPreflightError(f"{label} time is not ISO") from exc
     if (
         observed.tzinfo is None or observed.utcoffset() != timedelta(0)
         or observed.isoformat() != value
     ):
-        raise PairPreflightError("Witness session/event time must be canonical UTC")
+        raise PairPreflightError(f"{label} time must be canonical UTC")
     return value
 
 
@@ -438,6 +433,7 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
             or kind not in ("operator_verified_postread", "media_submit_reconciled")
         ):
             raise PairPreflightError("SQLite recovery clearance origin invalid")
+        _canonical_utc_timestamp(observed_at, label="SQLite recovery clearance")
         if state == "in_progress":
             continue
         if state != "completed":
@@ -911,9 +907,9 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
             or (state == "active" and sealed_at is not None)
         ):
             raise PairPreflightError("witness session state invalid")
-        _witness_utc_timestamp(opened_at)
+        _canonical_utc_timestamp(opened_at, label="Witness session")
         if sealed_at is not None:
-            _witness_utc_timestamp(sealed_at)
+            _canonical_utc_timestamp(sealed_at, label="Witness session")
         sessions[sid] = state
 
     opened: set[str] = set()
@@ -938,7 +934,7 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
             )
         ):
             raise PairPreflightError("witness event identity or sequence invalid")
-        _witness_utc_timestamp(at)
+        _canonical_utc_timestamp(at, label="Witness event")
         if kind == "opened":
             if (
                 sid in opened or active is not None
@@ -1148,11 +1144,11 @@ def inspect_offline_pair(
                 # SnapshotStore state/key/SHA checks in _sqlite_inventory.
                 # The Witness is independently checked for exact operation-
                 # and session-bound operator clearances by _witness_inventory.
-                sqlite_cleared = {
-                    (_write_key(key), _text(sha))
-                    for key, sha in _rows(
+                sqlite_clearance_kinds = {
+                    (_write_key(key), _text(sha)): kind
+                    for key, sha, kind in _rows(
                         sql_db,
-                        "SELECT idempotency_key,request_sha256 "
+                        "SELECT idempotency_key,request_sha256,verification_kind "
                         "FROM write_recovery_clearances "
                         "ORDER BY idempotency_key",
                     )
@@ -1173,21 +1169,47 @@ def inspect_offline_pair(
                         "witness completion does not match durable SQLite reply"
                     )
             unresolved = {tuple(row) for row in wit_fences["witness_unresolved"]}
+            # A Witness operator clearance must not conceal an uncleared
+            # SQLite in_progress write merely because that write has no reply
+            # to bind. For completed replies with an authenticated Witness
+            # completion, the replay-digest agreement already proves both
+            # copies agree on completion; an additional SQLite operator
+            # clearance is not a prerequisite for that distinct safe case.
+            for key, sha in sql_fences["sqlite_started"]:
+                operation = (key, sha)
+                if (
+                    key not in sqlite_by_key
+                    and operation not in unresolved
+                    and sqlite_clearance_kinds.get(operation)
+                    != "operator_verified_postread"
+                ):
+                    raise PairPreflightError(
+                        "witness clearance hides unverified SQLite in_progress write"
+                    )
             unverified = []
             for key, record in sqlite_by_key.items():
                 if key not in witness_by_key:
                     operation = (key, record[1])
                     witness_pending = operation in unresolved
-                    sqlite_settled = operation in sqlite_cleared
+                    sqlite_clearance_kind = sqlite_clearance_kinds.get(operation)
                     # Without a Witness completion, a durable SQLite reply is
-                    # ALWAYS unverified replay data. Accept it only if BOTH
-                    # authorities still retain the open write, or BOTH have
-                    # independently bound operator recovery clearance.
-                    # A cleared Witness start is necessarily operation-bound
-                    # and sealed after _verify_witness_event_history.
-                    if witness_pending == sqlite_settled:
+                    # ALWAYS unverified replay. BOTH authorities must still
+                    # have their write open (no SQLite clearance at all) OR
+                    # BOTH must have independently OPERATOR-cleared the
+                    # operation. A local media_submit_reconciled executor
+                    # clearance may suppress the SQLite recovery inventory,
+                    # but never substitutes for independent operator evidence.
+                    # A cleared Witness start was separately validated as
+                    # operation/session-bound and post-seal.
+                    if (
+                        (witness_pending and sqlite_clearance_kind is not None)
+                        or (
+                            not witness_pending
+                            and sqlite_clearance_kind != "operator_verified_postread"
+                        )
+                    ):
                         raise PairPreflightError(
-                            "unverified SQLite replay has one-sided recovery clearance"
+                            "unverified SQLite replay has one-sided or executor-only clearance"
                         )
                     unverified.append(record)
             sql_fences["sqlite_unverified_replay"] = unverified
