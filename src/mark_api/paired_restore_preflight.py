@@ -35,6 +35,7 @@ from .fence_witness import (
 from .storage import SnapshotStore
 from .storage_owner import (
     StorageOwnerError, _KEY as _STORAGE_KEY, _pending_from_json,
+    _dashboard_pending_contract, _validate_pending_wire_body,
     _record_from_json,
 )
 
@@ -429,6 +430,7 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
             or not started_at or not isinstance(observed_at, str)
             or not observed_at or not isinstance(evidence, str)
             or not 1 <= len(evidence.strip()) <= 256
+            or evidence != evidence.strip()
             or any(ch in evidence for ch in "\r\n\x00")
             or kind not in ("operator_verified_postread", "media_submit_reconciled")
         ):
@@ -647,14 +649,24 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         if type(acknowledged) is not int or acknowledged not in (0, 1):
             raise PairPreflightError("SQLite dashboard pending fence invalid")
         try:
-            # This decoder is used by StorageOwnerClient after restore.
-            # A nonempty key or stale malformed payload cannot pass.
+            # A restored pending fence must satisfy BOTH the StorageOwner
+            # reply decoder and its stricter original claim admission. The
+            # reply decoder alone does not bind ad_id, scope or resource to
+            # the exact Write method/path, nor does it require canonical
+            # serialized payloads. Never invent independent route grammars.
             _pending_from_json({
                 "scope": scope, "resource_key": resource,
                 "idempotency_key": key, "method": method, "path": path,
                 "payload_json": payload, "ad_id": ad_id,
                 "acknowledged": bool(acknowledged),
             })
+            expected = _dashboard_pending_contract(method, path)
+            if (
+                expected is None
+                or (scope, resource, ad_id, payload is not None) != expected
+            ):
+                raise StorageOwnerError("pending route identity is not owner-admissible")
+            _validate_pending_wire_body(payload)
         except (StorageOwnerError, ValueError, TypeError,
                 UnicodeError, RecursionError) as exc:
             raise PairPreflightError(
@@ -962,6 +974,10 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
             if (
                 key in starts or action not in _WITNESS_ACTIONS
                 or any((outcome, response, evidence))
+                # FenceLedger.execution_started() refuses ANY second start
+                # until every earlier started write was independently
+                # operator-cleared after its originating session sealed.
+                or any(not item["operator"] for item in starts.values())
             ):
                 raise PairPreflightError("witness started operation invalid")
             starts[key] = {
@@ -1153,30 +1169,33 @@ def inspect_offline_pair(
                         "ORDER BY idempotency_key",
                     )
                 }
-                # SnapshotStore has NO SQLite clearance for a completed,
-                # non-media HTTP 500 execution error. It is not among its
-                # blocked Create/media/202 recovery fences. A real Witness
-                # operator clearance may independently settle that start,
-                # but its SQLite reply still lacks a Witness completion and
-                # MUST remain permanently unverified replay data. Restrict
-                # this exception to the exact runtime-generated non-media
-                # error envelope; no 200/202/media response or extra fields.
-                nonmedia_executor_errors = {
-                    (_write_key(key), _text(sha))
-                    for key, sha, status, response in _rows(
-                        sql_db,
-                        "SELECT idempotency_key,request_sha256,"
-                        "response_status,response_json "
-                        "FROM write_api_requests WHERE state='completed' "
-                        "AND execution_started_at IS NOT NULL "
-                        "ORDER BY idempotency_key",
-                    )
-                    if status == 500 and response == _canonical({
-                        "error": "write_execution_error",
-                        "idempotency_key": key,
-                        "platform_retry_authorized": False,
-                    }).decode("ascii")
-                }
+                # SnapshotStore has no SQLite recovery-clearance API for
+                # ANY completed, non-media reply other than its canonical
+                # owner-202 UNKNOWN. A legitimate post-crash Witness operator
+                # clearance can therefore settle the independent start alone,
+                # but cannot attest the SQLite reply as a safe replay.
+                # Mirror the actual SQLite clearance contract, NOT one HTTP
+                # status or response envelope. Every persisted completed
+                # response has already been owner-decoded and checked for
+                # strict canonical JSON by _validate_sqlite_write_request_records.
+                nonmedia_without_sqlite_clearance = set()
+                for key, sha, status, response in _rows(
+                    sql_db,
+                    "SELECT idempotency_key,request_sha256,"
+                    "response_status,response_json "
+                    "FROM write_api_requests WHERE state='completed' "
+                    "AND execution_started_at IS NOT NULL "
+                    "ORDER BY idempotency_key",
+                ):
+                    if (
+                        status == 202
+                        and response == SnapshotStore._unverified_write_api_response(key)
+                    ):
+                        continue
+                    if "media_persistence_confirmed" not in json.loads(response):
+                        nonmedia_without_sqlite_clearance.add(
+                            (_write_key(key), _text(sha))
+                        )
             if sql_fences["sqlite_started"] != wit_fences["witness_started"]:
                 raise PairPreflightError("pair has unmatched durable write starts")
             # UID50044 may crash AFTER persisting the SQLite response but
@@ -1193,19 +1212,23 @@ def inspect_offline_pair(
                         "witness completion does not match durable SQLite reply"
                     )
             unresolved = {tuple(row) for row in wit_fences["witness_unresolved"]}
-            # A Witness operator clearance must not conceal an uncleared
-            # SQLite in_progress write merely because that write has no reply
-            # to bind. For completed replies with an authenticated Witness
-            # completion, the replay-digest agreement already proves both
-            # copies agree on completion; an additional SQLite operator
-            # clearance is not a prerequisite for that distinct safe case.
+            # A one-sided SQLite recovery clearance suppresses the local
+            # create/pending fence while the independent Witness remains
+            # unresolved. Conversely, an uncompleted SQLite in_progress row
+            # is unsafe when only its Witness is operator-cleared. Both cases
+            # are invalid restore generations, even if transiently observable
+            # while a legitimate operator performs two separate clearances.
             for key, sha in sql_fences["sqlite_started"]:
                 operation = (key, sha)
+                sqlite_kind = sqlite_clearance_kinds.get(operation)
+                witness_pending = operation in unresolved
+                if witness_pending and sqlite_kind is not None:
+                    raise PairPreflightError(
+                        "SQLite clearance lacks an independent Witness clearance"
+                    )
                 if (
-                    key not in sqlite_by_key
-                    and operation not in unresolved
-                    and sqlite_clearance_kinds.get(operation)
-                    != "operator_verified_postread"
+                    key not in sqlite_by_key and not witness_pending
+                    and sqlite_kind != "operator_verified_postread"
                 ):
                     raise PairPreflightError(
                         "witness clearance hides unverified SQLite in_progress write"
@@ -1216,18 +1239,18 @@ def inspect_offline_pair(
                     operation = (key, record[1])
                     witness_pending = operation in unresolved
                     sqlite_clearance_kind = sqlite_clearance_kinds.get(operation)
-                    # No Witness completion = NEVER verified replay. Both
-                    # pending is safe to preserve. If Witness is operator-
-                    # cleared, SQLite must also be independently operator-
-                    # cleared when SQLite has a recovery fence. The ONE
-                    # exception is an exact non-media HTTP 500 execution error:
-                    # SnapshotStore has no clearance API/fence for that
-                    # response, so independent Witness operator evidence plus
-                    # permanent sqlite_unverified_replay is the safer minimal
-                    # recovery path. It never certifies the SQLite response,
-                    # nor authorizes replay or a new platform mutation.
-                    # An executor-only clearance can never replace operator
-                    # evidence even in this exception.
+                    # No Witness completion ever proves the SQLite reply.
+                    # With both copies still pending, retain the unresolved
+                    # start. After sealed Witness operator settlement, SQLite
+                    # must also have independently operator-settled every
+                    # local recovery fence (owner 202 UNKNOWN or media).
+                    # Completed non-media replies, regardless of 2xx/4xx/5xx
+                    # status, have no SQLite clearance path or local recovery
+                    # fence. Preserve those as sqlite_unverified_replay after
+                    # independent Witness operator evidence, without ever
+                    # certifying safe HTTP replay, a success, or a new write.
+                    # Executor-only local clearance never substitutes for
+                    # independent operator evidence.
                     if (
                         (witness_pending and sqlite_clearance_kind is not None)
                         or (
@@ -1235,7 +1258,7 @@ def inspect_offline_pair(
                             and sqlite_clearance_kind != "operator_verified_postread"
                             and not (
                                 sqlite_clearance_kind is None
-                                and operation in nonmedia_executor_errors
+                                and operation in nonmedia_without_sqlite_clearance
                             )
                         )
                     ):

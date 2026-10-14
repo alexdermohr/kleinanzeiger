@@ -842,8 +842,11 @@ gehashte und niemals gestartete Write-Clearances werden ebenso
 verworfen wie Executor-Clearances für UNKNOWN-Antworten oder
 Clearances auf gewöhnliche erfolgreich abgeschlossene Writes.
 Damit darf eine gefälschte Clearance keine Create-, Media- oder
-Quarantäne-Fence verbergen. Das ist eine **Offline-Diagnose**, keine
-unabhängige Verifikation der externen Plattformantwort.
+Quarantäne-Fence verbergen. Auch `evidence_reference` muss genau der
+getrimmten kanonischen Speicherung aus `record_write_recovery_clearance()`
+entsprechen; führende/abschließende Leerzeichen oder Tabs werden verworfen.
+Das ist eine **Offline-Diagnose**, keine unabhängige Verifikation der
+externen Plattformantwort.
 
 Dashboard-Pending-Writes müssen vollständig durch den typisierten
 StorageOwner-Decoder lesbar sein; ungültige Key-Grammatik, Payloads,
@@ -873,27 +876,39 @@ offen ist, darf auf SQLite-Seite **überhaupt keine** Clearance für diese
 nicht verifizierte Antwort vorliegen. Eine nur einseitige Clearance wird
 für alle Operationen mit SQLite-Recovery-Fence abgewiesen.
 
-**Eng begrenzte Nicht-Media-Ausnahme:** Für einen bereits abgeschlossen
-persistierten Write mit exakt der kanonischen HTTP-500-Antwort
-`{"error":"write_execution_error","idempotency_key":"<key>","platform_retry_authorized":false}`
-(ohne `media_persistence_confirmed`) gibt es in
-`SnapshotStore.record_write_recovery_clearance()` bewusst **keinen**
-SQLite-Recovery-Clearance-Vertrag: dieser abgeschlossene Nicht-Media-Fehler
-ist dort kein offener Create-/Media-/Quarantäne-Fence. Hat der unabhängig
-verwaltete Witness den ursprünglich gebundenen Write nach versiegelter
-Session **operatorseitig** geklärt, darf das Paar auch ohne zusätzliche
-SQLite-Clearance als **reine Offline-Diagnose** attestiert werden.
-Die nicht von einer Witness-Completion gebundene lokale HTTP-500-Antwort
-bleibt dabei stets in `sqlite_unverified_replay`, ist niemals sicher
-wiederholbar und autorisiert **keinen** Plattform-Write. Der Operator muss
-den ursprünglichen externen Vorgang selbst unabhängig reconciliert haben.
-Schon ein abweichendes Feld, ein HTTP 200/202, eine Media-Antwort oder
-ein Executor-`media_submit_reconciled` schließen diese Ausnahme aus.
+**Eng begrenzter Nicht-Media-Fall ohne SQLite-Clearance-Vertrag:**
+Für jeden tatsächlich begonnenen und bereits abgeschlossen persistierten
+Write mit einer kanonischen Nicht-Media-JSON-Antwort **ohne**
+`media_persistence_confirmed` gibt es in
+`SnapshotStore.record_write_recovery_clearance()` **keinen** SQLite-
+Clearance-Pfad; das gilt sowohl für HTTP 200, 409 als auch HTTP 500.
+Der kanonische Owner-HTTP-202-Status `write_outcome_unverified` ist
+ausdrücklich **ausgenommen** und bleibt ein SQLite-Quarantäne-Fence.
+Hat der unabhängig verwaltete Witness nach versiegelter Ursprungssession
+genau diese Operation (Key/SHA/Session) **operatorseitig** geklärt,
+kann das Paar ohne zusätzliche nicht unterstützte SQLite-Clearance
+als **reine Offline-Diagnose** attestiert werden. Die mangels
+Witness-Completion nicht unabhängig gebundene SQLite-Antwort bleibt
+**immer** in `sqlite_unverified_replay`, selbst wenn sie HTTP 200
+oder eine erfolgreiche Create-/Lifecycle-Operation behauptet. Sie ist
+niemals eine Replay-Bestätigung und autorisiert **keinen** erneuten
+Plattform-Write. Der unabhängige Operator muss die externe Wirkung
+vor seiner Witness-Clearance tatsächlich selbst reconciliert haben.
+Jeder begonnene `in_progress`-Write sowie alle HTTP-202-UNKNOWN- und
+Media-Recovery-Fences verlangen dagegen eine echte, genau passende
+SQLite-`operator_verified_postread`- und Witness-Operator-Clearance,
+bevor der ursprüngliche Fence entfallen darf. Ein SQL-only- oder
+Witness-only-Zwischenstand ist **kein** freigegebener Paar-Restore.
+Auch `media_submit_reconciled` aus dem Executor zählt niemals als
+solche unabhängige Operator-Clearance.
 
 Ist ein Witness-Completion-Digest inkonsistent, fehlt der
-SQLite-Gegenpart oder fehlt bei unbestätigtem SQLite-Ergebnis eine
-gültige offene oder beidseitig geklärte Witness-/SQLite-Bindung, wird
-der gesamte Restore-Kandidat verweigert. Manifest-Schema v5 ist
+SQLite-Gegenpart oder fehlt bei einem noch offenen lokalen
+Recovery-Fence eine gültige, beidseitige Witness-/SQLite-Clearance,
+wird der Restore-Kandidat verweigert. Auch zwei unabhängig
+hashkonsistente Witness-`started`-Events ohne dazwischenliegende
+Operator-Clearance sind unmöglich: der echte `FenceLedger` verweigert
+jeden weiteren Start, solange irgendein vorheriger Write offen ist. Manifest-Schema v5 ist
 verpflichtend. Historische v1-Claims mit Witness-Outcomes
 `confirmed` oder `precondition_failed` dürfen nach v1→v2-Migration
 als untrusted Event erhalten bleiben; auch sie beweisen **keinen**

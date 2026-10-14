@@ -83,6 +83,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         legacy_media_response: dict[str, object] | None = None,
         forged_completed_outcome: str | None = None,
         forged_started_timestamp: str | None = None,
+        extra_started_key: str | None = None,
     ) -> None:
         """Test-only adversary reconstructs a self-consistent event hash chain.
 
@@ -117,6 +118,14 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 started = [row for row in events if row[1] == "started"]
                 self.assertEqual(len(started), 1)
                 started[0][8] = forged_started_timestamp
+            if extra_started_key is not None:
+                previous_start = next(row for row in events if row[1] == "started")
+                seal_index = next(i for i, row in enumerate(events) if row[1] == "sealed")
+                events.insert(seal_index, [
+                    previous_start[0], "started", extra_started_key,
+                    previous_start[3], previous_start[4], "", "", "",
+                    previous_start[8],
+                ])
             if legacy_media_completion is not None:
                 # Forge an otherwise hash-consistent historical media sequence.
                 self.assertIn(legacy_media_completion, ("confirmed", "ambiguous"))
@@ -166,6 +175,45 @@ class PairedRestorePreflightTests(unittest.TestCase):
             # cryptographic verifier; the new preflight must supply the
             # independently necessary semantic ordering validation.
             FenceLedger._verify_chain(connection)
+
+    def test_rehashed_witness_second_start_while_first_pending_is_rejected(self) -> None:
+        # Witness.execution_started() rejects a second key while ANY older
+        # start lacks a post-seal operator clearance, even with a sealed
+        # session and otherwise well-formed Hash/SHA/event order.
+        first, second = "pending:prior-write", "pending:forged-second-write"
+        self._start(key=first)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "INSERT INTO write_api_requests("
+                "idempotency_key,request_sha256,state,requested_at,claim_owner,"
+                "execution_started_at) VALUES(?,?,'in_progress',?,?,?)",
+                (second, SHA, AT.isoformat(), "pair-owner", AT.isoformat()),
+            )
+        self._rewrite_witness_events(extra_started_key=second)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_forged_sqlite_clearance_whitespace_evidence_is_not_canonical(self) -> None:
+        key = "clearance:whitespace-evidence"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:independent-operator", observed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-operator",
+            )
+        for forged in (" padded-reference ", "\tstart-tab", "end-tab\t"):
+            with self.subTest(evidence=forged):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        "UPDATE write_recovery_clearances SET evidence_reference=? "
+                        "WHERE idempotency_key=?", (forged, key),
+                    )
+                with self.assertRaises(PairPreflightError):
+                    inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_forged_witness_started_timestamp_must_be_runtime_readable(self) -> None:
         # A re-hashed, internally consistent event can still fail the
@@ -287,6 +335,30 @@ class PairedRestorePreflightTests(unittest.TestCase):
             )
         # The SQLite in_progress record remains recovery-blocking. A valid
         # digest-paired start alone must not make that one-sided clearance safe.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_sqlite_only_in_progress_operator_clearance_is_rejected(self) -> None:
+        key = "inprogress:sqlite-only-operator"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:only-sqlite-clear", observed_at=AT,
+        )
+        # Independent Witness remains unresolved: the SQLite-side clearance
+        # alone must never suppress a Write recovery fence in an attested pair.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_sqlite_only_in_progress_executor_clearance_is_rejected(self) -> None:
+        key = "inprogress:sqlite-only-executor"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="media_submit_reconciled",
+            evidence_reference="synthetic:executor-only", observed_at=AT,
+        )
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
@@ -576,6 +648,15 @@ class PairedRestorePreflightTests(unittest.TestCase):
         self.assertTrue(store.create_recovery_pending(
             exclude_idempotency_key="new", claim_owner="another-runtime",
         ))
+        # SQL-only clearance is a legitimate intermediate operator step,
+        # but NOT yet a valid jointly attested recovery generation.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key="separate-write", sha=SHA,
+                evidence="synthetic-only:operator-outcome",
+            )
         self.assertEqual(
             inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_final_creates"],
             [receipt_id],
@@ -593,9 +674,16 @@ class PairedRestorePreflightTests(unittest.TestCase):
         self.assertFalse(store.create_recovery_pending(
             exclude_idempotency_key="new", claim_owner="another-runtime",
         ))
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key="media-exact", sha=SHA,
+                evidence="synthetic-only:independent-review",
+            )
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
         self.assertEqual(inspected["fences"]["ambiguous_final_creates"], [])
-        self.assertEqual(inspected["fences"]["witness_unresolved"], [["media-exact", SHA]])
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
 
     def test_old_v4_manifest_is_rejected_after_replay_fence_upgrade(self) -> None:
         digest = self._pin()
@@ -675,24 +763,70 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 ).hexdigest(),
             ), "unverified")
 
-    def test_nonmedia_500_with_extra_response_field_not_recovered_from_witness_only_clearance(self) -> None:
-        key = "complete:nonmedia-untrusted-envelope"
+    def test_nonmedia_500_with_extra_response_field_remains_unverified(self) -> None:
+        # The independent Witness clearance, not the executor's asserted
+        # response shape, is the external reconciliation authority. Canonical
+        # non-media JSON stays permanently unverified after this crash.
+        key = "complete:nonmedia-extra-envelope"
         self._nonmedia_crash_without_witness_completion(
-            key=key, extra={"debug": "unexpected"}
+            key=key, extra={"debug": "unexpected"},
         )
         with FenceLedger(self.ledger) as witness:
             witness.operator_clearance(
                 key=key, sha=SHA, evidence="synthetic:independent-nonmedia-postread",
             )
-        with self.assertRaises(PairPreflightError):
-            inspect_offline_pair(self.sqlite, self.ledger)
+        report = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            report["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
 
-    def test_nonmedia_200_with_missing_witness_completion_is_never_attested_by_one_clearance(self) -> None:
+    def test_nonmedia_200_without_witness_completion_never_becomes_verified_replay(self) -> None:
         key = "complete:nonmedia-unwitnessed-success"
         self._nonmedia_crash_without_witness_completion(key=key, status=200)
         with FenceLedger(self.ledger) as witness:
             witness.operator_clearance(
                 key=key, sha=SHA, evidence="synthetic:independent-nonmedia-postread",
+            )
+        report = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            report["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
+        self.assertEqual(report["fences"]["witness_unresolved"], [])
+        digest = self._pin()
+        receipt = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=digest,
+        )
+        self.assertEqual(receipt["sqlite_unverified_replay_count"], 1)
+        self.assertFalse(receipt["restore_authorized"])
+
+    def test_nonmedia_409_without_witness_completion_stays_unverified(self) -> None:
+        key = "complete:nonmedia-unwitnessed-precondition"
+        self._nonmedia_crash_without_witness_completion(
+            key=key, status=409,
+            extra={"error": "write_claim_cancelled_before_begin"},
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-nonmedia-postread",
+            )
+        report = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            report["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
+
+    def test_quarantined_202_without_sqlite_clearance_cannot_use_nonmedia_exception(self) -> None:
+        key = "unknown:nonmedia-exclusion"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=202,
+            response_json=SnapshotStore._unverified_write_api_response(key),
+            completed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-operator",
             )
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
@@ -1258,6 +1392,81 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_dashboard_pending_route_identities_reject_forged_storage_records(self) -> None:
+        # These records satisfy _pending_from_json but could NEVER pass the
+        # independent StorageOwner dashboard_pending_claim route binding.
+        cases = (
+            ("DELETE", "/api/write/ads/222", "ad:222", "ad:222", None, "222"),
+            ("DELETE", "/api/write/ads/222", "ad:111:delete", "ad:111", None, "111"),
+            ("DELETE", "/api/write/ads/222", "ad:222:delete", "ad:111", None, "222"),
+            ("DELETE", "/api/write/ads/222", "ad:222:delete", "ad:222", None, "111"),
+            ("POST", "/api/write/media/ads", "create", "create", "{}", None),
+            ("POST", "/api/write/ads", "create-media", "create", "{}", None),
+            ("POST", "/api/write/ads/222/pause", "ad:222:activate", "ad:222", None, "222"),
+            ("PATCH", "/api/write/ads/222", "ad:222:update", "ad:222", None, "222"),
+            ("DELETE", "/api/write/ads/222", "ad:222:delete", "ad:222", "{}", "222"),
+            ("POST", "/api/write/ads/222/delete", "ad:222:delete", "ad:222", None, "222"),
+            ("DELETE", "/api/write/ads/0222", "ad:222:delete", "ad:222", None, "222"),
+        )
+        for method, path, scope, resource, payload, ad_id in cases:
+            with self.subTest(method=method, path=path, scope=scope, resource=resource,
+                              payload=payload, ad_id=ad_id):
+                with sqlite3.connect(self.sqlite) as connection:
+                    connection.execute("DELETE FROM dashboard_pending_writes")
+                    connection.execute(
+                        "INSERT INTO dashboard_pending_writes "
+                        "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                        "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                        (scope, resource, "pending:forged-route", method, path,
+                         payload, ad_id, 0),
+                    )
+                with self.assertRaises(PairPreflightError):
+                    inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_dashboard_pending_wire_payload_must_be_owner_canonical(self) -> None:
+        for payload in ('{"b":2, "a":1}', '{"title":"\\u00dc"}', '{ "title": "x" }'):
+            with self.subTest(payload=payload):
+                with sqlite3.connect(self.sqlite) as connection:
+                    connection.execute("DELETE FROM dashboard_pending_writes")
+                    connection.execute(
+                        "INSERT INTO dashboard_pending_writes "
+                        "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                        "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                        ("create", "create", "pending:noncanonical-payload", "POST",
+                         "/api/write/ads", payload, None, 0),
+                    )
+                with self.assertRaises(PairPreflightError):
+                    inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_dashboard_pending_all_storage_owner_write_routes_are_readable(self) -> None:
+        # Every legal route must remain inspectable as an unresolved fence;
+        # no restore or platform Write authority follows from inspection.
+        cases = (
+            ("POST", "/api/write/ads", "create", "create", "{}", None, 0),
+            ("POST", "/api/write/media/ads", "create-media", "create", "{}", None, 0),
+            ("PATCH", "/api/write/ads/222", "ad:222:update", "ad:222",
+             '{"title":"Über"}', "222", 0),
+            ("POST", "/api/write/ads/222/pause", "ad:222:pause", "ad:222", None, "222", 0),
+            ("POST", "/api/write/ads/222/activate", "ad:222:activate", "ad:222",
+             None, "222", 0),
+            ("DELETE", "/api/write/ads/222", "ad:222:delete", "ad:222", None, "222", 1),
+        )
+        for method, path, scope, resource, payload, ad_id, acknowledged in cases:
+            with self.subTest(path=path):
+                with sqlite3.connect(self.sqlite) as connection:
+                    connection.execute("DELETE FROM dashboard_pending_writes")
+                    connection.execute(
+                        "INSERT INTO dashboard_pending_writes "
+                        "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                        "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                        (scope, resource, "pending:valid-route", method, path,
+                         payload, ad_id, acknowledged),
+                    )
+                self.assertEqual(
+                    inspect_offline_pair(self.sqlite, self.ledger)["fences"]["dashboard_pending"],
+                    [[scope, resource, "pending:valid-route", acknowledged]],
+                )
+
     def test_dashboard_pending_key_is_validated_by_storage_owner_reader(self) -> None:
         with sqlite3.connect(self.sqlite) as connection:
             connection.execute(
@@ -1817,7 +2026,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def test_boolean_ack_does_not_match_integer_dashboard_pending_field(self) -> None:
         SnapshotStore(self.sqlite, create_if_missing=False).claim_dashboard_pending_write(
-            scope="ad:777", resource_key="ad:777",
+            scope="ad:777:delete", resource_key="ad:777",
             idempotency_key="pending:typed", method="DELETE",
             path="/api/write/ads/777", payload_json=None, ad_id="777",
         )
@@ -2030,7 +2239,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
             source="offline-qa", started_at=AT, require_no_unresolved=True,
         )
         store.claim_dashboard_pending_write(
-            scope="ad:777", resource_key="ad:777",
+            scope="ad:777:delete", resource_key="ad:777",
             idempotency_key="pending:one", method="DELETE",
             path="/api/write/ads/777", payload_json=None, ad_id="777",
         )
