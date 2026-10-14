@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, closing, contextmanager
+from datetime import datetime
 import fcntl
 import hashlib
 import json
@@ -32,6 +33,9 @@ from .fence_witness import (
     _private_directory as _witness_private_directory,
 )
 from .storage import SnapshotStore
+from .storage_owner import (
+    StorageOwnerError, _KEY as _STORAGE_KEY, _pending_from_json,
+)
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _GENERATION = re.compile(r"[0-9a-f]{32}\Z")
@@ -62,8 +66,11 @@ def _canonical(value: object) -> bytes:
 
 
 def _write_key(value: object) -> str:
-    """Use FenceLedger's actual idempotency-key grammar."""
-    if not isinstance(value, str) or _WITNESS_KEY.fullmatch(value) is None:
+    """Require the intersection of Witness and StorageOwner key grammars."""
+    if (
+        not isinstance(value, str) or _WITNESS_KEY.fullmatch(value) is None
+        or _STORAGE_KEY.fullmatch(value) is None
+    ):
         raise PairPreflightError("write recovery idempotency key invalid")
     return value
 
@@ -441,6 +448,46 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
             raise PairPreflightError("SQLite clearance was not ambiguous")
 
 
+
+def _validate_sqlite_write_request_timestamps(conn: sqlite3.Connection) -> None:
+    """Only certify requests whose durable timestamp fields survive readback.
+
+    SnapshotStore._write_api_request_record parses these fields with
+    datetime.fromisoformat on retries. Verify *all* rows, including never-
+    started claims that would not appear in the pending-fence inventory.
+    """
+    for key, sha, requested, started, completed in _rows(
+        conn,
+        "SELECT idempotency_key,request_sha256,requested_at,"
+        "execution_started_at,completed_at FROM write_api_requests "
+        "ORDER BY idempotency_key",
+    ):
+        _write_key(key)
+        if not isinstance(sha, str) or _SHA.fullmatch(sha) is None:
+            raise PairPreflightError("SQLite persisted request digest invalid")
+        for field, value, required in (
+            ("requested_at", requested, True),
+            ("execution_started_at", started, False),
+            ("completed_at", completed, False),
+        ):
+            if value is None and not required:
+                continue
+            if not isinstance(value, str) or not 1 <= len(value) <= 80:
+                raise PairPreflightError(
+                    "SQLite persisted write request timestamp invalid"
+                )
+            try:
+                timestamp = datetime.fromisoformat(value)
+                aware = timestamp.tzinfo is not None and (
+                    timestamp.utcoffset() is not None
+                )
+            except (ValueError, TypeError, OverflowError):
+                aware = False
+            if not aware:
+                raise PairPreflightError(
+                    "SQLite persisted write request timestamp lacks timezone"
+                )
+
 def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
         raise PairPreflightError("SQLite integrity check failed")
@@ -448,6 +495,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     _verify_store_security_schema(conn)
     if conn.execute("PRAGMA user_version").fetchone()[0] != 2:
         raise PairPreflightError("SQLite recovery schema v2 is required")
+    _validate_sqlite_write_request_timestamps(conn)
     _validate_sqlite_clearances(conn)
     starts = [
         [_write_key(row[0]), _text(row[1])] for row in _rows(
@@ -532,15 +580,31 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     ]
     if any(row <= 0 for row in pending_sync):
         raise PairPreflightError("SQLite sync attempt identity invalid")
-    dashboard = [
-        [_text(row[0]), _text(row[1]), _text(row[2]), row[3]]
-        for row in _rows(
-            conn, "SELECT scope,resource_key,idempotency_key,acknowledged "
-            "FROM dashboard_pending_writes ORDER BY scope",
-        )
-    ]
-    if any(type(row[3]) is not int or row[3] not in (0, 1) for row in dashboard):
-        raise PairPreflightError("SQLite dashboard pending fence invalid")
+    dashboard: list[list[object]] = []
+    for row in _rows(
+        conn,
+        "SELECT scope,resource_key,idempotency_key,method,path,"
+        "payload_json,ad_id,acknowledged "
+        "FROM dashboard_pending_writes ORDER BY scope",
+    ):
+        scope, resource, key, method, path, payload, ad_id, acknowledged = row
+        if type(acknowledged) is not int or acknowledged not in (0, 1):
+            raise PairPreflightError("SQLite dashboard pending fence invalid")
+        try:
+            # This decoder is used by StorageOwnerClient after restore.
+            # A nonempty key or stale malformed payload cannot pass.
+            _pending_from_json({
+                "scope": scope, "resource_key": resource,
+                "idempotency_key": key, "method": method, "path": path,
+                "payload_json": payload, "ad_id": ad_id,
+                "acknowledged": bool(acknowledged),
+            })
+        except (StorageOwnerError, ValueError, TypeError,
+                UnicodeError, RecursionError) as exc:
+            raise PairPreflightError(
+                "SQLite dashboard pending fence is unreadable by storage owner"
+            ) from exc
+        dashboard.append([scope, resource, key, acknowledged])
     # A durable before_media_post_read checkpoint always has
     # outcome='confirmed' (SnapshotStore.append_create_operation_checkpoint).
     # The browser executor may crash BEFORE persisting its final receipt.
@@ -842,7 +906,8 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
                 raise PairPreflightError("witness started operation invalid")
             starts[key] = {
                 "session": sid, "sha": sha, "action": action,
-                "completed": False, "runtime": False, "operator": False,
+                "completed": False, "completion_outcome": "",
+                "runtime": False, "operator": False,
             }
             continue
         start = starts.get(key)
@@ -859,10 +924,12 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
             ):
                 raise PairPreflightError("witness completion order invalid")
             start["completed"] = True
+            start["completion_outcome"] = outcome
         elif kind == "runtime_cleared":
             if (
                 start["runtime"] or start["operator"]
                 or not start["completed"] or start["action"] != "create_media"
+                or start["completion_outcome"] != "ambiguous"
                 or outcome or response
             ):
                 raise PairPreflightError("witness runtime clearance order invalid")

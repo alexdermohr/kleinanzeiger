@@ -79,6 +79,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
     def _rewrite_witness_events(
         self, *, order: tuple[str, ...] | None = None,
         started_key: str | None = None,
+        legacy_media_completion: str | None = None,
     ) -> None:
         """Test-only adversary reconstructs a self-consistent event hash chain.
 
@@ -104,6 +105,22 @@ class PairedRestorePreflightTests(unittest.TestCase):
                         row[2] = started_key
                         found = True
                 self.assertTrue(found)
+            if legacy_media_completion is not None:
+                # Forge an otherwise hash-consistent historical media sequence.
+                self.assertIn(legacy_media_completion, ("confirmed", "ambiguous"))
+                start = next(row for row in events if row[1] == "started")
+                start[4] = "create_media"
+                sid, _, key, sha, _, _, _, _, observed = start
+                completed = [
+                    sid, "completed", key, sha, "", legacy_media_completion,
+                    SHA, "", observed,
+                ]
+                runtime = [
+                    sid, "runtime_cleared", key, sha, "", "", "",
+                    "synthetic:untrusted-runtime", observed,
+                ]
+                seal_index = next(i for i, row in enumerate(events) if row[1] == "sealed")
+                events[seal_index:seal_index] = [completed, runtime]
             connection.execute("DROP TRIGGER events_no_update")
             connection.execute("DROP TRIGGER events_no_delete")
             connection.execute("DELETE FROM events")
@@ -770,6 +787,117 @@ class PairedRestorePreflightTests(unittest.TestCase):
             self.assertEqual(cursor.rowcount, 1)
             connection.execute("PRAGMA schema_version=71")
             connection.execute("PRAGMA writable_schema=OFF")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_started_key_requires_storage_owner_grammar(self) -> None:
+        # Witness accepts ':bad', but StorageOwner._KEY does not.
+        self._start()
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET idempotency_key=? WHERE idempotency_key=?",
+                (":bad", KEY),
+            )
+        self._rewrite_witness_events(started_key=":bad")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_dashboard_pending_key_is_validated_by_storage_owner_reader(self) -> None:
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO dashboard_pending_writes "
+                "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                ("ad:777", "ad:777", "bad key", "DELETE",
+                 "/api/write/ads/777", None, "777", 0),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_dashboard_pending_corrupt_payload_is_not_readable_after_restore(self) -> None:
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO dashboard_pending_writes "
+                "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                ("ad:777", "ad:777", "pending:777", "POST",
+                 "/api/write/ads/777", "{not-json", "777", 0),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_runtime_clearance_after_confirmed_completion_is_not_trusted(self) -> None:
+        self._start()
+        self._rewrite_witness_events(legacy_media_completion="confirmed")
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_runtime_clearance_after_ambiguous_completion_remains_fenced(self) -> None:
+        self._start()
+        self._rewrite_witness_events(legacy_media_completion="ambiguous")
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            inspected["fences"]["witness_unresolved"], [[KEY, SHA]],
+        )
+
+    def test_unparseable_requested_at_cannot_restore_started_write(self) -> None:
+        self._start()
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET requested_at=? "
+                "WHERE idempotency_key=?", ("broken", KEY),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_unparseable_started_at_cannot_restore_started_write(self) -> None:
+        self._start()
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET execution_started_at=? "
+                "WHERE idempotency_key=?", ("broken", KEY),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_naive_started_at_cannot_restore_started_write(self) -> None:
+        self._start()
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET execution_started_at=? "
+                "WHERE idempotency_key=?", ("2026-10-13T16:00:00", KEY),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_unstarted_unreadable_requested_at_cannot_restore_claim(self) -> None:
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        claim = store.claim_write_api_request(
+            idempotency_key="unstarted:bad-clock", request_sha256=SHA,
+            claim_owner="pair-owner", requested_at=AT,
+        )
+        self.assertTrue(claim.created)
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET requested_at=? "
+                "WHERE idempotency_key=?",
+                ("not-a-timestamp", "unstarted:bad-clock"),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_bad_completed_timestamp_cannot_restore_media_response(self) -> None:
+        key = "media:bad-completed-clock"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={"media_persistence_confirmed": False,
+                      "operation_receipt": None},
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET completed_at=? "
+                "WHERE idempotency_key=?", ("broken", key),
+            )
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 

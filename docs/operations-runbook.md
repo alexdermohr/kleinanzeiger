@@ -810,7 +810,7 @@ letzten Runtime-Event der Ursprungssession und zwingend **vor**
 Clearances sind kein Recovery-Beweis. Historische `runtime_cleared`-
 Beobachtungen ersetzen weiterhin keine unabhängige Operator-Clearance.
 Für SQLite-Write-Starts und Witness-Operationen gilt exakt die
-FenceLedger-Key-Grammatik `[A-Za-z0-9._:-]{1,160}`: Unicode, Leerzeichen,
+gemeinsame Witness-/StorageOwner-Key-Grammatik `[A-Za-z0-9][A-Za-z0-9._:-]{0,159}`: Unicode, Leerzeichen,
 unzulässige Sonderzeichen und überlange Keys lassen sich nicht durch
 einen übereinstimmend manipulierten Paarstand legitimieren.
 
@@ -822,6 +822,12 @@ als kanonische JSON-Bytefolge verglichen: `false` ist kein numerisches
 `1`. Auch ein extern mit dem manipulierten Manifest-Digest gepinnter
 solcher Kandidat wird verworfen. Damit bleiben SQLite-/Witness-IDs,
 Bestätigungs-Bools und Hashketten-Sequenzen semantisch getrennt.
+Zusätzlich werden sämtliche persistierten Write-Request-Zeitstempel
+(requested_at, execution_started_at und completed_at) vor der
+Restore-Prüfung wie beim produktiven Datenbank-Readback als
+zeitzonenbehaftete ISO-Zeitpunkte validiert. Auch niemals gestartete
+Requests dürfen nicht mit unlesbaren Zeitfeldern restauriert werden.
+
 Vor dem Inventar werden alle SQLite-Recovery-Clearances mit ihrer
 tatsächlich ausgeführten Ursprungsoperation (exakter Key und SHA,
 gesetzter execution_started_at) abgeglichen. Verwaiste, falsch
@@ -831,6 +837,13 @@ Clearances auf gewöhnliche erfolgreich abgeschlossene Writes.
 Damit darf eine gefälschte Clearance keine Create-, Media- oder
 Quarantäne-Fence verbergen. Das ist eine **Offline-Diagnose**, keine
 unabhängige Verifikation der externen Plattformantwort.
+
+Dashboard-Pending-Writes müssen vollständig durch den typisierten
+StorageOwner-Decoder lesbar sein; ungültige Key-Grammatik, Payloads,
+Methoden und Identitäten verhindern eine Restore-Diagnosefreigabe.
+Eine historische Witness-Runtime-Clearance benötigt vorher eine
+create_media-Completion mit Outcome ambiguous; ein bestätigter
+oder mit precondition_failed abgeschlossener Submit legitimiert sie nicht.
 
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
