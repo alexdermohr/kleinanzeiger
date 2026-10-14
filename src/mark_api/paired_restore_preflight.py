@@ -496,6 +496,16 @@ def _validate_sqlite_write_request_records(
             raise PairPreflightError(
                 "SQLite persisted write request is unreadable by storage owner"
             ) from exc
+        # Every current-schema unstarted claim is owned at insertion, and
+        # owner-only cancellation preserves that owner. A NULL owner cannot
+        # be taken over by SnapshotStore on restart, permanently trapping an
+        # in_progress key; a forged completed cancellation is equally not
+        # owner-reachable. Started historical records remain separately
+        # governed by durable SQLite/Witness execution fences.
+        if record.execution_started_at is None and record.claim_owner is None:
+            raise PairPreflightError(
+                "SQLite unstarted write claim lacks original owner"
+            )
         if record.state != "completed":
             continue
         response = record.response_json

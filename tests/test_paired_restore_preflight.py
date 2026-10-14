@@ -1806,6 +1806,49 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_unstarted_ownerless_in_progress_claim_cannot_restore(self) -> None:
+        # A claim that never began must remain takeover/cancel-able.
+        # Ownerlessness is not a legitimate current-schema write path.
+        key = "unstarted:ownerless-open"
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertTrue(store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="first-runtime", requested_at=AT,
+        ).created)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE write_api_requests SET claim_owner=NULL WHERE idempotency_key=?",
+                (key,),
+            )
+        self.assertFalse(store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="replacement-runtime", requested_at=AT,
+            allow_abandoned_takeover=True,
+        ).created)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_unstarted_ownerless_cancelled_claim_cannot_restore(self) -> None:
+        key = "unstarted:ownerless-cancelled"
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertTrue(store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="first-runtime", requested_at=AT,
+        ).created)
+        store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="first-runtime", cancelled_at=AT,
+        )
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE write_api_requests SET claim_owner=NULL WHERE idempotency_key=?",
+                (key,),
+            )
+        # Exact 409 response alone is not sufficient: the storage owner's
+        # cancellation protocol could never have persisted a NULL owner.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_unstarted_owner_cancellation_is_recoverable_without_witness(self) -> None:
         # Only the independent StorageOwner can complete an unstarted
         # request. It constructs an exact HTTP 409 cancellation envelope.

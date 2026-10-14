@@ -861,7 +861,14 @@ oder mit precondition_failed abgeschlossener Submit legitimiert sie nicht.
 
 Sämtliche Write-Request-Zeilen müssen durch den realen StorageOwner-
 Record-Decoder lesbar sein; auch Status, Owner, Ergebnisübergang und
-kanonische JSON-Antwort sind Teil der Prüfung. Eine als `completed`
+kanonische JSON-Antwort sind Teil der Prüfung. Bei **jeder ungestarteten**
+Operation (also `execution_started_at=NULL`) muss der ursprüngliche
+`claim_owner` erhalten sein: der aktuelle StorageOwner erstellt Claims
+ausschließlich mit gültigem Owner, und ein `in_progress`-Claim ohne
+Owner ist nach Neustart nicht einmal durch den zulässigen
+`allow_abandoned_takeover`-Pfad übernehmbar. Solche historischen oder
+manipulierten Claims dürfen im Offline-Paarrestore nicht als
+fence-frei attestiert werden. Eine als `completed`
 persistierte Operation **ohne** `execution_started_at` hat keinen
 Witness-Start: Sie darf ausschließlich den vom StorageOwner selbst
 konstruierten HTTP-409-Abbruch `write_claim_cancelled_before_begin`
