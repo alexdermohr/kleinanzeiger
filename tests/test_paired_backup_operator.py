@@ -1,0 +1,302 @@
+"""No live services or Kleinanzeigen access: cold pair sealing/rollback tests."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from unittest.mock import patch
+
+from mark_api.fence_witness import FenceLedger
+from mark_api.paired_backup_operator import (
+    PairedBackupOperatorError, seal_offline_pair,
+)
+from mark_api.paired_restore_preflight import verify_offline_pair
+from mark_api.storage import SnapshotStore
+
+
+SHA = "f" * 64
+AT = datetime(2026, 10, 14, 17, 0, tzinfo=timezone.utc)
+FIRST = "11111111111111111111111111111111"
+SECOND = "22222222222222222222222222222222"
+
+
+class PairedBackupOperatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="mark-cold-pair-")
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.source = root / "operator-source"
+        self.output = root / "private-generations"
+        self.anchor = root / "separate-operator-anchors"
+        for path in (self.source, self.output, self.anchor):
+            path.mkdir(mode=0o700)
+        self.sqlite = self.source / "mark.sqlite"
+        self.witness = self.source / "witness.sqlite"
+        SnapshotStore(self.sqlite)
+        with FenceLedger(self.witness, initialize=True):
+            pass
+
+    def _hash(self, path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _seal(
+        self,
+        *,
+        generation: str = FIRST,
+        previous: str | None = None,
+        sqlite_sha: str | None = None,
+        witness_sha: str | None = None,
+    ) -> dict[str, object]:
+        return seal_offline_pair(
+            self.sqlite, self.witness, self.output, self.anchor,
+            expected_sqlite_sha256=sqlite_sha or self._hash(self.sqlite),
+            expected_witness_sha256=witness_sha or self._hash(self.witness),
+            expected_previous_head_sha256=previous,
+            generation=generation,
+        )
+
+    def _start_write(self) -> None:
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        claim = store.claim_write_api_request(
+            idempotency_key="pair:operator:pending", request_sha256=SHA,
+            claim_owner="owner-one", requested_at=AT,
+        )
+        self.assertTrue(claim.created)
+        store.begin_write_api_request(
+            idempotency_key="pair:operator:pending", request_sha256=SHA,
+            claim_owner="owner-one", execution_started_at=AT,
+            strict_owner_fence=True,
+        )
+        with FenceLedger(self.witness) as witness:
+            sid = witness.open_session()
+            witness.execution_started(
+                sid, key="pair:operator:pending", sha=SHA, action="create",
+            )
+            witness.seal_session(sid)
+
+    def test_first_generation_creates_independently_anchored_offline_pair(self) -> None:
+        result = self._seal()
+        generation = self.output / FIRST
+        head = self.anchor / "latest.json"
+        self.assertEqual(result["generation"], FIRST)
+        self.assertEqual(result["head_sha256"], self._hash(head))
+        self.assertEqual(result["manifest_sha256"], self._hash(generation / "manifest.json"))
+        self.assertEqual((self.anchor / (FIRST + ".json")).read_bytes(), head.read_bytes())
+        self.assertEqual((generation / "witness.sqlite.lock").stat().st_mode & 0o777, 0o600)
+        self.assertFalse(result["restore_authorized"])
+        self.assertFalse(result["live_source_quiescence_attested"])
+        self.assertFalse(result["external_write_authorized"])
+        self.assertTrue(result["offline_only"])
+        inspected = verify_offline_pair(
+            generation / "mark.sqlite", generation / "witness.sqlite",
+            generation / "manifest.json",
+            expected_manifest_sha256=result["manifest_sha256"],
+        )
+        self.assertEqual(inspected["generation"], FIRST)
+        self.assertEqual(inspected["sqlite_started_count"], 0)
+        self.assertFalse(inspected["restore_authorized"])
+
+    def test_later_generation_keeps_real_open_sqlite_witness_fences(self) -> None:
+        first = self._seal()
+        self._start_write()
+        second = self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertEqual(
+            second["fences"]["sqlite_started_count"], 1,
+        )
+        self.assertEqual(
+            second["fences"]["witness_unresolved_count"], 1,
+        )
+        self.assertEqual(second["fences"]["sqlite_unverified_replay_count"], 0)
+        self.assertEqual(
+            json.loads((self.anchor / "latest.json").read_bytes())["predecessor_sha256"],
+            first["head_sha256"],
+        )
+        self.assertEqual(
+            self._hash(self.anchor / (FIRST + ".json")),
+            first["head_sha256"],
+        )
+
+    def test_missing_or_stale_previous_anchor_never_publishes(self) -> None:
+        first = self._seal()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND)
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous="0" * 64)
+        self.assertFalse((self.output / SECOND).exists())
+        self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
+
+    def test_replayed_old_head_rejected_against_latest_external_digest(self) -> None:
+        first = self._seal()
+        second = self._seal(generation=SECOND, previous=first["head_sha256"])
+        (self.anchor / "latest.json").write_bytes(
+            (self.anchor / (FIRST + ".json")).read_bytes()
+        )
+        with self.assertRaises(PairedBackupOperatorError):
+            seal_offline_pair(
+                self.sqlite, self.witness, self.output, self.anchor,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
+                expected_previous_head_sha256=second["head_sha256"],
+                generation="3" * 32,
+            )
+
+    def test_missing_witness_lock_never_attests_quiescence(self) -> None:
+        self.witness.with_name(self.witness.name + ".lock").unlink()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal()
+        self.assertFalse((self.output / FIRST).exists())
+
+    def test_running_witness_refused(self) -> None:
+        with FenceLedger(self.witness):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.output / FIRST).exists())
+
+    def test_sidecars_refused_even_with_valid_source_sha(self) -> None:
+        sidecar = self.sqlite.with_name(self.sqlite.name + "-wal")
+        sidecar.write_bytes(b"untrusted")
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal()
+        self.assertFalse((self.output / FIRST).exists())
+
+    def test_mutated_source_cannot_be_signed_using_stale_anchor(self) -> None:
+        pinned = self._hash(self.sqlite)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute("PRAGMA user_version=77")
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(sqlite_sha=pinned)
+        self.assertFalse((self.output / FIRST).exists())
+
+    def test_rejects_private_source_substitution_and_untrusted_schema(self) -> None:
+        with sqlite3.connect(self.witness) as db:
+            db.execute("DROP TRIGGER events_no_delete")
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal()
+        self.assertFalse((self.output / FIRST).exists())
+
+    def test_source_symlink_cannot_be_sealed(self) -> None:
+        different = self.source / "substituted.sqlite"
+        self.sqlite.rename(different)
+        self.sqlite.symlink_to(different)
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal()
+        self.assertFalse((self.output / FIRST).exists())
+
+    def test_after_uncertain_head_update_never_retries_same_generation(self) -> None:
+        with patch("mark_api.paired_backup_operator.os.replace",
+                   side_effect=OSError("synthetic late failure")):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        # Both images are published, but there is no final HEAD: the
+        # result is UNKNOWN, not a successful backup or restore authority.
+        self.assertTrue((self.output / FIRST / "manifest.json").exists())
+        self.assertFalse((self.anchor / "latest.json").exists())
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+
+    def test_uncertain_first_head_cannot_be_silently_rebased(self) -> None:
+        # A killed first-generation publish can leave both cold images and
+        # a retained immutable record but no current HEAD. Another distinct
+        # generation must NOT quietly bootstrap over that unresolved state.
+        with patch("mark_api.paired_backup_operator.os.replace",
+                   side_effect=OSError("synthetic late crash")):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND)
+
+    def test_crashed_second_generation_cannot_be_discarded_by_third(self) -> None:
+        # A completed first HEAD does not make a *second* generation safe
+        # when its cold directory has been published but latest.json was not
+        # advanced. A third generation must refuse rather than chain directly
+        # to the first and lose the unanchored intermediate checkpoint.
+        first = self._seal()
+        from mark_api import paired_backup_operator as operator
+        real_new_file = operator._new_file
+
+        def fail_immutable_record(path: Path, payload: bytes) -> None:
+            if path == self.anchor / (SECOND + ".json"):
+                raise OSError("synthetic crash before immutable head record")
+            real_new_file(path, payload)
+
+        with patch(
+            "mark_api.paired_backup_operator._new_file",
+            side_effect=fail_immutable_record,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal(
+                    generation=SECOND, previous=first["head_sha256"],
+                )
+        self.assertTrue((self.output / SECOND / "manifest.json").exists())
+        self.assertEqual(
+            self._hash(self.anchor / "latest.json"), first["head_sha256"],
+        )
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(
+                generation="3" * 32, previous=first["head_sha256"],
+            )
+
+    def test_successful_second_generation_allows_third_after_sealing(self) -> None:
+        first = self._seal()
+        second = self._seal(generation=SECOND, previous=first["head_sha256"])
+        third = self._seal(generation="3" * 32, previous=second["head_sha256"])
+        self.assertEqual(third["generation"], "3" * 32)
+
+    def test_predirtied_shared_mapping_rejects_stat_invariant_source_edit(self) -> None:
+        # Real Linux MAP_SHARED pages, not a mocked byte change. A page
+        # dirtied before stat attestation can be rewritten without updating
+        # mtime/ctime. The independent source SHA must still defeat it.
+        import mmap
+        import sys
+
+        if not sys.platform.startswith("linux"):
+            self.skipTest("requires Linux MAP_SHARED")
+        with self.sqlite.open("r+b") as source:
+            image = mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_WRITE)
+            try:
+                previous = image[63]
+                image[63] = previous ^ 1
+                image[63] = previous
+                before = self.sqlite.stat()
+                pinned_sha = self._hash(self.sqlite)
+                image[63] = previous ^ 1
+                after = self.sqlite.stat()
+                if (
+                    before.st_mtime_ns != after.st_mtime_ns
+                    or before.st_ctime_ns != after.st_ctime_ns
+                ):
+                    self.skipTest("filesystem does not retain predirtied timestamp")
+                with self.assertRaises(PairedBackupOperatorError):
+                    self._seal(sqlite_sha=pinned_sha)
+                self.assertFalse((self.output / FIRST).exists())
+            finally:
+                image.close()
+
+    def test_bad_root_permissions_or_nested_roots_rejected(self) -> None:
+        os.chmod(self.anchor, 0o770)
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal()
+        os.chmod(self.anchor, 0o700)
+        with self.assertRaises(PairedBackupOperatorError):
+            seal_offline_pair(
+                self.sqlite, self.witness, self.output, self.source,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
+                expected_previous_head_sha256=None, generation=FIRST,
+            )
+
+    def test_completed_generation_is_create_only(self) -> None:
+        self._seal()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal()
+
+
+if __name__ == "__main__":
+    unittest.main()
