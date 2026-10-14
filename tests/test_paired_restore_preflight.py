@@ -1458,6 +1458,39 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 expected_manifest_sha256=externally_anchored,
             )
 
+    def test_forged_final_receipt_completed_before_start_cannot_settle_checkpoint(self) -> None:
+        # A valid-looking final receipt matching the checkpoint's selected
+        # SQL fields must still satisfy CreateOperationReceipt.__post_init__.
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_receipts SET completed_at=? "
+                "WHERE id=(SELECT MAX(id) FROM create_operation_receipts)",
+                ("2026-10-13T15:59:59+00:00",),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_forged_final_receipt_empty_required_status_cannot_settle_checkpoint(self) -> None:
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_receipts SET confirmation_pre_read_status='' "
+                "WHERE id=(SELECT MAX(id) FROM create_operation_receipts)"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_other_receipt_cannot_settle_a_crashed_checkpoint(self) -> None:
         receipt, checkpoint = self._create_checkpoint()
         foreign_final = replace(

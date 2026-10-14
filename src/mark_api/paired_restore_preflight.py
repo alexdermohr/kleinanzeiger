@@ -23,6 +23,7 @@ import sys
 from typing import Iterator
 
 from .container_draft import container_draft_denied
+from .domain import CreateOperationReceipt, MediaPostReadStatus, OperationOutcome
 from .fence_witness import (
     FenceLedger, FenceWitnessError,
     _ACTIONS as _WITNESS_ACTIONS,
@@ -570,6 +571,109 @@ def _witness_completed_response_bindings(
 
 
 
+
+def _validate_sqlite_create_receipts(conn: sqlite3.Connection) -> None:
+    """Reject final receipts that the real CreateOperationReceipt cannot emit.
+
+    A forged terminal receipt can otherwise match the checkpoint's selected
+    columns and falsely retire a still-open media recovery fence. Domain
+    construction verifies the exact timestamps, outcome, media relationship,
+    nonempty statuses and created-ad identity without authorizing any write.
+    Historical snapshot JSON remains read-only evidence, not platform truth.
+    """
+    fields = (
+        "id", "operation", "created_ad_id", "started_at", "completed_at",
+        "outcome", "pre_read_status", "confirmation_pre_read_status",
+        "post_read_status", "confirmation_post_read_status",
+        "content_post_read_status", "writer_invoked", "authorization_by",
+        "authorization_reference", "media_post_read_status",
+        "media_persistence_confirmed", "writer_error", "post_snapshot_json",
+        "confirmation_post_snapshot_json", "content_post_snapshot_json",
+    )
+
+    def persisted_time(raw: object) -> datetime:
+        if type(raw) is not str or not 1 <= len(raw) <= 80:
+            raise PairPreflightError("SQLite final receipt timestamp is invalid")
+        value = datetime.fromisoformat(raw)
+        if (
+            value.tzinfo is None or value.utcoffset() is None
+            or value.isoformat() != raw
+        ):
+            raise PairPreflightError("SQLite final receipt timestamp is not canonical")
+        return value
+
+    for row in _rows(
+        conn, "SELECT " + ",".join(fields) + " FROM create_operation_receipts ORDER BY id",
+    ):
+        rec = dict(zip(fields, row))
+        try:
+            if type(rec["id"]) is not int or rec["id"] <= 0:
+                raise ValueError("receipt row id invalid")
+            if (
+                type(rec["writer_invoked"]) is not int
+                or rec["writer_invoked"] not in (0, 1)
+                or type(rec["media_persistence_confirmed"]) is not int
+                or rec["media_persistence_confirmed"] not in (0, 1)
+            ):
+                raise ValueError("receipt boolean field invalid")
+            persisted = CreateOperationReceipt(
+                operation=rec["operation"],
+                created_ad_id=rec["created_ad_id"],
+                started_at=persisted_time(rec["started_at"]),
+                completed_at=persisted_time(rec["completed_at"]),
+                outcome=OperationOutcome(rec["outcome"]),
+                pre_read_status=rec["pre_read_status"],
+                confirmation_pre_read_status=rec["confirmation_pre_read_status"],
+                post_read_status=rec["post_read_status"],
+                confirmation_post_read_status=rec["confirmation_post_read_status"],
+                content_post_read_status=rec["content_post_read_status"],
+                writer_invoked=bool(rec["writer_invoked"]),
+                authorization_by=rec["authorization_by"],
+                authorization_reference=rec["authorization_reference"],
+                media_post_read_status=(
+                    MediaPostReadStatus(rec["media_post_read_status"])
+                    if rec["media_post_read_status"] is not None else None
+                ),
+                media_persistence_confirmed=bool(rec["media_persistence_confirmed"]),
+                writer_error=rec["writer_error"],
+            )
+            # Optional historical snapshots may have older projection fields.
+            # Validate their JSON identity but do not silently fabricate a
+            # current owner inventory or require newly introduced fields.
+            for name in (
+                "post_snapshot_json",
+                "confirmation_post_snapshot_json",
+                "content_post_snapshot_json",
+            ):
+                raw_snapshot = rec[name]
+                if raw_snapshot is None:
+                    continue
+                if type(raw_snapshot) is not str:
+                    raise ValueError("receipt snapshot must be JSON")
+                snapshot = json.loads(
+                    raw_snapshot, object_pairs_hook=_unique_object,
+                    parse_constant=lambda _literal: (_ for _ in ()).throw(ValueError()),
+                )
+                if (
+                    not isinstance(snapshot, dict)
+                    or not isinstance(snapshot.get("ad_id"), str)
+                    or (
+                        persisted.created_ad_id is not None
+                        and snapshot["ad_id"] != persisted.created_ad_id
+                    )
+                ):
+                    raise ValueError("receipt snapshot identity invalid")
+        except PairPreflightError:
+            raise
+        except (
+            AttributeError, KeyError, TypeError, ValueError,
+            OverflowError, UnicodeError, RecursionError,
+        ) as exc:
+            raise PairPreflightError(
+                "SQLite final create receipt violates domain contract"
+            ) from exc
+
+
 def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
         raise PairPreflightError("SQLite integrity check failed")
@@ -579,6 +683,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         raise PairPreflightError("SQLite recovery schema v2 is required")
     _validate_sqlite_write_request_records(conn)
     _validate_sqlite_clearances(conn)
+    _validate_sqlite_create_receipts(conn)
     starts = [
         [_write_key(row[0]), _text(row[1])] for row in _rows(
             conn, "SELECT idempotency_key,request_sha256 "

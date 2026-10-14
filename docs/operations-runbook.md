@@ -993,7 +993,16 @@ Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
 vollständige File-Digests, SQLite-Integrität/Schemata, die Witness-
 Hashkette, Operation-/Key-/SHA-Übereinstimmung und den Erhalt aller
-im extern verankerten Manifest enthaltenen Pending-Fences. Ein vor dem
+im extern verankerten Manifest enthaltenen Pending-Fences. Jede persistierte finale `create_operation_receipts`-Zeile muss
+vor jeder Checkpoint-Suppression dem tatsächlichen
+`CreateOperationReceipt`-Vertrag genügen: insbesondere kanonische
+zeitzonenbewusste Start-/Endzeiten in korrekter Reihenfolge, gültige
+Outcome-/Media-Kombinationen, typisierte Statusfelder und passende
+Snapshot-Anzeigenidentitäten. Ein künstlich geänderter Final-Receipt,
+der lediglich die für den SQL-Join verwendeten Spalten erfüllt,
+darf einen offenen Create-Checkpoint nicht verbergen.
+
+Ein vor dem
 Media-Postread dauerhaft geschriebenes Create-Checkpoint trägt
 `outcome=confirmed` und bleibt bei Prozessabsturz **ohne** passendes
 abschließendes Media-Receipt offen. Auch ein fremdes Receipt oder ein
