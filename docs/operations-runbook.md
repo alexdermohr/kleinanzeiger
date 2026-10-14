@@ -1001,6 +1001,22 @@ Outcome-/Media-Kombinationen, typisierte Statusfelder und passende
 Snapshot-Anzeigenidentitäten. Ein künstlich geänderter Final-Receipt,
 der lediglich die für den SQL-Join verwendeten Spalten erfüllt,
 darf einen offenen Create-Checkpoint nicht verbergen.
+Auch ein für sich gültiger Final-Receipt ist keine Fortsetzung des
+gleichen Checkpoints, wenn die bei Create-Persistenz unveränderlichen
+Kernfelder abweichen: `pre_read_status`,
+`confirmation_pre_read_status`, `post_read_status`,
+`confirmation_post_read_status`, `content_post_read_status` oder
+`writer_error`. Die Offline-Inspektion behält den ursprünglichen
+Checkpoint dann als `ambiguous_creates` bei, statt einen
+recoverypflichtigen Create fälschlich als abgeschlossen auszugeben.
+Gleiches gilt, wenn ein an sich gültiger Media-Final-Receipt ein
+**früheres** `completed_at` als der ursprüngliche vor dem
+Media-Postread persistierte Checkpoint trägt. Der echte Runtime-
+Übergang setzt den Endzeitpunkt mit `max(previous, clock())`;
+der Checker vergleicht dafür tatsächliche timezone-aware
+Zeitpunkte in Python, nicht fehleranfällige ISO-Textreihenfolge oder
+auf Millisekunden gerundete SQLite-Zeitstempel. Legitime unterschiedliche
+Offsets dürfen die Recovery-Fence dagegen nicht künstlich offenhalten.
 
 Auch **jede persistierte ursprüngliche** `create_operation_checkpoints`-Zeile
 wird unabhängig von späteren finalen Receipts auf den von

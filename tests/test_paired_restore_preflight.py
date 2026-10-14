@@ -1491,6 +1491,87 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_final_media_time_preceding_checkpoint_cannot_close_fence(self) -> None:
+        # The real runtime builds final via max(checkpoint.completed_at,
+        # clock()), so a separately valid earlier final is NOT a continuation.
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt,
+            completed_at=AT.replace(second=2),
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_checkpoints SET completed_at=? WHERE id=?",
+                (AT.replace(second=3).isoformat(), checkpoint),
+            )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            observed["fences"]["ambiguous_creates"], [checkpoint],
+        )
+
+    def test_final_media_time_after_offset_checkpoint_remains_settled(self) -> None:
+        # Compare instants, not ISO strings: +02:00 and +00:00 can represent
+        # the same operation and the final still chronologically follows.
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt,
+            completed_at=AT.replace(second=3),
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_checkpoints SET completed_at=? WHERE id=?",
+                ("2026-10-13T18:00:02+02:00", checkpoint),
+            )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["ambiguous_creates"], [])
+
+    def test_mismatched_immutable_checkpoint_final_receipt_fields_remain_fenced(self) -> None:
+        # Independently valid receipts may still be unrelated to the durable
+        # before-media checkpoint: only exact immutable fields can settle it.
+        # The genuine media runtime derives final from the same original
+        # CreateOperationReceipt; status/error fields cannot change.
+        changes = (
+            ("pre_read_status", "success_nonempty"),
+            ("confirmation_pre_read_status", "success_nonempty"),
+            ("post_read_status", "success_empty"),
+            ("confirmation_post_read_status", "success_empty"),
+            ("content_post_read_status", "success_empty"),
+            ("writer_error", "synthetic:altered-core-error"),
+        )
+        for field_name, changed_value in changes:
+            with self.subTest(field=field_name):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute("DELETE FROM create_operation_checkpoints")
+                    db.execute("DELETE FROM create_operation_receipts")
+                receipt, checkpoint = self._create_checkpoint()
+                final = replace(
+                    receipt,
+                    media_post_read_status=MediaPostReadStatus.CONFIRMED,
+                    media_persistence_confirmed=True,
+                )
+                SnapshotStore(
+                    self.sqlite, create_if_missing=False,
+                ).append_create_operation_receipt(final)
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {field_name}=?",
+                        (changed_value,),
+                    )
+                inspected = inspect_offline_pair(self.sqlite, self.ledger)
+                self.assertEqual(
+                    inspected["fences"]["ambiguous_creates"], [checkpoint],
+                )
+
     def test_forged_checkpoint_domain_contract_cannot_be_settled_by_valid_final(self) -> None:
         # Even the EXACT matching final receipt cannot hide a forged durable
         # checkpoint whose values append_create_operation_checkpoint could

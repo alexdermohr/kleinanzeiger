@@ -903,28 +903,52 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     # Only a narrowly matched and media-confirmed final receipt settles
     # this local checkpoint; claimed browser results do NOT independently
     # establish an external platform outcome or recovery clearance.
+    # Domain checks above validate both source and final timestamps, but
+    # the media post-read can only move completion time FORWARD:
+    # PrivateWebRuntime._with_media_post_read uses max(original, clock()).
+    # SQLite lexical ISO comparisons (and ms-rounded julianday) cannot
+    # compare arbitrary timezone offsets and submillisecond instants exactly.
+    # Match all immutable source fields in SQL and compare aware datetimes
+    # before an otherwise plausible final is allowed to retire the fence.
+    settlement_matches = (
+        "FROM create_operation_checkpoints AS c "
+        "JOIN create_operation_receipts AS r ON "
+        "c.operation=r.operation "
+        "AND c.created_ad_id=r.created_ad_id "
+        "AND c.started_at=r.started_at "
+        "AND c.authorization_by IS NOT NULL "
+        "AND c.authorization_by=r.authorization_by "
+        "AND c.authorization_reference IS NOT NULL "
+        "AND c.authorization_reference=r.authorization_reference "
+        "AND c.pre_read_status=r.pre_read_status "
+        "AND c.confirmation_pre_read_status=r.confirmation_pre_read_status "
+        "AND c.post_read_status IS r.post_read_status "
+        "AND c.confirmation_post_read_status IS r.confirmation_post_read_status "
+        "AND c.content_post_read_status IS r.content_post_read_status "
+        "AND c.writer_error IS r.writer_error "
+        "AND c.post_snapshot_json IS r.post_snapshot_json "
+        "AND c.confirmation_post_snapshot_json IS r.confirmation_post_snapshot_json "
+        "AND c.content_post_snapshot_json IS r.content_post_snapshot_json "
+        "WHERE r.outcome='confirmed' "
+        "AND r.writer_invoked=1 "
+        "AND r.media_persistence_confirmed=1 "
+        "AND r.media_post_read_status='confirmed'"
+    )
+    settled_checkpoints: set[int] = set()
+    for checkpoint_id, checkpoint_completed, final_completed in _rows(
+        conn,
+        "SELECT c.id,c.completed_at,r.completed_at "
+        + settlement_matches + " ORDER BY c.id,r.id",
+    ):
+        if datetime.fromisoformat(final_completed) >= datetime.fromisoformat(
+            checkpoint_completed
+        ):
+            settled_checkpoints.add(int(checkpoint_id))
     ambiguous = [
         int(row[0]) for row in _rows(
-            conn,
-            "SELECT c.id FROM create_operation_checkpoints AS c "
-            "WHERE NOT EXISTS ("
-            "SELECT 1 FROM create_operation_receipts AS r "
-            "WHERE c.operation=r.operation "
-            "AND c.created_ad_id=r.created_ad_id "
-            "AND c.started_at=r.started_at "
-            "AND c.authorization_by IS NOT NULL "
-            "AND c.authorization_by=r.authorization_by "
-            "AND c.authorization_reference IS NOT NULL "
-            "AND c.authorization_reference=r.authorization_reference "
-            "AND c.post_snapshot_json IS r.post_snapshot_json "
-            "AND c.confirmation_post_snapshot_json IS r.confirmation_post_snapshot_json "
-            "AND c.content_post_snapshot_json IS r.content_post_snapshot_json "
-            "AND r.outcome='confirmed' "
-            "AND r.writer_invoked=1 "
-            "AND r.media_persistence_confirmed=1 "
-            "AND r.media_post_read_status='confirmed'"
-            ") ORDER BY c.id",
+            conn, "SELECT id FROM create_operation_checkpoints ORDER BY id",
         )
+        if int(row[0]) not in settled_checkpoints
     ]
     if any(row <= 0 for row in ambiguous):
         raise PairPreflightError("SQLite ambiguous create identity invalid")
