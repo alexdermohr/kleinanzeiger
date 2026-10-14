@@ -76,6 +76,64 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 )
                 owner.seal_session(session)
 
+    def _rewrite_witness_events(
+        self, *, order: tuple[str, ...] | None = None,
+        started_key: str | None = None,
+    ) -> None:
+        """Test-only adversary reconstructs a self-consistent event hash chain.
+
+        This is explicitly *not* an authorized Witness mutation API. The
+        trusted checker must reject states that could not be produced by
+        FenceLedger even if every event hash matches.
+        """
+        with sqlite3.connect(self.ledger) as connection:
+            events = [
+                list(row) for row in connection.execute(
+                    "SELECT session_id,kind,request_key,request_sha256,action,"
+                    "outcome,response_sha256,evidence_reference,created_at "
+                    "FROM events ORDER BY seq"
+                )
+            ]
+            if order is not None:
+                self.assertCountEqual([row[1] for row in events], order)
+                events.sort(key=lambda row: order.index(row[1]))
+            if started_key is not None:
+                found = False
+                for row in events:
+                    if row[1] == "started":
+                        row[2] = started_key
+                        found = True
+                self.assertTrue(found)
+            connection.execute("DROP TRIGGER events_no_update")
+            connection.execute("DROP TRIGGER events_no_delete")
+            connection.execute("DELETE FROM events")
+            previous = "0" * 64
+            for seq, values in enumerate(events, 1):
+                material = [item if item is not None else "" for item in values]
+                material.append(previous)
+                current = hashlib.sha256(_canonical(material)).hexdigest()
+                connection.execute(
+                    "INSERT INTO events(seq,session_id,kind,request_key,"
+                    "request_sha256,action,outcome,response_sha256,"
+                    "evidence_reference,created_at,previous_sha256,row_sha256) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (seq, *values, previous, current),
+                )
+                previous = current
+            connection.execute(
+                "CREATE TRIGGER events_no_update BEFORE UPDATE ON events "
+                "BEGIN SELECT RAISE(ABORT, 'append-only events'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER events_no_delete BEFORE DELETE ON events "
+                "BEGIN SELECT RAISE(ABORT, 'append-only events'); END"
+            )
+        with sqlite3.connect(self.ledger) as connection:
+            # Prove that the forged chain still passes the original
+            # cryptographic verifier; the new preflight must supply the
+            # independently necessary semantic ordering validation.
+            FenceLedger._verify_chain(connection)
+
     def _pin(self, *, generation: str = GENERATION) -> str:
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
         manifest = {"schema_version": 4, "generation": generation, **inspected}
@@ -424,6 +482,8 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def test_uid_owned_sticky_writable_ancestor_is_still_rejected(self) -> None:
         # Root-owned /tmp 1777 is allowed, but caller-owned 1777 is not.
+        if os.geteuid() == 0:
+            self.skipTest("root-owned sticky 01777 ancestors are allowed by protocol")
         ancestor = self.source.parent
         old_mode = ancestor.stat().st_mode & 0o7777
         try:
@@ -601,6 +661,101 @@ class PairedRestorePreflightTests(unittest.TestCase):
             connection.execute("PRAGMA writable_schema=OFF")
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_operator_clearance_preceding_matching_start_is_not_trusted(self) -> None:
+        self._start()
+        with FenceLedger(self.ledger) as operator:
+            operator.operator_clearance(
+                key=KEY, sha=SHA, evidence="synthetic:independent-clearance",
+            )
+        self._rewrite_witness_events(
+            order=("opened", "operator_cleared", "started", "sealed"),
+        )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_invalid_whitespace_started_key_cannot_be_recovered(self) -> None:
+        self._start()
+        invalid = "bad write key"
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET idempotency_key=? WHERE idempotency_key=?",
+                (invalid, KEY),
+            )
+        self._rewrite_witness_events(started_key=invalid)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_oversized_started_key_cannot_be_recovered(self) -> None:
+        self._start()
+        invalid = "k" * 161
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET idempotency_key=? WHERE idempotency_key=?",
+                (invalid, KEY),
+            )
+        self._rewrite_witness_events(started_key=invalid)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+    def test_operator_clearance_before_session_seal_is_not_trusted(self) -> None:
+        self._start()
+        with FenceLedger(self.ledger) as operator:
+            operator.operator_clearance(
+                key=KEY, sha=SHA, evidence="synthetic:independent-clearance",
+            )
+        self._rewrite_witness_events(
+            order=("opened", "started", "operator_cleared", "sealed"),
+        )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_started_before_session_open_is_not_trusted(self) -> None:
+        self._start()
+        self._rewrite_witness_events(order=("started", "opened", "sealed"))
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_started_after_session_seal_is_not_trusted(self) -> None:
+        self._start()
+        self._rewrite_witness_events(order=("opened", "sealed", "started"))
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_unicode_started_key_cannot_be_recovered(self) -> None:
+        self._start()
+        invalid = "write:ümlaut"
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET idempotency_key=? WHERE idempotency_key=?",
+                (invalid, KEY),
+            )
+        self._rewrite_witness_events(started_key=invalid)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_unsupported_symbol_key_cannot_be_recovered(self) -> None:
+        self._start()
+        invalid = "write/unsupported"
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET idempotency_key=? WHERE idempotency_key=?",
+                (invalid, KEY),
+            )
+        self._rewrite_witness_events(started_key=invalid)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_witness_maximum_160_character_started_key_is_recoverable(self) -> None:
+        self._start()
+        valid = "k" * 160
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET idempotency_key=? WHERE idempotency_key=?",
+                (valid, KEY),
+            )
+        self._rewrite_witness_events(started_key=valid)
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["witness_started"], [[valid, SHA]])
 
     def test_witness_started_operation_without_originating_session_fails(self) -> None:
         # After the original owner sealed, a candidate image is corrupted by
@@ -844,6 +999,68 @@ class PairedRestorePreflightTests(unittest.TestCase):
             )
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_boolean_witness_chain_tip_is_not_numeric_zero_in_manifest(self) -> None:
+        self._pin()
+        claimed = json.loads(self.manifest.read_bytes())
+        self.assertEqual(claimed["fences"]["witness_chain_tip"][0], 0)
+        claimed["fences"]["witness_chain_tip"][0] = False
+        poisoned = _canonical(claimed)
+        self.manifest.write_bytes(poisoned)
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=hashlib.sha256(poisoned).hexdigest(),
+            )
+
+    def test_boolean_create_checkpoint_id_does_not_match_integer_id(self) -> None:
+        _, checkpoint_id = self._create_checkpoint()
+        self._pin()
+        claimed = json.loads(self.manifest.read_bytes())
+        self.assertEqual(claimed["fences"]["ambiguous_creates"], [checkpoint_id])
+        claimed["fences"]["ambiguous_creates"] = [True]
+        poisoned = _canonical(claimed)
+        self.manifest.write_bytes(poisoned)
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=hashlib.sha256(poisoned).hexdigest(),
+            )
+
+    def test_float_sync_attempt_id_does_not_match_integer_id(self) -> None:
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        attempt = store.begin_sync_attempt(
+            source="typed-restore", started_at=AT, require_no_unresolved=True,
+        )
+        self._pin()
+        claimed = json.loads(self.manifest.read_bytes())
+        self.assertEqual(claimed["fences"]["sqlite_sync_open"], [attempt])
+        claimed["fences"]["sqlite_sync_open"] = [float(attempt)]
+        poisoned = _canonical(claimed)
+        self.manifest.write_bytes(poisoned)
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=hashlib.sha256(poisoned).hexdigest(),
+            )
+
+    def test_boolean_ack_does_not_match_integer_dashboard_pending_field(self) -> None:
+        SnapshotStore(self.sqlite, create_if_missing=False).claim_dashboard_pending_write(
+            scope="ad:777", resource_key="ad:777",
+            idempotency_key="pending:typed", method="DELETE",
+            path="/api/write/ads/777", payload_json=None, ad_id="777",
+        )
+        self._pin()
+        claimed = json.loads(self.manifest.read_bytes())
+        self.assertEqual(claimed["fences"]["dashboard_pending"][0][3], 0)
+        claimed["fences"]["dashboard_pending"][0][3] = False
+        poisoned = _canonical(claimed)
+        self.manifest.write_bytes(poisoned)
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=hashlib.sha256(poisoned).hexdigest(),
+            )
 
     def test_missing_or_invalid_external_anchor_never_passes(self) -> None:
         self._pin()

@@ -24,6 +24,11 @@ from typing import Iterator
 from .container_draft import container_draft_denied
 from .fence_witness import (
     FenceLedger, FenceWitnessError,
+    _ACTIONS as _WITNESS_ACTIONS,
+    _EVENT_KINDS as _WITNESS_EVENT_KINDS,
+    _KEY as _WITNESS_KEY,
+    _SAFE_OUTCOMES as _WITNESS_SAFE_OUTCOMES,
+    _evidence as _witness_evidence,
     _private_directory as _witness_private_directory,
 )
 from .storage import SnapshotStore
@@ -54,6 +59,13 @@ def _canonical(value: object) -> bytes:
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
         allow_nan=False,
     ).encode("ascii")
+
+
+def _write_key(value: object) -> str:
+    """Use FenceLedger's actual idempotency-key grammar."""
+    if not isinstance(value, str) or _WITNESS_KEY.fullmatch(value) is None:
+        raise PairPreflightError("write recovery idempotency key invalid")
+    return value
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -185,8 +197,6 @@ def _no_sidecars(path: Path) -> None:
         except OSError as exc:
             raise PairPreflightError("offline SQLite sidecar cannot be attested") from exc
         raise PairPreflightError("offline SQLite sidecars are forbidden")
-
-
 @contextmanager
 def _witness_owner_absent(path: Path) -> Iterator[None]:
     """Refuse an active cooperative witness process, without ledger writes."""
@@ -374,7 +384,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA user_version").fetchone()[0] != 2:
         raise PairPreflightError("SQLite recovery schema v2 is required")
     starts = [
-        [_text(row[0]), _text(row[1])] for row in _rows(
+        [_write_key(row[0]), _text(row[1])] for row in _rows(
             conn, "SELECT idempotency_key,request_sha256 "
             "FROM write_api_requests WHERE execution_started_at IS NOT NULL "
             "ORDER BY idempotency_key",
@@ -398,7 +408,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         "AND c.idempotency_key IS NULL ORDER BY w.idempotency_key",
     ):
         key, sha, response = row
-        key, sha = _text(key), _text(sha)
+        key, sha = _write_key(key), _text(sha)
         if _SHA.fullmatch(sha) is None or not isinstance(response, str):
             raise PairPreflightError("SQLite completed write response invalid")
         if response.startswith('{"error":"write_outcome_unverified",'):
@@ -424,7 +434,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         "ORDER BY w.idempotency_key",
     ):
         key, sha, response = row
-        key, sha = _text(key), _text(sha)
+        key, sha = _write_key(key), _text(sha)
         if _SHA.fullmatch(sha) is None or not isinstance(response, str):
             raise PairPreflightError("SQLite media recovery identity invalid")
         try:
@@ -689,6 +699,132 @@ def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
         raise PairPreflightError("witness partial UNIQUE index properties invalid")
 
 
+def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
+    """Prove ledger-producible ordering in addition to hash-chain integrity.
+
+    An adversary can recalculate every hash in a forged candidate. Sequence,
+    active/sealed session transitions and operation-bound clearances must also
+    agree with the actual FenceLedger protocol.
+    """
+    sessions: dict[str, str] = {}
+    for sid, state, opened_at, sealed_at in _rows(
+        conn, "SELECT id,state,opened_at,sealed_at FROM sessions",
+    ):
+        if (
+            not isinstance(sid, str) or _GENERATION.fullmatch(sid) is None
+            or state not in ("active", "sealed")
+            or not isinstance(opened_at, str) or not opened_at
+            or (
+                state == "sealed"
+                and (not isinstance(sealed_at, str) or not sealed_at)
+            )
+            or (state == "active" and sealed_at is not None)
+        ):
+            raise PairPreflightError("witness session state invalid")
+        sessions[sid] = state
+
+    opened: set[str] = set()
+    sealed: set[str] = set()
+    active: str | None = None
+    starts: dict[str, dict[str, object]] = {}
+    history = _rows(
+        conn,
+        "SELECT seq,session_id,kind,request_key,request_sha256,action,"
+        "outcome,response_sha256,evidence_reference,created_at "
+        "FROM events ORDER BY seq",
+    )
+    for expected_seq, event in enumerate(history, 1):
+        seq, sid, kind, key, sha, action, outcome, response, evidence, at = event
+        if (
+            type(seq) is not int or seq != expected_seq
+            or sid not in sessions or kind not in _WITNESS_EVENT_KINDS
+            or not isinstance(at, str) or not at
+            or any(
+                not isinstance(field, str)
+                for field in (key, sha, action, outcome, response, evidence)
+            )
+        ):
+            raise PairPreflightError("witness event identity or sequence invalid")
+        if kind == "opened":
+            if (
+                sid in opened or active is not None
+                or any((key, sha, action, outcome, response, evidence))
+            ):
+                raise PairPreflightError("witness session open order invalid")
+            opened.add(sid)
+            active = sid
+            continue
+        if kind == "sealed":
+            if (
+                active != sid or sid in sealed
+                or any((key, sha, action, outcome, response, evidence))
+            ):
+                raise PairPreflightError("witness session seal order invalid")
+            sealed.add(sid)
+            active = None
+            continue
+        if kind != "operator_cleared" and active != sid:
+            raise PairPreflightError("witness write outside active session")
+        _write_key(key)
+        if _SHA.fullmatch(sha) is None:
+            raise PairPreflightError("witness operation digest invalid")
+        if kind == "started":
+            if (
+                key in starts or action not in _WITNESS_ACTIONS
+                or any((outcome, response, evidence))
+            ):
+                raise PairPreflightError("witness started operation invalid")
+            starts[key] = {
+                "session": sid, "sha": sha, "action": action,
+                "completed": False, "runtime": False, "operator": False,
+            }
+            continue
+        start = starts.get(key)
+        if (
+            start is None or start["session"] != sid or start["sha"] != sha
+            or action
+        ):
+            raise PairPreflightError("witness event not bound to earlier start")
+        if kind == "completed":
+            if (
+                start["completed"] or start["operator"]
+                or outcome not in (*_WITNESS_SAFE_OUTCOMES, "ambiguous")
+                or _SHA.fullmatch(response) is None or evidence
+            ):
+                raise PairPreflightError("witness completion order invalid")
+            start["completed"] = True
+        elif kind == "runtime_cleared":
+            if (
+                start["runtime"] or start["operator"]
+                or not start["completed"] or start["action"] != "create_media"
+                or outcome or response
+            ):
+                raise PairPreflightError("witness runtime clearance order invalid")
+            try:
+                if _witness_evidence(evidence) != evidence:
+                    raise PairPreflightError("witness runtime evidence not canonical")
+            except FenceWitnessError as exc:
+                raise PairPreflightError("witness runtime evidence invalid") from exc
+            start["runtime"] = True
+        elif kind == "operator_cleared":
+            if sid not in sealed or start["operator"] or outcome or response:
+                raise PairPreflightError("witness operator clearance order invalid")
+            try:
+                if _witness_evidence(evidence) != evidence:
+                    raise PairPreflightError("witness operator evidence not canonical")
+            except FenceWitnessError as exc:
+                raise PairPreflightError("witness operator evidence invalid") from exc
+            start["operator"] = True
+        else:
+            raise PairPreflightError("unsupported witness event")
+
+    if opened != set(sessions) or any(
+        (sid in sealed) != (state == "sealed")
+        for sid, state in sessions.items()
+    ):
+        raise PairPreflightError("witness session events disagree with session table")
+
+
 def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
         raise PairPreflightError("Witness integrity check failed")
@@ -715,8 +851,9 @@ def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         "ON s.id=e.session_id WHERE s.id IS NULL LIMIT 1"
     ).fetchone() is not None:
         raise PairPreflightError("witness event has no originating session")
+    _verify_witness_event_history(conn)
     starts = [
-        [_text(row[0]), _text(row[1])] for row in _rows(
+        [_write_key(row[0]), _text(row[1])] for row in _rows(
             conn, "SELECT request_key,request_sha256 FROM events "
             "WHERE kind='started' ORDER BY request_key",
         )
@@ -731,7 +868,7 @@ def _witness_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     ).fetchone():
         raise PairPreflightError("witness operator clearance is not operation-bound")
     unresolved = [
-        [_text(row[0]), _text(row[1])] for row in _rows(
+        [_write_key(row[0]), _text(row[1])] for row in _rows(
             conn, "SELECT s.request_key,s.request_sha256 FROM events AS s "
             "WHERE s.kind='started' AND NOT EXISTS ("
             "SELECT 1 FROM events AS c WHERE c.kind='operator_cleared' "
@@ -856,11 +993,16 @@ def verify_offline_pair(
                 expected_sqlite_sha256=anchored["sqlite_sha256"],
                 expected_witness_sha256=anchored["witness_sha256"],
             )
-            if {
+            bound = {
                 key: anchored[key] for key in (
                     "sqlite_sha256", "witness_sha256", "fences",
                 )
-            } != observed:
+            }
+            # Native Python equality silently equates JSON bool with integer
+            # and integral float (False == 0, True == 1, 1.0 == 1).
+            # Hash-/generation-bound recovery identities must match by both
+            # type AND value, including chain positions and row IDs.
+            if _canonical(bound) != _canonical(observed):
                 raise PairPreflightError("restored generation or pending fences differ")
             fences = observed["fences"]
             return {

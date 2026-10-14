@@ -801,8 +801,27 @@ wiederherstellbar: die unabhängige Operator-Clearance verlangt eine
 versiegelte Ursprungssession. Die Prüfung lehnt auch verwaiste
 `opened`- und `sealed`-Events ab.
 
+Auch eine kryptografisch konsistente Witness-Hashkette wird als
+**nicht wiederherstellbar** verworfen, wenn die dauerhaften Event-Sequenzen
+nicht vom tatsächlichen Witness-Protokoll erzeugbar sind: `opened` vor
+`started`, `started` vor etwaigem `completed`, `sealed` nach dem
+letzten Runtime-Event der Ursprungssession und zwingend **vor**
+`operator_cleared`. Nachträglich umsortierte und neu gehashte
+Clearances sind kein Recovery-Beweis. Historische `runtime_cleared`-
+Beobachtungen ersetzen weiterhin keine unabhängige Operator-Clearance.
+Für SQLite-Write-Starts und Witness-Operationen gilt exakt die
+FenceLedger-Key-Grammatik `[A-Za-z0-9._:-]{1,160}`: Unicode, Leerzeichen,
+unzulässige Sonderzeichen und überlange Keys lassen sich nicht durch
+einen übereinstimmend manipulierten Paarstand legitimieren.
+
 Die bisherigen Schema-v1/v2/v3-Manifeste bleiben nach dieser
 sicherheitsrelevanten Erweiterung grundsätzlich ungültig.
+Das vollständige `fences`-Inventar wird zudem **typbewahrend**
+als kanonische JSON-Bytefolge verglichen: `false` ist kein numerisches
+`0`, `true` keine Zeilen-ID `1` und `1.0` keine Integer-ID
+`1`. Auch ein extern mit dem manipulierten Manifest-Digest gepinnter
+solcher Kandidat wird verworfen. Damit bleiben SQLite-/Witness-IDs,
+Bestätigungs-Bools und Hashketten-Sequenzen semantisch getrennt.
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
 vollständige File-Digests, SQLite-Integrität/Schemata, die Witness-
