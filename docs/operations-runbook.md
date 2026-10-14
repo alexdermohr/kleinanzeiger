@@ -822,7 +822,7 @@ als kanonische JSON-Bytefolge verglichen: `false` ist kein numerisches
 `1`. Auch ein extern mit dem manipulierten Manifest-Digest gepinnter
 solcher Kandidat wird verworfen. Damit bleiben SQLite-/Witness-IDs,
 Bestätigungs-Bools und Hashketten-Sequenzen semantisch getrennt.
-Alle Identitäten sind sortiert und bei der Paarsicherung durch die
+Vor dem Inventar werden alle SQLite-Recovery-Clearances mit ihrer\ntatsächlich ausgeführten Ursprungsoperation (exakter Key und SHA,\ngesetzter execution_started_at) abgeglichen. Verwaiste, falsch\ngehashte und niemals gestartete Write-Clearances werden ebenso\nverworfen wie Executor-Clearances für UNKNOWN-Antworten oder\nClearances auf gewöhnliche erfolgreich abgeschlossene Writes.\nDamit darf eine gefälschte Clearance keine Create-, Media- oder\nQuarantäne-Fence verbergen. Das ist eine **Offline-Diagnose**, keine\nunabhängige Verifikation der externen Plattformantwort.\n\nAlle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
 vollständige File-Digests, SQLite-Integrität/Schemata, die Witness-
 Hashkette, Operation-/Key-/SHA-Übereinstimmung und den Erhalt aller

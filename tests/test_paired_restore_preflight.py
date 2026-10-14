@@ -192,6 +192,117 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 "SELECT MAX(id) FROM create_operation_receipts",
             ).fetchone()[0])
 
+    def test_forged_clearance_for_never_executed_write_cannot_hide_media_fence(self) -> None:
+        # Attack: staged pair has a valid but unstarted request, a separate
+        # ambiguous media receipt, and an unauthorized forged clearance. The
+        # restore inspector must not trust the SQLite join to suppress it.
+        key = "media:unstarted-forged-clearance"
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        claim = store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", requested_at=AT,
+        )
+        self.assertTrue(claim.created)
+        receipt_id = self._ambiguous_final_create(reference="write-api:" + key)
+        with self.assertRaisesRegex(ValueError, "never executed"):
+            store.record_write_recovery_clearance(
+                idempotency_key=key, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:unauthorized-claim", observed_at=AT,
+            )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO write_recovery_clearances "
+                "(idempotency_key,request_sha256,observed_at,"
+                "verification_kind,evidence_reference) VALUES (?,?,?,?,?)",
+                (key, SHA, AT.isoformat(), "operator_verified_postread",
+                 "forged:unstarted"),
+            )
+            self.assertIsNone(connection.execute(
+                "SELECT execution_started_at FROM write_api_requests "
+                "WHERE idempotency_key=?", (key,),
+            ).fetchone()[0])
+        self.assertGreater(receipt_id, 0)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_orphan_clearance_without_a_matching_write_is_rejected(self) -> None:
+        # No request exists, but the clearance table lacks an FK.
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO write_recovery_clearances "
+                "(idempotency_key,request_sha256,observed_at,"
+                "verification_kind,evidence_reference) VALUES (?,?,?,?,?)",
+                ("orphan:fake", SHA, AT.isoformat(),
+                 "operator_verified_postread", "forged:orphan"),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_clearance_fingerprint_mismatch_is_rejected(self) -> None:
+        # Real started requests exist in BOTH ledgers. An additional SQL-only
+        # clearance for that key with a different digest remains invalid.
+        self._start()
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO write_recovery_clearances "
+                "(idempotency_key,request_sha256,observed_at,"
+                "verification_kind,evidence_reference) VALUES (?,?,?,?,?)",
+                (KEY, "b" * 64, AT.isoformat(),
+                 "operator_verified_postread", "forged:digest"),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_executor_clearance_cannot_settle_owner_unknown(self) -> None:
+        key = "unknown:forged-media-clearance"
+        self._start(key=key)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", response_status=202,
+            response_json=SnapshotStore._unverified_write_api_response(key),
+            completed_at=AT,
+        )
+        with self.assertRaisesRegex(ValueError, "independent operator"):
+            store.record_write_recovery_clearance(
+                idempotency_key=key, request_sha256=SHA,
+                verification_kind="media_submit_reconciled",
+                evidence_reference="synthetic:executor", observed_at=AT,
+            )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO write_recovery_clearances "
+                "(idempotency_key,request_sha256,observed_at,"
+                "verification_kind,evidence_reference) VALUES (?,?,?,?,?)",
+                (key, SHA, AT.isoformat(),
+                 "media_submit_reconciled", "forged:executor"),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_forged_clearance_for_confirmed_media_is_rejected(self) -> None:
+        key = "media:confirmed-no-recovery"
+        self._persist_media_http_response(
+            key=key, status=200,
+            envelope={
+                "media_persistence_confirmed": True,
+                "operation_receipt": {
+                    "outcome": "confirmed", "writer_invoked": True,
+                },
+            },
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO write_recovery_clearances "
+                "(idempotency_key,request_sha256,observed_at,"
+                "verification_kind,evidence_reference) VALUES (?,?,?,?,?)",
+                (key, SHA, AT.isoformat(),
+                 "operator_verified_postread", "forged:confirmed"),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_ambiguous_final_media_receipt_without_checkpoint_is_manifested(self) -> None:
         receipt_id = self._ambiguous_final_create()
         store = SnapshotStore(self.sqlite, create_if_missing=False)

@@ -376,6 +376,71 @@ def _verify_store_security_schema(conn: sqlite3.Connection) -> None:
         )
 
 
+
+def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
+    """Only trust clearances actually reachable through SnapshotStore's API.
+
+    Never-started requests can be forged with a matching request SHA and an
+    independent-looking clearance to conceal otherwise unresolved media/
+    Create responses. Check EVERY clearance before using any suppression join.
+    """
+    for row in _rows(
+        conn,
+        "SELECT c.idempotency_key,c.request_sha256,c.observed_at,"
+        "c.verification_kind,c.evidence_reference,"
+        "w.idempotency_key,w.execution_started_at,w.state,"
+        "w.response_status,w.response_json "
+        "FROM write_recovery_clearances AS c "
+        "LEFT JOIN write_api_requests AS w "
+        "ON w.idempotency_key=c.idempotency_key "
+        "AND w.request_sha256=c.request_sha256 "
+        "ORDER BY c.idempotency_key",
+    ):
+        (key, sha, observed_at, kind, evidence, matched_key,
+         started_at, state, response_status, response_json) = row
+        _write_key(key)
+        if (
+            not isinstance(sha, str) or _SHA.fullmatch(sha) is None
+            or matched_key != key or not isinstance(started_at, str)
+            or not started_at or not isinstance(observed_at, str)
+            or not observed_at or not isinstance(evidence, str)
+            or not 1 <= len(evidence.strip()) <= 256
+            or any(ch in evidence for ch in "\r\n\x00")
+            or kind not in ("operator_verified_postread", "media_submit_reconciled")
+        ):
+            raise PairPreflightError("SQLite recovery clearance origin invalid")
+        if state == "in_progress":
+            continue
+        if state != "completed":
+            raise PairPreflightError("SQLite recovery clearance state invalid")
+        if (
+            response_status == 202
+            and response_json == SnapshotStore._unverified_write_api_response(key)
+        ):
+            if kind != "operator_verified_postread":
+                raise PairPreflightError("SQLite UNKNOWN clearance lacks operator proof")
+            continue
+        try:
+            envelope = json.loads(
+                response_json, object_pairs_hook=_unique_object,
+                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+            )
+        except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+            raise PairPreflightError("SQLite clearance response invalid") from exc
+        if (
+            not isinstance(envelope, dict)
+            or not isinstance(envelope.get("media_persistence_confirmed"), bool)
+        ):
+            raise PairPreflightError("SQLite clearance is not media recovery")
+        receipt = envelope.get("operation_receipt")
+        if receipt is not None and not (
+            isinstance(receipt, dict)
+            and receipt.get("writer_invoked") is True
+            and receipt.get("outcome") == "ambiguous"
+        ):
+            raise PairPreflightError("SQLite clearance was not ambiguous")
+
+
 def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
         raise PairPreflightError("SQLite integrity check failed")
@@ -383,6 +448,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     _verify_store_security_schema(conn)
     if conn.execute("PRAGMA user_version").fetchone()[0] != 2:
         raise PairPreflightError("SQLite recovery schema v2 is required")
+    _validate_sqlite_clearances(conn)
     starts = [
         [_write_key(row[0]), _text(row[1])] for row in _rows(
             conn, "SELECT idempotency_key,request_sha256 "
