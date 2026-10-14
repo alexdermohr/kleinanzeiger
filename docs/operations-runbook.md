@@ -814,7 +814,7 @@ gemeinsame Witness-/StorageOwner-Key-Grammatik `[A-Za-z0-9][A-Za-z0-9._:-]{0,159
 unzulässige Sonderzeichen und überlange Keys lassen sich nicht durch
 einen übereinstimmend manipulierten Paarstand legitimieren.
 
-Die bisherigen Schema-v1/v2/v3-Manifeste bleiben nach dieser
+Die bisherigen Schema-v1/v2/v3/v4-Manifeste bleiben nach dieser
 sicherheitsrelevanten Erweiterung grundsätzlich ungültig.
 Das vollständige `fences`-Inventar wird zudem **typbewahrend**
 als kanonische JSON-Bytefolge verglichen: `false` ist kein numerisches
@@ -844,6 +844,19 @@ Methoden und Identitäten verhindern eine Restore-Diagnosefreigabe.
 Eine historische Witness-Runtime-Clearance benötigt vorher eine
 create_media-Completion mit Outcome ambiguous; ein bestätigter
 oder mit precondition_failed abgeschlossener Submit legitimiert sie nicht.
+
+Sämtliche Write-Request-Zeilen müssen durch den realen StorageOwner-
+Record-Decoder lesbar sein; auch Status, Owner, Ergebnisübergang und
+kanonische JSON-Antwort sind Teil der Prüfung. Ein vorliegender
+Witness-Completion-Digest muss genau zur dauerhaft gespeicherten
+SQLite-Antwort passen. Fehlt die Witness-Completion nach einem Crash
+zwischen SQLite-Persistenz und Witness-Append, bleibt die Antwort als
+"sqlite_unverified_replay" im generationengebundenen Manifest sichtbar
+und das ursprüngliche Witness-Fence ausdrücklich offen. Das ist
+**keine** erfolgreiche Replay-Bestätigung. Ist ein Completion-Digest
+inkonsistent, fehlt der SQLite-Gegenpart oder fehlt bei unbestätigtem
+SQLite-Ergebnis zugleich das offene Witness-Fence, wird der gesamte
+Restore-Kandidat verweigert. Manifest-Schema v5 ist verpflichtend.
 
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert

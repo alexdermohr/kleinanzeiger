@@ -80,6 +80,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         self, *, order: tuple[str, ...] | None = None,
         started_key: str | None = None,
         legacy_media_completion: str | None = None,
+        legacy_media_response: dict[str, object] | None = None,
     ) -> None:
         """Test-only adversary reconstructs a self-consistent event hash chain.
 
@@ -111,9 +112,13 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 start = next(row for row in events if row[1] == "started")
                 start[4] = "create_media"
                 sid, _, key, sha, _, _, _, _, observed = start
+                completion_sha = (
+                    hashlib.sha256(_canonical(legacy_media_response)).hexdigest()
+                    if legacy_media_response is not None else SHA
+                )
                 completed = [
                     sid, "completed", key, sha, "", legacy_media_completion,
-                    SHA, "", observed,
+                    completion_sha, "", observed,
                 ]
                 runtime = [
                     sid, "runtime_cleared", key, sha, "", "", "",
@@ -153,7 +158,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def _pin(self, *, generation: str = GENERATION) -> str:
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
-        manifest = {"schema_version": 4, "generation": generation, **inspected}
+        manifest = {"schema_version": 5, "generation": generation, **inspected}
         raw = _canonical(manifest)
         self.manifest.write_bytes(raw)
         os.chmod(self.manifest, 0o600)
@@ -320,6 +325,125 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def _completed_response_pair(
+        self, *, key: str, response: dict[str, object],
+        status: int = 500,
+    ) -> None:
+        """Exactly one durable SQL completion then same-object Witness completion."""
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        claim = store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", requested_at=AT,
+        )
+        self.assertTrue(claim.created)
+        store.begin_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", execution_started_at=AT,
+            strict_owner_fence=True,
+        )
+        with FenceLedger(self.ledger) as owner:
+            session = owner.open_session()
+            owner.execution_started(
+                session, key=key, sha=SHA, action="create",
+            )
+            store.complete_write_api_request(
+                idempotency_key=key, request_sha256=SHA,
+                claim_owner="pair-owner", response_status=status,
+                response_json=json.dumps(
+                    response, sort_keys=True, ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                completed_at=AT,
+            )
+            outcome = owner.execution_completed(
+                session, key=key, sha=SHA, response=response,
+            )
+            self.assertEqual(outcome, "ambiguous")
+            owner.seal_session(session)
+
+    def test_invalid_completed_http_status_is_not_restorable(self) -> None:
+        key = "complete:bad-http"
+        response = {"error": "write_execution_error"}
+        self._completed_response_pair(key=key, response=response)
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET response_status=700 "
+                "WHERE idempotency_key=?", (key,),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_invalid_claim_owner_is_not_restorable(self) -> None:
+        self._start(key="request:bad-owner")
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET claim_owner='invalid owner' "
+                "WHERE idempotency_key='request:bad-owner'",
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_noncanonical_completed_response_is_not_restorable(self) -> None:
+        key = "complete:json-order"
+        self._completed_response_pair(
+            key=key, response={"error": "write_execution_error", "kind": 1},
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET response_json=? "
+                "WHERE idempotency_key=?",
+                ('{"kind": 1, "error":"write_execution_error"}', key),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_completed_response_digest_divergence_is_not_restorable(self) -> None:
+        key = "complete:diverged"
+        self._completed_response_pair(
+            key=key, response={"error": "write_execution_error"},
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET response_json=? "
+                "WHERE idempotency_key=?",
+                ('{"error":"write_execution_error_changed"}', key),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_matching_witness_completion_with_unicode_response_is_valid(self) -> None:
+        key = "complete:unicode"
+        self._completed_response_pair(
+            key=key, response={"error": "write_execution_error",
+                               "detail": "Überprüfung"},
+        )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [[key, SHA]])
+
+    def test_crash_before_witness_completion_remains_explicitly_fenced(self) -> None:
+        key = "complete:crashed-after-sqlite"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={
+                "media_persistence_confirmed": False,
+                "operation_receipt": None,
+            },
+        )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [[key, SHA]])
+        self.assertEqual(inspected["fences"]["sqlite_media_unresolved"], [[key, SHA]])
+        self.assertEqual(
+            inspected["fences"]["sqlite_unverified_replay"][0][:2],
+            [key, SHA],
+        )
+        digest = self._pin()
+        result = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=digest,
+        )
+        self.assertEqual(result["sqlite_unverified_replay_count"], 1)
+        self.assertFalse(result["restore_authorized"])
+
     def test_ambiguous_final_media_receipt_without_checkpoint_is_manifested(self) -> None:
         receipt_id = self._ambiguous_final_create()
         store = SnapshotStore(self.sqlite, create_if_missing=False)
@@ -381,10 +505,52 @@ class PairedRestorePreflightTests(unittest.TestCase):
         self.assertEqual(inspected["fences"]["ambiguous_final_creates"], [])
         self.assertEqual(inspected["fences"]["witness_unresolved"], [["media-exact", SHA]])
 
+    def test_old_v4_manifest_is_rejected_after_replay_fence_upgrade(self) -> None:
+        digest = self._pin()
+        claimed = json.loads(self.manifest.read_bytes())
+        self.assertEqual(claimed["schema_version"], 5)
+        claimed["schema_version"] = 4
+        downgraded = _canonical(claimed)
+        self.manifest.write_bytes(downgraded)
+        with self.assertRaises(PairPreflightError):
+            verify_offline_pair(
+                self.sqlite, self.ledger, self.manifest,
+                expected_manifest_sha256=hashlib.sha256(downgraded).hexdigest(),
+            )
+        self.assertNotEqual(hashlib.sha256(downgraded).hexdigest(), digest)
+
+    def test_witness_completed_response_without_sqlite_completion_is_rejected(self) -> None:
+        key = "complete:lost-sqlite"
+        self._completed_response_pair(
+            key=key, response={"error": "write_execution_error"},
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET state='in_progress',"
+                "completed_at=NULL,response_status=NULL,response_json=NULL "
+                "WHERE idempotency_key=?", (key,),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_missing_completion_with_operator_clearance_is_not_safe_replay(self) -> None:
+        key = "complete:cleared-without-replay"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={"media_persistence_confirmed": False,
+                      "operation_receipt": None},
+        )
+        with FenceLedger(self.ledger) as owner:
+            owner.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-check",
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_v1_manifest_not_accepted_after_fence_inventory_schema_upgrade(self) -> None:
         expected = self._pin()
         loaded = json.loads(self.manifest.read_bytes())
-        self.assertEqual(loaded["schema_version"], 4)
+        self.assertEqual(loaded["schema_version"], 5)
         loaded["schema_version"] = 1
         older = _canonical(loaded)
         self.manifest.write_bytes(older)
@@ -499,7 +665,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
     def test_v3_manifest_rejected_after_media_recovery_fence_upgrade(self) -> None:
         expected = self._pin()
         manifest = json.loads(self.manifest.read_bytes())
-        self.assertEqual(manifest["schema_version"], 4)
+        self.assertEqual(manifest["schema_version"], 5)
         manifest["schema_version"] = 3
         downgraded = _canonical(manifest)
         self.manifest.write_bytes(downgraded)
@@ -577,7 +743,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
     def test_v2_manifest_rejected_when_quarantine_fence_schema_is_upgraded(self) -> None:
         old_sha = self._pin()
         raw = json.loads(self.manifest.read_bytes())
-        self.assertEqual(raw["schema_version"], 4)
+        self.assertEqual(raw["schema_version"], 5)
         raw["schema_version"] = 2
         old_bytes = _canonical(raw)
         self.manifest.write_bytes(old_bytes)
@@ -834,11 +1000,31 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def test_runtime_clearance_after_ambiguous_completion_remains_fenced(self) -> None:
         self._start()
-        self._rewrite_witness_events(legacy_media_completion="ambiguous")
+        response = {
+            "error": "write_execution_error",
+            "idempotency_key": KEY,
+            "platform_retry_authorized": False,
+            "media_persistence_confirmed": False,
+            "operation_receipt": None,
+        }
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=500,
+            response_json=json.dumps(
+                response, sort_keys=True, ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            completed_at=AT,
+        )
+        self._rewrite_witness_events(
+            legacy_media_completion="ambiguous",
+            legacy_media_response=response,
+        )
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
         self.assertEqual(
             inspected["fences"]["witness_unresolved"], [[KEY, SHA]],
         )
+        self.assertEqual(inspected["fences"]["sqlite_unverified_replay"], [])
 
     def test_unparseable_requested_at_cannot_restore_started_write(self) -> None:
         self._start()

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, closing, contextmanager
-from datetime import datetime
 import fcntl
 import hashlib
 import json
@@ -35,6 +34,7 @@ from .fence_witness import (
 from .storage import SnapshotStore
 from .storage_owner import (
     StorageOwnerError, _KEY as _STORAGE_KEY, _pending_from_json,
+    _record_from_json,
 )
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -46,7 +46,7 @@ _MAX_ROWS = 250_000
 _MAX_IMAGE_BYTES = 512 * 1024 * 1024
 _FENCE_KEYS = frozenset({
     "sqlite_started", "sqlite_sync_open", "sqlite_quarantined",
-    "sqlite_media_unresolved",
+    "sqlite_media_unresolved", "sqlite_unverified_replay",
     "dashboard_pending",
     "ambiguous_creates", "ambiguous_final_creates",
     "witness_started", "witness_unresolved",
@@ -107,7 +107,7 @@ def _manifest(raw: bytes, expected_sha: str) -> dict[str, object]:
             "witness_sha256", "fences",
         }
         or type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 4
+        or manifest["schema_version"] != 5
         or not isinstance(manifest["generation"], str)
         or _GENERATION.fullmatch(manifest["generation"]) is None
         or any(
@@ -449,44 +449,82 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
 
 
 
-def _validate_sqlite_write_request_timestamps(conn: sqlite3.Connection) -> None:
-    """Only certify requests whose durable timestamp fields survive readback.
+def _validate_sqlite_write_request_records(
+    conn: sqlite3.Connection,
+) -> list[list[str]]:
+    """Validate every persisted owner record and digest each completed reply.
 
-    SnapshotStore._write_api_request_record parses these fields with
-    datetime.fromisoformat on retries. Verify *all* rows, including never-
-    started claims that would not appear in the pending-fence inventory.
+    These are exactly the fields decoded by StorageOwnerClient on restart and
+    replay. All rows matter, not only started Create/media recovery fences.
+    The witness computes its digest over canonical ASCII JSON of the actual
+    response object, *not* the local UTF-8 JSON bytes.
     """
-    for key, sha, requested, started, completed in _rows(
-        conn,
-        "SELECT idempotency_key,request_sha256,requested_at,"
-        "execution_started_at,completed_at FROM write_api_requests "
-        "ORDER BY idempotency_key",
+    fields = (
+        "idempotency_key", "request_sha256", "state", "requested_at",
+        "claim_owner", "execution_started_at", "completed_at",
+        "response_status", "response_json",
+    )
+    completed: list[list[str]] = []
+    for row in _rows(
+        conn, "SELECT " + ",".join(fields) +
+        " FROM write_api_requests ORDER BY idempotency_key",
     ):
-        _write_key(key)
-        if not isinstance(sha, str) or _SHA.fullmatch(sha) is None:
-            raise PairPreflightError("SQLite persisted request digest invalid")
-        for field, value, required in (
-            ("requested_at", requested, True),
-            ("execution_started_at", started, False),
-            ("completed_at", completed, False),
-        ):
-            if value is None and not required:
-                continue
-            if not isinstance(value, str) or not 1 <= len(value) <= 80:
+        try:
+            record = _record_from_json(dict(zip(fields, row)))
+        except (StorageOwnerError, ValueError, TypeError,
+                OverflowError, UnicodeError, RecursionError) as exc:
+            raise PairPreflightError(
+                "SQLite persisted write request is unreadable by storage owner"
+            ) from exc
+        if record.state != "completed":
+            continue
+        response = record.response_json
+        if not isinstance(response, str):
+            raise PairPreflightError("SQLite completed write response missing")
+        try:
+            value = json.loads(
+                response, object_pairs_hook=_unique_object,
+                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+            )
+            # WriteApiHandler._canonical_json writes sorted UTF-8 JSON, while
+            # FenceLedger hashes the same object using ensure_ascii=True.
+            as_utf8 = json.dumps(
+                value, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            )
+            as_utf8.encode("utf-8")
+            if not isinstance(value, dict) or as_utf8 != response:
                 raise PairPreflightError(
-                    "SQLite persisted write request timestamp invalid"
+                    "SQLite completed response is not canonical Write API JSON"
                 )
-            try:
-                timestamp = datetime.fromisoformat(value)
-                aware = timestamp.tzinfo is not None and (
-                    timestamp.utcoffset() is not None
-                )
-            except (ValueError, TypeError, OverflowError):
-                aware = False
-            if not aware:
-                raise PairPreflightError(
-                    "SQLite persisted write request timestamp lacks timezone"
-                )
+            response_sha = hashlib.sha256(_canonical(value)).hexdigest()
+        except PairPreflightError:
+            raise
+        except (TypeError, ValueError, UnicodeError,
+                RecursionError, OverflowError) as exc:
+            raise PairPreflightError("SQLite completed response cannot replay") from exc
+        # A completed precondition that never entered the platform writer does
+        # not have a Witness start. Only genuinely started requests are paired.
+        if record.execution_started_at is not None:
+            completed.append([
+                record.idempotency_key, record.request_sha256, response_sha,
+            ])
+    return completed
+
+
+def _witness_completed_response_bindings(
+    conn: sqlite3.Connection,
+) -> list[list[str]]:
+    """All Witness completions, after full schema/chain/event validation."""
+    return [
+        [_write_key(key), _text(sha), _text(response)]
+        for key, sha, response in _rows(
+            conn, "SELECT request_key,request_sha256,response_sha256 "
+            "FROM events WHERE kind='completed' ORDER BY request_key",
+        )
+    ]
+
+
 
 def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -495,7 +533,7 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     _verify_store_security_schema(conn)
     if conn.execute("PRAGMA user_version").fetchone()[0] != 2:
         raise PairPreflightError("SQLite recovery schema v2 is required")
-    _validate_sqlite_write_request_timestamps(conn)
+    _validate_sqlite_write_request_records(conn)
     _validate_sqlite_clearances(conn)
     starts = [
         [_write_key(row[0]), _text(row[1])] for row in _rows(
@@ -1078,8 +1116,33 @@ def inspect_offline_pair(
             ):
                 sql_fences = _sqlite_inventory(sql_db)
                 wit_fences = _witness_inventory(wit_db)
+                sql_completed = _validate_sqlite_write_request_records(sql_db)
+                wit_completed = _witness_completed_response_bindings(wit_db)
             if sql_fences["sqlite_started"] != wit_fences["witness_started"]:
                 raise PairPreflightError("pair has unmatched durable write starts")
+            # UID50044 may crash AFTER persisting the SQLite response but
+            # BEFORE appending its independent Witness completion. That is
+            # genuinely unresolved and must survive restore as a visible fence.
+            # Never mistake it for a verified replay. A conflicting Witness
+            # digest or a Witness completion missing from SQLite is rollback/
+            # forgery and is categorically rejected.
+            sqlite_by_key = {row[0]: row for row in sql_completed}
+            witness_by_key = {row[0]: row for row in wit_completed}
+            for key, record in witness_by_key.items():
+                if sqlite_by_key.get(key) != record:
+                    raise PairPreflightError(
+                        "witness completion does not match durable SQLite reply"
+                    )
+            unresolved = {tuple(row) for row in wit_fences["witness_unresolved"]}
+            unverified = []
+            for key, record in sqlite_by_key.items():
+                if key not in witness_by_key:
+                    if (key, record[1]) not in unresolved:
+                        raise PairPreflightError(
+                            "unverified SQLite response has no recovery fence"
+                        )
+                    unverified.append(record)
+            sql_fences["sqlite_unverified_replay"] = unverified
             if _sha256_fd(sql_fd) != sql_hash or _sha256_fd(wit_fd) != wit_hash:
                 raise PairPreflightError("offline image contents changed during scan")
             _no_sidecars(sql)
@@ -1153,6 +1216,7 @@ def verify_offline_pair(
                 ),
                 "sqlite_quarantined_count": len(fences["sqlite_quarantined"]),
                 "sqlite_media_unresolved_count": len(fences["sqlite_media_unresolved"]),
+                "sqlite_unverified_replay_count": len(fences["sqlite_unverified_replay"]),
                 "ambiguous_final_create_count": len(fences["ambiguous_final_creates"]),
                 "offline_only": True,
                 "restore_authorized": False,
