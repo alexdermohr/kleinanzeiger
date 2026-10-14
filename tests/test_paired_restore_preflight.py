@@ -780,6 +780,64 @@ class PairedRestorePreflightTests(unittest.TestCase):
             report["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
         )
 
+    def test_nonmedia_echoed_media_marker_is_not_an_sqlite_media_fence(self) -> None:
+        # Adversarial independent-review P2: legal client-controlled keys can
+        # contain the substring used by the old raw SQL media heuristic.
+        key = "client:media_persistence_confirmed"
+        self._nonmedia_crash_without_witness_completion(key=key)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="another", claim_owner="other-owner",
+        ))
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-nonmedia-readback",
+            )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["sqlite_media_unresolved"], [])
+        self.assertEqual(observed["fences"]["sqlite_quarantined"], [])
+        self.assertEqual(
+            observed["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
+
+    def test_nonmedia_echoed_payload_media_marker_is_not_media(self) -> None:
+        key = "complete:echoed-nonmedia-field"
+        self._nonmedia_crash_without_witness_completion(
+            key=key, extra={"debug": "media_persistence_confirmed"},
+        )
+        self.assertFalse(
+            SnapshotStore(self.sqlite, create_if_missing=False)
+            .create_recovery_pending(
+                exclude_idempotency_key="another", claim_owner="other-owner",
+            )
+        )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["sqlite_media_unresolved"], [])
+        self.assertEqual(
+            observed["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
+
+    def test_owner_unknown_202_key_with_media_marker_is_only_quarantined(self) -> None:
+        key = "client:media_persistence_confirmed"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=202,
+            response_json=SnapshotStore._unverified_write_api_response(key),
+            completed_at=AT,
+        )
+        self.assertTrue(
+            SnapshotStore(self.sqlite, create_if_missing=False)
+            .create_recovery_pending(
+                exclude_idempotency_key="another", claim_owner="other-owner",
+            )
+        )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            observed["fences"]["sqlite_quarantined"], [[key, SHA]],
+        )
+        self.assertEqual(observed["fences"]["sqlite_media_unresolved"], [])
+
     def test_nonmedia_200_without_witness_completion_never_becomes_verified_replay(self) -> None:
         key = "complete:nonmedia-unwitnessed-success"
         self._nonmedia_crash_without_witness_completion(key=key, status=200)
@@ -863,10 +921,23 @@ class PairedRestorePreflightTests(unittest.TestCase):
             witness.operator_clearance(
                 key=key, sha=SHA, evidence="synthetic:operator-witness-only",
             )
-        # Executor-only evidence cannot retire the independent SQLite media
-        # fence, regardless of presence of a Witness completion or clearance.
-        with self.assertRaises(PairPreflightError):
-            inspect_offline_pair(self.sqlite, self.ledger)
+        # The historically admissible executor row cannot be upgraded by
+        # SnapshotStore's append-only unique clearance API. It remains an
+        # explicit local recovery fence even after independent Witness
+        # settlement; a matching completion does NOT certify it as cleared.
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            observed["fences"]["sqlite_media_unresolved"], [[key, SHA]],
+        )
+        self.assertEqual(observed["fences"]["witness_unresolved"], [])
+        self.assertEqual(observed["fences"]["sqlite_unverified_replay"], [])
+        digest = self._pin()
+        verified = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=digest,
+        )
+        self.assertFalse(verified["restore_authorized"])
+        self.assertEqual(verified["sqlite_media_unresolved_count"], 1)
 
     def test_matching_witness_completion_with_dual_operator_media_clearance_remains_diagnosable(self) -> None:
         key = "media:completed-dual-operator"
@@ -907,8 +978,22 @@ class PairedRestorePreflightTests(unittest.TestCase):
             witness.operator_clearance(
                 key=key, sha=SHA, evidence="synthetic:independent-postread",
             )
-        with self.assertRaises(PairPreflightError):
-            inspect_offline_pair(self.sqlite, self.ledger)
+        # Independent Witness settlement permits offline diagnosis, not
+        # retirement of this local executor-only media fence or safe replay.
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            inspected["fences"]["sqlite_media_unresolved"], [[key, SHA]],
+        )
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertEqual(
+            inspected["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
+        expected = self._pin()
+        verified = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=expected,
+        )
+        self.assertFalse(verified["restore_authorized"])
 
     def test_executor_clearance_without_witness_completion_keeps_witness_pending(self) -> None:
         key = "complete:executor-clearance-witness-pending"

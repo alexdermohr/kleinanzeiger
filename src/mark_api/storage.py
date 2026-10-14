@@ -1413,7 +1413,7 @@ class SnapshotStore:
                   AND w.state = 'completed'
                   AND c.idempotency_key IS NULL
                   AND (
-                    instr(w.response_json, 'media_persistence_confirmed') > 0
+                    json_type(w.response_json, '$.media_persistence_confirmed') IS NOT NULL
                     OR (
                       w.response_status = 202
                       AND substr(

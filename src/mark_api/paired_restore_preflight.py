@@ -592,7 +592,9 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     # persisting e.g. HTTP 500 without ever writing a Create checkpoint or
     # create_operation_receipts row. Mirror the exact media response
     # classification of SnapshotStore.create_recovery_pending(), not HTTP
-    # status alone. Do not mistake response persistence for external proof.
+    # status alone. Select only a top-level JSON member: an echoed client
+    # idempotency key or string must never impersonate media recovery state.
+    # Do not mistake response persistence for external proof.
     media_unresolved = []
     for row in _rows(
         conn,
@@ -601,8 +603,9 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         "LEFT JOIN write_recovery_clearances AS c "
         "ON c.idempotency_key=w.idempotency_key "
         "AND c.request_sha256=w.request_sha256 "
-        "WHERE w.state='completed' AND c.idempotency_key IS NULL "
-        "AND instr(w.response_json,'media_persistence_confirmed')>0 "
+        "WHERE w.state='completed' AND "
+        "(c.idempotency_key IS NULL OR c.verification_kind='media_submit_reconciled') "
+        "AND json_type(w.response_json,'$.media_persistence_confirmed') IS NOT NULL "
         "ORDER BY w.idempotency_key",
     ):
         key, sha, response = row
@@ -1179,6 +1182,11 @@ def inspect_offline_pair(
                 # reply, and its SQLite clearance API is unavailable.
                 # An independently operator-cleared Witness still cannot
                 # attest safe replay or actual external platform success.
+                # A legacy executor-only clearance is valid persisted evidence
+                # but never independently retires an ambiguous local Media fence.
+                sqlite_media_open_fences = {
+                    tuple(operation) for operation in sql_fences["sqlite_media_unresolved"]
+                }
                 sqlite_local_reply_fences = {
                     tuple(operation)
                     for category in ("sqlite_quarantined", "sqlite_media_unresolved")
@@ -1218,14 +1226,18 @@ def inspect_offline_pair(
                     raise PairPreflightError(
                         "SQLite clearance lacks an independent Witness clearance"
                     )
-                # Even when a matching Witness response was durably completed,
-                # only a separate operator postread can retire an SQLite media
-                # fence after independent Witness operator clearance. The
-                # executor's media_submit_reconciled is NOT operator authority.
+                # A matching Witness completion does not make executor-only
+                # media evidence an independent SQLite operator clearance.
+                # This remains DIAGNOSABLE only if the media fence is STILL
+                # present in the manifest; it never becomes a safe replay.
                 if (
                     not witness_pending
                     and sqlite_kind is not None
                     and sqlite_kind != "operator_verified_postread"
+                    and not (
+                        sqlite_kind == "media_submit_reconciled"
+                        and operation in sqlite_media_open_fences
+                    )
                 ):
                     raise PairPreflightError(
                         "SQLite executor clearance cannot replace independent operator"
@@ -1245,9 +1257,9 @@ def inspect_offline_pair(
                     sqlite_clearance_kind = sqlite_clearance_kinds.get(operation)
                     # No Witness completion ever proves the SQLite reply.
                     # With both copies still pending, retain the unresolved
-                    # start. After sealed Witness operator settlement, SQLite
-                    # must also have independently operator-settled every
-                    # local recovery fence (owner 202 UNKNOWN or media).
+                    # start. After sealed Witness operator settlement, a local
+                    # fence either has independent operator clearance or stays
+                    # explicitly OPEN if its row is only executor-reconciled.
                     # Completed replies lacking a local recovery fence
                     # (including nonmedia and non-ambiguous media) cannot
                     # obtain an SQLite clearance. Preserve these as
@@ -1262,8 +1274,12 @@ def inspect_offline_pair(
                             not witness_pending
                             and sqlite_clearance_kind != "operator_verified_postread"
                             and not (
-                                sqlite_clearance_kind is None
-                                and operation in replies_without_sqlite_clearance
+                                (sqlite_clearance_kind is None
+                                 and operation in replies_without_sqlite_clearance)
+                                or (
+                                    sqlite_clearance_kind == "media_submit_reconciled"
+                                    and operation in sqlite_media_open_fences
+                                )
                             )
                         )
                     ):
