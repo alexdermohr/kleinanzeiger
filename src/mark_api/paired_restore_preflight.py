@@ -1118,6 +1118,19 @@ def inspect_offline_pair(
                 wit_fences = _witness_inventory(wit_db)
                 sql_completed = _validate_sqlite_write_request_records(sql_db)
                 wit_completed = _witness_completed_response_bindings(wit_db)
+                # Every SQL clearance has already passed the authoritative
+                # SnapshotStore state/key/SHA checks in _sqlite_inventory.
+                # The Witness is independently checked for exact operation-
+                # and session-bound operator clearances by _witness_inventory.
+                sqlite_cleared = {
+                    (_write_key(key), _text(sha))
+                    for key, sha in _rows(
+                        sql_db,
+                        "SELECT idempotency_key,request_sha256 "
+                        "FROM write_recovery_clearances "
+                        "ORDER BY idempotency_key",
+                    )
+                }
             if sql_fences["sqlite_started"] != wit_fences["witness_started"]:
                 raise PairPreflightError("pair has unmatched durable write starts")
             # UID50044 may crash AFTER persisting the SQLite response but
@@ -1137,9 +1150,18 @@ def inspect_offline_pair(
             unverified = []
             for key, record in sqlite_by_key.items():
                 if key not in witness_by_key:
-                    if (key, record[1]) not in unresolved:
+                    operation = (key, record[1])
+                    witness_pending = operation in unresolved
+                    sqlite_settled = operation in sqlite_cleared
+                    # Without a Witness completion, a durable SQLite reply is
+                    # ALWAYS unverified replay data. Accept it only if BOTH
+                    # authorities still retain the open write, or BOTH have
+                    # independently bound operator recovery clearance.
+                    # A cleared Witness start is necessarily operation-bound
+                    # and sealed after _verify_witness_event_history.
+                    if witness_pending == sqlite_settled:
                         raise PairPreflightError(
-                            "unverified SQLite response has no recovery fence"
+                            "unverified SQLite replay has one-sided recovery clearance"
                         )
                     unverified.append(record)
             sql_fences["sqlite_unverified_replay"] = unverified

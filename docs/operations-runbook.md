@@ -851,12 +851,27 @@ kanonische JSON-Antwort sind Teil der Prüfung. Ein vorliegender
 Witness-Completion-Digest muss genau zur dauerhaft gespeicherten
 SQLite-Antwort passen. Fehlt die Witness-Completion nach einem Crash
 zwischen SQLite-Persistenz und Witness-Append, bleibt die Antwort als
-"sqlite_unverified_replay" im generationengebundenen Manifest sichtbar
-und das ursprüngliche Witness-Fence ausdrücklich offen. Das ist
-**keine** erfolgreiche Replay-Bestätigung. Ist ein Completion-Digest
-inkonsistent, fehlt der SQLite-Gegenpart oder fehlt bei unbestätigtem
-SQLite-Ergebnis zugleich das offene Witness-Fence, wird der gesamte
-Restore-Kandidat verweigert. Manifest-Schema v5 ist verpflichtend.
+`sqlite_unverified_replay` im generationengebundenen Manifest sichtbar
+und ist **niemals** eine erfolgreiche Replay-Bestätigung. Vor einer
+Operator-Recovery bleibt der ursprüngliche Witness-Fence offen.
+Nach einer tatsächlich an dieselbe Ursprungsoperation (Key/SHA/Session)
+gebundenen unabhängigen Operator-Clearance **in Witness und SQLite**
+darf dieses Fence geschlossen sein; das unbestätigte Replay bleibt
+weiterhin im Manifest sichtbar. Eine nur einseitige Clearance wird
+abgewiesen. Ist ein Witness-Completion-Digest inkonsistent, fehlt der
+SQLite-Gegenpart oder fehlt bei unbestätigtem SQLite-Ergebnis eine
+gültige offene oder beidseitig geklärte Witness-/SQLite-Bindung, wird
+der gesamte Restore-Kandidat verweigert. Manifest-Schema v5 ist
+verpflichtend. Historische v1-Claims mit Witness-Outcomes
+`confirmed` oder `precondition_failed` dürfen nach v1→v2-Migration
+als untrusted Event erhalten bleiben; auch sie beweisen **keinen**
+externen Erfolg und werden durch Witness-Replay weiterhin als
+`ambiguous` behandelt. Für eine `runtime_cleared` verlangt der aktuelle v5-Preflight
+eine zuvor attestierte `ambiguous`-Completion. Abweichende tatsächliche
+v1-Ledger-Ereignisse können nach expliziter v1→v2-Migration noch
+existieren; deren Herkunft ist damit nicht unabhängig attestiert.
+Solche Restore-Kandidaten bleiben bis zu gesonderter historischer
+Provenienz-/Sicherheitsabnahme gesperrt.
 
 Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert

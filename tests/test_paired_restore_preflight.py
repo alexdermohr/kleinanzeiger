@@ -81,6 +81,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         started_key: str | None = None,
         legacy_media_completion: str | None = None,
         legacy_media_response: dict[str, object] | None = None,
+        forged_completed_outcome: str | None = None,
     ) -> None:
         """Test-only adversary reconstructs a self-consistent event hash chain.
 
@@ -99,6 +100,11 @@ class PairedRestorePreflightTests(unittest.TestCase):
             if order is not None:
                 self.assertCountEqual([row[1] for row in events], order)
                 events.sort(key=lambda row: order.index(row[1]))
+            if forged_completed_outcome is not None:
+                self.assertIn(forged_completed_outcome, ("confirmed", "precondition_failed"))
+                completed = [row for row in events if row[1] == "completed"]
+                self.assertEqual(len(completed), 1)
+                completed[0][5] = forged_completed_outcome
             if started_key is not None:
                 found = False
                 for row in events:
@@ -547,6 +553,81 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_dual_operator_clearance_with_missing_witness_completion_remains_attested(self) -> None:
+        # Real crash window: SQLite reply persisted, Witness completion absent.
+        # Later independent clearances in BOTH ledgers settle the write fence,
+        # but do not turn the unverified reply into a proven replay.
+        key = "complete:dual-operator-clearance"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={"media_persistence_confirmed": False, "operation_receipt": None},
+        )
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:independent-platform-check", observed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-platform-check",
+            )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertEqual(
+            inspected["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
+        digest = self._pin()
+        verified = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=digest,
+        )
+        self.assertEqual(verified["sqlite_unverified_replay_count"], 1)
+        self.assertFalse(verified["restore_authorized"])
+
+    def test_missing_witness_completion_with_only_sqlite_clearance_is_rejected(self) -> None:
+        key = "complete:sqlite-only-clearance"
+        self._persist_media_http_response(
+            key=key, status=500,
+            envelope={"media_persistence_confirmed": False, "operation_receipt": None},
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:incomplete-clearance", observed_at=AT,
+        )
+        # The independent Witness has no matching operator clearance.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_dual_operator_clearance_of_quarantined_202_keeps_replay_unverified(self) -> None:
+        key = "unknown:dual-operator-clearance"
+        self._start(key=key)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="pair-owner", response_status=202,
+            response_json=SnapshotStore._unverified_write_api_response(key),
+            completed_at=AT,
+        )
+        store.record_write_recovery_clearance(
+            idempotency_key=key, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:operator-reconciliation", observed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:operator-reconciliation",
+            )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["sqlite_quarantined"], [])
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertEqual(
+            inspected["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA],
+        )
+
     def test_v1_manifest_not_accepted_after_fence_inventory_schema_upgrade(self) -> None:
         expected = self._pin()
         loaded = json.loads(self.manifest.read_bytes())
@@ -654,11 +735,20 @@ class PairedRestorePreflightTests(unittest.TestCase):
             evidence_reference="synthetic-test-only:media-operator-postread",
             observed_at=AT,
         )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA,
+                evidence="synthetic-test-only:media-operator-postread",
+            )
         self.assertFalse(store.create_recovery_pending(
             exclude_idempotency_key="different-key", claim_owner="separate-owner",
         ))
         self.assertEqual(
             inspect_offline_pair(self.sqlite, self.ledger)["fences"]["sqlite_media_unresolved"],
+            [],
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["witness_unresolved"],
             [],
         )
 
@@ -717,12 +807,19 @@ class PairedRestorePreflightTests(unittest.TestCase):
             evidence_reference="synthetic-test-only:operator-observation",
             observed_at=AT,
         )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key="quarantine:cleared", sha=SHA,
+                evidence="synthetic-test-only:operator-observation",
+            )
         self.assertFalse(store.create_recovery_pending(
             exclude_idempotency_key="unrelated", claim_owner="separate-owner",
         ))
         result = inspect_offline_pair(self.sqlite, self.ledger)
         self.assertEqual(result["fences"]["sqlite_quarantined"], [])
         self.assertEqual(result["fences"]["sqlite_started"], [["quarantine:cleared", SHA]])
+        self.assertEqual(result["fences"]["witness_unresolved"], [])
+        self.assertEqual(result["fences"]["sqlite_unverified_replay"][0][:2], ["quarantine:cleared", SHA])
 
     def test_quarantined_response_with_unsupported_envelope_fails_closed(self) -> None:
         self._start(key="quarantine:tamper")
@@ -991,6 +1088,62 @@ class PairedRestorePreflightTests(unittest.TestCase):
             )
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_legacy_confirmed_completion_never_proves_external_replay(self) -> None:
+        # Schema-v1 completions may legitimately claim confirmed and survive
+        # v1->v2 migration unchanged. Even with an independent operator
+        # clearance, FenceLedger.replay_status must NEVER trust this claim.
+        key = "complete:legacy-claimed-success"
+        response = {"operation_receipt": {
+            "outcome": "confirmed", "writer_invoked": True,
+        }}
+        self._completed_response_pair(key=key, status=200, response=response)
+        with FenceLedger(self.ledger) as owner:
+            owner.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:operator-check",
+            )
+        self._rewrite_witness_events(forged_completed_outcome="confirmed")
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        with FenceLedger(self.ledger) as reopened:
+            self.assertEqual(reopened.replay_status(
+                key=key, sha=SHA,
+                response_sha=hashlib.sha256(_canonical(response)).hexdigest(),
+            ), "ambiguous")
+
+    def test_legacy_precondition_completion_remains_untrusted_pending(self) -> None:
+        # A historical executor-claimed precondition_failed is NOT
+        # independent authority to retire the original durable Witness start.
+        key = "complete:legacy-precondition"
+        response = {"operation_receipt": {
+            "outcome": "precondition_failed", "writer_invoked": False,
+        }}
+        self._completed_response_pair(key=key, status=409, response=response)
+        self._rewrite_witness_events(
+            forged_completed_outcome="precondition_failed",
+        )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [[key, SHA]])
+        with FenceLedger(self.ledger) as reopened:
+            self.assertTrue(reopened.fence_pending())
+            self.assertEqual(reopened.replay_status(
+                key=key, sha=SHA,
+                response_sha=hashlib.sha256(_canonical(response)).hexdigest(),
+            ), "ambiguous")
+
+    def test_operator_clearance_after_ambiguous_witness_response_stays_valid(self) -> None:
+        key = "complete:real-ambiguous"
+        self._completed_response_pair(
+            key=key, status=500,
+            response={"error": "write_execution_error"},
+        )
+        with FenceLedger(self.ledger) as owner:
+            owner.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:operator-reconciliation",
+            )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertEqual(inspected["fences"]["sqlite_unverified_replay"], [])
 
     def test_runtime_clearance_after_confirmed_completion_is_not_trusted(self) -> None:
         self._start()
