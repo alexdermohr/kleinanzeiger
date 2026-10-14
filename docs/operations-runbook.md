@@ -871,7 +871,26 @@ fehlende Witness-Completion auch dann nicht freigeben, wenn der Witness
 seinerseits operatorseitig geklärt wurde. Solange der Witness-Fence
 offen ist, darf auf SQLite-Seite **überhaupt keine** Clearance für diese
 nicht verifizierte Antwort vorliegen. Eine nur einseitige Clearance wird
-abgewiesen. Ist ein Witness-Completion-Digest inkonsistent, fehlt der
+für alle Operationen mit SQLite-Recovery-Fence abgewiesen.
+
+**Eng begrenzte Nicht-Media-Ausnahme:** Für einen bereits abgeschlossen
+persistierten Write mit exakt der kanonischen HTTP-500-Antwort
+`{"error":"write_execution_error","idempotency_key":"<key>","platform_retry_authorized":false}`
+(ohne `media_persistence_confirmed`) gibt es in
+`SnapshotStore.record_write_recovery_clearance()` bewusst **keinen**
+SQLite-Recovery-Clearance-Vertrag: dieser abgeschlossene Nicht-Media-Fehler
+ist dort kein offener Create-/Media-/Quarantäne-Fence. Hat der unabhängig
+verwaltete Witness den ursprünglich gebundenen Write nach versiegelter
+Session **operatorseitig** geklärt, darf das Paar auch ohne zusätzliche
+SQLite-Clearance als **reine Offline-Diagnose** attestiert werden.
+Die nicht von einer Witness-Completion gebundene lokale HTTP-500-Antwort
+bleibt dabei stets in `sqlite_unverified_replay`, ist niemals sicher
+wiederholbar und autorisiert **keinen** Plattform-Write. Der Operator muss
+den ursprünglichen externen Vorgang selbst unabhängig reconciliert haben.
+Schon ein abweichendes Feld, ein HTTP 200/202, eine Media-Antwort oder
+ein Executor-`media_submit_reconciled` schließen diese Ausnahme aus.
+
+Ist ein Witness-Completion-Digest inkonsistent, fehlt der
 SQLite-Gegenpart oder fehlt bei unbestätigtem SQLite-Ergebnis eine
 gültige offene oder beidseitig geklärte Witness-/SQLite-Bindung, wird
 der gesamte Restore-Kandidat verweigert. Manifest-Schema v5 ist

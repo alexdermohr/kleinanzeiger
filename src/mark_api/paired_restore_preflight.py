@@ -1153,6 +1153,30 @@ def inspect_offline_pair(
                         "ORDER BY idempotency_key",
                     )
                 }
+                # SnapshotStore has NO SQLite clearance for a completed,
+                # non-media HTTP 500 execution error. It is not among its
+                # blocked Create/media/202 recovery fences. A real Witness
+                # operator clearance may independently settle that start,
+                # but its SQLite reply still lacks a Witness completion and
+                # MUST remain permanently unverified replay data. Restrict
+                # this exception to the exact runtime-generated non-media
+                # error envelope; no 200/202/media response or extra fields.
+                nonmedia_executor_errors = {
+                    (_write_key(key), _text(sha))
+                    for key, sha, status, response in _rows(
+                        sql_db,
+                        "SELECT idempotency_key,request_sha256,"
+                        "response_status,response_json "
+                        "FROM write_api_requests WHERE state='completed' "
+                        "AND execution_started_at IS NOT NULL "
+                        "ORDER BY idempotency_key",
+                    )
+                    if status == 500 and response == _canonical({
+                        "error": "write_execution_error",
+                        "idempotency_key": key,
+                        "platform_retry_authorized": False,
+                    }).decode("ascii")
+                }
             if sql_fences["sqlite_started"] != wit_fences["witness_started"]:
                 raise PairPreflightError("pair has unmatched durable write starts")
             # UID50044 may crash AFTER persisting the SQLite response but
@@ -1192,20 +1216,27 @@ def inspect_offline_pair(
                     operation = (key, record[1])
                     witness_pending = operation in unresolved
                     sqlite_clearance_kind = sqlite_clearance_kinds.get(operation)
-                    # Without a Witness completion, a durable SQLite reply is
-                    # ALWAYS unverified replay. BOTH authorities must still
-                    # have their write open (no SQLite clearance at all) OR
-                    # BOTH must have independently OPERATOR-cleared the
-                    # operation. A local media_submit_reconciled executor
-                    # clearance may suppress the SQLite recovery inventory,
-                    # but never substitutes for independent operator evidence.
-                    # A cleared Witness start was separately validated as
-                    # operation/session-bound and post-seal.
+                    # No Witness completion = NEVER verified replay. Both
+                    # pending is safe to preserve. If Witness is operator-
+                    # cleared, SQLite must also be independently operator-
+                    # cleared when SQLite has a recovery fence. The ONE
+                    # exception is an exact non-media HTTP 500 execution error:
+                    # SnapshotStore has no clearance API/fence for that
+                    # response, so independent Witness operator evidence plus
+                    # permanent sqlite_unverified_replay is the safer minimal
+                    # recovery path. It never certifies the SQLite response,
+                    # nor authorizes replay or a new platform mutation.
+                    # An executor-only clearance can never replace operator
+                    # evidence even in this exception.
                     if (
                         (witness_pending and sqlite_clearance_kind is not None)
                         or (
                             not witness_pending
                             and sqlite_clearance_kind != "operator_verified_postread"
+                            and not (
+                                sqlite_clearance_kind is None
+                                and operation in nonmedia_executor_errors
+                            )
                         )
                     ):
                         raise PairPreflightError(

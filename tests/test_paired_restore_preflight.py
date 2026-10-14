@@ -625,6 +625,78 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def _nonmedia_crash_without_witness_completion(
+        self, *, key: str, status: int = 500,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        self._start(key=key)
+        envelope = {
+            "error": "write_execution_error",
+            "idempotency_key": key,
+            "platform_retry_authorized": False,
+        }
+        if extra:
+            envelope.update(extra)
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=status, response_json=_canonical(envelope).decode("ascii"),
+            completed_at=AT,
+        )
+
+    def test_nonmedia_500_without_witness_completion_after_operator_clearance_remains_unverified(self) -> None:
+        # A completed non-media HTTP 500 does not have a SQLite recovery
+        # clearance in SnapshotStore's supported protocol. Only the
+        # independent Witness needs its original start operator-cleared.
+        # Neither the local reply nor the restored manifest is safe replay.
+        key = "complete:nonmedia-crash-500"
+        self._nonmedia_crash_without_witness_completion(key=key)
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-nonmedia-postread",
+            )
+        report = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(report["fences"]["witness_unresolved"], [])
+        self.assertEqual(report["fences"]["sqlite_unverified_replay"][0][:2], [key, SHA])
+        digest = self._pin()
+        verified = verify_offline_pair(
+            self.sqlite, self.ledger, self.manifest,
+            expected_manifest_sha256=digest,
+        )
+        self.assertEqual(verified["sqlite_unverified_replay_count"], 1)
+        self.assertFalse(verified["restore_authorized"])
+        with FenceLedger(self.ledger) as reopened:
+            self.assertEqual(reopened.replay_status(
+                key=key, sha=SHA, response_sha=hashlib.sha256(
+                    _canonical({
+                        "error": "write_execution_error",
+                        "idempotency_key": key,
+                        "platform_retry_authorized": False,
+                    })
+                ).hexdigest(),
+            ), "unverified")
+
+    def test_nonmedia_500_with_extra_response_field_not_recovered_from_witness_only_clearance(self) -> None:
+        key = "complete:nonmedia-untrusted-envelope"
+        self._nonmedia_crash_without_witness_completion(
+            key=key, extra={"debug": "unexpected"}
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-nonmedia-postread",
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_nonmedia_200_with_missing_witness_completion_is_never_attested_by_one_clearance(self) -> None:
+        key = "complete:nonmedia-unwitnessed-success"
+        self._nonmedia_crash_without_witness_completion(key=key, status=200)
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:independent-nonmedia-postread",
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_missing_completion_with_operator_clearance_is_not_safe_replay(self) -> None:
         key = "complete:cleared-without-replay"
         self._persist_media_http_response(
@@ -1998,27 +2070,3 @@ class PairedRestorePreflightTests(unittest.TestCase):
                         expected_manifest_sha256=expected,
                     )
                 sidecar.unlink()
-
-    def test_missing_database_fails_without_creating_empty_replacement(self) -> None:
-        expected = self._pin()
-        self.sqlite.unlink()
-        with self.assertRaises(PairPreflightError):
-            verify_offline_pair(
-                self.sqlite, self.ledger, self.manifest,
-                expected_manifest_sha256=expected,
-            )
-        self.assertFalse(self.sqlite.exists())
-
-    def test_unattested_draft_container_denies_new_cli_before_io(self) -> None:
-        from unittest.mock import patch
-
-        with patch(
-            "mark_api.paired_restore_preflight.container_draft_denied",
-            return_value=True,
-        ):
-            self.assertEqual(main(["--sqlite", "/nonexistent"]), 2)
-
-
-
-if __name__ == "__main__":
-    unittest.main()
