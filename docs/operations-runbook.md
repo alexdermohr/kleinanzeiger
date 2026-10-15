@@ -966,26 +966,45 @@ Fence-Closure noch sicherer Paar-Restore, Replay, Host-Cutover oder
 Plattform-Schreibrecht. Erst beide unabhängigen, passenden Clearances
 können diesen Create-Checkpoint schließen.
 
-Owner-HTTP-202-`write_outcome_unverified` sowie noch ambivalente
-Media-Replies mit einem eigenen lokalen Fence verlangen ebenfalls
-echte unabhängige SQLite-Operator-Evidenz zum Schließen dieses Fences.
-Hat der unabhängig verwaltete Witness nach versiegelter Ursprungssession
-genau diese Operation (Key/SHA/Session) **operatorseitig** geklärt,
-kann das Paar ohne zusätzliche nicht unterstützte SQLite-Clearance
-als **reine Offline-Diagnose** attestiert werden. Die mangels
-Witness-Completion nicht unabhängig gebundene SQLite-Antwort bleibt
-**immer** in `sqlite_unverified_replay`, selbst wenn sie HTTP 200
-oder eine erfolgreiche Create-/Lifecycle-Operation behauptet. Sie ist
-niemals eine Replay-Bestätigung und autorisiert **keinen** erneuten
-Plattform-Write. Der unabhängige Operator muss die externe Wirkung
-vor seiner Witness-Clearance tatsächlich selbst reconciliert haben.
-Jeder begonnene `in_progress`-Write sowie alle HTTP-202-UNKNOWN- und
-Media-Recovery-Fences verlangen dagegen eine echte, genau passende
-SQLite-`operator_verified_postread`- und Witness-Operator-Clearance,
-bevor der ursprüngliche Fence entfallen darf. Ein SQL-only- oder
-Witness-only-Zwischenstand ist **kein** freigegebener Paar-Restore.
-Auch `media_submit_reconciled` aus dem Executor zählt niemals als
-solche unabhängige Operator-Clearance.
+Owner-HTTP-202-`write_outcome_unverified` und abgeschlossene
+ambivalente Media-Replies mit eigenem lokalen
+`sqlite_quarantined`- bzw. `sqlite_media_unresolved`-Fence verlangen
+zum **Schließen** des Fences stets die exakt an dieselbe ursprüngliche
+Operation gebundene SQLite-`operator_verified_postread`-Clearance und
+die unabhängig belegte Witness-Operator-Clearance.
+
+**Witness-only ist nicht immer ein zulässiger Offline-Zwischenstand.**
+Ist bei einem solchen lokalen 202-/Media-Recovery-Fence die
+Witness-Completion **nicht** dauerhaft vorhanden, lehnt der
+Paar-Preflight eine bloße Witness-Operator-Clearance **auch als reine
+Offline-Diagnose** ab. Liegt dagegen eine vollständig passende,
+hashgebundene Witness-Completion bereits vor, kann derselbe
+Witness-only-Zustand bei weiterhin offenem SQLite-Fence als
+`sqlite_quarantined` bzw. `sqlite_media_unresolved` **diagnostiziert**
+werden; das ist ausdrücklich keine Fence-Schließung oder Wiederfreigabe.
+Diese Differenz wird durch die negativen Tests
+`test_quarantined_202_without_sqlite_clearance_cannot_use_nonmedia_exception`
+und `test_missing_completion_with_operator_clearance_is_not_safe_replay`
+sowie durch
+`test_witness_only_ambiguous_media_with_completion_is_diagnostic`
+festgelegt.
+
+Eine **abgeschlossene Nicht-Media-Antwort ohne offenen lokalen
+Recovery-Fence** hat dagegen keinen künstlich zu erzwingenden
+SQLite-Clearance-Pfad: Fehlt ihre Witness-Completion, darf sie nach
+unabhängiger Witness-Operator-Clearance lediglich als offene
+`sqlite_unverified_replay`-Diagnose erhalten bleiben, niemals als
+bestätigtes Replay oder Plattform-Ergebnis. Ebenso ist der oben
+gesondert behandelte `before_media_post_read`-Checkpoint bei
+bestätigtem Kern-Create und unbestätigter Media-Antwort **nicht**
+automatisch ein `sqlite_media_unresolved`-Reply-Fence: Witness-only
+darf hier den offenen `ambiguous_creates`-Checkpoint sowie das
+unverifizierte Replay sichtbar erhalten, aber nie autorisieren.
+
+In keinem dieser Zustände darf der lokale Executor eine echte
+unabhängige Post-Read-Evidenz durch `media_submit_reconciled`
+ersetzen. Reine SQLite- oder Witness-Nachweise allein erteilen keine
+Host-Cutover-, Restore-, Replay- oder erneute externe Write-Erlaubnis.
 
 Ist ein Witness-Completion-Digest inkonsistent oder fehlt der
 SQLite-Gegenpart, wird der Restore-Kandidat verworfen. Fehlt auch

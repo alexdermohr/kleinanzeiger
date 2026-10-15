@@ -1432,6 +1432,137 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_confirmed_core_operator_clearance_requires_original_open_checkpoint(self) -> None:
+        # No browser-committed before_media_post_read checkpoint exists,
+        # despite a response claiming confirmed core Create. A local operator
+        # must not manufacture evidence for a nonexistent durable fence, even
+        # if the independent Witness reply and clearance are well-formed.
+        key = "media:core-no-original-checkpoint"
+        response = {
+            "media_persistence_confirmed": False,
+            "operation_receipt": {
+                "operation": "create", "outcome": "confirmed",
+                "writer_invoked": True, "created_ad_id": "201",
+                "authorization_by": "offline-test-owner",
+                "authorization_reference": "write-api:" + key,
+                "media_post_read_status": "unknown",
+            },
+        }
+        self._completed_response_pair(key=key, response=response, status=200)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=key, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:imagined-checkpoint",
+                observed_at=AT,
+            )
+        # A directly forged SQLite clearance with correct key/SHA and
+        # independent Witness operator proof must ALSO be rejected offline.
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "INSERT INTO write_recovery_clearances "
+                "(idempotency_key,request_sha256,observed_at,"
+                "verification_kind,evidence_reference) VALUES(?,?,?,?,?)",
+                (key, SHA, AT.isoformat(), "operator_verified_postread",
+                 "synthetic:forged-nonexistent-checkpoint"),
+            )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:witness-reconciled",
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_confirmed_core_operator_cannot_clear_duplicate_checkpoints(self) -> None:
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        receipt, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        # A second Create checkpoint with the same key could represent a
+        # second external effect: one operator observation is insufficient.
+        store.append_create_operation_checkpoint(receipt)
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=200,
+            response_json=_canonical({
+                "media_persistence_confirmed": False,
+                "operation_receipt": {
+                    "operation": "create", "outcome": "confirmed",
+                    "writer_invoked": True, "created_ad_id": "201",
+                    "authorization_by": "offline-test-owner",
+                    "authorization_reference": "write-api:" + KEY,
+                    "media_post_read_status": "unknown",
+                },
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:inadequate-duplicate-proof",
+                observed_at=AT,
+            )
+
+    def test_confirmed_core_operator_cannot_clear_settled_checkpoint(self) -> None:
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        receipt, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        store.append_create_operation_receipt(replace(
+            receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        ))
+        # A mismatched later HTTP envelope must not allow an invented
+        # independent operator clearance for an already settled checkpoint.
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=200,
+            response_json=_canonical({
+                "media_persistence_confirmed": False,
+                "operation_receipt": {
+                    "operation": "create", "outcome": "confirmed",
+                    "writer_invoked": True, "created_ad_id": "201",
+                    "authorization_by": "offline-test-owner",
+                    "authorization_reference": "write-api:" + KEY,
+                    "media_post_read_status": "unknown",
+                },
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:already-settled-checkpoint",
+                observed_at=AT,
+            )
+
+    def test_witness_only_ambiguous_media_with_completion_is_diagnostic(self) -> None:
+        # A genuine Witness-completed ambiguous media reply may remain an
+        # explicitly open SQLite recovery fence after Witness-only operator
+        # clearance. Without completion the same state must be rejected.
+        key = "media:witness-completed-with-open-sqlite"
+        self._completed_response_pair(
+            key=key, status=500, response={
+                "media_persistence_confirmed": False,
+                "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
+            },
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:witness-only-postread",
+            )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["sqlite_media_unresolved"], [[key, SHA]])
+        self.assertEqual(observed["fences"]["witness_unresolved"], [])
+        self.assertEqual(observed["fences"]["sqlite_unverified_replay"], [])
+        self.assertTrue(
+            SnapshotStore(self.sqlite, create_if_missing=False).create_recovery_pending(
+                exclude_idempotency_key="next-after-witness-only",
+                claim_owner="other-owner",
+            ),
+        )
+
     def test_witness_only_clearance_preserves_unverified_media_checkpoint(self) -> None:
         # An operator-cleared Witness alone does not attest the SQLite media
         # effect, even if the persisted HTTP response says core confirmed.

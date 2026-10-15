@@ -480,6 +480,12 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
             and type(receipt.get("authorization_by")) is str
             and bool(receipt["authorization_by"].strip())
             and receipt.get("authorization_reference") == "write-api:" + key
+            and SnapshotStore._original_unsettled_media_checkpoint(
+                conn,
+                idempotency_key=key,
+                created_ad_id=receipt["created_ad_id"],
+                authorization_by=receipt["authorization_by"],
+            )
         )
         if receipt is not None and not (
             isinstance(receipt, dict)
