@@ -122,6 +122,69 @@ class PairedBackupOperatorTests(unittest.TestCase):
             first["head_sha256"],
         )
 
+    def test_published_inode_swap_while_preparing_head_cannot_publish_head(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        real_new = operator._new_file
+
+        def swap_before_retained_record(path: Path, data: bytes) -> None:
+            if path == self.anchor / (FIRST + ".json"):
+                old = self.output / FIRST / "mark.sqlite"
+                replacement = self.output / FIRST / "replacement-image"
+                replacement.write_bytes(old.read_bytes())
+                replacement.chmod(0o600)
+                os.replace(replacement, old)
+            real_new(path, data)
+
+        with patch("mark_api.paired_backup_operator._new_file",
+                   side_effect=swap_before_retained_record):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+        self.assertTrue((self.anchor / (FIRST + ".json")).is_file())
+
+    def test_published_image_edit_while_preparing_head_cannot_publish_head(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        real_new = operator._new_file
+
+        def alter_before_retained_record(path: Path, data: bytes) -> None:
+            if path == self.anchor / (FIRST + ".json"):
+                published = self.output / FIRST / "witness.sqlite"
+                altered = bytearray(published.read_bytes())
+                altered[-1] ^= 1
+                published.write_bytes(altered)
+            real_new(path, data)
+
+        with patch("mark_api.paired_backup_operator._new_file",
+                   side_effect=alter_before_retained_record):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_published_manifest_swap_while_preparing_head_cannot_publish_head(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        real_new = operator._new_file
+
+        def swap_manifest_before_retained_record(path: Path, data: bytes) -> None:
+            if path == self.anchor / (FIRST + ".json"):
+                old = self.output / FIRST / "manifest.json"
+                replacement = self.output / FIRST / "replacement-manifest"
+                replacement.write_bytes(old.read_bytes())
+                replacement.chmod(0o600)
+                os.replace(replacement, old)
+            real_new(path, data)
+
+        with patch("mark_api.paired_backup_operator._new_file",
+                   side_effect=swap_manifest_before_retained_record):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
     def test_unlinked_new_pair_sidecar_must_not_be_anchored(self) -> None:
         from mark_api import paired_backup_operator as operator
 

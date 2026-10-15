@@ -681,17 +681,52 @@ def seal_offline_pair(
             _check_generation_dir(output, generation, manifest_sha)
             _no_sidecars(published / "mark.sqlite")
             _no_sidecars(published / "witness.sqlite")
-            head = _canonical({
-                "schema_version": 1,
-                "generation": generation,
-                "manifest_sha256": manifest_sha,
-                "predecessor_sha256": expected_previous_head_sha256 or _ZERO,
-            })
-            # A create-only retained record precedes the atomically replaced
-            # HEAD. A crash can leave an orphan, never a falsely pinned pair.
-            _new_file(anchor / (generation + ".json"), head)
-            _fsync_dir(anchor)
-            _new_file(anchor / (".next-" + generation), head)
+            # Pin all published artifacts while preparing durable HEAD records.
+            # ExitStack must close before the latest.json replace, since its
+            # context-exit identity check can still reject an inode swap.
+            with ExitStack() as pinned_published:
+                pinned_sqlite = pinned_published.enter_context(
+                    _pinned_file(published / "mark.sqlite")
+                )
+                pinned_witness = pinned_published.enter_context(
+                    _pinned_file(published / "witness.sqlite")
+                )
+                pinned_manifest = pinned_published.enter_context(
+                    _pinned_file(published / "manifest.json")
+                )
+                pinned_lock = pinned_published.enter_context(
+                    _pinned_file(published / "witness.sqlite.lock")
+                )
+                head = _canonical({
+                    "schema_version": 1,
+                    "generation": generation,
+                    "manifest_sha256": manifest_sha,
+                    "predecessor_sha256": expected_previous_head_sha256 or _ZERO,
+                })
+                # Persisted create-only records remain for manual investigation
+                # if validation fails; .inflight must remain unresolved.
+                _new_file(anchor / (generation + ".json"), head)
+                _fsync_dir(anchor)
+                _new_file(anchor / (".next-" + generation), head)
+                if (
+                    _sha256_fd(pinned_sqlite) != sqlite_sha
+                    or _sha256_fd(pinned_witness) != witness_sha
+                    or os.fstat(pinned_lock).st_size != 0
+                    or os.fstat(pinned_manifest).st_size != len(manifest)
+                    or os.pread(pinned_manifest, len(manifest), 0) != manifest
+                ):
+                    raise PairedBackupOperatorError(
+                        "published image changed during HEAD preparation"
+                    )
+                _no_sidecars(published / "mark.sqlite")
+                _no_sidecars(published / "witness.sqlite")
+            # Do not publish HEAD if the predecessor changed during preparation.
+            if _read_head(anchor, expected_previous_head_sha256) != prior:
+                raise PairedBackupOperatorError(
+                    "previous backup HEAD changed during HEAD preparation"
+                )
+            # A malicious same-UID actor may still race the last check-to-HEAD
+            # interval. Host trust requires independent operator authority.
             os.replace(anchor / (".next-" + generation), anchor / "latest.json")
             _fsync_dir(anchor)
             # Only a durably committed head releases this serial operator
