@@ -1455,14 +1455,16 @@ def inspect_offline_pair(
                         "ORDER BY idempotency_key",
                     )
                 }
-                # SnapshotStore accepts an independent SQLite clearance
-                # only for in_progress, the exact owner-202 UNKNOWN, or a
-                # locally ambiguous media result. The inventory immediately
-                # above already mirrors the latter TWO completed-reply
-                # predicates. No second response-grammar or status guess:
-                # a completed confirmed/precondition media reply has no
-                # local recovery fence, just like any completed nonmedia
-                # reply, and its SQLite clearance API is unavailable.
+                # SnapshotStore permits an independent SQLite clearance
+                # for in_progress, exact owner-202 UNKNOWN, ambiguous media,
+                # AND confirmed-core Create with unverified media if a durable
+                # before_media_post_read checkpoint remains open. This last
+                # case is not in sqlite_media_unresolved: it remains in
+                # ambiguous_creates until exact-key/SHA operator-only SQLite
+                # clearance. A Witness-only clearance can be diagnosed with
+                # that checkpoint still open, never as recovery authority.
+                # Other completed confirmed/precondition/nonmedia responses
+                # with NO local checkpoint have no SQLite clearance path.
                 # An independently operator-cleared Witness still cannot
                 # attest safe replay or actual external platform success.
                 # Executor-only media clearances are recognized as valid

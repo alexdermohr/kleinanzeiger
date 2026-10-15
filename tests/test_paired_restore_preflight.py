@@ -1432,6 +1432,56 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_witness_only_clearance_preserves_unverified_media_checkpoint(self) -> None:
+        # An operator-cleared Witness alone does not attest the SQLite media
+        # effect, even if the persisted HTTP response says core confirmed.
+        # It remains a visible OPEN fence, never inferred restore authority.
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        receipt, checkpoint = self._create_checkpoint(
+            reference="write-api:" + KEY,
+        )
+        store.append_create_operation_receipt(replace(
+            receipt, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        ))
+        response = _canonical({
+            "media_persistence_confirmed": False,
+            "operation_receipt": {
+                "operation": "create", "outcome": "confirmed",
+                "writer_invoked": True, "created_ad_id": "201",
+                "authorization_by": "offline-test-owner",
+                "authorization_reference": "write-api:" + KEY,
+                "media_post_read_status": "unknown",
+            },
+        }).decode("ascii")
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA,
+            claim_owner="pair-owner", response_status=200,
+            response_json=response, completed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=KEY, sha=SHA, evidence="synthetic:witness-operator-only",
+            )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["ambiguous_creates"], [checkpoint])
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertEqual(
+            [r[:2] for r in inspected["fences"]["sqlite_unverified_replay"]],
+            [[KEY, SHA]],
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new-after-witness", claim_owner="another",
+        ))
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="media_submit_reconciled",
+                evidence_reference="synthetic:executor-only",
+                observed_at=AT,
+            )
+
     def test_operator_only_dual_clearance_settles_unconfirmed_media_checkpoint(self) -> None:
         # Confirmed core Create + unresolved media is NOT automatically
         # settled. Only actual independent operator clearances in both
