@@ -21,8 +21,9 @@ from typing import Iterator
 
 from .fence_witness import FenceWitnessError, _private_directory
 from .paired_restore_preflight import (
-    PairPreflightError, _canonical, _no_sidecars, _pinned_file,
-    _sha256_fd, _witness_owner_absent, inspect_offline_pair, verify_offline_pair,
+    PairPreflightError, _MAX_IMAGE_BYTES, _MAX_MANIFEST, _canonical,
+    _manifest, _no_sidecars, _pinned_file, _sha256_fd,
+    _witness_owner_absent, inspect_offline_pair, verify_offline_pair,
 )
 
 
@@ -209,6 +210,7 @@ def _assert_no_ambiguous_artifacts(
 
 def _validate_anchored_history(
     anchor: Path, output: Path, head_sha: str, head: dict[str, object],
+    *, pending_generation: str | None = None,
 ) -> dict[str, tuple[str, dict[str, object]]]:
     """Fail closed when a committed ancestor or output artifact is missing.
 
@@ -259,6 +261,18 @@ def _validate_anchored_history(
         _private_root(entry)
         generations.add(entry.name)
 
+    # During a new seal, its completely copied but not yet HEAD-anchored
+    # directory is the one permitted additional output artifact. It must not
+    # shadow or replace any already committed generation.
+    if pending_generation is not None:
+        if (
+            _GENERATION.fullmatch(pending_generation) is None
+            or pending_generation not in generations
+            or any(generation == pending_generation for generation, _ in anchor_records.values())
+        ):
+            raise PairedBackupOperatorError("pending generation is not uniquely staged")
+        generations.remove(pending_generation)
+
     visited: set[str] = set()
     link = head_sha
     while link != _ZERO:
@@ -274,6 +288,37 @@ def _validate_anchored_history(
     if head["manifest_sha256"] != anchor_records[head_sha][1]["manifest_sha256"]:
         raise PairedBackupOperatorError("current manifest anchor mismatches")
 
+    # A directory name does not prove that its sealed pair still exists.
+    # Every committed generation must retain precisely the four originally
+    # published, operator-private files. Check real pinned inodes and their
+    # sizes, plus the inexpensive canonical manifest digest bound to the
+    # immutable independent head. Historical SQLite/Witness *contents* are
+    # still verified at restore/reconciliation, not rehashed on every seal.
+    expected_names = frozenset({
+        "mark.sqlite", "witness.sqlite", "witness.sqlite.lock", "manifest.json",
+    })
+    for digest in visited:
+        generation, record = anchor_records[digest]
+        generation_dir = output / generation
+        if {entry.name for entry in generation_dir.iterdir()} != expected_names:
+            raise PairedBackupOperatorError("committed generation artifact set is incomplete")
+        for name in ("mark.sqlite", "witness.sqlite", "witness.sqlite.lock"):
+            with _pinned_file(generation_dir / name) as fd:
+                size = os.fstat(fd).st_size
+                if name == "witness.sqlite.lock":
+                    if size != 0:
+                        raise PairedBackupOperatorError("committed witness lock is invalid")
+                elif not 100 <= size <= _MAX_IMAGE_BYTES:
+                    raise PairedBackupOperatorError("committed SQLite image size is unsafe")
+        with _pinned_file(generation_dir / "manifest.json") as fd:
+            size = os.fstat(fd).st_size
+            if not 0 < size <= _MAX_MANIFEST:
+                raise PairedBackupOperatorError("committed manifest length is invalid")
+            anchored_manifest = _manifest(
+                os.pread(fd, size, 0), record["manifest_sha256"],
+            )
+            if anchored_manifest["generation"] != generation:
+                raise PairedBackupOperatorError("committed manifest generation disagrees with anchor")
 
     return anchor_records
 
@@ -377,6 +422,22 @@ def reconcile_committed_inflight(
             # historically opened write mapping is revoked by this operation.
             if _read_head(anchor, head_sha) != head:
                 raise PairedBackupOperatorError("committed HEAD changed during reconciliation")
+            # Pathname identities may change after an earlier verification
+            # while another same-UID process modifies retained artifacts.
+            # Reconcile is exceptional: reverify the entire retained pair
+            # history immediately before consuming the crash intent.
+            _validate_anchored_history(anchor, output, head_sha, head)
+            for digest in visited:
+                generation, record = anchor_records[digest]
+                image_dir = output / generation
+                final = verify_offline_pair(
+                    image_dir / "mark.sqlite",
+                    image_dir / "witness.sqlite",
+                    image_dir / "manifest.json",
+                    expected_manifest_sha256=record["manifest_sha256"],
+                )
+                if final["generation"] != generation:
+                    raise PairedBackupOperatorError("committed pair changed before intent clearance")
             # A readable latest.json may have been renamed into place just
             # before the original process crashed without fsyncing the parent
             # directory. Persist the checked HEAD and immutable record FIRST.
@@ -533,6 +594,14 @@ def seal_offline_pair(
             )
             if verified["generation"] != generation:
                 raise PairedBackupOperatorError("published pair generation drifted")
+            if prior is not None:
+                # Source image verification can be expensive. Reject changes
+                # in any previously anchored generation which occurred since
+                # the initial admission check, before publishing a new HEAD.
+                _validate_anchored_history(
+                    anchor, output, expected_previous_head_sha256, prior,
+                    pending_generation=generation,
+                )
             head = _canonical({
                 "schema_version": 1,
                 "generation": generation,

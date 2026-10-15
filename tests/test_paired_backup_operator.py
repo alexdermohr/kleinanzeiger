@@ -122,6 +122,80 @@ class PairedBackupOperatorTests(unittest.TestCase):
             first["head_sha256"],
         )
 
+    def test_next_head_refuses_ancestor_deleted_after_first_validation(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        first = self._seal()
+        original_verify = operator.verify_offline_pair
+
+        def remove_ancestor_after_new_pair_verified(*args: object, **kwargs: object) -> object:
+            inspected = original_verify(*args, **kwargs)
+            if args[0] == self.output / SECOND / "mark.sqlite":
+                (self.output / FIRST / "manifest.json").unlink()
+            return inspected
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=remove_ancestor_after_new_pair_verified,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_keeps_intent_after_verified_image_is_removed(self) -> None:
+        from mark_api import paired_backup_operator as operator
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        current = self._crash_after_durable_head()
+        original_verify = operator.verify_offline_pair
+
+        def remove_after_verification(*args: object, **kwargs: object) -> object:
+            inspected = original_verify(*args, **kwargs)
+            (self.output / FIRST / "witness.sqlite").unlink()
+            return inspected
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=remove_after_verification,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                reconcile_committed_inflight(
+                    self.output, self.anchor,
+                    expected_current_head_sha256=current,
+                    expected_generation=FIRST,
+                )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_keeps_intent_after_verified_image_is_mutated(self) -> None:
+        from mark_api import paired_backup_operator as operator
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        current = self._crash_after_durable_head()
+        original_verify = operator.verify_offline_pair
+        tampered = False
+
+        def modify_after_verification(*args: object, **kwargs: object) -> object:
+            nonlocal tampered
+            inspected = original_verify(*args, **kwargs)
+            if not tampered:
+                tampered = True
+                with sqlite3.connect(self.output / FIRST / "mark.sqlite") as db:
+                    db.execute("PRAGMA user_version=99")
+            return inspected
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=modify_after_verification,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                reconcile_committed_inflight(
+                    self.output, self.anchor,
+                    expected_current_head_sha256=current,
+                    expected_generation=FIRST,
+                )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
     def test_next_generation_rejects_missing_committed_predecessor(self) -> None:
         first = self._seal()
         shutil.rmtree(self.output / FIRST)
@@ -129,6 +203,56 @@ class PairedBackupOperatorTests(unittest.TestCase):
             self._seal(generation=SECOND, previous=first["head_sha256"])
         self.assertFalse((self.output / SECOND).exists())
         self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
+
+    def test_next_generation_rejects_missing_retained_manifest(self) -> None:
+        first = self._seal()
+        (self.output / FIRST / "manifest.json").unlink()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+
+    def test_next_generation_rejects_missing_retained_sqlite(self) -> None:
+        first = self._seal()
+        (self.output / FIRST / "mark.sqlite").unlink()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+
+    def test_next_generation_rejects_missing_retained_witness(self) -> None:
+        first = self._seal()
+        (self.output / FIRST / "witness.sqlite").unlink()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+
+    def test_next_generation_rejects_missing_retained_lock(self) -> None:
+        first = self._seal()
+        (self.output / FIRST / "witness.sqlite.lock").unlink()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+
+    def test_next_generation_rejects_modified_retained_manifest(self) -> None:
+        first = self._seal()
+        (self.output / FIRST / "manifest.json").write_bytes(b"{}")
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+
+    def test_next_generation_rejects_extra_retained_artifact(self) -> None:
+        first = self._seal()
+        (self.output / FIRST / "unpublished.tmp").write_bytes(b"")
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+
+    def test_next_generation_rejects_missing_older_manifest(self) -> None:
+        first = self._seal()
+        second = self._seal(generation=SECOND, previous=first["head_sha256"])
+        (self.output / FIRST / "manifest.json").unlink()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation="3" * 32, previous=second["head_sha256"])
+        self.assertFalse((self.output / ("3" * 32)).exists())
 
     def test_next_generation_rejects_missing_older_generation(self) -> None:
         first = self._seal()
