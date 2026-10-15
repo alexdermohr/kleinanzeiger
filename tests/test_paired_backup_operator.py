@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -120,6 +121,40 @@ class PairedBackupOperatorTests(unittest.TestCase):
             self._hash(self.anchor / (FIRST + ".json")),
             first["head_sha256"],
         )
+
+    def test_next_generation_rejects_missing_committed_predecessor(self) -> None:
+        first = self._seal()
+        shutil.rmtree(self.output / FIRST)
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+        self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
+
+    def test_next_generation_rejects_missing_older_generation(self) -> None:
+        first = self._seal()
+        second = self._seal(generation=SECOND, previous=first["head_sha256"])
+        shutil.rmtree(self.output / FIRST)
+        third = "3" * 32
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=third, previous=second["head_sha256"])
+        self.assertFalse((self.output / third).exists())
+        self.assertEqual(self._hash(self.anchor / "latest.json"), second["head_sha256"])
+
+    def test_next_generation_rejects_unlinked_artifacts(self) -> None:
+        first = self._seal()
+        unrelated = "3" * 32
+        orphan_dir = self.output / unrelated
+        orphan_dir.mkdir(mode=0o700)
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        orphan_dir.rmdir()
+        (self.anchor / (unrelated + ".json")).write_bytes(
+            (self.anchor / (FIRST + ".json")).read_bytes()
+        )
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+        self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
 
     def test_missing_or_stale_previous_anchor_never_publishes(self) -> None:
         first = self._seal()

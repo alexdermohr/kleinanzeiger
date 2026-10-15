@@ -207,6 +207,77 @@ def _assert_no_ambiguous_artifacts(
         raise PairedBackupOperatorError("unsettled partial generation requires recovery")
 
 
+def _validate_anchored_history(
+    anchor: Path, output: Path, head_sha: str, head: dict[str, object],
+) -> dict[str, tuple[str, dict[str, object]]]:
+    """Fail closed when a committed ancestor or output artifact is missing.
+
+    Called under the independent anchor lock; only identities and canonical
+    chain records are checked here. Crash reconciliation verifies every image.
+    """
+    # A stray staging image, next-HEAD, unpublished generation or
+    # unlinked immutable record is an unresolved operation. Do not
+    # retire the fence just because latest.json looks consistent.
+    anchor_records: dict[str, tuple[str, dict[str, object]]] = {}
+    for entry in anchor.iterdir():
+        name = entry.name
+        if name in {".authority.lock", ".inflight", "latest.json"}:
+            continue
+        if not name.endswith(".json") or _GENERATION.fullmatch(name[:-5]) is None:
+            raise PairedBackupOperatorError("unexpected independent anchor artifact")
+        with _pinned_file(entry) as fd:
+            size = os.fstat(fd).st_size
+            if not 1 <= size <= _MAX_HEAD:
+                raise PairedBackupOperatorError("generation record length invalid")
+            raw = os.pread(fd, size, 0)
+        record = json.loads(raw)
+        if (
+            type(record) is not dict
+            or set(record) != {
+                "schema_version", "generation", "manifest_sha256",
+                "predecessor_sha256",
+            }
+            or type(record["schema_version"]) is not int
+            or record["schema_version"] != 1
+            or record["generation"] != name[:-5]
+            or type(record["manifest_sha256"]) is not str
+            or _SHA.fullmatch(record["manifest_sha256"]) is None
+            or type(record["predecessor_sha256"]) is not str
+            or _SHA.fullmatch(record["predecessor_sha256"]) is None
+            or _canonical(record) != raw
+        ):
+            raise PairedBackupOperatorError("generation history record is not canonical")
+        digest = _digest(raw)
+        if digest in anchor_records:
+            raise PairedBackupOperatorError("generation history has duplicate head hash")
+        anchor_records[digest] = (name[:-5], record)
+
+    generations: set[str] = set()
+    for entry in output.iterdir():
+        if _GENERATION.fullmatch(entry.name) is None:
+            raise PairedBackupOperatorError("unsettled or unexpected backup artifact")
+        _private_root(entry)
+        generations.add(entry.name)
+
+    visited: set[str] = set()
+    link = head_sha
+    while link != _ZERO:
+        if link in visited or link not in anchor_records:
+            raise PairedBackupOperatorError("backup head chain is broken or cyclic")
+        visited.add(link)
+        generation, record = anchor_records[link]
+        if generation not in generations:
+            raise PairedBackupOperatorError("committed generation is missing")
+        link = record["predecessor_sha256"]
+    if visited != set(anchor_records) or len(visited) != len(generations):
+        raise PairedBackupOperatorError("unlinked or unpublished backup generation remains")
+    if head["manifest_sha256"] != anchor_records[head_sha][1]["manifest_sha256"]:
+        raise PairedBackupOperatorError("current manifest anchor mismatches")
+
+
+    return anchor_records
+
+
 @contextmanager
 def _authority_lock(
     anchor: Path, *, create_if_missing: bool = True,
@@ -276,64 +347,11 @@ def reconcile_committed_inflight(
                     raise PairedBackupOperatorError("persisted generation intent disagrees with HEAD")
                 marker_identity = (info.st_dev, info.st_ino)
 
-            # A stray staging image, next-HEAD, unpublished generation or
-            # unlinked immutable record is an unresolved operation. Do not
-            # retire the fence just because latest.json looks consistent.
-            anchor_records: dict[str, tuple[str, dict[str, object]]] = {}
-            for entry in anchor.iterdir():
-                name = entry.name
-                if name in {".authority.lock", ".inflight", "latest.json"}:
-                    continue
-                if not name.endswith(".json") or _GENERATION.fullmatch(name[:-5]) is None:
-                    raise PairedBackupOperatorError("unexpected independent anchor artifact")
-                with _pinned_file(entry) as fd:
-                    size = os.fstat(fd).st_size
-                    if not 1 <= size <= _MAX_HEAD:
-                        raise PairedBackupOperatorError("generation record length invalid")
-                    raw = os.pread(fd, size, 0)
-                record = json.loads(raw)
-                if (
-                    type(record) is not dict
-                    or set(record) != {
-                        "schema_version", "generation", "manifest_sha256",
-                        "predecessor_sha256",
-                    }
-                    or type(record["schema_version"]) is not int
-                    or record["schema_version"] != 1
-                    or record["generation"] != name[:-5]
-                    or type(record["manifest_sha256"]) is not str
-                    or _SHA.fullmatch(record["manifest_sha256"]) is None
-                    or type(record["predecessor_sha256"]) is not str
-                    or _SHA.fullmatch(record["predecessor_sha256"]) is None
-                    or _canonical(record) != raw
-                ):
-                    raise PairedBackupOperatorError("generation history record is not canonical")
-                digest = _digest(raw)
-                if digest in anchor_records:
-                    raise PairedBackupOperatorError("generation history has duplicate head hash")
-                anchor_records[digest] = (name[:-5], record)
-
-            generations: set[str] = set()
-            for entry in output.iterdir():
-                if _GENERATION.fullmatch(entry.name) is None:
-                    raise PairedBackupOperatorError("unsettled or unexpected backup artifact")
-                _private_root(entry)
-                generations.add(entry.name)
-
-            visited: set[str] = set()
-            link = head_sha
-            while link != _ZERO:
-                if link in visited or link not in anchor_records:
-                    raise PairedBackupOperatorError("backup head chain is broken or cyclic")
-                visited.add(link)
-                generation, record = anchor_records[link]
-                if generation not in generations:
-                    raise PairedBackupOperatorError("committed generation is missing")
-                link = record["predecessor_sha256"]
-            if visited != set(anchor_records) or len(visited) != len(generations):
-                raise PairedBackupOperatorError("unlinked or unpublished backup generation remains")
-            if head["manifest_sha256"] != anchor_records[head_sha][1]["manifest_sha256"]:
-                raise PairedBackupOperatorError("current manifest anchor mismatches")
+            # Reuse the exact committed-chain validation used at seal time.
+            anchor_records = _validate_anchored_history(
+                anchor, output, head_sha, head,
+            )
+            visited = set(anchor_records)
 
             # Chain links alone do not prove historical image integrity.
             # Every retained generation must still match its immutable
@@ -444,6 +462,10 @@ def seal_offline_pair(
         with _authority_lock(anchor):
             prior = _read_head(anchor, expected_previous_head_sha256)
             _assert_no_ambiguous_artifacts(anchor, output, has_head=prior is not None)
+            if prior is not None:
+                _validate_anchored_history(
+                    anchor, output, expected_previous_head_sha256, prior,
+                )
             _unoccupied(temporary)
             _unoccupied(published)
             _unoccupied(anchor / (generation + ".json"))
