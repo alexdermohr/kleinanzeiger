@@ -2926,8 +2926,10 @@ class WriteApiTests(unittest.TestCase):
                 payload={k: v for k, v in payload.items() if k != "media_refs"},
                 idempotency_key="new-key-damaged-fence",
             )
-        self.assertEqual(status, 500)
-        self.assertEqual(response["error"], "write_execution_error")
+        # Corrupt legacy response remains an unresolved Create fence, now
+        # reported deterministically instead of bubbling an opaque 500.
+        self.assertEqual(status, 409)
+        self.assertEqual(response["error"], "create_recovery_pending")
         self.assertFalse(response["platform_retry_authorized"])
         self.assertEqual(plain.calls, [])
 

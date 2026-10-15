@@ -1571,6 +1571,128 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 self.assertEqual(
                     inspected["fences"]["ambiguous_creates"], [checkpoint],
                 )
+                self.assertTrue(
+                    SnapshotStore(self.sqlite, create_if_missing=False)
+                    .create_recovery_pending(
+                        exclude_idempotency_key="new:postrestore",
+                        claim_owner="new-owner",
+                    )
+                )
+
+    def test_runtime_checkpoint_fence_matches_offline_immutable_fields(self) -> None:
+        # RED: an offline-open confirmed checkpoint must also block a new
+        # Create in the restored runtime, including a forged final receipt.
+        receipt, checkpoint = self._create_checkpoint()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [checkpoint],
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new:postrestore",
+            claim_owner="new-owner",
+        ))
+        final = replace(
+            receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        store.append_create_operation_receipt(final)
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [],
+        )
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="new:postrestore",
+            claim_owner="new-owner",
+        ))
+        changes = (
+            ("pre_read_status", "success_nonempty"),
+            ("confirmation_pre_read_status", "success_nonempty"),
+            ("post_read_status", "success_empty"),
+            ("confirmation_post_read_status", "success_empty"),
+            ("content_post_read_status", "success_empty"),
+            ("writer_error", "synthetic:altered-core-error"),
+        )
+        for field_name, changed_value in changes:
+            with self.subTest(field=field_name):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {field_name}=?",
+                        (changed_value,),
+                    )
+                self.assertEqual(
+                    inspect_offline_pair(self.sqlite, self.ledger)
+                    ["fences"]["ambiguous_creates"], [checkpoint],
+                )
+                self.assertTrue(store.create_recovery_pending(
+                    exclude_idempotency_key="new:postrestore",
+                    claim_owner="new-owner",
+                ))
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {field_name}=?",
+                        (getattr(receipt, field_name),),
+                    )
+                self.assertFalse(store.create_recovery_pending(
+                    exclude_idempotency_key="new:postrestore",
+                    claim_owner="new-owner",
+                ))
+
+    def test_runtime_checkpoint_microsecond_inversion_remains_fenced(self) -> None:
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt, completed_at=AT.replace(microsecond=1),
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_checkpoints SET completed_at=? WHERE id=?",
+                (AT.replace(microsecond=2).isoformat(), checkpoint),
+            )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [checkpoint],
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new:postrestore", claim_owner="new-owner",
+        ))
+        # The same exact instant with another timezone offset remains valid.
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_checkpoints SET completed_at=? WHERE id=?",
+                ("2026-10-13T18:00:00.000001+02:00", checkpoint),
+            )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [],
+        )
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="new:postrestore", claim_owner="new-owner",
+        ))
+
+    def test_runtime_malformed_completed_response_is_fail_closed(self) -> None:
+        key = "complete:non-json-recovery"
+        self._nonmedia_crash_without_witness_completion(key=key)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="another", claim_owner="new-owner",
+        ))
+        for raw in ("not-json", "null", "[]", "42", '"text"'):
+            with self.subTest(raw=raw):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        "UPDATE write_api_requests SET response_json=? "
+                        "WHERE idempotency_key=?",
+                        (raw, key),
+                    )
+                # Valid JSON primitives are not valid owner-produced HTTP
+                # envelopes either, so none may silently release a fence.
+                self.assertTrue(store.create_recovery_pending(
+                    exclude_idempotency_key="another", claim_owner="new-owner",
+                ))
 
     def test_forged_checkpoint_domain_contract_cannot_be_settled_by_valid_final(self) -> None:
         # Even the EXACT matching final receipt cannot hide a forged durable

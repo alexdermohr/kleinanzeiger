@@ -1386,6 +1386,66 @@ class SnapshotStore:
                 (exclude_idempotency_key,),
             ).fetchone() is not None:
                 return True
+            # Runtime must enforce the same durable before-media Create fences
+            # the independent offline pair inventory promises to preserve.
+            # A checkpoint is settled only by a final media-confirmed receipt
+            # bound to EVERY immutable source field. In particular, an
+            # independently valid but unrelated final receipt, or a final
+            # timestamp earlier by even one microsecond, cannot release it.
+            # Keep this runtime predicate independent of offline inspector
+            # code; the paired acceptance tests cross-check both contracts.
+            previous_checkpoint_id = None
+            previous_checkpoint_settled = False
+            checkpoint_rows = connection.execute(
+                """
+                SELECT c.id, c.completed_at, r.completed_at
+                FROM create_operation_checkpoints AS c
+                LEFT JOIN create_operation_receipts AS r
+                  ON c.operation = r.operation
+                 AND c.created_ad_id = r.created_ad_id
+                 AND c.started_at = r.started_at
+                 AND c.authorization_by IS NOT NULL
+                 AND c.authorization_by = r.authorization_by
+                 AND c.authorization_reference IS NOT NULL
+                 AND c.authorization_reference = r.authorization_reference
+                 AND c.pre_read_status = r.pre_read_status
+                 AND c.confirmation_pre_read_status = r.confirmation_pre_read_status
+                 AND c.post_read_status IS r.post_read_status
+                 AND c.confirmation_post_read_status IS r.confirmation_post_read_status
+                 AND c.content_post_read_status IS r.content_post_read_status
+                 AND c.writer_error IS r.writer_error
+                 AND c.post_snapshot_json IS r.post_snapshot_json
+                 AND c.confirmation_post_snapshot_json IS r.confirmation_post_snapshot_json
+                 AND c.content_post_snapshot_json IS r.content_post_snapshot_json
+                 AND r.outcome = 'confirmed'
+                 AND r.writer_invoked = 1
+                 AND r.media_persistence_confirmed = 1
+                 AND r.media_post_read_status = 'confirmed'
+                ORDER BY c.id, r.id
+                """
+            )
+            for checkpoint_id, checkpoint_completed, final_completed in checkpoint_rows:
+                if checkpoint_id != previous_checkpoint_id:
+                    if previous_checkpoint_id is not None and not previous_checkpoint_settled:
+                        return True
+                    previous_checkpoint_id = checkpoint_id
+                    previous_checkpoint_settled = False
+                if final_completed is None:
+                    continue
+                try:
+                    checkpoint_time = datetime.fromisoformat(checkpoint_completed)
+                    final_time = datetime.fromisoformat(final_completed)
+                    if (
+                        checkpoint_time.utcoffset() is not None
+                        and final_time.utcoffset() is not None
+                        and final_time >= checkpoint_time
+                    ):
+                        previous_checkpoint_settled = True
+                except (TypeError, ValueError):
+                    # Invalid historical data cannot prove settlement.
+                    continue
+            if previous_checkpoint_id is not None and not previous_checkpoint_settled:
+                return True
             if connection.execute(
                 """
                 SELECT 1 FROM create_operation_receipts AS r
@@ -1413,7 +1473,11 @@ class SnapshotStore:
                   AND w.state = 'completed'
                   AND c.idempotency_key IS NULL
                   AND (
-                    json_type(w.response_json, '$.media_persistence_confirmed') IS NOT NULL
+                    (CASE WHEN json_valid(w.response_json) = 0 THEN 1
+                          WHEN json_type(w.response_json) != 'object' THEN 1
+                          ELSE json_type(
+                            w.response_json, '$.media_persistence_confirmed'
+                          ) IS NOT NULL END)
                     OR (
                       w.response_status = 202
                       AND substr(
@@ -1428,8 +1492,15 @@ class SnapshotStore:
             for row in rows:
                 try:
                     response = json.loads(row["response_json"])
-                    if not isinstance(response, dict):
-                        raise ValueError("invalid response envelope")
+                except (TypeError, ValueError):
+                    # Historical corrupt JSON is an unresolved write, not
+                    # permission to re-submit and not an opaque SQLite crash.
+                    return True
+                if not isinstance(response, dict):
+                    # A parseable JSON primitive is not an HTTP response
+                    # envelope and cannot authorize another Create.
+                    return True
+                try:
                     if (
                         row["response_status"] == 202
                         and response.get("error") == "write_outcome_unverified"
