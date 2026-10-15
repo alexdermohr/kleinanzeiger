@@ -443,6 +443,13 @@ def reconcile_committed_inflight(
             # directory. Persist the checked HEAD and immutable record FIRST.
             # If this barrier fails, the intent marker must remain in place.
             _fsync_dir(anchor)
+            # Re-reading only before the potentially long historical pair
+            # verification is insufficient: an older HEAD may be replaced
+            # while verification is in progress. Preserve the crash intent.
+            if _read_head(anchor, head_sha) != head:
+                raise PairedBackupOperatorError(
+                    "committed HEAD changed before intent clearance"
+                )
             info = inflight.lstat()
             if (info.st_dev, info.st_ino) != marker_identity:
                 raise PairedBackupOperatorError("generation intent inode changed")
@@ -594,7 +601,29 @@ def seal_offline_pair(
             )
             if verified["generation"] != generation:
                 raise PairedBackupOperatorError("published pair generation drifted")
-            if prior is not None:
+            # An earlier HEAD read is not a reservation. Before publishing
+            # a new chain tip, check that the independently pinned previous
+            # pointer has not been replaced during the expensive pair scan.
+            if _read_head(anchor, expected_previous_head_sha256) != prior:
+                raise PairedBackupOperatorError(
+                    "previous backup HEAD changed before publication"
+                )
+            if prior is None:
+                # Bootstrap has no committed ancestors, but after the
+                # durable intent and output rename exactly one new pair must
+                # exist. Ignore neither orphan anchors nor foreign outputs.
+                # Keeping this separate avoids treating a new generation as
+                # a committed predecessor.
+                if {
+                    entry.name for entry in anchor.iterdir()
+                } != {".authority.lock", ".inflight"} or {
+                    entry.name for entry in output.iterdir()
+                } != {generation}:
+                    raise PairedBackupOperatorError(
+                        "first generation has unexpected committed artifacts"
+                    )
+                _private_root(published)
+            else:
                 # Source image verification can be expensive. Reject changes
                 # in any previously anchored generation which occurred since
                 # the initial admission check, before publishing a new HEAD.

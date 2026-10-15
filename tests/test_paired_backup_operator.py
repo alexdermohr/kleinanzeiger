@@ -122,6 +122,94 @@ class PairedBackupOperatorTests(unittest.TestCase):
             first["head_sha256"],
         )
 
+    def test_bootstrap_refuses_orphan_output_injected_after_pair_verification(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        original_verify = operator.verify_offline_pair
+
+        def inject_orphan(*args: object, **kwargs: object) -> object:
+            checked = original_verify(*args, **kwargs)
+            (self.output / SECOND).mkdir(mode=0o700)
+            return checked
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=inject_orphan,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_bootstrap_refuses_orphan_anchor_injected_after_pair_verification(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        original_verify = operator.verify_offline_pair
+
+        def inject_anchor(*args: object, **kwargs: object) -> object:
+            checked = original_verify(*args, **kwargs)
+            (self.anchor / (SECOND + ".json")).write_bytes(b"unattested")
+            return checked
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=inject_anchor,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_later_seal_refuses_previous_head_modified_after_verification(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        first = self._seal()
+        original_verify = operator.verify_offline_pair
+
+        def change_previous_head(*args: object, **kwargs: object) -> object:
+            checked = original_verify(*args, **kwargs)
+            if args[0] == self.output / SECOND / "mark.sqlite":
+                (self.anchor / "latest.json").write_bytes(b"{}")
+            return checked
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=change_previous_head,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal(generation=SECOND, previous=first["head_sha256"])
+        self.assertEqual((self.anchor / "latest.json").read_bytes(), b"{}")
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_refuses_head_changed_after_last_pair_verification(self) -> None:
+        from mark_api import paired_backup_operator as operator
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        original_verify = operator.verify_offline_pair
+        call_count = 0
+
+        def replace_after_final_check(*args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            checked = original_verify(*args, **kwargs)
+            call_count += 1
+            if call_count == 2:
+                (self.anchor / "latest.json").write_bytes(b"{}")
+            return checked
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=replace_after_final_check,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                reconcile_committed_inflight(
+                    self.output, self.anchor,
+                    expected_current_head_sha256=digest,
+                    expected_generation=FIRST,
+                )
+        self.assertGreaterEqual(call_count, 2)
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
     def test_next_head_refuses_ancestor_deleted_after_first_validation(self) -> None:
         from mark_api import paired_backup_operator as operator
 
