@@ -243,6 +243,303 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 generation="3" * 32, previous=first["head_sha256"],
             )
 
+    def _crash_after_durable_head(self) -> str:
+        # A real published pair and HEAD exist, but fsync of the final
+        # operator intent clear was interrupted. The fence must remain.
+        from mark_api import paired_backup_operator as operator
+
+        real_unlink = operator.os.unlink
+
+        def interrupt_final_fence_unlink(path: object, *args: object, **kwargs: object) -> None:
+            if path == self.anchor / ".inflight":
+                raise OSError("synthetic SIGKILL after durable HEAD")
+            real_unlink(path, *args, **kwargs)
+
+        with patch(
+            "mark_api.paired_backup_operator.os.unlink",
+            side_effect=interrupt_final_fence_unlink,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertTrue((self.anchor / ".inflight").is_file())
+        self.assertTrue((self.output / FIRST / "manifest.json").is_file())
+        return self._hash(self.anchor / "latest.json")
+
+    def test_reconcile_only_fully_anchored_post_head_crash(self) -> None:
+        # RED: without an explicit pinned-HEAD recovery primitive a
+        # successful HEAD followed by a crashed sentinel unlink deadlocks
+        # all future generations. Never remove an incomplete generation.
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation=SECOND, previous=digest)
+        recovered = reconcile_committed_inflight(
+            self.output, self.anchor,
+            expected_current_head_sha256=digest, expected_generation=FIRST,
+        )
+        self.assertTrue(recovered["reconciled"])
+        self.assertEqual(recovered["head_sha256"], digest)
+        self.assertFalse(recovered["restore_authorized"])
+        self.assertFalse(recovered["live_source_quiescence_attested"])
+        self.assertFalse(recovered["external_write_authorized"])
+        self.assertFalse((self.anchor / ".inflight").exists())
+        self.assertEqual(self._hash(self.anchor / "latest.json"), digest)
+        second = self._seal(generation=SECOND, previous=digest)
+        self.assertEqual(second["generation"], SECOND)
+
+    def test_reconcile_rejects_pre_head_crash_and_does_not_skip_generation(self) -> None:
+        from mark_api import paired_backup_operator as operator
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        first = self._seal()
+        original = operator._new_file
+
+        def abort_before_head_record(path: Path, data: bytes) -> None:
+            if path == self.anchor / (SECOND + ".json"):
+                raise OSError("synthetic interruption before immutable head")
+            original(path, data)
+
+        with patch(
+            "mark_api.paired_backup_operator._new_file",
+            side_effect=abort_before_head_record,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal(generation=SECOND, previous=first["head_sha256"])
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=first["head_sha256"],
+                expected_generation=SECOND,
+            )
+        self.assertEqual((self.anchor / ".inflight").read_text(), SECOND)
+        self.assertEqual(
+            self._hash(self.anchor / "latest.json"), first["head_sha256"],
+        )
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal(generation="3" * 32, previous=first["head_sha256"])
+
+    def test_reconcile_rejects_wrong_external_head_and_tampered_pair(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256="0" * 64,
+                expected_generation=FIRST,
+            )
+        with sqlite3.connect(self.output / FIRST / "mark.sqlite") as db:
+            db.execute("PRAGMA user_version=91")
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=digest,
+                expected_generation=FIRST,
+            )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_refuses_unexpected_staging_artifacts(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        next_head = self.anchor / (".next-" + SECOND)
+        next_head.write_bytes(b"unattested")
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=digest,
+                expected_generation=FIRST,
+            )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+        next_head.unlink()
+        partial = self.output / (".partial-" + SECOND)
+        partial.mkdir(mode=0o700)
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=digest,
+                expected_generation=FIRST,
+            )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_refuses_symlinked_or_missing_intent_marker(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        marker = self.anchor / ".inflight"
+        marker.unlink()
+        target = self.anchor / "foreign"
+        target.write_text(FIRST)
+        marker.symlink_to(target)
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=digest,
+                expected_generation=FIRST,
+            )
+        marker.unlink()
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=digest,
+                expected_generation=FIRST,
+            )
+
+    def test_reconcile_does_not_claim_success_without_crashed_intent(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        first = self._seal()
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=first["head_sha256"],
+                expected_generation=FIRST,
+            )
+
+    def test_reconcile_refuses_orphaned_published_pair_after_durable_head(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        orphan = self.output / SECOND
+        orphan.mkdir(mode=0o700)
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=digest,
+                expected_generation=FIRST,
+            )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_refuses_damaged_predecessor_in_durable_head_chain(self) -> None:
+        from mark_api import paired_backup_operator as operator
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        first = self._seal()
+        original_unlink = operator.os.unlink
+
+        def interrupted_second(path: object, *args: object, **kwargs: object) -> None:
+            if path == self.anchor / ".inflight":
+                raise OSError("synthetic post-head crash")
+            original_unlink(path, *args, **kwargs)
+
+        with patch("mark_api.paired_backup_operator.os.unlink", side_effect=interrupted_second):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal(generation=SECOND, previous=first["head_sha256"])
+        committed = self._hash(self.anchor / "latest.json")
+        # The newest pair passes verification, but an older immutable head
+        # is now corrupt. The operator must not erase evidence of lost history.
+        (self.anchor / (FIRST + ".json")).write_text("corrupt")
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=committed,
+                expected_generation=SECOND,
+            )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_rejects_corrupted_predecessor_pair_image(self) -> None:
+        from mark_api import paired_backup_operator as operator
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        first = self._seal()
+        original_unlink = operator.os.unlink
+
+        def interrupted_second(path: object, *args: object, **kwargs: object) -> None:
+            if path == self.anchor / ".inflight":
+                raise OSError("synthetic late crash")
+            original_unlink(path, *args, **kwargs)
+
+        with patch("mark_api.paired_backup_operator.os.unlink", side_effect=interrupted_second):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal(generation=SECOND, previous=first["head_sha256"])
+        committed = self._hash(self.anchor / "latest.json")
+        # Its current HEAD is still fully valid; corrupting an older
+        # generation must not allow silent release of the incomplete chain.
+        with sqlite3.connect(self.output / FIRST / "mark.sqlite") as db:
+            db.execute("PRAGMA user_version=99")
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=committed,
+                expected_generation=SECOND,
+            )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_rejects_wrong_inflight_generation_bytes(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        (self.anchor / ".inflight").write_bytes(SECOND.encode("ascii"))
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=digest,
+                expected_generation=FIRST,
+            )
+        self.assertTrue((self.anchor / ".inflight").exists())
+
+    def test_reconcile_respects_concurrent_authority_lock(self) -> None:
+        import fcntl
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        with (self.anchor / ".authority.lock").open("rb") as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with self.assertRaises(PairedBackupOperatorError):
+                    reconcile_committed_inflight(
+                        self.output, self.anchor,
+                        expected_current_head_sha256=digest,
+                        expected_generation=FIRST,
+                    )
+            finally:
+                fcntl.flock(guard, fcntl.LOCK_UN)
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_must_not_recreate_missing_operator_authority_lock(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        digest = self._crash_after_durable_head()
+        lock_path = self.anchor / ".authority.lock"
+        lock_path.unlink()
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=digest,
+                expected_generation=FIRST,
+            )
+        self.assertFalse(lock_path.exists())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_success_keeps_pending_write_fences(self) -> None:
+        from mark_api import paired_backup_operator as operator
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        first = self._seal()
+        self._start_write()
+        original_unlink = operator.os.unlink
+
+        def interrupted_second(path: object, *args: object, **kwargs: object) -> None:
+            if path == self.anchor / ".inflight":
+                raise OSError("synthetic post-head crash with open write")
+            original_unlink(path, *args, **kwargs)
+
+        with patch("mark_api.paired_backup_operator.os.unlink", side_effect=interrupted_second):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal(generation=SECOND, previous=first["head_sha256"])
+        committed = self._hash(self.anchor / "latest.json")
+        result = reconcile_committed_inflight(
+            self.output, self.anchor,
+            expected_current_head_sha256=committed,
+            expected_generation=SECOND,
+        )
+        self.assertEqual(result["fences"]["sqlite_started_count"], 1)
+        self.assertEqual(result["fences"]["witness_unresolved_count"], 1)
+        self.assertFalse(result["restore_authorized"])
+        self.assertFalse(result["external_write_authorized"])
+
+
     def test_successful_second_generation_allows_third_after_sealing(self) -> None:
         first = self._seal()
         second = self._seal(generation=SECOND, previous=first["head_sha256"])
@@ -294,9 +591,3 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_completed_generation_is_create_only(self) -> None:
         self._seal()
-        with self.assertRaises(PairedBackupOperatorError):
-            self._seal()
-
-
-if __name__ == "__main__":
-    unittest.main()

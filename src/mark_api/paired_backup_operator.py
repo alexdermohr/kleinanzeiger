@@ -208,13 +208,19 @@ def _assert_no_ambiguous_artifacts(
 
 
 @contextmanager
-def _authority_lock(anchor: Path) -> Iterator[None]:
+def _authority_lock(
+    anchor: Path, *, create_if_missing: bool = True,
+) -> Iterator[None]:
     path = anchor / ".authority.lock"
-    try:
-        _new_file(path, b"")
-        _fsync_dir(anchor)
-    except FileExistsError:
-        pass
+    if create_if_missing:
+        try:
+            _new_file(path, b"")
+            _fsync_dir(anchor)
+        except FileExistsError:
+            pass
+    # Reconciliation must reuse the existing operator-lock inode. Recreating
+    # a missing lock could coexist with a still-running holder of the old
+    # (unlinked) inode, falsely claiming exclusive authority.
     with _pinned_file(path) as fd:
         if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
             raise PairedBackupOperatorError("operator lock is untrusted")
@@ -226,6 +232,158 @@ def _authority_lock(anchor: Path) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+
+def reconcile_committed_inflight(
+    output_root: Path,
+    anchor_root: Path,
+    *,
+    expected_current_head_sha256: str,
+    expected_generation: str,
+) -> dict[str, object]:
+    """Release ONLY a stale intent for an independently pinned committed HEAD.
+
+    This is offline operator reconciliation, not an automatic crash retry or
+    a source-quiescence, restore, platform-write or host-cutover authority.
+    The expected HEAD digest must come from a separately protected channel.
+    A published pair without its durable HEAD remains UNKNOWN and locked.
+    """
+    output = _private_root(output_root)
+    anchor = _private_root(anchor_root)
+    if output == anchor or output in anchor.parents or anchor in output.parents:
+        raise PairedBackupOperatorError("backup and independent anchors overlap")
+    head_sha = _require_digest(expected_current_head_sha256, "current head")
+    if (
+        type(expected_generation) is not str
+        or _GENERATION.fullmatch(expected_generation) is None
+    ):
+        raise PairedBackupOperatorError("committed generation identity is invalid")
+
+    try:
+        with _authority_lock(anchor, create_if_missing=False):
+            head = _read_head(anchor, head_sha)
+            if head is None or head["generation"] != expected_generation:
+                raise PairedBackupOperatorError("independently pinned HEAD is not the inflight generation")
+
+            inflight = anchor / ".inflight"
+            with _pinned_file(inflight) as fd:
+                info = os.fstat(fd)
+                if (
+                    info.st_size != 32
+                    or os.pread(fd, 33, 0) != expected_generation.encode("ascii")
+                ):
+                    raise PairedBackupOperatorError("persisted generation intent disagrees with HEAD")
+                marker_identity = (info.st_dev, info.st_ino)
+
+            # A stray staging image, next-HEAD, unpublished generation or
+            # unlinked immutable record is an unresolved operation. Do not
+            # retire the fence just because latest.json looks consistent.
+            anchor_records: dict[str, tuple[str, dict[str, object]]] = {}
+            for entry in anchor.iterdir():
+                name = entry.name
+                if name in {".authority.lock", ".inflight", "latest.json"}:
+                    continue
+                if not name.endswith(".json") or _GENERATION.fullmatch(name[:-5]) is None:
+                    raise PairedBackupOperatorError("unexpected independent anchor artifact")
+                with _pinned_file(entry) as fd:
+                    size = os.fstat(fd).st_size
+                    if not 1 <= size <= _MAX_HEAD:
+                        raise PairedBackupOperatorError("generation record length invalid")
+                    raw = os.pread(fd, size, 0)
+                record = json.loads(raw)
+                if (
+                    type(record) is not dict
+                    or set(record) != {
+                        "schema_version", "generation", "manifest_sha256",
+                        "predecessor_sha256",
+                    }
+                    or type(record["schema_version"]) is not int
+                    or record["schema_version"] != 1
+                    or record["generation"] != name[:-5]
+                    or type(record["manifest_sha256"]) is not str
+                    or _SHA.fullmatch(record["manifest_sha256"]) is None
+                    or type(record["predecessor_sha256"]) is not str
+                    or _SHA.fullmatch(record["predecessor_sha256"]) is None
+                    or _canonical(record) != raw
+                ):
+                    raise PairedBackupOperatorError("generation history record is not canonical")
+                digest = _digest(raw)
+                if digest in anchor_records:
+                    raise PairedBackupOperatorError("generation history has duplicate head hash")
+                anchor_records[digest] = (name[:-5], record)
+
+            generations: set[str] = set()
+            for entry in output.iterdir():
+                if _GENERATION.fullmatch(entry.name) is None:
+                    raise PairedBackupOperatorError("unsettled or unexpected backup artifact")
+                _private_root(entry)
+                generations.add(entry.name)
+
+            visited: set[str] = set()
+            link = head_sha
+            while link != _ZERO:
+                if link in visited or link not in anchor_records:
+                    raise PairedBackupOperatorError("backup head chain is broken or cyclic")
+                visited.add(link)
+                generation, record = anchor_records[link]
+                if generation not in generations:
+                    raise PairedBackupOperatorError("committed generation is missing")
+                link = record["predecessor_sha256"]
+            if visited != set(anchor_records) or len(visited) != len(generations):
+                raise PairedBackupOperatorError("unlinked or unpublished backup generation remains")
+            if head["manifest_sha256"] != anchor_records[head_sha][1]["manifest_sha256"]:
+                raise PairedBackupOperatorError("current manifest anchor mismatches")
+
+            # Chain links alone do not prove historical image integrity.
+            # Every retained generation must still match its immutable
+            # manifest before clearing the only crash-intent marker. This
+            # infrequent explicit offline operation is deliberately thorough.
+            verified: dict[str, object] | None = None
+            for digest in visited:
+                generation, record = anchor_records[digest]
+                image_dir = output / generation
+                inspected = verify_offline_pair(
+                    image_dir / "mark.sqlite",
+                    image_dir / "witness.sqlite",
+                    image_dir / "manifest.json",
+                    expected_manifest_sha256=record["manifest_sha256"],
+                )
+                if inspected["generation"] != generation:
+                    raise PairedBackupOperatorError("historical pair generation drifted")
+                if generation == expected_generation:
+                    verified = inspected
+            if verified is None:
+                raise PairedBackupOperatorError("committed pair was not fully verified")
+            # Validate the pointer once more under the operator lock. No
+            # historically opened write mapping is revoked by this operation.
+            if _read_head(anchor, head_sha) != head:
+                raise PairedBackupOperatorError("committed HEAD changed during reconciliation")
+            info = inflight.lstat()
+            if (info.st_dev, info.st_ino) != marker_identity:
+                raise PairedBackupOperatorError("generation intent inode changed")
+            os.unlink(inflight)
+            _fsync_dir(anchor)
+            return {
+                "generation": expected_generation,
+                "head_sha256": head_sha,
+                "manifest_sha256": head["manifest_sha256"],
+                "reconciled": True,
+                "offline_only": True,
+                "live_source_quiescence_attested": False,
+                "restore_authorized": False,
+                "external_write_authorized": False,
+                "fences": verified,
+            }
+    except PairedBackupOperatorError:
+        raise
+    except (
+        OSError, ValueError, TypeError, KeyError, UnicodeError,
+        RecursionError, PairPreflightError, FenceWitnessError,
+    ) as exc:
+        raise PairedBackupOperatorError(
+            "committed generation not reconciled; preserve recovery evidence"
+        ) from exc
 
 
 def seal_offline_pair(
