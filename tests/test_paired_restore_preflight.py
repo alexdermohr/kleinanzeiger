@@ -56,7 +56,10 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with FenceLedger(self.ledger, initialize=True):
             pass
 
-    def _start(self, *, key: str = KEY, sha: str = SHA, witness: bool = True) -> None:
+    def _start(
+        self, *, key: str = KEY, sha: str = SHA, witness: bool = True,
+        action: str = "create",
+    ) -> None:
         store = SnapshotStore(self.sqlite, create_if_missing=False)
         result = store.claim_write_api_request(
             idempotency_key=key, request_sha256=sha,
@@ -72,7 +75,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
             with FenceLedger(self.ledger) as owner:
                 session = owner.open_session()
                 owner.execution_started(
-                    session, key=key, sha=sha, action="create",
+                    session, key=key, sha=sha, action=action,
                 )
                 owner.seal_session(session)
 
@@ -83,6 +86,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         legacy_media_response: dict[str, object] | None = None,
         forged_completed_outcome: str | None = None,
         forged_started_timestamp: str | None = None,
+        forged_started_action: str | None = None,
         extra_started_key: str | None = None,
     ) -> None:
         """Test-only adversary reconstructs a self-consistent event hash chain.
@@ -118,6 +122,10 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 started = [row for row in events if row[1] == "started"]
                 self.assertEqual(len(started), 1)
                 started[0][8] = forged_started_timestamp
+            if forged_started_action is not None:
+                started = [row for row in events if row[1] == "started"]
+                self.assertEqual(len(started), 1)
+                started[0][4] = forged_started_action
             if extra_started_key is not None:
                 previous_start = next(row for row in events if row[1] == "started")
                 seal_index = next(i for i, row in enumerate(events) if row[1] == "sealed")
@@ -491,7 +499,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def _completed_response_pair(
         self, *, key: str, response: dict[str, object],
-        status: int = 500,
+        status: int = 500, action: str = "create",
     ) -> None:
         """Exactly one durable SQL completion then same-object Witness completion."""
         store = SnapshotStore(self.sqlite, create_if_missing=False)
@@ -508,7 +516,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with FenceLedger(self.ledger) as owner:
             session = owner.open_session()
             owner.execution_started(
-                session, key=key, sha=SHA, action="create",
+                session, key=key, sha=SHA, action=action,
             )
             store.complete_write_api_request(
                 idempotency_key=key, request_sha256=SHA,
@@ -524,6 +532,46 @@ class PairedRestorePreflightTests(unittest.TestCase):
             )
             self.assertEqual(outcome, "ambiguous")
             owner.seal_session(session)
+
+    def test_media_completed_response_requires_matching_witness_action(self) -> None:
+        # RED: a hash-consistent forged Witness may claim any allowed action
+        # while SQLite's canonical HTTP payload unambiguously says Create+Media.
+        key = "media:forged-witness-action"
+        response = {
+            "error": "write_execution_error",
+            "idempotency_key": key,
+            "media_persistence_confirmed": False,
+            "platform_retry_authorized": False,
+        }
+        self._completed_response_pair(
+            key=key, response=response, action="create_media",
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["witness_unresolved"],
+            [[key, SHA]],
+        )
+        self._rewrite_witness_events(forged_started_action="delete")
+        with self.assertRaisesRegex(PairPreflightError, "witness action"):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_media_uncompleted_response_requires_matching_witness_action(self) -> None:
+        # Crash before Witness completion must not let a forged action pass.
+        key = "media:uncompleted-forged-action"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=500,
+            response_json=_canonical({
+                "error": "write_execution_error",
+                "idempotency_key": key,
+                "media_persistence_confirmed": False,
+                "platform_retry_authorized": False,
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        self._rewrite_witness_events(forged_started_action="activate")
+        with self.assertRaisesRegex(PairPreflightError, "witness action"):
+            inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_oversized_owner_write_record_reply_is_not_restorable(self) -> None:
         # A canonical stored HTTP response may fit SQLite but not the
@@ -1000,7 +1048,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
             "media_persistence_confirmed": False,
             "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
         }
-        self._completed_response_pair(key=key, status=500, response=response)
+        self._completed_response_pair(key=key, status=500, response=response, action="create_media")
         SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
             idempotency_key=key, request_sha256=SHA,
             verification_kind="media_submit_reconciled",
@@ -1029,7 +1077,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
             "media_persistence_confirmed": False,
             "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
         }
-        self._completed_response_pair(key=key, status=500, response=response)
+        self._completed_response_pair(key=key, status=500, response=response, action="create_media")
         SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
             idempotency_key=key, request_sha256=SHA,
             verification_kind="operator_verified_postread",
@@ -1182,7 +1230,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
     def _persist_media_http_response(
         self, *, key: str, status: int, envelope: dict[str, object],
     ) -> None:
-        self._start(key=key)
+        self._start(key=key, action="create_media")
         SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
             idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
             response_status=status,
@@ -1783,7 +1831,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         # clearance. Without completion the same state must be rejected.
         key = "media:witness-completed-with-open-sqlite"
         self._completed_response_pair(
-            key=key, status=500, response={
+            key=key, status=500, action="create_media", response={
                 "media_persistence_confirmed": False,
                 "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
             },
@@ -1807,7 +1855,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         # An operator-cleared Witness alone does not attest the SQLite media
         # effect, even if the persisted HTTP response says core confirmed.
         # It remains a visible OPEN fence, never inferred restore authority.
-        self._start()
+        self._start(action="create_media")
         store = SnapshotStore(self.sqlite, create_if_missing=False)
         receipt, checkpoint = self._create_checkpoint(
             reference="write-api:" + KEY,
@@ -1857,7 +1905,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         # Confirmed core Create + unresolved media is NOT automatically
         # settled. Only actual independent operator clearances in both
         # persistent authorities can permit a future Create after restore.
-        self._start()
+        self._start(action="create_media")
         store = SnapshotStore(self.sqlite, create_if_missing=False)
         receipt, checkpoint = self._create_checkpoint(
             reference="write-api:" + KEY,

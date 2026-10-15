@@ -493,8 +493,41 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
 
 
 
+def _response_bound_witness_action(response: dict[str, object]) -> str | None:
+    """Recover an action only when the persisted Write API response identifies it.
+
+    Witness starts are a separate authority, not an arbitrary action label:
+    WriteApiHandler emits media_persistence_confirmed/media_post_read_status
+    only for create_media; other operation_receipt.operation values identify
+    their respective routes. Plain execution errors do not identify a route.
+    """
+    receipt = response.get("operation_receipt")
+    operation = receipt.get("operation") if type(receipt) is dict else None
+    actions = {
+        "create": "create",
+        "update_content": "update_content",
+        "set_state:paused": "pause",
+        "set_state:active": "activate",
+        "delete": "delete",
+    }
+    if operation is not None and (
+        type(operation) is not str or operation not in actions
+    ):
+        raise PairPreflightError("SQLite receipt has unsupported Write API operation")
+    media_response = (
+        "media_persistence_confirmed" in response
+        or "media_post_read_status" in response
+    )
+    if media_response:
+        if operation is not None and operation != "create":
+            raise PairPreflightError("SQLite media response conflicts with operation")
+        return "create_media"
+    return actions.get(operation) if operation is not None else None
+
+
 def _validate_sqlite_write_request_records(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection, *,
+    action_bindings: dict[str, str] | None = None,
 ) -> list[list[str]]:
     """Validate every persisted owner record and digest each completed reply.
 
@@ -565,6 +598,10 @@ def _validate_sqlite_write_request_records(
         except (TypeError, ValueError, UnicodeError,
                 RecursionError, OverflowError) as exc:
             raise PairPreflightError("SQLite completed response cannot replay") from exc
+        if action_bindings is not None and record.execution_started_at is not None:
+            expected_action = _response_bound_witness_action(value)
+            if expected_action is not None:
+                action_bindings[record.idempotency_key] = expected_action
         # A completed claim that never crossed the owner Begin gate cannot
         # have a Witness start. The *only* owner-reachable terminal transition
         # is cancel_unstarted_write_api_request(), whose entire HTTP 409
@@ -1456,8 +1493,18 @@ def inspect_offline_pair(
             ):
                 sql_fences = _sqlite_inventory(sql_db)
                 wit_fences = _witness_inventory(wit_db)
-                sql_completed = _validate_sqlite_write_request_records(sql_db)
+                response_actions: dict[str, str] = {}
+                sql_completed = _validate_sqlite_write_request_records(
+                    sql_db, action_bindings=response_actions,
+                )
                 wit_completed = _witness_completed_response_bindings(wit_db)
+                witness_actions = {
+                    _write_key(key): _text(action)
+                    for key, action in _rows(
+                        wit_db,
+                        "SELECT request_key,action FROM events WHERE kind='started'",
+                    )
+                }
                 # Every SQL clearance has already passed the authoritative
                 # SnapshotStore state/key/SHA checks in _sqlite_inventory.
                 # The Witness is independently checked for exact operation-
@@ -1500,6 +1547,14 @@ def inspect_offline_pair(
                 }
             if sql_fences["sqlite_started"] != wit_fences["witness_started"]:
                 raise PairPreflightError("pair has unmatched durable write starts")
+            # Bind even crash-after-SQLite-completion states with no Witness
+            # completion. A correctly rehashed ledger can otherwise claim
+            # 'delete' for a durable media Create and mislead recovery.
+            for key, action in response_actions.items():
+                if witness_actions.get(key) != action:
+                    raise PairPreflightError(
+                        "witness action does not match durable SQLite response"
+                    )
             # UID50044 may crash AFTER persisting the SQLite response but
             # BEFORE appending its independent Witness completion. That is
             # genuinely unresolved and must survive restore as a visible fence.
