@@ -461,12 +461,33 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
         ):
             raise PairPreflightError("SQLite clearance is not media recovery")
         receipt = envelope.get("operation_receipt")
+        # Keep parity with the trusted SnapshotStore clearance API: a core
+        # Create that is confirmed but still media-unverified can only be
+        # reconciled by an operator after independent post-read evidence.
+        # Executor-only media reconciliation cannot clear this checkpoint.
+        operator_reconciled_core = (
+            kind == "operator_verified_postread"
+            and envelope["media_persistence_confirmed"] is False
+            and isinstance(receipt, dict)
+            and receipt.get("operation") == "create"
+            and receipt.get("outcome") == "confirmed"
+            and receipt.get("writer_invoked") is True
+            and receipt.get("media_post_read_status") in {
+                "not_read", "verifier_unavailable", "mismatch", "unknown",
+            }
+            and type(receipt.get("created_ad_id")) is str
+            and bool(receipt["created_ad_id"].strip())
+            and type(receipt.get("authorization_by")) is str
+            and bool(receipt["authorization_by"].strip())
+            and receipt.get("authorization_reference") == "write-api:" + key
+        )
         if receipt is not None and not (
             isinstance(receipt, dict)
             and receipt.get("writer_invoked") is True
             and receipt.get("outcome") == "ambiguous"
+            or operator_reconciled_core
         ):
-            raise PairPreflightError("SQLite clearance was not ambiguous")
+            raise PairPreflightError("SQLite clearance has no reconcilable media outcome")
 
 
 
@@ -941,11 +962,31 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
             checkpoint_completed
         ):
             settled_checkpoints.add(int(checkpoint_id))
+    # The only other authority that can retire a before-media checkpoint is
+    # a persisted exact-key/SHA operator clearance of its originally started
+    # Write. The clearance row was domain-validated above; the independently
+    # sealed Witness side is verified before the pair can be attested.
+    # An executor-only media_submit_reconciled row can NEVER retire it.
+    operator_cleared_checkpoints = {
+        int(row[0]) for row in _rows(
+            conn,
+            "SELECT c.id FROM create_operation_checkpoints AS c "
+            "JOIN write_api_requests AS w "
+            "ON c.authorization_reference=('write-api:' || w.idempotency_key) "
+            "AND w.execution_started_at IS NOT NULL "
+            "JOIN write_recovery_clearances AS verified "
+            "ON verified.idempotency_key=w.idempotency_key "
+            "AND verified.request_sha256=w.request_sha256 "
+            "AND verified.verification_kind='operator_verified_postread' "
+            "ORDER BY c.id",
+        )
+    }
     ambiguous = [
         int(row[0]) for row in _rows(
             conn, "SELECT id FROM create_operation_checkpoints ORDER BY id",
         )
         if int(row[0]) not in settled_checkpoints
+        and int(row[0]) not in operator_cleared_checkpoints
     ]
     if any(row <= 0 for row in ambiguous):
         raise PairPreflightError("SQLite ambiguous create identity invalid")

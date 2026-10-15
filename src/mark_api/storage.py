@@ -1398,7 +1398,8 @@ class SnapshotStore:
             previous_checkpoint_settled = False
             checkpoint_rows = connection.execute(
                 """
-                SELECT c.id, c.completed_at, r.completed_at
+                SELECT c.id, c.completed_at, r.completed_at,
+                       independent.idempotency_key
                 FROM create_operation_checkpoints AS c
                 LEFT JOIN create_operation_receipts AS r
                   ON c.operation = r.operation
@@ -1421,15 +1422,27 @@ class SnapshotStore:
                  AND r.writer_invoked = 1
                  AND r.media_persistence_confirmed = 1
                  AND r.media_post_read_status = 'confirmed'
+                LEFT JOIN write_api_requests AS original_write
+                  ON c.authorization_reference =
+                        ('write-api:' || original_write.idempotency_key)
+                 AND original_write.execution_started_at IS NOT NULL
+                LEFT JOIN write_recovery_clearances AS independent
+                  ON independent.idempotency_key = original_write.idempotency_key
+                 AND independent.request_sha256 = original_write.request_sha256
+                 AND independent.verification_kind = 'operator_verified_postread'
                 ORDER BY c.id, r.id
                 """
             )
-            for checkpoint_id, checkpoint_completed, final_completed in checkpoint_rows:
+            for (checkpoint_id, checkpoint_completed, final_completed,
+                 independent_clearance) in checkpoint_rows:
                 if checkpoint_id != previous_checkpoint_id:
                     if previous_checkpoint_id is not None and not previous_checkpoint_settled:
                         return True
                     previous_checkpoint_id = checkpoint_id
-                    previous_checkpoint_settled = False
+                    # Only a persisted exact operation-bound operator
+                    # clearance can independently reconcile an unfinished
+                    # checkpoint. Executor-only media evidence is never enough.
+                    previous_checkpoint_settled = independent_clearance is not None
                 if final_completed is None:
                     continue
                 try:
@@ -1598,6 +1611,28 @@ class SnapshotStore:
                     if not isinstance(response.get("media_persistence_confirmed"), bool):
                         raise ValueError("not a media response")
                     receipt = response.get("operation_receipt")
+                    # A confirmed core Create can have an unconfirmed media
+                    # post-read. The durable before-media checkpoint remains
+                    # a fence until independent operator evidence reconciles
+                    # this exact started, completed Write. Executor-side media
+                    # observations may never issue this kind of clearance.
+                    operator_reconciled_core = (
+                        verification_kind == "operator_verified_postread"
+                        and response["media_persistence_confirmed"] is False
+                        and isinstance(receipt, dict)
+                        and receipt.get("operation") == "create"
+                        and receipt.get("outcome") == "confirmed"
+                        and receipt.get("writer_invoked") is True
+                        and receipt.get("media_post_read_status") in {
+                            "not_read", "verifier_unavailable", "mismatch", "unknown",
+                        }
+                        and type(receipt.get("created_ad_id")) is str
+                        and bool(receipt["created_ad_id"].strip())
+                        and type(receipt.get("authorization_by")) is str
+                        and bool(receipt["authorization_by"].strip())
+                        and receipt.get("authorization_reference")
+                            == "write-api:" + idempotency_key
+                    )
                     unresolved = (
                         receipt is None
                         or (
@@ -1605,6 +1640,7 @@ class SnapshotStore:
                             and receipt.get("writer_invoked") is True
                             and receipt.get("outcome") == "ambiguous"
                         )
+                        or operator_reconciled_core
                     )
                 except (TypeError, ValueError):
                     unresolved = False
