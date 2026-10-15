@@ -21,6 +21,7 @@ mark-api-launch = "mark_api.launcher:main"
 mark-api-inventory-sync = "mark_api.owner_inventory_cli:main"
 mark-api-migrate-legacy = "mark_api.legacy_migration:main"
 mark-api-backup = "mark_api.backup_cli:main"
+mark-api-pair-restore-check = "mark_api.paired_restore_preflight:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

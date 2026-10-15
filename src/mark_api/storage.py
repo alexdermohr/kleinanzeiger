@@ -1386,6 +1386,77 @@ class SnapshotStore:
                 (exclude_idempotency_key,),
             ).fetchone() is not None:
                 return True
+            # Runtime must enforce the same durable before-media Create fences
+            # the independent offline pair inventory promises to preserve.
+            # A checkpoint is settled only by a final media-confirmed receipt
+            # bound to EVERY immutable source field. In particular, an
+            # independently valid but unrelated final receipt, or a final
+            # timestamp earlier by even one microsecond, cannot release it.
+            # Keep this runtime predicate independent of offline inspector
+            # code; the paired acceptance tests cross-check both contracts.
+            previous_checkpoint_id = None
+            previous_checkpoint_settled = False
+            checkpoint_rows = connection.execute(
+                """
+                SELECT c.id, c.completed_at, r.completed_at,
+                       independent.idempotency_key
+                FROM create_operation_checkpoints AS c
+                LEFT JOIN create_operation_receipts AS r
+                  ON c.operation = r.operation
+                 AND c.created_ad_id = r.created_ad_id
+                 AND c.started_at = r.started_at
+                 AND c.authorization_by IS r.authorization_by
+                 AND c.authorization_reference IS r.authorization_reference
+                 AND c.pre_read_status = r.pre_read_status
+                 AND c.confirmation_pre_read_status = r.confirmation_pre_read_status
+                 AND c.post_read_status IS r.post_read_status
+                 AND c.confirmation_post_read_status IS r.confirmation_post_read_status
+                 AND c.content_post_read_status IS r.content_post_read_status
+                 AND c.writer_error IS r.writer_error
+                 AND c.post_snapshot_json IS r.post_snapshot_json
+                 AND c.confirmation_post_snapshot_json IS r.confirmation_post_snapshot_json
+                 AND c.content_post_snapshot_json IS r.content_post_snapshot_json
+                 AND r.outcome = 'confirmed'
+                 AND r.writer_invoked = 1
+                 AND r.media_persistence_confirmed = 1
+                 AND r.media_post_read_status = 'confirmed'
+                LEFT JOIN write_api_requests AS original_write
+                  ON c.authorization_reference =
+                        ('write-api:' || original_write.idempotency_key)
+                 AND original_write.execution_started_at IS NOT NULL
+                LEFT JOIN write_recovery_clearances AS independent
+                  ON independent.idempotency_key = original_write.idempotency_key
+                 AND independent.request_sha256 = original_write.request_sha256
+                 AND independent.verification_kind = 'operator_verified_postread'
+                ORDER BY c.id, r.id
+                """
+            )
+            for (checkpoint_id, checkpoint_completed, final_completed,
+                 independent_clearance) in checkpoint_rows:
+                if checkpoint_id != previous_checkpoint_id:
+                    if previous_checkpoint_id is not None and not previous_checkpoint_settled:
+                        return True
+                    previous_checkpoint_id = checkpoint_id
+                    # Only a persisted exact operation-bound operator
+                    # clearance can independently reconcile an unfinished
+                    # checkpoint. Executor-only media evidence is never enough.
+                    previous_checkpoint_settled = independent_clearance is not None
+                if final_completed is None:
+                    continue
+                try:
+                    checkpoint_time = datetime.fromisoformat(checkpoint_completed)
+                    final_time = datetime.fromisoformat(final_completed)
+                    if (
+                        checkpoint_time.utcoffset() is not None
+                        and final_time.utcoffset() is not None
+                        and final_time >= checkpoint_time
+                    ):
+                        previous_checkpoint_settled = True
+                except (TypeError, ValueError):
+                    # Invalid historical data cannot prove settlement.
+                    continue
+            if previous_checkpoint_id is not None and not previous_checkpoint_settled:
+                return True
             if connection.execute(
                 """
                 SELECT 1 FROM create_operation_receipts AS r
@@ -1413,7 +1484,11 @@ class SnapshotStore:
                   AND w.state = 'completed'
                   AND c.idempotency_key IS NULL
                   AND (
-                    instr(w.response_json, 'media_persistence_confirmed') > 0
+                    (CASE WHEN json_valid(w.response_json) = 0 THEN 1
+                          WHEN json_type(w.response_json) != 'object' THEN 1
+                          ELSE json_type(
+                            w.response_json, '$.media_persistence_confirmed'
+                          ) IS NOT NULL END)
                     OR (
                       w.response_status = 202
                       AND substr(
@@ -1428,8 +1503,15 @@ class SnapshotStore:
             for row in rows:
                 try:
                     response = json.loads(row["response_json"])
-                    if not isinstance(response, dict):
-                        raise ValueError("invalid response envelope")
+                except (TypeError, ValueError):
+                    # Historical corrupt JSON is an unresolved write, not
+                    # permission to re-submit and not an opaque SQLite crash.
+                    return True
+                if not isinstance(response, dict):
+                    # A parseable JSON primitive is not an HTTP response
+                    # envelope and cannot authorize another Create.
+                    return True
+                try:
                     if (
                         row["response_status"] == 202
                         and response.get("error") == "write_outcome_unverified"
@@ -1462,6 +1544,136 @@ class SnapshotStore:
                         "invalid persisted media recovery evidence"
                     ) from exc
         return False
+
+    @staticmethod
+    def _original_unsettled_media_checkpoint(
+        connection: sqlite3.Connection, *, idempotency_key: str,
+        operation_receipt: Mapping[str, object],
+    ) -> bool:
+        """Require one original checkpoint, matching final row and full HTTP receipt.
+
+        The HTTP receipt omits snapshots. Their immutable identity must be
+        established by comparing all three persisted SQLite snapshot fields
+        against the sole final Create receipt. No media result reported by the
+        browser/executor supplies independent operator authority.
+        """
+        if type(operation_receipt) is not dict:
+            return False
+        wire = operation_receipt
+        required = {
+            "operation", "created_ad_id", "started_at", "completed_at",
+            "outcome", "pre_read_status", "confirmation_pre_read_status",
+            "post_read_status", "confirmation_post_read_status",
+            "content_post_read_status", "writer_invoked",
+            "authorization_by", "authorization_reference", "writer_error",
+            "media_post_read_status", "media_persistence_confirmed",
+        }
+        if set(wire) != required or (
+            wire["operation"] != "create"
+            or wire["outcome"] != "confirmed"
+            or wire["writer_invoked"] is not True
+            or wire["media_persistence_confirmed"] is not False
+            or type(wire["media_post_read_status"]) is not str
+            or wire["media_post_read_status"] not in {
+                "not_read", "verifier_unavailable", "mismatch", "unknown",
+            }
+            or type(wire["created_ad_id"]) is not str
+            or not wire["created_ad_id"].strip()
+            or wire["authorization_reference"] != "write-api:" + idempotency_key
+            or (wire["authorization_by"] is not None and (
+                type(wire["authorization_by"]) is not str
+                or not wire["authorization_by"].strip()
+            ))
+        ):
+            return False
+
+        checkpoint_fields = (
+            "checkpoint_kind", "operation", "created_ad_id", "started_at",
+            "completed_at", "outcome", "pre_read_status",
+            "confirmation_pre_read_status", "post_read_status",
+            "confirmation_post_read_status", "content_post_read_status",
+            "writer_invoked", "authorization_by", "authorization_reference",
+            "writer_error", "post_snapshot_json",
+            "confirmation_post_snapshot_json", "content_post_snapshot_json",
+        )
+        rows = connection.execute(
+            "SELECT " + ",".join(checkpoint_fields)
+            + " FROM create_operation_checkpoints "
+            "WHERE operation='create' AND authorization_reference=?",
+            ("write-api:" + idempotency_key,),
+        ).fetchall()
+        if len(rows) != 1:
+            return False
+        original = dict(zip(checkpoint_fields, rows[0]))
+        if (
+            original["checkpoint_kind"] != "before_media_post_read"
+            or original["outcome"] != "confirmed"
+            or type(original["writer_invoked"]) is not int
+            or original["writer_invoked"] != 1
+        ):
+            return False
+
+        final_fields = tuple(
+            name for name in checkpoint_fields if name != "checkpoint_kind"
+        ) + ("media_post_read_status", "media_persistence_confirmed")
+        rows = connection.execute(
+            "SELECT " + ",".join(final_fields)
+            + " FROM create_operation_receipts "
+            "WHERE operation='create' AND authorization_reference=?",
+            ("write-api:" + idempotency_key,),
+        ).fetchall()
+        if len(rows) != 1:
+            return False
+        final = dict(zip(final_fields, rows[0]))
+        if (
+            type(final["writer_invoked"]) is not int
+            or final["writer_invoked"] != 1
+            or type(final["media_persistence_confirmed"]) is not int
+            or final["media_persistence_confirmed"] != 0
+        ):
+            return False
+
+        immutable = (
+            "operation", "created_ad_id", "started_at", "outcome",
+            "pre_read_status", "confirmation_pre_read_status",
+            "post_read_status", "confirmation_post_read_status",
+            "content_post_read_status", "authorization_by",
+            "authorization_reference", "writer_error",
+        )
+        if any(
+            original[name] != final[name] or wire[name] != final[name]
+            for name in immutable
+        ):
+            return False
+        if any(
+            original[name] != final[name]
+            for name in (
+                "post_snapshot_json", "confirmation_post_snapshot_json",
+                "content_post_snapshot_json",
+            )
+        ):
+            return False
+        if (
+            wire["completed_at"] != final["completed_at"]
+            or wire["media_post_read_status"] != final["media_post_read_status"]
+        ):
+            return False
+
+        try:
+            def canonical_time(raw: object) -> datetime:
+                if type(raw) is not str or not 1 <= len(raw) <= 80:
+                    raise ValueError("receipt timestamp invalid")
+                value = datetime.fromisoformat(raw)
+                if value.utcoffset() is None or value.isoformat() != raw:
+                    raise ValueError("receipt timestamp not canonical")
+                return value
+
+            started = canonical_time(original["started_at"])
+            checkpoint_done = canonical_time(original["completed_at"])
+            final_done = canonical_time(final["completed_at"])
+            return started <= checkpoint_done <= final_done
+        except (TypeError, ValueError, OverflowError):
+            return False
 
     def record_write_recovery_clearance(
         self, *, idempotency_key: str, request_sha256: str,
@@ -1527,6 +1739,30 @@ class SnapshotStore:
                     if not isinstance(response.get("media_persistence_confirmed"), bool):
                         raise ValueError("not a media response")
                     receipt = response.get("operation_receipt")
+                    # A confirmed core Create can have an unconfirmed media
+                    # post-read. The durable before-media checkpoint remains
+                    # a fence until independent operator evidence reconciles
+                    # this exact started, completed Write. Executor-side media
+                    # observations may never issue this kind of clearance.
+                    operator_reconciled_core = (
+                        verification_kind == "operator_verified_postread"
+                        and response["media_persistence_confirmed"] is False
+                        and isinstance(receipt, dict)
+                        and receipt.get("operation") == "create"
+                        and receipt.get("outcome") == "confirmed"
+                        and receipt.get("writer_invoked") is True
+                        and receipt.get("media_post_read_status") in {
+                            "not_read", "verifier_unavailable", "mismatch", "unknown",
+                        }
+                        and type(receipt.get("created_ad_id")) is str
+                        and bool(receipt["created_ad_id"].strip())
+                        and receipt.get("authorization_reference")
+                            == "write-api:" + idempotency_key
+                        and self._original_unsettled_media_checkpoint(
+                            connection, idempotency_key=idempotency_key,
+                            operation_receipt=receipt,
+                        )
+                    )
                     unresolved = (
                         receipt is None
                         or (
@@ -1534,6 +1770,7 @@ class SnapshotStore:
                             and receipt.get("writer_invoked") is True
                             and receipt.get("outcome") == "ambiguous"
                         )
+                        or operator_reconciled_core
                     )
                 except (TypeError, ValueError):
                     unresolved = False

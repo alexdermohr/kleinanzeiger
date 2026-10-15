@@ -102,6 +102,13 @@ def _timestamp(value: object) -> datetime:
     return timestamp
 
 
+def _reply_frame_fits(result: dict[str, object]) -> bool:
+    """Use exactly the UTF-8 success-frame envelope sent by _StorageHandler."""
+    return len(
+        (_canonical_json({"ok": True, "result": result}) + "\n").encode("utf-8")
+    ) <= _MAX_FRAME + 1
+
+
 def _record_as_json(record: WriteApiRequestRecord) -> dict[str, object]:
     return {
         "idempotency_key": record.idempotency_key,
@@ -1130,8 +1137,7 @@ class StorageOwnerServer(
             rows: list[dict[str, object]] = []
             for record in records:
                 trial = [*rows, _pending_as_json(record)]
-                frame = {"ok": True, "result": {"rows": trial, "more": False}}
-                if len(_canonical_json(frame).encode("utf-8")) + 1 > _MAX_FRAME + 1:
+                if not _reply_frame_fits({"rows": trial, "more": False}):
                     break
                 rows = trial
             if records and not rows:

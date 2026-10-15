@@ -740,3 +740,409 @@ bleiben bis zu tatsächlichen Multi-UID-/Prozess-/SQLite-/WAL-/SHM-Nachweisen
 und SHA-gebundenen unabhängigen Sicherheits-/Captain-Gates
 **weiterhin blockierend**. Kein PR-Merge und keine reale
 Kleinanzeigenmutation zu Testzwecken ohne nachgewiesene Berechtigung.
+
+## Offline-Paar-Restore-Preflight (A6: KEINE Produkt- oder Restore-Freigabe)
+
+Das neue optionale `mark-api-pair-restore-check` kontrolliert zwei bereits
+**stillgelegte**, private, vom unabhängigen Operator besessene SQLite-v2-
+und Witness-v2-Kopien gegen ein **extern verankertes** JSON-Manifest.
+Voraussetzung: physisch unabhängiger Host-Cutover, kein vorbestehendes
+writable FD/MAP_SHARED, vollständiger gestoppter Storage-/Witness-Writer,
+beide Quellen in einem privaten Operator-Verzeichnis (`0700`) als
+einzelne UID-eigene reguläre Dateien (`0600`). Beide unveränderten
+Quellbilder brauchen schon **vor dem SQLite-Parser** den SQLite-Header
+für den DELETE-Journal-Modus (`01 01`); ein WAL-Header (`02 02`) ist
+auch bei fehlenden `-wal`-/`-shm`-Dateien unzulässig. Keine Sidecars,
+Symlinks oder offenen Witness-Owner-Leases.
+Jeder lexikalische Vorfahre des privaten Staging-Verzeichnisses
+muss zudem ein echtes Verzeichnis unter Root- oder derselben Operator-UID
+sein, ohne unsichere Gruppen-/Fremdschreibrechte oder Symlink-Komponente.
+Nur ein **root-besessenes Sticky-Verzeichnis** (etwa `/tmp` mit `1777`)
+ist als Ausnahme zulässig; ein fremd- oder nutzerbesessenes, allgemein
+beschreibbares Vorfahrenverzeichnis ist kein sicherer Lock-/Image-Anker.
+Die Prüfung verwendet dieselbe Vorgängerpfad-Richtlinie wie der
+Witness-Owner. Der unabhängige Root-/Host-Cutover bleibt trotzdem eine
+separate notwendige Sicherheitsgrenze.
+`witness.sqlite.lock` muss als reguläre, UID-eigene Datei mit Modus
+`0600` **bereits vor dem Scan vorhanden** sein. Die Prüfung hält
+während des gesamten Scans ein exklusives `flock` und verweigert
+fehlende/unsichere Locks; sie erzeugt oder repariert diese nicht.
+
+Das kanonische JSON-Manifest hat die Felder `schema_version=5`,
+`generation` (32 lowercase hex), `sqlite_sha256`, `witness_sha256`
+und `fences`. `fences` enthält genau `sqlite_started`,
+`sqlite_sync_open`, `dashboard_pending`, `ambiguous_creates`,
+`ambiguous_final_creates`, `witness_started`, `witness_unresolved`,
+`witness_chain_tip`, `sqlite_quarantined`, `sqlite_media_unresolved`,
+`sqlite_unverified_replay`.
+Auch das SQLite-Store-Schema muss **exakt** der aktuell im Code
+aus `SnapshotStore._initialize()` erzeugten Version-2-Referenz
+entsprechen. Das Read-only-Preflight verifiziert die vollständige Menge
+aller 22 `sqlite_master`-Objekte samt Typ, Zuordnung und
+SHA-256 der unveränderten DDL-Definitionen. Hinzugefügte oder versteckte
+Trigger, abweichende `CHECK`-Constraints und gefälschte Indizes werden
+verweigert, auch wenn die geforderten Spalten weiter vorhanden sind.
+Die Digest-Referenz wird **nicht aus dem Kandidaten** gelernt.
+Ein legitimer, historisch additiv migrierter v2-Bestand mit
+abweichendem DDL-Layout besteht diese konservative Prüfung ebenfalls
+**nicht automatisch**: er erfordert eine gesonderte, autorisierte
+Offline-Schema-Migration und erneute unabhängige Paarattestierung,
+keinesfalls ein automatisches Reparieren oder Freigeben durch den
+Checker.
+
+Die Witness-DDL-Prüfung verlangt die vollständigen, unveränderten
+Tabellen-, UNIQUE-Partial-Index- und RAISE-Abbruch-Trigger-Semantiken
+einschließlich exakter SQL-Literalwerte und Token-Grenzen. Zusätzlich
+wird jedes `sqlite_`-Schemaobjekt geprüft; einzig der echte interne
+Session-Primärschlüsselindex ist in dieser Schema-Version erlaubt.
+Jedes Witness-Event muss zusätzlich auf eine vorhandene
+Ursprungs-`sessions`-Zeile verweisen. Ein hashkonsistentes
+`started`-Event nach Löschung dieser Session ist **nicht**
+wiederherstellbar: die unabhängige Operator-Clearance verlangt eine
+versiegelte Ursprungssession. Die Prüfung lehnt auch verwaiste
+`opened`- und `sealed`-Events ab.
+
+Alle Witness-Session-/Event-Zeitpunkte müssen die von `FenceLedger._now()`
+erzeugte kanonische UTC-ISO-Form mit maximal 64 Zeichen tragen. Auch
+eine neu gehashte Eventkette mit einem überlangen oder unlesbaren
+`started_at` ist nicht wiederherstellbar: der unabhängige
+`FenceWitnessClient.pending_page()` lehnt sie ab.
+
+Auch eine kryptografisch konsistente Witness-Hashkette wird als
+**nicht wiederherstellbar** verworfen, wenn die dauerhaften Event-Sequenzen
+nicht vom tatsächlichen Witness-Protokoll erzeugbar sind: `opened` vor
+`started`, `started` vor etwaigem `completed`, `sealed` nach dem
+letzten Runtime-Event der Ursprungssession und zwingend **vor**
+`operator_cleared`. Nachträglich umsortierte und neu gehashte
+Clearances sind kein Recovery-Beweis. Historische `runtime_cleared`-
+Beobachtungen ersetzen weiterhin keine unabhängige Operator-Clearance.
+Für SQLite-Write-Starts und Witness-Operationen gilt exakt die
+gemeinsame Witness-/StorageOwner-Key-Grammatik `[A-Za-z0-9][A-Za-z0-9._:-]{0,159}`: Unicode, Leerzeichen,
+unzulässige Sonderzeichen und überlange Keys lassen sich nicht durch
+einen übereinstimmend manipulierten Paarstand legitimieren.
+
+Die bisherigen Schema-v1/v2/v3/v4-Manifeste bleiben nach dieser
+sicherheitsrelevanten Erweiterung grundsätzlich ungültig.
+Das vollständige `fences`-Inventar wird zudem **typbewahrend**
+als kanonische JSON-Bytefolge verglichen: `false` ist kein numerisches
+`0`, `true` keine Zeilen-ID `1` und `1.0` keine Integer-ID
+`1`. Auch ein extern mit dem manipulierten Manifest-Digest gepinnter
+solcher Kandidat wird verworfen. Damit bleiben SQLite-/Witness-IDs,
+Bestätigungs-Bools und Hashketten-Sequenzen semantisch getrennt.
+Zusätzlich werden sämtliche persistierten Write-Request-Zeitstempel
+(requested_at, execution_started_at und completed_at) vor der
+Restore-Prüfung wie beim produktiven Datenbank-Readback als
+zeitzonenbehaftete ISO-Zeitpunkte validiert. Auch niemals gestartete
+Requests dürfen nicht mit unlesbaren Zeitfeldern restauriert werden.
+
+Vor dem Inventar werden alle SQLite-Recovery-Clearances mit ihrer
+tatsächlich ausgeführten Ursprungsoperation (exakter Key und SHA,
+gesetzter execution_started_at) abgeglichen. Verwaiste, falsch
+gehashte und niemals gestartete Write-Clearances werden ebenso
+verworfen wie Executor-Clearances für UNKNOWN-Antworten oder
+Clearances auf gewöhnliche erfolgreich abgeschlossene Writes.
+Damit darf eine gefälschte Clearance keine Create-, Media- oder
+Quarantäne-Fence verbergen. Auch `evidence_reference` muss genau der
+getrimmten kanonischen Speicherung aus `record_write_recovery_clearance()`
+entsprechen; führende/abschließende Leerzeichen oder Tabs werden verworfen.
+Das ist eine **Offline-Diagnose**, keine unabhängige Verifikation der
+externen Plattformantwort.
+
+Dashboard-Pending-Writes müssen vollständig durch den typisierten
+StorageOwner-Decoder **und** dessen tatsächlichen
+`_dashboard_pending_contract(method,path)` einschließlich
+Scope, Resource, Ad-ID und Payload-Präsenz sowie kanonischer
+`_validate_pending_wire_body` lesbar sein; nicht zulässige
+Routenidentitäten, Key-Grammatik und Payloads verhindern die
+Offline-Paardiagnose.
+Eine historische Witness-Runtime-Clearance benötigt vorher eine
+create_media-Completion mit Outcome ambiguous; ein bestätigter
+oder mit precondition_failed abgeschlossener Submit legitimiert sie nicht.
+
+Sämtliche Write-Request-Zeilen müssen durch den realen StorageOwner-
+Record-Decoder lesbar sein; auch Status, Owner, Ergebnisübergang und
+kanonische JSON-Antwort sind Teil der Prüfung. Bei **jeder ungestarteten**
+Operation (also `execution_started_at=NULL`) muss der ursprüngliche
+`claim_owner` erhalten sein: der aktuelle StorageOwner erstellt Claims
+ausschließlich mit gültigem Owner, und ein `in_progress`-Claim ohne
+Owner ist nach Neustart nicht einmal durch den zulässigen
+`allow_abandoned_takeover`-Pfad übernehmbar. Solche historischen oder
+manipulierten Claims dürfen im Offline-Paarrestore nicht als
+fence-frei attestiert werden. Eine als `completed`
+persistierte Operation **ohne** `execution_started_at` hat keinen
+Witness-Start: Sie darf ausschließlich den vom StorageOwner selbst
+konstruierten HTTP-409-Abbruch `write_claim_cancelled_before_begin`
+enthalten, mit exakt passendem Idempotency-Key und
+`platform_retry_authorized=false`. Auch kanonische HTTP-200-/500-
+Antworten oder zusätzliche JSON-Felder sind hierfür unzulässig;
+ein Restore-Preflight darf sie nicht als unproblematisch durchwinken. Ein vorliegender
+Witness-Completion-Digest muss genau zur dauerhaft gespeicherten
+SQLite-Antwort passen. Fehlt die Witness-Completion nach einem Crash
+zwischen SQLite-Persistenz und Witness-Append, bleibt die Antwort als
+`sqlite_unverified_replay` im generationengebundenen Manifest sichtbar
+und ist **niemals** eine erfolgreiche Replay-Bestätigung. Vor einer
+Operator-Recovery bleibt der ursprüngliche Witness-Fence offen.
+Nach einer tatsächlich an dieselbe Ursprungsoperation (Key/SHA/Session)
+gebundenen unabhängigen Operator-Clearance **in Witness und SQLite**
+darf dieses Fence geschlossen sein; das unbestätigte Replay bleibt
+weiterhin im Manifest sichtbar. Die SQLite-Clearance muss dabei
+`operator_verified_postread` sein: ein `media_submit_reconciled`-
+Executor-Eintrag ist keine unabhängige Operator-Evidenz und kann eine
+fehlende Witness-Completion auch dann nicht freigeben, wenn der Witness
+seinerseits operatorseitig geklärt wurde. Solange der Witness-Fence
+offen ist, darf auf SQLite-Seite **überhaupt keine** Clearance für diese
+nicht verifizierte Antwort vorliegen. Fehlt die Witness-Completion, wird jede einseitige Clearance einer
+lokal ungelösten SQLite-Recovery-Operation abgewiesen. Auch **mit**
+persistierter Witness-Completion darf eine Executor-Clearance
+`media_submit_reconciled` keine unabhängige
+SQLite-`operator_verified_postread`-Clearance ersetzen.
+Ist die Witness-Completion hingegen exakt vorhanden und der Witness
+operatorseitig geklärt, kann ein **weiterhin offener** SQLite-Fence
+ohne unabhängige SQLite-Operator-Clearance im Offline-Inventar sichtbar bleiben. Das ist
+ausschließlich ein ungeklärter Diagnosezustand: niemals eine
+Recovery-Fence-Freigabe, sichere HTTP-Replay-Autorität oder Host-Cutover-Erlaubnis.
+
+**Media-JSON und historische Executor-Clearances:** Sowohl der
+produktive `SnapshotStore.create_recovery_pending()` als auch der
+Offline-Preflight erkennen Media-Responses ausschließlich anhand des
+Top-Level-JSON-Mitglieds `media_persistence_confirmed`
+(`json_type(..., '$.media_persistence_confirmed')`), **nicht** an einem
+Texttreffer in der gesamten Response. Dieser Text darf etwa in einem
+vom Client gesetzten Idempotency-Key oder Fehlerdetail vorkommen,
+ohne dadurch einen falschen Media-Recovery-Fence zu erzeugen.
+
+Eine bereits persistierte `media_submit_reconciled`-SQLite-Clearance
+stammt nur aus Executor-Evidenz und kann unter dem aktuellen eindeutigen
+Clearance-Key nicht zusätzlich mit `operator_verified_postread`
+überschrieben oder ergänzt werden. Das Runtime-
+`SnapshotStore.create_recovery_pending()` behandelt diese lokale
+Executor-Zeile historisch als geklärt (ohne unabhängigen Witness);
+nach einer späteren Witness-Operator-Clearance wäre daher ein neuer
+Create zulässig, obwohl die SQLite-Media-Wirkung nicht unabhängig
+reconciliert sein muss. **Der aktuelle Offline-Paar-Preflight verweigert
+diese Kombination ausdrücklich**, unabhängig davon, ob eine passende
+Witness-Completion existiert. Sie darf **weder** als zulässiger
+`sqlite_media_unresolved`-Restore **noch** als unabhängige
+Replay-/Write-/Host-Cutover-Freigabe ausgegeben werden. Diese
+historisch zulässige lokale Recovery kann erst nach nachweislich
+gemeinsam durchgesetzter StorageOwner-/Witness-Laufzeitautorität
+produktiv integriert werden. Der bestehende No-Witness-Lokalmodus
+wird durch diesen rein diagnostischen Sicherheits-Stop nicht verändert.
+
+**Abgeschlossene Antworten und der offene Media-Checkpoint-Ausnahmefall:**
+Für einen begonnenen, dauerhaft abgeschlossenen Write **ohne** offenen
+`sqlite_quarantined`-, `sqlite_media_unresolved`- **oder**
+`before_media_post_read`-Checkpoint-Fence gibt es im
+`SnapshotStore.record_write_recovery_clearance()` keinen zusätzlichen
+SQLite-Operator-Clearance-Pfad. Das gilt für kanonische Nicht-Media-
+Antworten (HTTP 200, 409, 500), vollständig bestätigte Media-
+Persistenz sowie `precondition_failed`-Receipts ohne offenen
+Create-Checkpoint. Der HTTP-Status und das bloße Vorkommen von
+`media_persistence_confirmed` begründen weder eine Clearance noch
+eine erneute Plattform-Write-Autorisierung.
+
+**Wichtige Ausnahme: Kern-Create bestätigt, Media nicht bestätigt.**
+Ein abgeschlossenes Create kann `operation_receipt.outcome=confirmed`
+und eine gültige `created_ad_id` haben, aber zugleich
+`media_persistence_confirmed=false` und den Media-Post-Read-Status
+`not_read`, `verifier_unavailable`, `mismatch` oder `unknown`.
+Auch wenn diese HTTP-Antwort **nicht** in `sqlite_media_unresolved`
+auftaucht, hält der zuvor persistierte
+`before_media_post_read`-Checkpoint in `ambiguous_creates` die
+Create-Recovery-Sperre ausdrücklich offen. Nur nach unabhängigem,
+autorisiertem Post-Read-Nachweis zur **exakt begonnenen**
+Ursprungsoperation (Idempotency-Key und Request-SHA) darf der
+StorageOwner `operator_verified_postread` persistieren;
+`media_submit_reconciled` aus dem Executor wird dafür verweigert.
+Der Witness benötigt zusätzlich seine **eigene**, genau an
+Key/SHA/Session gebundene Operator-Clearance. Nach einer einseitigen
+SQLite-Clearance bei noch offenem Witness lehnt der Offline-Preflight
+die Paar-Generation ab. Eine **nur** im Witness persistierte
+Operator-Clearance ist lediglich diagnostizierbar: der SQLite-Checkpoint
+bleibt in `ambiguous_creates`, `create_recovery_pending()` bleibt
+`true`, und eine SQLite-Antwort ohne Witness-Completion bleibt in
+`sqlite_unverified_replay`. Ein solcher Zwischenstand ist weder
+Fence-Closure noch sicherer Paar-Restore, Replay, Host-Cutover oder
+Plattform-Schreibrecht. Erst beide unabhängigen, passenden Clearances
+können diesen Create-Checkpoint schließen.
+
+Owner-HTTP-202-`write_outcome_unverified` und abgeschlossene
+ambivalente Media-Replies mit eigenem lokalen
+`sqlite_quarantined`- bzw. `sqlite_media_unresolved`-Fence verlangen
+zum **Schließen** des Fences stets die exakt an dieselbe ursprüngliche
+Operation gebundene SQLite-`operator_verified_postread`-Clearance und
+die unabhängig belegte Witness-Operator-Clearance.
+
+**Witness-only ist nicht immer ein zulässiger Offline-Zwischenstand.**
+Ist bei einem solchen lokalen 202-/Media-Recovery-Fence die
+Witness-Completion **nicht** dauerhaft vorhanden, lehnt der
+Paar-Preflight eine bloße Witness-Operator-Clearance **auch als reine
+Offline-Diagnose** ab. Liegt dagegen eine vollständig passende,
+hashgebundene Witness-Completion bereits vor, kann derselbe
+Witness-only-Zustand bei weiterhin offenem SQLite-Fence als
+`sqlite_quarantined` bzw. `sqlite_media_unresolved` **diagnostiziert**
+werden; das ist ausdrücklich keine Fence-Schließung oder Wiederfreigabe.
+Diese Differenz wird durch die negativen Tests
+`test_quarantined_202_without_sqlite_clearance_cannot_use_nonmedia_exception`
+und `test_missing_completion_with_operator_clearance_is_not_safe_replay`
+sowie durch
+`test_witness_only_ambiguous_media_with_completion_is_diagnostic`
+festgelegt.
+
+Eine **abgeschlossene Nicht-Media-Antwort ohne offenen lokalen
+Recovery-Fence** hat dagegen keinen künstlich zu erzwingenden
+SQLite-Clearance-Pfad: Fehlt ihre Witness-Completion, darf sie nach
+unabhängiger Witness-Operator-Clearance lediglich als offene
+`sqlite_unverified_replay`-Diagnose erhalten bleiben, niemals als
+bestätigtes Replay oder Plattform-Ergebnis. Ebenso ist der oben
+gesondert behandelte `before_media_post_read`-Checkpoint bei
+bestätigtem Kern-Create und unbestätigter Media-Antwort **nicht**
+automatisch ein `sqlite_media_unresolved`-Reply-Fence: Witness-only
+darf hier den offenen `ambiguous_creates`-Checkpoint sowie das
+unverifizierte Replay sichtbar erhalten, aber nie autorisieren.
+
+In keinem dieser Zustände darf der lokale Executor eine echte
+unabhängige Post-Read-Evidenz durch `media_submit_reconciled`
+ersetzen. Reine SQLite- oder Witness-Nachweise allein erteilen keine
+Host-Cutover-, Restore-, Replay- oder erneute externe Write-Erlaubnis.
+
+Ist ein Witness-Completion-Digest inkonsistent oder fehlt der
+SQLite-Gegenpart, wird der Restore-Kandidat verworfen. Fehlt auch
+die Witness-Completion, wird bei einer einseitigen SQLite-Clearance
+ohne Witness-Operator-Clearance die Offline-Paardiagnose verweigert.
+Eine anschließend unabhängig Witness-operatorgeklärte historische
+Executor-Media-Clearance bleibt derzeit **nicht attestierbar**:
+Der Offline-Preflight lehnt den Paarrestore-Kandidaten ab, damit die
+im produktiven lokalen Runtime-Pfad fälschlich entfallende Fence
+nicht beim Host-Cutover verschwinden kann.
+Ist dagegen eine exakt passende Witness-Completion vorhanden, kann
+ein noch ungelöster SQLite-Fence bei Witness-only-Operator-Clearance
+als **offen** diagnostiziert werden. Seine Inventarisierung
+bedeutet weder Closure noch Restore-/Write-Autorisierung. Auch zwei unabhängig
+hashkonsistente Witness-`started`-Events ohne dazwischenliegende
+Operator-Clearance sind unmöglich: der echte `FenceLedger` verweigert
+jeden weiteren Start, solange irgendein vorheriger Write offen ist. Manifest-Schema v5 ist
+verpflichtend. Historische v1-Claims mit Witness-Outcomes
+`confirmed` oder `precondition_failed` dürfen nach v1→v2-Migration
+als untrusted Event erhalten bleiben; auch sie beweisen **keinen**
+externen Erfolg und werden durch Witness-Replay weiterhin als
+`ambiguous` behandelt. Für eine `runtime_cleared` verlangt der aktuelle v5-Preflight
+eine zuvor attestierte `ambiguous`-Completion. Abweichende tatsächliche
+v1-Ledger-Ereignisse können nach expliziter v1→v2-Migration noch
+existieren; deren Herkunft ist damit nicht unabhängig attestiert.
+Solche Restore-Kandidaten bleiben bis zu gesonderter historischer
+Provenienz-/Sicherheitsabnahme gesperrt.
+
+Alle Identitäten sind sortiert und bei der Paarsicherung durch die
+**unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
+vollständige File-Digests, SQLite-Integrität/Schemata, die Witness-
+Hashkette, Operation-/Key-/SHA-Übereinstimmung und den Erhalt aller
+im extern verankerten Manifest enthaltenen Pending-Fences. Jede persistierte finale `create_operation_receipts`-Zeile muss
+vor jeder Checkpoint-Suppression dem tatsächlichen
+`CreateOperationReceipt`-Vertrag genügen: insbesondere kanonische
+zeitzonenbewusste Start-/Endzeiten in korrekter Reihenfolge, gültige
+Outcome-/Media-Kombinationen, typisierte Statusfelder und passende
+Snapshot-Anzeigenidentitäten. Ein künstlich geänderter Final-Receipt,
+der lediglich die für den SQL-Join verwendeten Spalten erfüllt,
+darf einen offenen Create-Checkpoint nicht verbergen.
+Auch ein für sich gültiger Final-Receipt ist keine Fortsetzung des
+gleichen Checkpoints, wenn die bei Create-Persistenz unveränderlichen
+Kernfelder abweichen: `pre_read_status`,
+`confirmation_pre_read_status`, `post_read_status`,
+`confirmation_post_read_status`, `content_post_read_status` oder
+`writer_error`. Die Offline-Inspektion behält den ursprünglichen
+Checkpoint dann als `ambiguous_creates` bei, statt einen
+recoverypflichtigen Create fälschlich als abgeschlossen auszugeben.
+Gleiches gilt, wenn ein an sich gültiger Media-Final-Receipt ein
+**früheres** `completed_at` als der ursprüngliche vor dem
+Media-Postread persistierte Checkpoint trägt. Der echte Runtime-
+Übergang setzt den Endzeitpunkt mit `max(previous, clock())`;
+der Checker vergleicht dafür tatsächliche timezone-aware
+Zeitpunkte in Python, nicht fehleranfällige ISO-Textreihenfolge oder
+auf Millisekunden gerundete SQLite-Zeitstempel. Legitime unterschiedliche
+Offsets dürfen die Recovery-Fence dagegen nicht künstlich offenhalten.
+
+Auch **jede persistierte ursprüngliche** `create_operation_checkpoints`-Zeile
+wird unabhängig von späteren finalen Receipts auf den von
+`append_create_operation_checkpoint()` zugelassenen Zustand geprüft:
+`before_media_post_read`, bestätigter ausgeführter Create mit Anzeigen-ID,
+zeitzonenbewusste und korrekt geordnete Zeitpunkte, gültige Pflichtstatus
+und die unveränderten Snapshot-Anzeigenidentitäten. Eine nachträglich
+manipulierte Ursprungszeile darf daher auch bei passend erscheinendem
+finalen Receipt keine verschwundene Recovery-Fence ergeben.
+
+Ein vor dem
+Media-Postread dauerhaft geschriebenes Create-Checkpoint trägt
+`outcome=confirmed` und bleibt bei Prozessabsturz **ohne** passendes
+abschließendes Media-Receipt offen. Auch ein fremdes Receipt oder ein
+Media-Receipt ohne nachgewiesene lokale Media-Persistenz kann diesen
+Checkpoint nicht aus dem Offline-Pending-Inventar entfernen. Ein
+zugehöriges bestätigtes Receipt bedeutet dabei **keine** unabhängige
+Bestätigung des tatsächlichen Kleinanzeigen-Zustands.
+Auch ein **bereits abschließend persistiertes** Media-Create-Receipt mit
+`outcome=ambiguous`, `writer_invoked=1` und vorhandenem Media-Postread
+bleibt ein eigenständiges offenes Fence, selbst **ohne** Checkpoint.
+Das Inventar `ambiguous_final_creates` speichert die betroffenen
+Receipt-Zeilen-IDs; nur eine exakt an den ursprünglichen begonnenen
+Write-Request samt SHA gebundene unabhängige Recovery-Clearance kann
+dieses Teilinventar ausnehmen. Der Offline-Checker vergibt niemals
+solche Clearances. `ambiguous_create_count` zählt beide offenen
+Create-Fence-Arten. Auch ein begonnener und danach durch den
+unabhängigen Owner mit dem kanonischen HTTP-202-Status
+`write_outcome_unverified` abgeschlossener Write-Request bleibt als
+`sqlite_quarantined` ein eigener Recovery-Fence, **selbst ohne**
+Create-Checkpoint oder Media-Receipt. Nur eine an Key **und** Request-SHA
+gebundene persistierte Recovery-Clearance nimmt ihn aus diesem Teilinventar.
+`sqlite_quarantined_count` zählt solche Operationen; der konservative
+`ambiguous_create_count` umfasst auch diese potentiell bereits auf
+Kleinanzeigen ausgeführten Aufträge. Ein fehlerhaftes UNKNOWN-Envelope
+wird nicht als gültige Entwarnung akzeptiert.
+Unabhängig davon wird jede bereits HTTP-abgeschlossene Media-Write-
+Antwort mit ungelöstem Outcome aus `write_api_requests` als eigenes
+`sqlite_media_unresolved`-Fence attestiert. Dies gilt insbesondere für
+HTTP 500 nach Browser-Submit, wenn ein `operation_receipt` fehlt,
+sowie für einen persistierten aufgerufenen `ambiguous`-Receipt.
+Nur eine tatsächlich an denselben Write-Key und Request-SHA gebundene
+unabhängige Recovery-Clearance nimmt die Operation aus dem Inventar.
+Ungültige oder untypisierte Media-Response-Envelopes werden verweigert;
+`sqlite_media_unresolved_count` und `ambiguous_create_count`
+zählen diese offenen Vorgänge konservativ. Es wird kein HTTP-Status
+zur unabhängigen Bestätigung eines Kleinanzeigen-Ergebnisses erhoben.
+
+**Vor jedem Öffnen durch SQLite** werden beide bereits per FD gepinnten
+Datei-Digests gegen die extern im Manifest verankerten Hashes verglichen.
+Ein abweichender SHA führt unmittelbar zum Abbruch, noch vor
+`integrity_check` oder sonstigem Schema-Parsing. Bei passenden Hashes
+werden die **exakt per Datei-Descriptor gepinnten Bytes** (nicht
+ein erneut geöffneter, umbenennbarer Pfad) größenbegrenzt in eine
+In-Memory-SQLite-Datenbank deserialisiert. Beide Verbindungen erzwingen
+`query_only=ON` und `trusted_schema=OFF`; der ursprüngliche
+Witness-DELETE-Journalmodus wird separat aus dem gepinnten
+SQLite-Dateiheader geprüft. Dateien über 512 MiB sind für diesen
+begrenzten Prüfpfad nicht freigegeben; es erfolgt kein unsicherer
+Dateipfad-Fallback. Symlink-Ahnen und zwischenzeitlich vertauschte
+Quellpfade werden nicht als unabhängige Provenienz akzeptiert.
+Der ungebundene Diagnoseaufruf
+`inspect_offline_pair()` ohne erwartete Hashes bleibt ausdrücklich
+**keine** vertrauenswürdige Restore-Aufnahmeprüfung.
+
+Der Aufruf erfolgt **erst nach** Bereitstellung aller vertrauenswürdig
+erzeugten Kopien und des Digest-Ankers außerhalb der DB-/Witness-Volumes:
+
+```sh
+mark-api-pair-restore-check --sqlite /privat/mark.sqlite --witness /privat/witness.sqlite --manifest /privat/manifest.json --expected-manifest-sha256 VORHER_EXTERN_ATTESTIERTER_SHA256
+```
+
+**Sicherheitsgrenze:** `inspect_offline_pair()` ist ein nicht
+attestiertes Diagnoseinventar, **kein** Manifest-Signer. Wird der
+erwartete SHA erst aus einer möglicherweise kompromittierten Backup-
+Datei berechnet, beweist die Prüfung keine Quellintegrität.
+Der neue Checker erzeugt, publiziert und restauriert keine Sicherung,
+löscht keine Write-Fences und heilt keine beschädigten Bestände.
+Er kann die historische MAP_SHARED-/WAL-Rollback-Angriffsklasse
+gegen den **vor** dem Backup manipulierten Quellstand nicht allein
+widerlegen. Auch mit Checker-PASS fehlen das unabhängige sichere
+Paarbackup-Generationenprotokoll, ein root-attestierter Host-Cutover,
+Crash-/Restore-Negativbelege und externe Plattformfreigaben.
+`mark-api-container-backup.sh`, `live` und Draft-Entrypoints
+bleiben gesperrt; PR #78 und Issue #76 bleiben NO-GO.

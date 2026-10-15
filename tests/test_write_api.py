@@ -2926,8 +2926,10 @@ class WriteApiTests(unittest.TestCase):
                 payload={k: v for k, v in payload.items() if k != "media_refs"},
                 idempotency_key="new-key-damaged-fence",
             )
-        self.assertEqual(status, 500)
-        self.assertEqual(response["error"], "write_execution_error")
+        # Corrupt legacy response remains an unresolved Create fence, now
+        # reported deterministically instead of bubbling an opaque 500.
+        self.assertEqual(status, 409)
+        self.assertEqual(response["error"], "create_recovery_pending")
         self.assertFalse(response["platform_retry_authorized"])
         self.assertEqual(plain.calls, [])
 
@@ -2989,6 +2991,94 @@ class WriteApiTests(unittest.TestCase):
         self.assertEqual(repeated, first_body)
         self.assertEqual(len(media.calls), 2)
         self.assertEqual(self.store.write_api_request("uncertain-original"), old_record)
+
+
+    def test_confirmed_core_unverified_media_has_operator_recovery_path(self) -> None:
+        # Real media runtime persists a confirmed core checkpoint BEFORE the
+        # media verifier can return UNKNOWN. An independent operator must be
+        # able to clear this precise started Create after a trusted readback.
+        payload = {
+            "category_path": ["Haus & Garten", "Dekoration"],
+            "title": "Unverified media vase", "description": "Synthetic",
+            "price_eur": 12, "media_refs": ["cover_01"],
+        }
+        store = self.store
+
+        class ConfirmedCoreUnknownMedia(FakeMediaWriteService):
+            def create_with_media(
+                self, request: AdCreateRequest, media_refs: tuple[str, ...],
+                *, authorization_by: str | None = None,
+                authorization_reference: str | None = None,
+            ) -> CreateOperationReceipt:
+                self.calls.append(("create_with_media", request, media_refs))
+                core = create_receipt(
+                    request=request, authorization_by=authorization_by,
+                    authorization_reference=authorization_reference,
+                )
+                store.append_create_operation_checkpoint(core)
+                final = replace(
+                    core, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+                    media_persistence_confirmed=False,
+                )
+                # Real PrivateWebMediaCreateService persists this final row
+                # before WriteApiHandler serializes its complete HTTP receipt.
+                store.append_create_operation_receipt(final)
+                return final
+
+        key = "media-core-verified-observation-unknown"
+        plain = FakeWriteService()
+        media = ConfirmedCoreUnknownMedia()
+        with self.server(
+            plain, media_service=media,
+            capabilities=frozenset({
+                WriteCapability.CREATE, WriteCapability.CREATE_MEDIA,
+            }),
+        ) as server:
+            status, _, first_body = self.request(
+                server, "POST", "/api/write/media/ads",
+                payload=payload, idempotency_key=key,
+            )
+            self.assertIn(status, (200, 202))
+            self.assertEqual(first_body["operation_receipt"]["outcome"], "confirmed")
+            self.assertFalse(first_body["media_persistence_confirmed"])
+            persisted = store.write_api_request(key)
+            assert persisted is not None
+            self.assertEqual(persisted.state, "completed")
+            self.assertTrue(store.create_recovery_pending(
+                exclude_idempotency_key="new-after-media", claim_owner="other",
+            ))
+            with self.assertRaises(ValueError):
+                server.clear_verified_create_recovery(key, persisted.request_sha256)
+            # Operator-only API with explicit evidence; never callable by
+            # the browser executor or a public arbitrary-clearance RPC.
+            store.record_write_recovery_clearance(
+                idempotency_key=key,
+                request_sha256=persisted.request_sha256,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:independently-verified-core-create",
+                observed_at=NOW,
+            )
+            self.assertFalse(store.create_recovery_pending(
+                exclude_idempotency_key="new-after-media", claim_owner="other",
+            ))
+            server.clear_verified_create_recovery(key, persisted.request_sha256)
+            status2, _, later = self.request(
+                server, "POST", "/api/write/ads",
+                payload={k: v for k, v in payload.items() if k != "media_refs"},
+                idempotency_key="new-after-media",
+            )
+            replay_status, replay_headers, replay_body = self.request(
+                server, "POST", "/api/write/media/ads",
+                payload=payload, idempotency_key=key,
+            )
+        self.assertEqual(status2, 200)
+        self.assertEqual(later["operation_receipt"]["outcome"], "confirmed")
+        self.assertEqual(replay_status, status)
+        self.assertEqual(replay_headers.get("Idempotency-Replayed"), "true")
+        self.assertEqual(replay_body, first_body)
+        self.assertEqual(len(plain.calls), 1)
+        self.assertEqual(len(media.calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
