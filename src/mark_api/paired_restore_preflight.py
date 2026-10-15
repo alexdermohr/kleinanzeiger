@@ -37,7 +37,8 @@ from .storage import SnapshotStore
 from .storage_owner import (
     StorageOwnerError, _KEY as _STORAGE_KEY, _pending_from_json,
     _dashboard_pending_contract, _validate_pending_wire_body,
-    _record_from_json, _snapshot_from_json,
+    _record_from_json, _record_as_json, _pending_as_json,
+    _reply_frame_fits, _snapshot_from_json,
 )
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -477,14 +478,9 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
             }
             and type(receipt.get("created_ad_id")) is str
             and bool(receipt["created_ad_id"].strip())
-            and type(receipt.get("authorization_by")) is str
-            and bool(receipt["authorization_by"].strip())
             and receipt.get("authorization_reference") == "write-api:" + key
             and SnapshotStore._original_unsettled_media_checkpoint(
-                conn,
-                idempotency_key=key,
-                created_ad_id=receipt["created_ad_id"],
-                authorization_by=receipt["authorization_by"],
+                conn, idempotency_key=key, operation_receipt=receipt,
             )
         )
         if receipt is not None and not (
@@ -524,6 +520,14 @@ def _validate_sqlite_write_request_records(
             raise PairPreflightError(
                 "SQLite persisted write request is unreadable by storage owner"
             ) from exc
+        # Claim/replay must fit the actual StorageOwner reply frame, including
+        # the created boolean and JSON escaping, not just the decoded fields.
+        if not _reply_frame_fits({
+            "created": False, "record": _record_as_json(record),
+        }):
+            raise PairPreflightError(
+                "SQLite write request exceeds StorageOwner reply frame"
+            )
         # Every current-schema unstarted claim is owned at insertion, and
         # owner-only cancellation preserves that owner. A NULL owner cannot
         # be taken over by SnapshotStore on restart, permanently trapping an
@@ -902,12 +906,20 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
             # reply decoder alone does not bind ad_id, scope or resource to
             # the exact Write method/path, nor does it require canonical
             # serialized payloads. Never invent independent route grammars.
-            _pending_from_json({
+            pending_record = _pending_from_json({
                 "scope": scope, "resource_key": resource,
                 "idempotency_key": key, "method": method, "path": path,
                 "payload_json": payload, "ad_id": ad_id,
                 "acknowledged": bool(acknowledged),
             })
+            # A canonical inner payload may double in size when JSON escaped
+            # again inside the StorageOwner's single-record page envelope.
+            if not _reply_frame_fits({
+                "rows": [_pending_as_json(pending_record)], "more": False,
+            }):
+                raise StorageOwnerError(
+                    "dashboard pending record exceeds owner RPC frame"
+                )
             expected = _dashboard_pending_contract(method, path)
             if (
                 expected is None
@@ -940,10 +952,8 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         "c.operation=r.operation "
         "AND c.created_ad_id=r.created_ad_id "
         "AND c.started_at=r.started_at "
-        "AND c.authorization_by IS NOT NULL "
-        "AND c.authorization_by=r.authorization_by "
-        "AND c.authorization_reference IS NOT NULL "
-        "AND c.authorization_reference=r.authorization_reference "
+        "AND c.authorization_by IS r.authorization_by "
+        "AND c.authorization_reference IS r.authorization_reference "
         "AND c.pre_read_status=r.pre_read_status "
         "AND c.confirmation_pre_read_status=r.confirmation_pre_read_status "
         "AND c.post_read_status IS r.post_read_status "

@@ -3016,10 +3016,14 @@ class WriteApiTests(unittest.TestCase):
                     authorization_reference=authorization_reference,
                 )
                 store.append_create_operation_checkpoint(core)
-                return replace(
+                final = replace(
                     core, media_post_read_status=MediaPostReadStatus.UNKNOWN,
                     media_persistence_confirmed=False,
                 )
+                # Real PrivateWebMediaCreateService persists this final row
+                # before WriteApiHandler serializes its complete HTTP receipt.
+                store.append_create_operation_receipt(final)
+                return final
 
         key = "media-core-verified-observation-unknown"
         plain = FakeWriteService()

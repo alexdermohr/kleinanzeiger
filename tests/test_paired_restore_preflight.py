@@ -525,6 +525,95 @@ class PairedRestorePreflightTests(unittest.TestCase):
             self.assertEqual(outcome, "ambiguous")
             owner.seal_session(session)
 
+    def test_oversized_owner_write_record_reply_is_not_restorable(self) -> None:
+        # A canonical stored HTTP response may fit SQLite but not the
+        # owner's actual claim/read/replay response envelope.
+        key = "complete:oversized-owner-reply"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=500,
+            response_json=_canonical({
+                "error": "write_execution_error", "detail": "x" * 40000,
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        # This oversized response cannot cross Witness completion either,
+        # so the valid paired case retains the original unresolved start.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_bounded_owner_write_record_reply_remains_restorable(self) -> None:
+        key = "complete:bounded-owner-reply"
+        self._completed_response_pair(
+            key=key, response={"error": "write_execution_error",
+                               "detail": "x" * 28000},
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["witness_unresolved"],
+            [[key, SHA]],
+        )
+
+    def test_owner_write_reply_exact_frame_edge(self) -> None:
+        # The byte-bound is checked on the *complete* Owner response. Its
+        # last admissible byte is replayable; the next byte must fail closed.
+        from mark_api.storage_owner import _record_as_json, _reply_frame_fits
+
+        key = "complete:exact-owner-frame"
+        self._start(key=key)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        started = store.write_api_request(key)
+        self.assertIsNotNone(started)
+        assert started is not None
+
+        def response(length: int) -> str:
+            return json.dumps(
+                {"detail": "x" * length, "error": "write_execution_error"},
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            )
+
+        def envelope(length: int) -> dict[str, object]:
+            completed = replace(
+                started, state="completed", completed_at=AT,
+                response_status=500, response_json=response(length),
+            )
+            return {"created": False, "record": _record_as_json(completed)}
+
+        lower, upper = 0, 40000
+        while lower < upper:
+            candidate = (lower + upper + 1) // 2
+            if _reply_frame_fits(envelope(candidate)):
+                lower = candidate
+            else:
+                upper = candidate - 1
+        boundary = lower
+        self.assertTrue(_reply_frame_fits(envelope(boundary)))
+        self.assertFalse(_reply_frame_fits(envelope(boundary + 1)))
+        self.assertEqual(
+            len(_canonical({"ok": True, "result": envelope(boundary)}) + b"\n"),
+            32 * 1024 + 1,
+        )
+
+        store.complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=500, response_json=response(boundary),
+            completed_at=AT,
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"][
+                "witness_unresolved"
+            ],
+            [[key, SHA]],
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET response_json=? "
+                "WHERE idempotency_key=?",
+                (response(boundary + 1), key),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_invalid_completed_http_status_is_not_restorable(self) -> None:
         key = "complete:bad-http"
         response = {"error": "write_execution_error"}
@@ -1432,6 +1521,157 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_operator_clearance_rejects_http_checkpoint_status_divergence(self) -> None:
+        from mark_api.write_api import _create_receipt_to_dict
+
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        checkpoint, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        final = replace(
+            checkpoint, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        store.append_create_operation_receipt(final)
+        wire = _create_receipt_to_dict(final)
+        wire["pre_read_status"] = "incompatible-pre-read"
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=202,
+            response_json=_canonical({
+                "media_persistence_confirmed": False, "operation_receipt": wire,
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:independent-operator",
+                observed_at=AT,
+            )
+
+    def test_operator_core_clearance_rejects_all_immutable_http_mismatches(self) -> None:
+        from mark_api.write_api import _create_receipt_to_dict
+
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        checkpoint, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        final = replace(
+            checkpoint, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        store.append_create_operation_receipt(final)
+        original_wire = _create_receipt_to_dict(final)
+        def attempt(wire: dict[str, object]) -> None:
+            with sqlite3.connect(self.sqlite) as db:
+                db.execute(
+                    "UPDATE write_api_requests SET state='completed', "
+                    "response_status=202, completed_at=?, response_json=? "
+                    "WHERE idempotency_key=?",
+                    (AT.isoformat(), _canonical({
+                        "idempotency_key": KEY,
+                        "platform_retry_authorized": False,
+                        "media_persistence_confirmed": False,
+                        "media_post_read_status": "unknown",
+                        "operation_receipt": wire,
+                    }).decode("ascii"), KEY),
+                )
+            with self.assertRaises(ValueError):
+                store.record_write_recovery_clearance(
+                    idempotency_key=KEY, request_sha256=SHA,
+                    verification_kind="operator_verified_postread",
+                    evidence_reference="synthetic:adversarial-http",
+                    observed_at=AT,
+                )
+
+        changes = {
+            "started_at": "2026-10-13T17:00:00+01:00",
+            "completed_at": "2026-10-13T15:59:59.999999+00:00",
+            "pre_read_status": "read_changed",
+            "confirmation_pre_read_status": "confirmation_changed",
+            "post_read_status": "post_read_changed",
+            "confirmation_post_read_status": "confirmation_post_changed",
+            "content_post_read_status": "content_post_changed",
+            "writer_error": "forged-unrelated-error",
+            "authorization_by": "another-operator",
+            "authorization_reference": "write-api:other-key",
+            "created_ad_id": "202",
+            "media_post_read_status": ["unknown"],
+        }
+        for field, altered in changes.items():
+            with self.subTest(field=field):
+                wire = dict(original_wire)
+                wire[field] = altered
+                attempt(wire)
+        for mode in ("missing", "extra"):
+            with self.subTest(mode=mode):
+                wire = dict(original_wire)
+                if mode == "missing":
+                    del wire["post_read_status"]
+                else:
+                    wire["untrusted_extra_status"] = "confirmed"
+                attempt(wire)
+
+    def test_operator_core_clearance_rejects_final_snapshot_or_duplicate(self) -> None:
+        from mark_api.write_api import _create_receipt_to_dict
+
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        checkpoint, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        final = replace(
+            checkpoint, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        store.append_create_operation_receipt(final)
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=202,
+            response_json=_canonical({
+                "idempotency_key": KEY,
+                "platform_retry_authorized": False,
+                "media_persistence_confirmed": False,
+                "media_post_read_status": "unknown",
+                "operation_receipt": _create_receipt_to_dict(final),
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        with sqlite3.connect(self.sqlite) as db:
+            snapshots = dict(zip(
+                ("post_snapshot_json", "confirmation_post_snapshot_json",
+                 "content_post_snapshot_json"),
+                db.execute(
+                    "SELECT post_snapshot_json,confirmation_post_snapshot_json,"
+                    "content_post_snapshot_json FROM create_operation_receipts"
+                ).fetchone(),
+            ))
+        for column in snapshots:
+            with self.subTest(column=column):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {column}=?",
+                        ('{"ad_id":"201"}',),
+                    )
+                with self.assertRaises(ValueError):
+                    store.record_write_recovery_clearance(
+                        idempotency_key=KEY, request_sha256=SHA,
+                        verification_kind="operator_verified_postread",
+                        evidence_reference="synthetic:forged-snapshot",
+                        observed_at=AT,
+                    )
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {column}=?",
+                        (snapshots[column],),
+                    )
+        store.append_create_operation_receipt(final)
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:duplicate-final",
+                observed_at=AT,
+            )
+
     def test_confirmed_core_operator_clearance_requires_original_open_checkpoint(self) -> None:
         # No browser-committed before_media_post_read checkpoint exists,
         # despite a response claiming confirmed core Create. A local operator
@@ -1627,19 +1867,20 @@ class PairedRestorePreflightTests(unittest.TestCase):
             media_persistence_confirmed=False,
         )
         store.append_create_operation_receipt(final)
+        from mark_api.write_api import _create_receipt_to_dict
+
+        # This is the *actual* canonical Write API wire projection, not a
+        # abbreviated synthetic subset admitted only for test convenience.
         response = _canonical({
+            "idempotency_key": KEY,
+            "platform_retry_authorized": False,
             "media_persistence_confirmed": False,
-            "operation_receipt": {
-                "operation": "create", "outcome": "confirmed",
-                "writer_invoked": True, "created_ad_id": "201",
-                "authorization_by": "offline-test-owner",
-                "authorization_reference": "write-api:" + KEY,
-                "media_post_read_status": "unknown",
-            },
+            "media_post_read_status": "unknown",
+            "operation_receipt": _create_receipt_to_dict(final),
         }).decode("ascii")
         store.complete_write_api_request(
             idempotency_key=KEY, request_sha256=SHA,
-            claim_owner="pair-owner", response_status=200,
+            claim_owner="pair-owner", response_status=202,
             response_json=response, completed_at=AT,
         )
         self.assertEqual(
@@ -1675,6 +1916,58 @@ class PairedRestorePreflightTests(unittest.TestCase):
         self.assertFalse(store.create_recovery_pending(
             exclude_idempotency_key="new-after-media", claim_owner="another",
         ))
+
+    def test_none_authorization_does_not_settle_mismatched_final_identity(self) -> None:
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        original, _ = self._create_checkpoint()
+        unbound = replace(
+            original, authorization_by=None, authorization_reference=None,
+        )
+        for field, value in (
+            ("authorization_by", "unrelated-operator"),
+            ("authorization_reference", "write-api:unrelated-key"),
+        ):
+            with self.subTest(field=field):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute("DELETE FROM create_operation_checkpoints")
+                    db.execute("DELETE FROM create_operation_receipts")
+                store.append_create_operation_checkpoint(unbound)
+                mismatched = replace(
+                    unbound, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+                    media_persistence_confirmed=True, **{field: value},
+                )
+                store.append_create_operation_receipt(mismatched)
+                self.assertTrue(store.create_recovery_pending(
+                    exclude_idempotency_key="unrelated-new-create",
+                    claim_owner="separate-owner",
+                ))
+                self.assertEqual(
+                    len(inspect_offline_pair(
+                        self.sqlite, self.ledger,
+                    )["fences"]["ambiguous_creates"]),
+                    1,
+                )
+
+    def test_matching_none_authorization_checkpoint_is_settled(self) -> None:
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        bound, _ = self._create_checkpoint()
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute("DELETE FROM create_operation_checkpoints")
+        unbound = replace(
+            bound, authorization_by=None, authorization_reference=None,
+        )
+        store.append_create_operation_checkpoint(unbound)
+        store.append_create_operation_receipt(replace(
+            unbound, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        ))
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="new-key", claim_owner="other-owner",
+        ))
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [],
+        )
 
     def test_confirmed_create_checkpoint_without_final_receipt_is_unresolved(self) -> None:
         receipt, checkpoint = self._create_checkpoint()
@@ -2233,6 +2526,85 @@ class PairedRestorePreflightTests(unittest.TestCase):
                     inspect_offline_pair(self.sqlite, self.ledger)["fences"]["dashboard_pending"],
                     [[scope, resource, "pending:valid-route", acknowledged]],
                 )
+
+    def test_dashboard_pending_escaped_page_overflow_is_not_restorable(self) -> None:
+        # Inner JSON is below 32 KiB, while double-escaping in the actual
+        # StorageOwner dashboard_pending_page response exceeds its IPC frame.
+        payload = json.dumps(
+            {"title": '"' * 15000}, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"),
+        )
+        self.assertLess(len(payload.encode("utf-8")), 32 * 1024)
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO dashboard_pending_writes "
+                "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                ("create", "create", "pending:escaped-overflow", "POST",
+                 "/api/write/ads", payload, None, 0),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_dashboard_pending_page_exact_escaped_frame_edge(self) -> None:
+        # A heavily escaped inner intent still has a valid final page byte.
+        # Do not reject it early or admit the next-byte overflow.
+        from mark_api.storage_owner import (
+            _pending_as_json, _pending_from_json, _reply_frame_fits,
+        )
+
+        key = "pending:exact-escaped-frame"
+        def payload(length: int) -> str:
+            return json.dumps(
+                {"padding": "x" * length, "title": '"' * 7000},
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            )
+
+        def envelope(length: int) -> dict[str, object]:
+            pending = _pending_from_json({
+                "scope": "create", "resource_key": "create",
+                "idempotency_key": key, "method": "POST",
+                "path": "/api/write/ads", "payload_json": payload(length),
+                "ad_id": None, "acknowledged": False,
+            })
+            return {"rows": [_pending_as_json(pending)], "more": False}
+
+        lower, upper = 0, 30000
+        while lower < upper:
+            candidate = (lower + upper + 1) // 2
+            if _reply_frame_fits(envelope(candidate)):
+                lower = candidate
+            else:
+                upper = candidate - 1
+        boundary = lower
+        self.assertTrue(_reply_frame_fits(envelope(boundary)))
+        self.assertFalse(_reply_frame_fits(envelope(boundary + 1)))
+        self.assertEqual(
+            len(_canonical({"ok": True, "result": envelope(boundary)}) + b"\n"),
+            32 * 1024 + 1,
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO dashboard_pending_writes "
+                "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                ("create", "create", key, "POST", "/api/write/ads",
+                 payload(boundary), None, 0),
+            )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"][
+                "dashboard_pending"
+            ],
+            [["create", "create", key, 0]],
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE dashboard_pending_writes SET payload_json=? "
+                "WHERE idempotency_key=?",
+                (payload(boundary + 1), key),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_dashboard_pending_key_is_validated_by_storage_owner_reader(self) -> None:
         with sqlite3.connect(self.sqlite) as connection:
