@@ -37,7 +37,7 @@ from .storage import SnapshotStore
 from .storage_owner import (
     StorageOwnerError, _KEY as _STORAGE_KEY, _pending_from_json,
     _dashboard_pending_contract, _validate_pending_wire_body,
-    _record_from_json,
+    _record_from_json, _snapshot_from_json,
 )
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -572,6 +572,32 @@ def _witness_completed_response_bindings(
 
 
 
+def _validate_persisted_create_snapshot(
+    raw: object, *, created_ad_id: str | None,
+) -> None:
+    """Require complete, canonical AdSnapshot data emitted by SnapshotStore.
+
+    A matching but truncated JSON object could otherwise allow a forged
+    final media receipt to retire an unresolved durable Create checkpoint.
+    The independent StorageOwner wire decoder checks every field, bounds,
+    counters, timestamps and lifecycle, while the roundtrip checks the
+    original SnapshotStore persistence bytes. No owner inventory is inferred.
+    """
+    if raw is None:
+        return
+    if type(raw) is not str:
+        raise ValueError("create snapshot must be JSON text")
+    payload = json.loads(
+        raw, object_pairs_hook=_unique_object,
+        parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+    )
+    snapshot = _snapshot_from_json(payload)
+    if created_ad_id is not None and snapshot.ad_id != created_ad_id:
+        raise ValueError("create snapshot does not match created ad")
+    if SnapshotStore._snapshot_json(snapshot) != raw:
+        raise ValueError("create snapshot differs from persisted owner format")
+
+
 def _validate_sqlite_create_receipts(conn: sqlite3.Connection) -> None:
     """Reject final receipts that the real CreateOperationReceipt cannot emit.
 
@@ -637,37 +663,19 @@ def _validate_sqlite_create_receipts(conn: sqlite3.Connection) -> None:
                 media_persistence_confirmed=bool(rec["media_persistence_confirmed"]),
                 writer_error=rec["writer_error"],
             )
-            # Optional historical snapshots may have older projection fields.
-            # Validate their JSON identity but do not silently fabricate a
-            # current owner inventory or require newly introduced fields.
             for name in (
                 "post_snapshot_json",
                 "confirmation_post_snapshot_json",
                 "content_post_snapshot_json",
             ):
-                raw_snapshot = rec[name]
-                if raw_snapshot is None:
-                    continue
-                if type(raw_snapshot) is not str:
-                    raise ValueError("receipt snapshot must be JSON")
-                snapshot = json.loads(
-                    raw_snapshot, object_pairs_hook=_unique_object,
-                    parse_constant=lambda _literal: (_ for _ in ()).throw(ValueError()),
+                _validate_persisted_create_snapshot(
+                    rec[name], created_ad_id=persisted.created_ad_id,
                 )
-                if (
-                    not isinstance(snapshot, dict)
-                    or not isinstance(snapshot.get("ad_id"), str)
-                    or (
-                        persisted.created_ad_id is not None
-                        and snapshot["ad_id"] != persisted.created_ad_id
-                    )
-                ):
-                    raise ValueError("receipt snapshot identity invalid")
         except PairPreflightError:
             raise
         except (
             AttributeError, KeyError, TypeError, ValueError,
-            OverflowError, UnicodeError, RecursionError,
+            OverflowError, UnicodeError, RecursionError, StorageOwnerError,
         ) as exc:
             raise PairPreflightError(
                 "SQLite final create receipt violates domain contract"
@@ -741,25 +749,14 @@ def _validate_sqlite_create_checkpoints(conn: sqlite3.Connection) -> None:
                 "confirmation_post_snapshot_json",
                 "content_post_snapshot_json",
             ):
-                raw_snapshot = rec[name]
-                if raw_snapshot is None:
-                    continue
-                if type(raw_snapshot) is not str:
-                    raise ValueError("checkpoint snapshot must be JSON text")
-                snapshot = json.loads(
-                    raw_snapshot, object_pairs_hook=_unique_object,
-                    parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+                _validate_persisted_create_snapshot(
+                    rec[name], created_ad_id=receipt.created_ad_id,
                 )
-                if (
-                    not isinstance(snapshot, dict)
-                    or snapshot.get("ad_id") != receipt.created_ad_id
-                ):
-                    raise ValueError("checkpoint snapshot ad identity mismatch")
         except PairPreflightError:
             raise
         except (
             AttributeError, KeyError, TypeError, ValueError,
-            OverflowError, UnicodeError, RecursionError,
+            OverflowError, UnicodeError, RecursionError, StorageOwnerError,
         ) as exc:
             raise PairPreflightError(
                 "SQLite create checkpoint violates original owner contract"

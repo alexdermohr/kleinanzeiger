@@ -1694,6 +1694,61 @@ class PairedRestorePreflightTests(unittest.TestCase):
                     exclude_idempotency_key="another", claim_owner="new-owner",
                 ))
 
+    def test_ambiguous_final_create_may_contain_legitimate_unbound_snapshot(self) -> None:
+        # A domain-valid ambiguous Create can retain an observation without
+        # claiming a confirmed created_ad_id; it remains a recovery fence.
+        observed = AdSnapshot(
+            ad_id="201", observed_at=AT, source="management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Unconfirmed synthetic item",
+        )
+        receipt = CreateOperationReceipt(
+            operation="create", started_at=AT, completed_at=AT,
+            outcome=OperationOutcome.AMBIGUOUS,
+            pre_read_status="success_empty",
+            confirmation_pre_read_status="success_empty",
+            post_read_status="unknown",
+            confirmation_post_read_status="unknown",
+            content_post_read_status="unknown",
+            writer_invoked=True, created_ad_id=None,
+            authorization_by="offline-test-owner",
+            authorization_reference="write-api:ambiguous-observation",
+            post_snapshot=observed,
+            media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).append_create_operation_receipt(receipt)
+        observed_pair = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(len(observed_pair["fences"]["ambiguous_final_creates"]), 1)
+
+    def test_truncated_matching_snapshot_payloads_cannot_settle_checkpoint(self) -> None:
+        # RED: matching but truncated snapshot JSON is not owner-produced
+        # AdSnapshot evidence. The original checkpoint must never disappear.
+        receipt, _ = self._create_checkpoint()
+        final = replace(
+            receipt,
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).append_create_operation_receipt(final)
+        truncated = '{"ad_id": "201"}'
+        with sqlite3.connect(self.sqlite) as db:
+            for table in (
+                "create_operation_checkpoints", "create_operation_receipts",
+            ):
+                db.execute(
+                    f"UPDATE {table} SET post_snapshot_json=?, "
+                    "confirmation_post_snapshot_json=?, "
+                    "content_post_snapshot_json=?",
+                    (truncated, truncated, truncated),
+                )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_forged_checkpoint_domain_contract_cannot_be_settled_by_valid_final(self) -> None:
         # Even the EXACT matching final receipt cannot hide a forged durable
         # checkpoint whose values append_create_operation_checkpoint could
