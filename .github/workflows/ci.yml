@@ -64,6 +64,82 @@ jobs:
             python -m unittest discover -s tests -v
           fi
 
+      - name: Verify installed wheel and offline product path
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$(mktemp -d)"
+          trap 'rm -rf "$artifact_dir"' EXIT
+
+          python -m pip wheel --no-deps --wheel-dir "$artifact_dir/wheels" .
+          python -m venv "$artifact_dir/venv"
+          "$artifact_dir/venv/bin/python" -m pip install --no-deps "$artifact_dir"/wheels/mark_api-*.whl
+
+          # Synthetic local email; no live accounts or Kleinanzeigen requests.
+          python - "$artifact_dir/message.eml" <<'PY'
+          from email import policy
+          from email.message import EmailMessage
+          from pathlib import Path
+          import sys
+
+          message = EmailMessage(policy=policy.default)
+          message["From"] = "Kleinanzeigen <noreply@mail.kleinanzeigen.de>"
+          message["To"] = "owner@example.invalid"
+          message["Date"] = "Thu, 24 Sep 2026 10:37:48 +0000"
+          message["Message-ID"] = "<ci-smoke-1@chat.kleinanzeigen.de>"
+          message["X-Conversation-ID"] = "ci:smoke:one"
+          message["X-Message-ID"] = "ci-smoke-1"
+          message.set_content(
+              "Anfrage zu deiner Anzeige\n"
+              "(Anzeigennummer: 1234567890)\n"
+              "https://www.kleinanzeigen.de/m-nachrichten.html?"
+              "conversationId=ci:smoke:one"
+          )
+          Path(sys.argv[1]).write_bytes(message.as_bytes(policy=policy.default))
+          PY
+
+          timeout 30s "$artifact_dir/venv/bin/mark-api-local-smoke" \
+            "$artifact_dir/message.eml" > "$artifact_dir/smoke.json"
+          "$artifact_dir/venv/bin/mark-api-import-mail" \
+            --db "$artifact_dir/state.sqlite" --init-db \
+            "$artifact_dir/message.eml" > /dev/null
+          "$artifact_dir/venv/bin/mark-api-classify" \
+            --db "$artifact_dir/state.sqlite" --ad-id 1234567890 \
+            --city Berlin > /dev/null
+
+          # -I prevents imports from the checkout: assert actual installed bytes.
+          "$artifact_dir/venv/bin/python" -I - "$artifact_dir" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          import mark_api
+          from mark_api.analytics import AnalyticsService
+          from mark_api.storage import SnapshotStore
+
+          root = Path(sys.argv[1])
+          assert "site-packages" in Path(mark_api.__file__).parts
+          report = json.loads((root / "smoke.json").read_text())
+          assert report["parsed_files"] == 1
+          assert report["inserted_events"] == 1
+          assert report["email_inbound_message_total"] == 1
+          assert report["analytics_ranked_ads"] == 1
+          assert report["dashboard_health_ok"] is True
+          assert report["http_write_methods_rejected"] is True
+          assert report["write_route_absent"] is True
+          assert report["platform_writes_enabled"] is False
+
+          store = SnapshotStore(root / "state.sqlite")
+          assert store.is_ready()
+          assert store.tracked_ad_ids() == ()  # Email alone is not ownership.
+          groups = AnalyticsService(store).group_rankings(
+              "city", "email_inbound_message_count"
+          )
+          assert [(g.label, g.sample_size, g.metric_sum) for g in groups] == [
+              ("Berlin", 1, 1)
+          ]
+          PY
+
       - name: Check embedded dashboard JavaScript
         shell: bash
         env:
