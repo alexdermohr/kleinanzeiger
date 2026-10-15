@@ -1,14 +1,17 @@
 """Opt-in real Linux/Docker DAC test for the offline backup-intent operator.
 
-Only uniquely named, disposable Docker volumes and synthetic SQLite/Witness
-images are touched. This is not a live service, platform-write, historic mmap,
-source-quiescence, or production host acceptance test.
+Only uniquely named disposable Docker volumes and synthetic SQLite/Witness
+images are touched. This is not a live service, historic mmap revocation,
+host quiescence or platform-write acceptance test. The caller must select an
+already verified local immutable test image; no pulling is permitted.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 import unittest
@@ -16,9 +19,13 @@ from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE = __import__("os").environ.get("MARK_INTENT_MULTIUID_TEST_IMAGE", "")
+IMAGE = os.environ.get("MARK_INTENT_MULTIUID_TEST_IMAGE", "")
 IMAGE_OK = bool(re.fullmatch(r"sha256:[0-9a-f]{64}", IMAGE))
 PYTHON = "/opt/mark-api/venv/bin/python"
+if IMAGE and not IMAGE_OK:
+    raise ValueError("MARK_INTENT_MULTIUID_TEST_IMAGE must be an immutable sha256 image ID")
+if os.environ.get("MARK_REQUIRE_INTENT_MULTIUID") == "1" and not IMAGE_OK:
+    raise ValueError("required real-UID test has no immutable Docker image")
 
 
 def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
@@ -32,7 +39,7 @@ def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProc
 
 
 _SEAL = """
-import os
+import os,stat
 from pathlib import Path
 import mark_api
 from mark_api.backup_intent_authority import BackupIntentAuthority
@@ -53,24 +60,46 @@ assert prepared['generation']==generation
 result=op.seal_prepared(generation,Path('/output'),Path('/anchor'))
 assert result['external_operator_intent_acknowledged'] is True
 assert not (Path('/anchor')/'.inflight').exists()
-assert (Path('/intent')/(generation+'.acknowledged.json')).is_file()
-print('REAL_UID50043_OFFLINE_INTENT_SEALED',flush=True)
+for name in ('source','output','anchor','intent'):
+    info=Path('/'+name).stat()
+    assert info.st_uid==50043 and stat.S_IMODE(info.st_mode)==0o700,(name,info)
+pair=Path('/output')/generation
+info=pair.stat()
+assert info.st_uid==50043 and stat.S_IMODE(info.st_mode)==0o700
+files=[
+    Path('/intent/.intent.lock'),
+    Path('/intent/.intent.bootstrap.json'),
+    *(Path('/intent')/(generation+'.'+phase+'.json')
+      for phase in ('prepared','committing','acknowledged')),
+    Path('/anchor/latest.json'),
+    Path('/anchor')/(generation+'.json'),
+    *(pair/name for name in
+      ('mark.sqlite','witness.sqlite','manifest.json','witness.sqlite.lock')),
+]
+for path in files:
+    info=path.stat()
+    assert info.st_uid==50043 and stat.S_IMODE(info.st_mode)==0o600,(path,info)
+print('REAL_UID50043_OPERATOR_MODES_AND_OFFLINE_INTENT_SEALED',flush=True)
 """
 
 _ATTACK = """
 import errno,os
 from pathlib import Path
 assert os.geteuid()==50044
-# The test deliberately supplies writable volume mounts to the attacker.
-# Real DAC, not volume read-only flags, must deny all four protected paths.
-for item in (
+# Positive control: RW Docker volume access actually works for this UID.
+control=Path('/control/probe')
+control.write_bytes(b'UID50044-RW-ALLOWED')
+assert control.read_bytes()==b'UID50044-RW-ALLOWED'
+# All protected volumes are ALSO intentionally mounted RW to this UID.
+protected=(
     '/intent/.intent.lock',
     '/intent/'+'1'*32+'.acknowledged.json',
     '/source/mark.sqlite',
     '/source/witness.sqlite',
     '/output/'+'1'*32+'/mark.sqlite',
     '/anchor/latest.json',
-):
+)
+for item in protected:
     for flags in (os.O_RDONLY,os.O_WRONLY):
         try:
             fd=os.open(item,flags|os.O_CLOEXEC|os.O_NOFOLLOW)
@@ -79,13 +108,27 @@ for item in (
         else:
             os.close(fd)
             raise AssertionError('hostile UID accessed protected path: '+item)
+    try:Path(item).read_bytes()
+    except PermissionError:pass
+    else:raise AssertionError('hostile UID read protected image: '+item)
+    try:os.unlink(item)
+    except OSError as exc:
+        assert exc.errno in (errno.EACCES,errno.EPERM),(item,'unlink',exc)
+    else:raise AssertionError('hostile UID unlinked protected artifact: '+item)
+for path in ('/intent/forged.json','/anchor/.inflight','/output/attacker'):
     try:
-        Path(item).read_bytes()
-    except PermissionError:
-        pass
+        fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|
+                   os.O_CLOEXEC|os.O_NOFOLLOW,0o600)
+    except OSError as exc:
+        assert exc.errno in (errno.EACCES,errno.EPERM),(path,exc)
     else:
-        raise AssertionError('hostile UID read protected image: '+item)
-print('REAL_UID50044_CANNOT_READ_OR_MUTATE_OPERATOR_PAIRS',flush=True)
+        os.close(fd)
+        raise AssertionError('hostile UID created protected artifact: '+path)
+try:os.rename('/anchor/latest.json','/anchor/rolled-back.json')
+except OSError as exc:
+    assert exc.errno in (errno.EACCES,errno.EPERM),exc
+else:raise AssertionError('hostile UID replaced the anchored HEAD')
+print('REAL_UID50044_DAC_DENIED_WITH_RW_VOLUME_POSITIVE_CONTROL',flush=True)
 """
 
 _RECHECK = """
@@ -100,25 +143,38 @@ generation='1'*32
 root=Path('/output')/generation
 anchor=Path('/anchor')
 head_bytes=(anchor/'latest.json').read_bytes()
+head_sha=hashlib.sha256(head_bytes).hexdigest()
 head=json.loads(head_bytes)
 assert head['generation']==generation
+pairs=[root/name for name in ('mark.sqlite','witness.sqlite','manifest.json')]
+original={str(path):hashlib.sha256(path.read_bytes()).hexdigest()
+          for path in pairs}
 checked=verify_offline_pair(
-    root/'mark.sqlite',root/'witness.sqlite',root/'manifest.json',
+    pairs[0],pairs[1],pairs[2],
     expected_manifest_sha256=head['manifest_sha256'],
 )
 assert checked['generation']==generation
 op=BackupIntentAuthority(Path('/intent'))
-for action in (
-    lambda:op.prepare(generation,Path('/source/mark.sqlite'),
-        Path('/source/witness.sqlite'),previous_head_sha256=None),
-    lambda:op.acknowledge(generation,Path('/output'),anchor),
-):
+checks=(
+    (lambda:op.prepare(generation,Path('/source/mark.sqlite'),
+        Path('/source/witness.sqlite'),previous_head_sha256=head_sha),
+     'operator generation already used or pending'),
+    (lambda:op.seal_prepared(generation,Path('/output'),anchor),
+     'generation not singly prepared; never retry commit'),
+    (lambda:op.acknowledge(generation,Path('/output'),anchor),
+     'no unconsumed external committing intent'),
+)
+for action,message in checks:
     try:action()
-    except BackupIntentError:pass
+    except BackupIntentError as exc:
+        assert message in str(exc),(message,str(exc))
     else:raise AssertionError('original acknowledged intent was replayed')
+assert (anchor/'latest.json').read_bytes()==head_bytes
+for path in pairs:
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==original[str(path)]
 assert not (anchor/'.inflight').exists()
 assert (Path('/intent')/(generation+'.acknowledged.json')).is_file()
-print('REAL_UID50043_CHAIN_INTACT_AND_INTENT_SINGLE_USE',flush=True)
+print('REAL_UID50043_EXACT_CHAIN_AND_SINGLE_USE_REPLAY_DENIAL',flush=True)
 """
 
 
@@ -127,8 +183,9 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
     def test_hostile_executor_cannot_access_independent_offline_intent(self) -> None:
         suffix = uuid4().hex[:12]
         names = {name: "mark-intent-" + suffix + "-" + name
-                 for name in ("source", "output", "anchor", "intent")}
+                 for name in ("source", "output", "anchor", "intent", "control")}
         created: list[str] = []
+        launched: list[str] = []
         with tempfile.TemporaryDirectory(prefix="mark-intent-realuid-") as temp:
             package = Path(temp) / "src" / "mark_api"
             shutil.copytree(ROOT / "src" / "mark_api", package,
@@ -141,57 +198,84 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
             volume_mounts: list[str] = []
             for name, volume in names.items():
                 volume_mounts.extend([
-                    "--mount", f"type=volume,source={volume},target=/{name}",
+                    "--mount", f"type=volume,source={volume},target=/{name},volume-nocopy",
                 ])
             source_mount = [
                 "--mount",
                 f"type=bind,source={package.parent},target=/src,readonly",
             ]
-            trusted = [
-                "run", "--rm", "--pull", "never", "--network", "none",
-                "--read-only", "--cap-drop", "ALL",
-                "--security-opt", "no-new-privileges:true",
-                "--user", "50043:50043", *source_mount,
-                "-e", "PYTHONPATH=/src", "-e", "PYTHONDONTWRITEBYTECODE=1",
-                "--workdir", "/", "--entrypoint", PYTHON,
-                *volume_mounts, IMAGE, "-B", "-c",
-            ]
-            hostile = [
-                "run", "--rm", "--pull", "never", "--network", "none",
-                "--read-only", "--cap-drop", "ALL",
-                "--security-opt", "no-new-privileges:true",
-                "--user", "50044:50044", "--workdir", "/",
-                "--entrypoint", PYTHON, *volume_mounts, IMAGE, "-B", "-c",
-            ]
+
+            def run_python(role: str, uid: int, script: str,
+                           *, source_visible: bool) -> subprocess.CompletedProcess[str]:
+                name = f"mark-intent-{suffix}-{role}"
+                launched.append(name)
+                opts = [*source_mount, "-e", "PYTHONPATH=/src"] if source_visible else []
+                return _docker(
+                    "run", "--rm", "--pull", "never", "--name", name,
+                    "--network", "none", "--read-only", "--cap-drop", "ALL",
+                    "--security-opt", "no-new-privileges:true",
+                    "--user", f"{uid}:{uid}", "--workdir", "/",
+                    "-e", "PYTHONDONTWRITEBYTECODE=1",
+                    *opts, "--entrypoint", PYTHON, *volume_mounts,
+                    IMAGE, "-B", "-c", script,
+                )
+
             try:
                 for volume in names.values():
                     _docker("volume", "create", volume)
                     created.append(volume)
-                seed = _docker(
-                    "run", "--rm", "--pull", "never", "--network", "none",
-                    "--read-only", "--user", "0:0", "--cap-drop", "ALL",
-                    "--cap-add", "CHOWN", *volume_mounts,
-                    "--entrypoint", "/bin/sh", IMAGE, "-ec",
-                    "chmod 0700 /source /output /anchor /intent; "
-                    "chown 50043:50043 /source /output /anchor /intent",
+                seed_name = f"mark-intent-{suffix}-seed"
+                launched.append(seed_name)
+                _docker(
+                    "run", "--rm", "--pull", "never", "--name", seed_name,
+                    "--network", "none", "--read-only", "--user", "0:0",
+                    "--cap-drop", "ALL", "--cap-add", "CHOWN",
+                    *volume_mounts, "--entrypoint", "/bin/sh", IMAGE, "-ec",
+                    "chmod 0700 /source /output /anchor /intent /control; "
+                    "chown 50043:50043 /source /output /anchor /intent; "
+                    "chown 50044:50044 /control; "
+                    "for d in /source /output /anchor /intent /control; do "
+                    "[ -z \"$(ls -A \"$d\")\" ] || exit 1; done",
                 )
-                self.assertEqual(seed.returncode, 0)
-                first = _docker(*trusted, _SEAL)
-                self.assertIn("REAL_UID50043_OFFLINE_INTENT_SEALED", first.stdout)
-                attack = _docker(*hostile, _ATTACK)
+                first = run_python("seal", 50043, _SEAL, source_visible=True)
+                self.assertIn("REAL_UID50043_OPERATOR_MODES_AND_OFFLINE_INTENT_SEALED",
+                              first.stdout)
+                attack = run_python("attack", 50044, _ATTACK, source_visible=False)
                 self.assertIn(
-                    "REAL_UID50044_CANNOT_READ_OR_MUTATE_OPERATOR_PAIRS",
+                    "REAL_UID50044_DAC_DENIED_WITH_RW_VOLUME_POSITIVE_CONTROL",
                     attack.stdout,
                 )
-                verify = _docker(*trusted, _RECHECK)
+                verify = run_python("verify", 50043, _RECHECK, source_visible=True)
                 self.assertIn(
-                    "REAL_UID50043_CHAIN_INTACT_AND_INTENT_SINGLE_USE",
+                    "REAL_UID50043_EXACT_CHAIN_AND_SINGLE_USE_REPLAY_DENIAL",
                     verify.stdout,
                 )
             finally:
+                cleanup_errors: list[str] = []
+                # Even a Docker CLI timeout cannot orphan an anonymous
+                # container: every launch has an independently known name.
+                for name in reversed(launched):
+                    try:
+                        result = _docker("rm", "-f", name, allow_failure=True)
+                        if result.returncode and "No such container" not in (
+                            result.stderr + result.stdout
+                        ):
+                            cleanup_errors.append("container " + name + ": " + result.stderr[-200:])
+                    except Exception as exc:
+                        cleanup_errors.append("container " + name + ": " + repr(exc))
                 for volume in reversed(created):
-                    result = _docker("volume", "rm", volume, allow_failure=True)
-                    self.assertEqual(result.returncode, 0, result.stderr[-400:])
+                    try:
+                        result = _docker("volume", "rm", volume, allow_failure=True)
+                        if result.returncode:
+                            cleanup_errors.append("volume " + volume + ": " + result.stderr[-200:])
+                    except Exception as exc:
+                        cleanup_errors.append("volume " + volume + ": " + repr(exc))
+                if cleanup_errors:
+                    message = "synthetic Docker cleanup incomplete: " + "; ".join(cleanup_errors)
+                    if sys.exc_info()[0] is None:
+                        self.fail(message)
+                    else:
+                        print(message, file=sys.stderr)
 
 
 if __name__ == "__main__":
