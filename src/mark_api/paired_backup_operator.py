@@ -359,6 +359,11 @@ def reconcile_committed_inflight(
             # historically opened write mapping is revoked by this operation.
             if _read_head(anchor, head_sha) != head:
                 raise PairedBackupOperatorError("committed HEAD changed during reconciliation")
+            # A readable latest.json may have been renamed into place just
+            # before the original process crashed without fsyncing the parent
+            # directory. Persist the checked HEAD and immutable record FIRST.
+            # If this barrier fails, the intent marker must remain in place.
+            _fsync_dir(anchor)
             info = inflight.lstat()
             if (info.st_dev, info.st_ino) != marker_identity:
                 raise PairedBackupOperatorError("generation intent inode changed")

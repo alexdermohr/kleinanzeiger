@@ -512,6 +512,59 @@ class PairedBackupOperatorTests(unittest.TestCase):
         self.assertFalse(lock_path.exists())
         self.assertTrue((self.anchor / ".inflight").is_file())
 
+    def test_post_head_pre_fsync_crash_keeps_intent_if_reconcile_fsync_fails(self) -> None:
+        from mark_api import paired_backup_operator as operator
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        original_fsync = operator._fsync_dir
+
+        def crash_before_head_durability(directory: Path) -> None:
+            # The HEAD inode was fsynced via _new_file but its directory
+            # rename has not been durably persisted. Preserve the marker.
+            if (
+                directory == self.anchor
+                and (self.anchor / "latest.json").exists()
+                and (self.anchor / ".inflight").exists()
+            ):
+                raise OSError("simulated crash before HEAD directory fsync")
+            original_fsync(directory)
+
+        with patch(
+            "mark_api.paired_backup_operator._fsync_dir",
+            side_effect=crash_before_head_durability,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        digest = self._hash(self.anchor / "latest.json")
+        marker = self.anchor / ".inflight"
+        self.assertTrue(marker.is_file())
+
+        def fail_anchor_fsync(directory: Path) -> None:
+            if directory == self.anchor:
+                raise OSError("simulated durability barrier failure")
+            original_fsync(directory)
+
+        with patch(
+            "mark_api.paired_backup_operator._fsync_dir",
+            side_effect=fail_anchor_fsync,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                reconcile_committed_inflight(
+                    self.output, self.anchor,
+                    expected_current_head_sha256=digest,
+                    expected_generation=FIRST,
+                )
+        # A failed first durability barrier must NOT consume the only
+        # surviving intent marker. Without this, HEAD can be lost at poweroff.
+        self.assertTrue(marker.is_file())
+        result = reconcile_committed_inflight(
+            self.output, self.anchor,
+            expected_current_head_sha256=digest,
+            expected_generation=FIRST,
+        )
+        self.assertTrue(result["reconciled"])
+        self.assertFalse(marker.exists())
+
     def test_reconcile_success_keeps_pending_write_fences(self) -> None:
         from mark_api import paired_backup_operator as operator
         from mark_api.paired_backup_operator import reconcile_committed_inflight
