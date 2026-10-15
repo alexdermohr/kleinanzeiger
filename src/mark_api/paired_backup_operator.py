@@ -208,6 +208,44 @@ def _assert_no_ambiguous_artifacts(
         raise PairedBackupOperatorError("unsettled partial generation requires recovery")
 
 
+def _check_generation_dir(
+    output: Path, generation: str, manifest_sha256: str,
+) -> dict[str, object]:
+    """Require every file of a sealed generation, not just its directory name.
+
+    This is a conservative offline check, not a same-UID quiescence proof.
+    """
+    if type(generation) is not str or _GENERATION.fullmatch(generation) is None:
+        raise PairedBackupOperatorError("retained generation identity is invalid")
+    _require_digest(manifest_sha256, "retained manifest")
+    generation_dir = _private_root(output / generation)
+    expected_names = frozenset({
+        "mark.sqlite", "witness.sqlite", "witness.sqlite.lock", "manifest.json",
+    })
+    if {entry.name for entry in generation_dir.iterdir()} != expected_names:
+        raise PairedBackupOperatorError("generation artifact set is incomplete")
+    for name in ("mark.sqlite", "witness.sqlite", "witness.sqlite.lock"):
+        with _pinned_file(generation_dir / name) as fd:
+            size = os.fstat(fd).st_size
+            if name == "witness.sqlite.lock":
+                if size != 0:
+                    raise PairedBackupOperatorError("generation Witness lock is invalid")
+            elif not 100 <= size <= _MAX_IMAGE_BYTES:
+                raise PairedBackupOperatorError("generation SQLite image size is unsafe")
+    with _pinned_file(generation_dir / "manifest.json") as fd:
+        size = os.fstat(fd).st_size
+        if not 0 < size <= _MAX_MANIFEST:
+            raise PairedBackupOperatorError("generation manifest length is invalid")
+        anchored_manifest = _manifest(
+            os.pread(fd, size, 0), manifest_sha256,
+        )
+        if anchored_manifest["generation"] != generation:
+            raise PairedBackupOperatorError(
+                "generation manifest disagrees with independent anchor"
+            )
+        return anchored_manifest
+
+
 def _validate_anchored_history(
     anchor: Path, output: Path, head_sha: str, head: dict[str, object],
     *, pending_generation: str | None = None,
@@ -288,37 +326,11 @@ def _validate_anchored_history(
     if head["manifest_sha256"] != anchor_records[head_sha][1]["manifest_sha256"]:
         raise PairedBackupOperatorError("current manifest anchor mismatches")
 
-    # A directory name does not prove that its sealed pair still exists.
-    # Every committed generation must retain precisely the four originally
-    # published, operator-private files. Check real pinned inodes and their
-    # sizes, plus the inexpensive canonical manifest digest bound to the
-    # immutable independent head. Historical SQLite/Witness *contents* are
-    # still verified at restore/reconciliation, not rehashed on every seal.
-    expected_names = frozenset({
-        "mark.sqlite", "witness.sqlite", "witness.sqlite.lock", "manifest.json",
-    })
+    # Keep the same canonical artifact grammar for retained ancestors and
+    # the freshly published, not-yet-anchored pair.
     for digest in visited:
         generation, record = anchor_records[digest]
-        generation_dir = output / generation
-        if {entry.name for entry in generation_dir.iterdir()} != expected_names:
-            raise PairedBackupOperatorError("committed generation artifact set is incomplete")
-        for name in ("mark.sqlite", "witness.sqlite", "witness.sqlite.lock"):
-            with _pinned_file(generation_dir / name) as fd:
-                size = os.fstat(fd).st_size
-                if name == "witness.sqlite.lock":
-                    if size != 0:
-                        raise PairedBackupOperatorError("committed witness lock is invalid")
-                elif not 100 <= size <= _MAX_IMAGE_BYTES:
-                    raise PairedBackupOperatorError("committed SQLite image size is unsafe")
-        with _pinned_file(generation_dir / "manifest.json") as fd:
-            size = os.fstat(fd).st_size
-            if not 0 < size <= _MAX_MANIFEST:
-                raise PairedBackupOperatorError("committed manifest length is invalid")
-            anchored_manifest = _manifest(
-                os.pread(fd, size, 0), record["manifest_sha256"],
-            )
-            if anchored_manifest["generation"] != generation:
-                raise PairedBackupOperatorError("committed manifest generation disagrees with anchor")
+        _check_generation_dir(output, generation, record["manifest_sha256"])
 
     return anchor_records
 
@@ -357,19 +369,37 @@ def reconcile_committed_inflight(
     *,
     expected_current_head_sha256: str,
     expected_generation: str,
+    expected_previous_head_sha256: str | None,
+    expected_sqlite_sha256: str,
+    expected_witness_sha256: str,
 ) -> dict[str, object]:
-    """Release ONLY a stale intent for an independently pinned committed HEAD.
+    """Release an inflight intent only with independently pinned source provenance.
 
-    This is offline operator reconciliation, not an automatic crash retry or
-    a source-quiescence, restore, platform-write or host-cutover authority.
-    The expected HEAD digest must come from a separately protected channel.
-    A published pair without its durable HEAD remains UNKNOWN and locked.
+    The previous acknowledged HEAD and both cold source hashes MUST come
+    from an operator-protected, durable PRE-SEAL intent. The current HEAD
+    digest alone can be self-attested after a crash and proves nothing about
+    the provenance of its images. These inputs are not host-quiescence proof
+    and do not authorize restore, platform writes or service cutover.
     """
     output = _private_root(output_root)
     anchor = _private_root(anchor_root)
     if output == anchor or output in anchor.parents or anchor in output.parents:
         raise PairedBackupOperatorError("backup and independent anchors overlap")
     head_sha = _require_digest(expected_current_head_sha256, "current head")
+    previous_head_sha = (
+        _require_digest(expected_previous_head_sha256, "previous head")
+        if expected_previous_head_sha256 is not None else None
+    )
+    expected_sqlite_sha = _require_digest(
+        expected_sqlite_sha256, "independently attested SQLite image"
+    )
+    expected_witness_sha = _require_digest(
+        expected_witness_sha256, "independently attested Witness image"
+    )
+    if previous_head_sha == head_sha:
+        raise PairedBackupOperatorError(
+            "reconciliation cannot clear an already acknowledged HEAD"
+        )
     if (
         type(expected_generation) is not str
         or _GENERATION.fullmatch(expected_generation) is None
@@ -381,6 +411,10 @@ def reconcile_committed_inflight(
             head = _read_head(anchor, head_sha)
             if head is None or head["generation"] != expected_generation:
                 raise PairedBackupOperatorError("independently pinned HEAD is not the inflight generation")
+            if head["predecessor_sha256"] != (previous_head_sha or _ZERO):
+                raise PairedBackupOperatorError(
+                    "recovered HEAD does not extend the independently acknowledged predecessor"
+                )
 
             inflight = anchor / ".inflight"
             with _pinned_file(inflight) as fd:
@@ -396,6 +430,16 @@ def reconcile_committed_inflight(
             anchor_records = _validate_anchored_history(
                 anchor, output, head_sha, head,
             )
+            current_manifest = _check_generation_dir(
+                output, expected_generation, head["manifest_sha256"],
+            )
+            if (
+                current_manifest["sqlite_sha256"] != expected_sqlite_sha
+                or current_manifest["witness_sha256"] != expected_witness_sha
+            ):
+                raise PairedBackupOperatorError(
+                    "recovered pair differs from independently attested cold source images"
+                )
             visited = set(anchor_records)
 
             # Chain links alone do not prove historical image integrity.
@@ -631,6 +675,12 @@ def seal_offline_pair(
                     anchor, output, expected_previous_head_sha256, prior,
                     pending_generation=generation,
                 )
+            # A valid SHA of the pair is insufficient if a late local
+            # operation created a sidecar, removed the Witness lock, or
+            # swapped a pinned image after the first verification.
+            _check_generation_dir(output, generation, manifest_sha)
+            _no_sidecars(published / "mark.sqlite")
+            _no_sidecars(published / "witness.sqlite")
             head = _canonical({
                 "schema_version": 1,
                 "generation": generation,

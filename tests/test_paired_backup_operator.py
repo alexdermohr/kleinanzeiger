@@ -122,6 +122,46 @@ class PairedBackupOperatorTests(unittest.TestCase):
             first["head_sha256"],
         )
 
+    def test_unlinked_new_pair_sidecar_must_not_be_anchored(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        original_verify = operator.verify_offline_pair
+
+        def add_sidecar_after_verified(*args: object, **kwargs: object) -> object:
+            checked = original_verify(*args, **kwargs)
+            (self.output / FIRST / "mark.sqlite-wal").write_bytes(b"untrusted")
+            return checked
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=add_sidecar_after_verified,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+        self.assertFalse((self.anchor / (FIRST + ".json")).exists())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_unlinked_new_pair_missing_lock_must_not_be_anchored(self) -> None:
+        from mark_api import paired_backup_operator as operator
+
+        original_verify = operator.verify_offline_pair
+
+        def remove_lock_after_verified(*args: object, **kwargs: object) -> object:
+            checked = original_verify(*args, **kwargs)
+            (self.output / FIRST / "witness.sqlite.lock").unlink()
+            return checked
+
+        with patch(
+            "mark_api.paired_backup_operator.verify_offline_pair",
+            side_effect=remove_lock_after_verified,
+        ):
+            with self.assertRaises(PairedBackupOperatorError):
+                self._seal()
+        self.assertFalse((self.anchor / "latest.json").exists())
+        self.assertFalse((self.anchor / (FIRST + ".json")).exists())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
     def test_bootstrap_refuses_orphan_output_injected_after_pair_verification(self) -> None:
         from mark_api import paired_backup_operator as operator
 
@@ -206,6 +246,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                     self.output, self.anchor,
                     expected_current_head_sha256=digest,
                     expected_generation=FIRST,
+                    expected_previous_head_sha256=None,
+                    expected_sqlite_sha256=self._hash(self.sqlite),
+                    expected_witness_sha256=self._hash(self.witness),
                 )
         self.assertGreaterEqual(call_count, 2)
         self.assertTrue((self.anchor / ".inflight").is_file())
@@ -252,6 +295,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                     self.output, self.anchor,
                     expected_current_head_sha256=current,
                     expected_generation=FIRST,
+                    expected_previous_head_sha256=None,
+                    expected_sqlite_sha256=self._hash(self.sqlite),
+                    expected_witness_sha256=self._hash(self.witness),
                 )
         self.assertTrue((self.anchor / ".inflight").is_file())
 
@@ -281,6 +327,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                     self.output, self.anchor,
                     expected_current_head_sha256=current,
                     expected_generation=FIRST,
+                    expected_previous_head_sha256=None,
+                    expected_sqlite_sha256=self._hash(self.sqlite),
+                    expected_witness_sha256=self._hash(self.witness),
                 )
         self.assertTrue((self.anchor / ".inflight").is_file())
 
@@ -512,6 +561,69 @@ class PairedBackupOperatorTests(unittest.TestCase):
         self.assertTrue((self.output / FIRST / "manifest.json").is_file())
         return self._hash(self.anchor / "latest.json")
 
+    def test_reconcile_cannot_attest_forged_pair_from_self_hashed_head(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_restore_preflight import _canonical, inspect_offline_pair
+
+        attested_sqlite = self._hash(self.sqlite)
+        attested_witness = self._hash(self.witness)
+        self._crash_after_durable_head()
+
+        # A same-UID actor prepares a separately valid but *different* pair,
+        # then forges the manifest and the matching local head hash. The
+        # operator still knows the originally attested source image hashes.
+        self._start_write()
+        for name in ("mark.sqlite", "witness.sqlite"):
+            (self.output / FIRST / name).write_bytes((self.source / name).read_bytes())
+        backup_sqlite = self.output / FIRST / "mark.sqlite"
+        backup_witness = self.output / FIRST / "witness.sqlite"
+        self.assertNotEqual(self._hash(backup_sqlite), attested_sqlite)
+        observed = inspect_offline_pair(
+            backup_sqlite, backup_witness,
+            expected_sqlite_sha256=self._hash(backup_sqlite),
+            expected_witness_sha256=self._hash(backup_witness),
+        )
+        manifest = _canonical({
+            "schema_version": 5, "generation": FIRST, **observed,
+        })
+        (self.output / FIRST / "manifest.json").write_bytes(manifest)
+        replacement_head = _canonical({
+            "schema_version": 1, "generation": FIRST,
+            "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            "predecessor_sha256": "0" * 64,
+        })
+        (self.anchor / (FIRST + ".json")).write_bytes(replacement_head)
+        (self.anchor / "latest.json").write_bytes(replacement_head)
+        attacker_head_sha = self._hash(self.anchor / "latest.json")
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=attacker_head_sha,
+                expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=attested_sqlite,
+                expected_witness_sha256=attested_witness,
+            )
+        self.assertTrue((self.anchor / ".inflight").is_file())
+
+    def test_reconcile_cannot_reclear_previously_acknowledged_head(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        previous = self._seal()
+        marker = self.anchor / ".inflight"
+        marker.write_bytes(FIRST.encode("ascii"))
+        marker.chmod(0o600)
+        with self.assertRaises(PairedBackupOperatorError):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=previous["head_sha256"],
+                expected_generation=FIRST,
+                expected_previous_head_sha256=previous["head_sha256"],
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
+            )
+        self.assertTrue(marker.is_file())
+
     def test_reconcile_only_fully_anchored_post_head_crash(self) -> None:
         # RED: without an explicit pinned-HEAD recovery primitive a
         # successful HEAD followed by a crashed sentinel unlink deadlocks
@@ -524,6 +636,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
         recovered = reconcile_committed_inflight(
             self.output, self.anchor,
             expected_current_head_sha256=digest, expected_generation=FIRST,
+            expected_previous_head_sha256=None,
+            expected_sqlite_sha256=self._hash(self.sqlite),
+            expected_witness_sha256=self._hash(self.witness),
         )
         self.assertTrue(recovered["reconciled"])
         self.assertEqual(recovered["head_sha256"], digest)
@@ -558,6 +673,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=first["head_sha256"],
                 expected_generation=SECOND,
+                expected_previous_head_sha256=first["head_sha256"],
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertEqual((self.anchor / ".inflight").read_text(), SECOND)
         self.assertEqual(
@@ -575,6 +693,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256="0" * 64,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         with sqlite3.connect(self.output / FIRST / "mark.sqlite") as db:
             db.execute("PRAGMA user_version=91")
@@ -583,6 +704,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=digest,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertTrue((self.anchor / ".inflight").is_file())
 
@@ -597,6 +721,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=digest,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertTrue((self.anchor / ".inflight").is_file())
         next_head.unlink()
@@ -607,6 +734,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=digest,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertTrue((self.anchor / ".inflight").is_file())
 
@@ -624,6 +754,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=digest,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         marker.unlink()
         with self.assertRaises(PairedBackupOperatorError):
@@ -631,6 +764,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=digest,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
 
     def test_reconcile_does_not_claim_success_without_crashed_intent(self) -> None:
@@ -642,6 +778,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=first["head_sha256"],
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
 
     def test_reconcile_refuses_orphaned_published_pair_after_durable_head(self) -> None:
@@ -655,6 +794,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=digest,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertTrue((self.anchor / ".inflight").is_file())
 
@@ -682,6 +824,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=committed,
                 expected_generation=SECOND,
+                expected_previous_head_sha256=first["head_sha256"],
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertTrue((self.anchor / ".inflight").is_file())
 
@@ -710,6 +855,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=committed,
                 expected_generation=SECOND,
+                expected_previous_head_sha256=first["head_sha256"],
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertTrue((self.anchor / ".inflight").is_file())
 
@@ -723,6 +871,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=digest,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertTrue((self.anchor / ".inflight").exists())
 
@@ -739,6 +890,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                         self.output, self.anchor,
                         expected_current_head_sha256=digest,
                         expected_generation=FIRST,
+                        expected_previous_head_sha256=None,
+                        expected_sqlite_sha256=self._hash(self.sqlite),
+                        expected_witness_sha256=self._hash(self.witness),
                     )
             finally:
                 fcntl.flock(guard, fcntl.LOCK_UN)
@@ -755,6 +909,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                 self.output, self.anchor,
                 expected_current_head_sha256=digest,
                 expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=self._hash(self.sqlite),
+                expected_witness_sha256=self._hash(self.witness),
             )
         self.assertFalse(lock_path.exists())
         self.assertTrue((self.anchor / ".inflight").is_file())
@@ -800,6 +957,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
                     self.output, self.anchor,
                     expected_current_head_sha256=digest,
                     expected_generation=FIRST,
+                    expected_previous_head_sha256=None,
+                    expected_sqlite_sha256=self._hash(self.sqlite),
+                    expected_witness_sha256=self._hash(self.witness),
                 )
         # A failed first durability barrier must NOT consume the only
         # surviving intent marker. Without this, HEAD can be lost at poweroff.
@@ -808,6 +968,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
             self.output, self.anchor,
             expected_current_head_sha256=digest,
             expected_generation=FIRST,
+            expected_previous_head_sha256=None,
+            expected_sqlite_sha256=self._hash(self.sqlite),
+            expected_witness_sha256=self._hash(self.witness),
         )
         self.assertTrue(result["reconciled"])
         self.assertFalse(marker.exists())
@@ -833,6 +996,9 @@ class PairedBackupOperatorTests(unittest.TestCase):
             self.output, self.anchor,
             expected_current_head_sha256=committed,
             expected_generation=SECOND,
+            expected_previous_head_sha256=first["head_sha256"],
+            expected_sqlite_sha256=self._hash(self.sqlite),
+            expected_witness_sha256=self._hash(self.witness),
         )
         self.assertEqual(result["fences"]["sqlite_started_count"], 1)
         self.assertEqual(result["fences"]["witness_unresolved_count"], 1)
