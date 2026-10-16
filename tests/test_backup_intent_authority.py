@@ -396,6 +396,149 @@ class BackupIntentAuthorityTests(unittest.TestCase):
         self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
         self.assertTrue((self.intents / f"{FIRST}.acknowledged.json").exists())
 
+
+    def _write_canonical_record(self, path: Path, record: dict[str, object]) -> None:
+        # Adversarial records must otherwise satisfy the operator's exact
+        # canonical serialization and DAC checks, or a negative is vacuous.
+        path.write_bytes(json.dumps(record, sort_keys=True, separators=(",", ":")).encode("ascii"))
+        path.chmod(0o600)
+
+    def test_post_commit_crash_preserves_original_sealer_exception_and_pending_intent(self) -> None:
+        self._prepare()
+        with patch(
+            "mark_api.backup_intent_authority.seal_offline_pair",
+            side_effect=PairedBackupOperatorError("synthetic unknown post-commit result"),
+        ):
+            with self.assertRaises(PairedBackupOperatorError) as raised:
+                self.operator.seal_prepared(FIRST, self.output, self.anchor)
+        self.assertIs(type(raised.exception), PairedBackupOperatorError)
+        self.assertTrue((self.intents / f"{FIRST}.committing.json").is_file())
+        self.assertFalse((self.intents / f"{FIRST}.acknowledged.json").exists())
+        self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+        with self.assertRaisesRegex(BackupIntentError, "never retry"):
+            self.operator.begin_commit(FIRST)
+
+    def test_abandon_refuses_published_head_without_crash_marker_or_ack(self) -> None:
+        prepared = self._prepare()
+        self.operator.begin_commit(FIRST)
+        sealed = seal_offline_pair(
+            self.sqlite, self.witness, self.output, self.anchor,
+            expected_sqlite_sha256=prepared["sqlite_sha256"],
+            expected_witness_sha256=prepared["witness_sha256"],
+            expected_previous_head_sha256=None, generation=FIRST,
+        )
+        self.assertFalse((self.anchor / ".inflight").exists())
+        head_bytes = (self.anchor / "latest.json").read_bytes()
+        self.assertEqual(self._hash(self.anchor / "latest.json"), sealed["head_sha256"])
+        with self.assertRaises(BackupIntentError):
+            self.operator.abandon(FIRST, self.output, self.anchor)
+        self.assertEqual((self.anchor / "latest.json").read_bytes(), head_bytes)
+        self.assertTrue((self.intents / f"{FIRST}.committing.json").exists())
+        self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+
+    def test_abandon_refuses_pending_head_and_partial_generation_artifacts(self) -> None:
+        cases = (("anchor", ".next-synthetic", False),
+                 ("output", ".partial-synthetic", True),
+                 ("anchor", f"{FIRST}.json", False),
+                 ("anchor", "unrecognized-bootstrap-artifact", False),
+                 ("output", "unrecognized-bootstrap-artifact", False))
+        self._prepare()
+        self.operator.begin_commit(FIRST)
+        for where, name, directory in cases:
+            with self.subTest(root=where, name=name):
+                item = (self.anchor if where == "anchor" else self.output) / name
+                if directory:
+                    item.mkdir(mode=0o700)
+                else:
+                    item.write_bytes(b"nonempty-untrusted-artifact")
+                    item.chmod(0o600)
+                try:
+                    with self.assertRaises(BackupIntentError):
+                        self.operator.abandon(FIRST, self.output, self.anchor)
+                    self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+                    self.assertTrue((self.intents / f"{FIRST}.committing.json").exists())
+                finally:
+                    if directory:
+                        item.rmdir()
+                    else:
+                        item.unlink()
+
+    def test_abandon_second_proof_detects_effect_injected_during_directory_fsync(self) -> None:
+        from mark_api import backup_intent_authority as module
+        self._prepare()
+        self.operator.begin_commit(FIRST)
+        true_fsync = module._fsync_dir
+        injected = False
+
+        def inject_on_first_output_sync(path: Path) -> None:
+            nonlocal injected
+            true_fsync(path)
+            if path == self.output and not injected:
+                injected = True
+                (self.output / FIRST).mkdir(mode=0o700)
+
+        with patch("mark_api.backup_intent_authority._fsync_dir",
+                   side_effect=inject_on_first_output_sync):
+            with self.assertRaises(BackupIntentError):
+                self.operator.abandon(FIRST, self.output, self.anchor)
+        self.assertTrue(injected)
+        self.assertTrue((self.output / FIRST).is_dir())
+        self.assertTrue((self.intents / f"{FIRST}.committing.json").exists())
+        self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+
+    def test_operator_rejects_conflicting_acknowledged_and_abandoned_transitions(self) -> None:
+        first = self._seal()
+        abandoned = {
+            "schema_version": 1, "generation": FIRST,
+            "prepared_sha256": self._hash(self.intents / f"{FIRST}.prepared.json"),
+            "committing_sha256": self._hash(self.intents / f"{FIRST}.committing.json"),
+            "previous_head_sha256": "0" * 64,
+        }
+        self._write_canonical_record(self.intents / f"{FIRST}.abandoned.json", abandoned)
+        with self.assertRaisesRegex(BackupIntentError, "conflicting terminal"):
+            self._prepare(SECOND, first["head_sha256"])
+        self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
+
+    def test_operator_rejects_misbound_abandoned_digest(self) -> None:
+        self._prepare()
+        self.operator.abandon(FIRST, self.output, self.anchor)
+        path = self.intents / f"{FIRST}.abandoned.json"
+        record = json.loads(path.read_bytes())
+        record["prepared_sha256"] = "f" * 64
+        self._write_canonical_record(path, record)
+        with self.assertRaisesRegex(BackupIntentError, "not bound"):
+            self._prepare(SECOND)
+        self.assertFalse((self.intents / f"{SECOND}.prepared.json").exists())
+
+    def test_operator_rejects_committing_after_prepared_only_abandon(self) -> None:
+        self._prepare()
+        self.operator.abandon(FIRST, self.output, self.anchor)
+        committing = {
+            "schema_version": 1,
+            "generation": FIRST,
+            "prepared_sha256": self._hash(self.intents / f"{FIRST}.prepared.json"),
+        }
+        self._write_canonical_record(self.intents / f"{FIRST}.committing.json", committing)
+        with self.assertRaisesRegex(BackupIntentError, "not bound"):
+            self._prepare(SECOND)
+        self.assertFalse((self.intents / f"{SECOND}.prepared.json").exists())
+
+    def test_operator_rejects_abandoned_unknown_predecessor_fork(self) -> None:
+        self._prepare()
+        self.operator.abandon(FIRST, self.output, self.anchor)
+        prepared_path = self.intents / f"{FIRST}.prepared.json"
+        prepared = json.loads(prepared_path.read_bytes())
+        prepared["previous_head_sha256"] = "f" * 64
+        self._write_canonical_record(prepared_path, prepared)
+        abandoned_path = self.intents / f"{FIRST}.abandoned.json"
+        abandoned = json.loads(abandoned_path.read_bytes())
+        abandoned["previous_head_sha256"] = "f" * 64
+        abandoned["prepared_sha256"] = self._hash(prepared_path)
+        self._write_canonical_record(abandoned_path, abandoned)
+        with self.assertRaisesRegex(BackupIntentError, "predecessor not acknowledged"):
+            self._prepare(SECOND)
+        self.assertFalse((self.intents / f"{SECOND}.prepared.json").exists())
+
     def test_operator_restart_never_reuses_abandoned_identity(self) -> None:
         self._prepare()
         self.operator.begin_commit(FIRST)
