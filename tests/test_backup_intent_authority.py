@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from threading import Event, Thread
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -169,9 +170,10 @@ class BackupIntentAuthorityTests(unittest.TestCase):
         raw = bytearray(self.sqlite.read_bytes())
         raw[-1] ^= 1
         self.sqlite.write_bytes(raw)
-        with self.assertRaises(PairedBackupOperatorError):
+        with self.assertRaises(BackupIntentError):
             self.operator.seal_prepared(FIRST, self.output, self.anchor)
-        self.assertTrue((self.intents / (FIRST + ".committing.json")).exists())
+        self.assertFalse((self.intents / (FIRST + ".committing.json")).exists())
+        self.assertTrue((self.intents / (FIRST + ".prepared.json")).exists())
         self.assertFalse((self.intents / (FIRST + ".acknowledged.json")).exists())
 
     def test_published_image_tamper_does_not_consume_external_intent(self) -> None:
@@ -254,7 +256,8 @@ class BackupIntentAuthorityTests(unittest.TestCase):
             self.operator.seal_prepared(SECOND, self.output, self.anchor)
         self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
         self.assertFalse((self.output / SECOND).exists())
-        self.assertTrue((self.intents / f"{SECOND}.committing.json").is_file())
+        self.assertFalse((self.intents / f"{SECOND}.committing.json").exists())
+        self.assertTrue((self.intents / f"{SECOND}.prepared.json").is_file())
         self.assertFalse((self.intents / f"{SECOND}.acknowledged.json").exists())
 
     def test_late_corrupted_ancestor_blocks_external_acknowledgement(self) -> None:
@@ -295,6 +298,153 @@ class BackupIntentAuthorityTests(unittest.TestCase):
         result = restarted.prepare(FIRST, self.sqlite, self.witness, previous_head_sha256=None)
         self.assertEqual(result["generation"], FIRST)
         self.assertEqual(lock.stat().st_ino, original_inode)
+
+    def test_effect_free_committing_may_be_abandoned_once(self) -> None:
+        self._prepare()
+        self.operator.begin_commit(FIRST)
+        with self.assertRaisesRegex(BackupIntentError, "pending"):
+            self._prepare(SECOND)
+        result = self.operator.abandon(FIRST, self.output, self.anchor)
+        self.assertEqual(result["generation"], FIRST)
+        self.assertTrue(result["abandoned_once"])
+        self.assertTrue((self.intents / f"{FIRST}.abandoned.json").is_file())
+        self.assertFalse((self.anchor / "latest.json").exists())
+        with self.assertRaises(BackupIntentError):
+            self._prepare(FIRST)
+        with self.assertRaises(BackupIntentError):
+            self.operator.begin_commit(FIRST)
+        self.assertEqual(self._seal(SECOND)["generation"], SECOND)
+
+    def test_effect_free_prepared_only_can_be_abandoned(self) -> None:
+        self._prepare()
+        self.operator.abandon(FIRST, self.output, self.anchor)
+        self.assertFalse((self.intents / f"{FIRST}.committing.json").exists())
+        with self.assertRaises(BackupIntentError):
+            self.operator.acknowledge(FIRST, self.output, self.anchor)
+        self.assertEqual(self._seal(SECOND)["generation"], SECOND)
+
+    def test_failed_ancestor_check_keeps_head_and_supports_safe_abandon(self) -> None:
+        first = self._seal()
+        self._prepare(SECOND, first["head_sha256"])
+        original = (self.output / FIRST / "mark.sqlite").read_bytes()
+        mutated = bytearray(original)
+        mutated[-1] ^= 1
+        (self.output / FIRST / "mark.sqlite").write_bytes(mutated)
+        with self.assertRaises(BackupIntentError):
+            self.operator.seal_prepared(SECOND, self.output, self.anchor)
+        self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
+        self.assertFalse((self.output / SECOND).exists())
+        self.operator.abandon(SECOND, self.output, self.anchor)
+        self.assertFalse((self.intents / f"{SECOND}.acknowledged.json").exists())
+        (self.output / FIRST / "mark.sqlite").write_bytes(original)
+        third = "3" * 32
+        self.assertEqual(self._seal(third, first["head_sha256"])["generation"], third)
+
+    def test_abandon_refuses_open_inflight_and_preserves_fences(self) -> None:
+        self._prepare()
+        self.operator.begin_commit(FIRST)
+        (self.anchor / ".inflight").write_bytes(FIRST.encode("ascii"))
+        with self.assertRaises(BackupIntentError):
+            self.operator.abandon(FIRST, self.output, self.anchor)
+        self.assertTrue((self.anchor / ".inflight").exists())
+        self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+
+    def test_abandon_refuses_existing_generation_artifact(self) -> None:
+        self._prepare()
+        self.operator.begin_commit(FIRST)
+        (self.output / FIRST).mkdir(mode=0o700)
+        with self.assertRaises(BackupIntentError):
+            self.operator.abandon(FIRST, self.output, self.anchor)
+        self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+
+    def test_abandon_refuses_running_cooperating_sealer_without_publishing_fork(self) -> None:
+        from mark_api import backup_intent_authority as module
+
+        self._prepare()
+        real_seal = module.seal_offline_pair
+        entered, proceed = Event(), Event()
+        results: dict[str, object] = {}
+
+        def pause_before_seal(*args: object, **kwargs: object) -> dict[str, object]:
+            entered.set()
+            if not proceed.wait(timeout=10):
+                raise RuntimeError("timed out waiting for concurrent proof")
+            return real_seal(*args, **kwargs)
+
+        def seal_worker() -> None:
+            try:
+                results["result"] = self.operator.seal_prepared(
+                    FIRST, self.output, self.anchor,
+                )
+            except Exception as exc:
+                results["error"] = exc
+
+        with patch("mark_api.backup_intent_authority.seal_offline_pair",
+                   side_effect=pause_before_seal):
+            worker = Thread(target=seal_worker, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                with self.assertRaises(BackupIntentError):
+                    self.operator.abandon(FIRST, self.output, self.anchor)
+            finally:
+                proceed.set()
+                worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", results)
+        self.assertTrue(results["result"]["external_operator_intent_acknowledged"])
+        self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+        self.assertTrue((self.intents / f"{FIRST}.acknowledged.json").exists())
+
+    def test_operator_restart_never_reuses_abandoned_identity(self) -> None:
+        self._prepare()
+        self.operator.begin_commit(FIRST)
+        self.operator.abandon(FIRST, self.output, self.anchor)
+        restarted = BackupIntentAuthority(self.intents)
+        with self.assertRaises(BackupIntentError):
+            restarted.prepare(FIRST, self.sqlite, self.witness, previous_head_sha256=None)
+        with self.assertRaises(BackupIntentError):
+            restarted.acknowledge(FIRST, self.output, self.anchor)
+        self.assertEqual(
+            restarted.prepare(SECOND, self.sqlite, self.witness, previous_head_sha256=None)["generation"],
+            SECOND,
+        )
+
+    def test_external_ack_requires_anchor_fsync_before_ack(self) -> None:
+        from mark_api import backup_intent_authority as module
+        prepared = self._prepare()
+        self.operator.begin_commit(FIRST)
+        seal_offline_pair(
+            self.sqlite, self.witness, self.output, self.anchor,
+            expected_sqlite_sha256=prepared["sqlite_sha256"],
+            expected_witness_sha256=prepared["witness_sha256"],
+            expected_previous_head_sha256=None, generation=FIRST,
+        )
+        original_fsync = module._fsync_dir
+        def fail_anchor_barrier(directory: Path) -> None:
+            if directory == self.anchor:
+                raise OSError("synthetic unsynced HEAD parent")
+            original_fsync(directory)
+        with patch("mark_api.backup_intent_authority._fsync_dir", side_effect=fail_anchor_barrier):
+            with self.assertRaises(BackupIntentError):
+                self.operator.acknowledge(FIRST, self.output, self.anchor)
+        self.assertFalse((self.intents / f"{FIRST}.acknowledged.json").exists())
+        self.assertTrue((self.intents / f"{FIRST}.committing.json").exists())
+
+    def test_dangling_inflight_symlink_blocks_acknowledgement(self) -> None:
+        prepared = self._prepare()
+        self.operator.begin_commit(FIRST)
+        seal_offline_pair(
+            self.sqlite, self.witness, self.output, self.anchor,
+            expected_sqlite_sha256=prepared["sqlite_sha256"],
+            expected_witness_sha256=prepared["witness_sha256"],
+            expected_previous_head_sha256=None, generation=FIRST,
+        )
+        (self.anchor / ".inflight").symlink_to(self.anchor / "absent-marker")
+        with self.assertRaises(BackupIntentError):
+            self.operator.acknowledge(FIRST, self.output, self.anchor)
+        self.assertTrue((self.anchor / ".inflight").is_symlink())
+        self.assertFalse((self.intents / f"{FIRST}.acknowledged.json").exists())
 
     def test_private_operator_state_is_required(self) -> None:
         self.intents.chmod(0o755)

@@ -16,6 +16,9 @@ operator-owned, separately protected private directory:
   any seal/HEAD publication effect.
 - GEN.acknowledged.json: exact committing-record SHA-256 plus the actual
   independently reverified published HEAD digest.
+- GEN.abandoned.json: terminal create-only, fsynced proof bound to the exact
+  prepared record, optional committing record and original predecessor HEAD.
+  This is neither an ACK nor a reusable generation; records are never deleted.
 
 Every retained acknowledgement is checked to reconstruct a single linear
 history. Gaps, forks, orphaned or noncanonical phases, reused generations and
@@ -118,12 +121,51 @@ op.acknowledge(
 Failure or mismatch preserves the pending intent and recovery fences.
 Never delete .inflight to force a retry.
 
+## Exceptional recovery from an effect-free failure
+
+A committed intent remains pending after any uncertain operation. The trusted
+independent operator may instead call `abandon(generation, output, anchor)`
+**manually only after** independent host evidence proves that every process
+which could still seal that generation has terminated and all old image, UDS,
+filesystem and writable mapping access has been revoked. The code does not
+create or attest this host-level quiescence or serialize an out-of-process
+sealer; a concurrent sealer makes cancellation unsafe.
+
+`abandon` checks the original independently acknowledged predecessor HEAD,
+requires no generation output/anchor record, no `.inflight`, no staging HEAD,
+and no partial generation. It fsyncs both roots and rechecks the effects before
+persisting `GEN.abandoned.json` under the protected operator lock. All
+cooperating `seal_prepared` and `abandon` calls also hold a separate exclusive
+Linux directory `flock` on the immutable protected operator root for the
+entire process, so manual abandonment is rejected while an in-process seal
+has not finished; a reproducible threaded RED/GREEN test enforces this.
+The lock is only a coordination aid, not a protection against a hostile UID
+or an external sealer that ignores the protocol.
+Any ambiguity remains pending and needs manual forensic recovery. After a
+valid abandonment, a **new generation identifier** may be prepared against
+the same trusted predecessor; the abandoned identifier can never be
+committed, acknowledged or prepared again.
+
+An already published HEAD, an unknown outcome, a damaged directory tree, a
+concurrent operator, or a remaining crash marker can **never** be made safe by
+deleting local files or invoking `abandon` blindly. The API must not be
+exposed to the untrusted Mark service or invoked without independent
+operator-controlled process shutdown and trusted provenance.
+
+The lock bootstrap currently binds device/inode identity. Inode numbers may
+be reused after all descriptors close; absence of a matching inode is
+detectable, but recreation with inode reuse is not a cryptographic guarantee.
+Lock-state migration/recovery and hostile-UID assurance remain explicit
+deployment gates.
+
 ## Adversarial matrix
 
 | Failure point | Required result |
 | --- | --- |
 | Before committing | Prepared only, new generations blocked |
-| Committing before HEAD | No blind retry; pending record and fences |
+| Committing before HEAD | No blind retry; pending until an independently quiesced, proven effect-free manual abandon |
+| Abandoned generation replay | Original identity permanently consumed; only a fresh generation may start |
+| Inflight symlink or unsynced anchor | No ACK; retained committing intent requires investigation |
 | HEAD published, .inflight remains | Only the unconsumed external intent permits verified reconciliation |
 | HEAD published, .inflight cleared, ack missing | Reverify actual pair and record one ack |
 | Recreated .inflight after an ack | Reject duplicate acknowledgement |
