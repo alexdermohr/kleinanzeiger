@@ -44,6 +44,28 @@ def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProc
     return result
 
 
+def _docker_reports_missing(
+    result: subprocess.CompletedProcess[str], kind: str, name: str,
+) -> bool:
+    """Only exact Docker not-found replies establish resource absence."""
+    if result.returncode == 0 or result.stdout.strip() not in ("", "[]"):
+        return False
+    if kind == "volume":
+        accepted = (
+            f"Error response from daemon: get {name}: no such volume",
+            f"Error: No such volume: {name}",
+        )
+    elif kind == "container":
+        accepted = (
+            f"Error response from daemon: No such container: {name}",
+            f"Error: No such container: {name}",
+            f"Error: No such object: {name}",
+        )
+    else:
+        raise ValueError("unknown Docker resource kind")
+    return result.stderr.strip() in accepted
+
+
 _TRUSTED_SEAL = r"""
 import json,os,stat
 from pathlib import Path
@@ -291,8 +313,10 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                            ) -> subprocess.CompletedProcess[str]:
                 name = "mark-rawseal-" + suffix + "-" + label
                 prior = _docker("container", "inspect", name, allow_failure=True)
-                self.assertNotEqual(prior.returncode, 0,
-                                    "synthetic container name already exists")
+                self.assertTrue(
+                    _docker_reports_missing(prior, 'container', name),
+                    'synthetic container name not proven absent or Docker unavailable',
+                )
                 named_containers.append(name)  # before a potentially uncertain Docker run
                 args = [
                     "run", "--rm", "--pull", "never", "--name", name,
@@ -324,8 +348,10 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 for volume in volumes.values():
                     prior = _docker("volume", "inspect", volume,
                                     allow_failure=True)
-                    self.assertNotEqual(prior.returncode, 0,
-                                        "synthetic volume name already exists")
+                    self.assertTrue(
+                        _docker_reports_missing(prior, 'volume', volume),
+                        'synthetic volume name not proven absent or Docker unavailable',
+                    )
                     # Register the unique name BEFORE Docker starts. A daemon
                     # may have created it even when the CLI later times out.
                     created.append(volume)
@@ -342,8 +368,10 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 seed_name = "mark-rawseal-" + suffix + "-seed"
                 prior = _docker("container", "inspect", seed_name,
                                 allow_failure=True)
-                self.assertNotEqual(prior.returncode, 0,
-                                    "synthetic seed container already exists")
+                self.assertTrue(
+                    _docker_reports_missing(prior, 'container', seed_name),
+                    'synthetic seed container not proven absent or Docker unavailable',
+                )
                 named_containers.append(seed_name)  # before uncertain run
                 _docker(
                     "run", "--rm", "--pull", "never", "--name", seed_name,
@@ -417,11 +445,12 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     observed = _docker(kind, "inspect", "--format", expr,
                                        name, allow_failure=True)
                     if observed.returncode:
-                        message = (observed.stdout + observed.stderr).lower()
-                        if "no such" in message or "not found" in message:
-                            return False  # creation had not happened or --rm ran
-                        cleanup_errors.append(name + ": ownership read failed: " +
-                                              message[-160:])
+                        if _docker_reports_missing(observed, kind, name):
+                            return False  # no creation or --rm already ran
+                        cleanup_errors.append(
+                            name + ": ownership inspect failed, not 404: " +
+                            (observed.stdout + observed.stderr)[-180:]
+                        )
                         return False
                     if observed.stdout.strip() != suffix:
                         cleanup_errors.append(
@@ -430,22 +459,30 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                         return False
                     return True
 
+                def confirm_removed(kind: str, name: str) -> None:
+                    # A --rm container can disappear between inspect and rm.
+                    # Re-inspection accepts only an exact daemon not-found.
+                    final = _docker(kind, "inspect", name, allow_failure=True)
+                    if not _docker_reports_missing(final, kind, name):
+                        cleanup_errors.append(
+                            name + ": not proven removed: " +
+                            (final.stdout + final.stderr)[-180:]
+                        )
+
                 for name in reversed(named_containers):
                     try:
                         if not was_created_by_this_test("container", name):
                             continue
-                        out = _docker("rm", "-f", name, allow_failure=True)
-                        if out.returncode:
-                            cleanup_errors.append(name + ": " + out.stderr[-160:])
+                        _docker("rm", "-f", name, allow_failure=True)
+                        confirm_removed("container", name)
                     except Exception as exc:
                         cleanup_errors.append(name + ": " + repr(exc))
                 for volume in reversed(created):
                     try:
                         if not was_created_by_this_test("volume", volume):
                             continue
-                        out = _docker("volume", "rm", volume, allow_failure=True)
-                        if out.returncode:
-                            cleanup_errors.append(volume + ": " + out.stderr[-160:])
+                        _docker("volume", "rm", volume, allow_failure=True)
+                        confirm_removed("volume", volume)
                     except Exception as exc:
                         cleanup_errors.append(volume + ": " + repr(exc))
                 self.assertFalse(cleanup_errors,
@@ -487,8 +524,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
             self.assertIn("TimeoutExpired", result.errors[0][1])
             absent = original("volume", "inspect", created,
                               allow_failure=True)
-            self.assertNotEqual(
-                absent.returncode, 0, "uncertain created volume was orphaned",
+            self.assertTrue(
+                _docker_reports_missing(absent, "volume", created),
+                "uncertain created volume not proven absent or Docker unreachable",
             )
             print("DOCKER_VOLUME_CREATE_TIMEOUT_CLEANED", flush=True)
         finally:
@@ -507,6 +545,137 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     )
                     original("volume", "rm", created)
                     self.fail("orphaned test volume required emergency cleanup")
+
+
+    def test_docker_missing_evidence_rejects_daemon_failures(self) -> None:
+        name = "mark-rawseal-fake-test-resource"
+        cases = (
+            ("volume", f"Error response from daemon: get {name}: no such volume", True),
+            ("container", f"Error response from daemon: No such container: {name}", True),
+            ("volume", f"Error response from daemon: 500: no such volume {name}", False),
+            ("container", "permission denied while reaching Docker daemon", False),
+            ("container", f"Error response from daemon: No such container: {name}-other", False),
+            ("volume", "unexpected daemon timeout", False),
+        )
+        for kind, message, absent in cases:
+            with self.subTest(kind=kind, message=message):
+                result = subprocess.CompletedProcess(
+                    args=["docker", kind, "inspect", name],
+                    returncode=1, stdout="[]", stderr=message,
+                )
+                self.assertEqual(_docker_reports_missing(result, kind, name), absent)
+                success = subprocess.CompletedProcess(
+                    args=result.args, returncode=0, stdout="", stderr=message,
+                )
+                self.assertFalse(_docker_reports_missing(success, kind, name))
+
+    def test_auto_rm_container_after_inspect_does_not_fail_cleanup(self) -> None:
+        # Synchronously run a disposable --rm seed; its Docker container is
+        # already gone at the end. Inject an outdated positive inspect result
+        # once during cleanup to emulate auto-removal before docker rm -f.
+        original = _docker
+        seed: str | None = None
+        observed_positive = False
+        attempted_remove = False
+
+        def just_exited_after_inspection(*args: str, **kwargs: object
+                                          ) -> subprocess.CompletedProcess[str]:
+            nonlocal seed, observed_positive, attempted_remove
+            if args and args[0] == "run" and "--name" in args:
+                candidate = args[args.index("--name") + 1]
+                result = original(*args, **kwargs)
+                if candidate.endswith("-seed"):
+                    seed = candidate
+                return result
+            if (seed is not None and args[:2] == ("container", "inspect")
+                    and args[-1] == seed and "--format" in args
+                    and not observed_positive):
+                observed_positive = True
+                suffix = seed.split("-")[2]
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout=suffix, stderr="",
+                )
+            if seed is not None and args[:2] == ("rm", "-f") and args[-1] == seed:
+                attempted_remove = True
+                # Force the documented losing race even if this local Docker
+                # version returns 0 for an already auto-removed --rm seed:
+                # real post-removal inspect is absent, rm reports a synthetic
+                # nonzero "No such container", and only final strict 404 wins.
+                original(*args, **kwargs)
+                absent = original("container", "inspect", seed,
+                                  allow_failure=True)
+                self.assertTrue(_docker_reports_missing(absent, "container", seed))
+                return subprocess.CompletedProcess(
+                    args=args, returncode=1, stdout="",
+                    stderr="Error response from daemon: No such container: " + seed,
+                )
+            return original(*args, **kwargs)
+
+        with patch(__name__ + "._docker", side_effect=just_exited_after_inspection):
+            nested = type(self)(
+                "test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer",
+            )
+            result = unittest.TestResult()
+            nested.run(result)
+        self.assertTrue(observed_positive)
+        self.assertTrue(attempted_remove)
+        self.assertFalse(result.errors, result.errors)
+        self.assertFalse(result.failures, result.failures)
+
+
+    def test_create_timeout_rejects_inspection_500_not_false_404(self) -> None:
+        # A daemon 500 after a successfully cleaned create is not evidence of
+        # absence. This tests the full post-timeout verification contract, not
+        # just the stand-alone parser.
+        original = _docker
+        created: str | None = None
+        injected = False
+        volume_removed = False
+        cleanup_inspect_succeeded = False
+
+        def wrong_daemon_reply(*args: str, **kwargs: object
+                                ) -> subprocess.CompletedProcess[str]:
+            nonlocal created, injected, volume_removed, cleanup_inspect_succeeded
+            if args[:2] == ("volume", "create") and created is None:
+                outcome = original(*args, **kwargs)
+                created = args[-1]
+                return outcome
+            if (created is not None and args[:2] == ("volume", "rm")
+                    and args[-1] == created):
+                result = original(*args, **kwargs)
+                volume_removed = True
+                return result
+            if (created is not None and args == ("volume", "inspect", created)
+                    and volume_removed):
+                if not cleanup_inspect_succeeded:
+                    # The nested normal cleanup must prove a real 404 first.
+                    real = original(*args, **kwargs)
+                    self.assertTrue(
+                        _docker_reports_missing(real, "volume", created),
+                    )
+                    cleanup_inspect_succeeded = True
+                    return real
+                if not injected:
+                    # Only the later *test verdict* inspect receives 500.
+                    injected = True
+                    return subprocess.CompletedProcess(
+                        args=args, returncode=1, stdout="[]",
+                        stderr="Error response from daemon: 500 Internal Server Error",
+                    )
+            return original(*args, **kwargs)
+
+        with patch(__name__ + "._docker", side_effect=wrong_daemon_reply):
+            nested = type(self)(
+                "test_created_volume_is_cleaned_when_docker_client_times_out",
+            )
+            result = unittest.TestResult()
+            nested.run(result)
+        self.assertTrue(volume_removed)
+        self.assertTrue(cleanup_inspect_succeeded)
+        self.assertTrue(injected)
+        self.assertFalse(result.errors, result.errors)
+        self.assertEqual(len(result.failures), 1, result.failures)
+        self.assertIn("not proven absent", result.failures[0][1])
 
 
 if __name__ == "__main__":
