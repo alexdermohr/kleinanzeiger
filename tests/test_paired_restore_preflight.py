@@ -56,7 +56,10 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with FenceLedger(self.ledger, initialize=True):
             pass
 
-    def _start(self, *, key: str = KEY, sha: str = SHA, witness: bool = True) -> None:
+    def _start(
+        self, *, key: str = KEY, sha: str = SHA, witness: bool = True,
+        action: str = "create",
+    ) -> None:
         store = SnapshotStore(self.sqlite, create_if_missing=False)
         result = store.claim_write_api_request(
             idempotency_key=key, request_sha256=sha,
@@ -72,7 +75,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
             with FenceLedger(self.ledger) as owner:
                 session = owner.open_session()
                 owner.execution_started(
-                    session, key=key, sha=sha, action="create",
+                    session, key=key, sha=sha, action=action,
                 )
                 owner.seal_session(session)
 
@@ -83,6 +86,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         legacy_media_response: dict[str, object] | None = None,
         forged_completed_outcome: str | None = None,
         forged_started_timestamp: str | None = None,
+        forged_started_action: str | None = None,
         extra_started_key: str | None = None,
     ) -> None:
         """Test-only adversary reconstructs a self-consistent event hash chain.
@@ -118,6 +122,10 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 started = [row for row in events if row[1] == "started"]
                 self.assertEqual(len(started), 1)
                 started[0][8] = forged_started_timestamp
+            if forged_started_action is not None:
+                started = [row for row in events if row[1] == "started"]
+                self.assertEqual(len(started), 1)
+                started[0][4] = forged_started_action
             if extra_started_key is not None:
                 previous_start = next(row for row in events if row[1] == "started")
                 seal_index = next(i for i, row in enumerate(events) if row[1] == "sealed")
@@ -491,7 +499,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
 
     def _completed_response_pair(
         self, *, key: str, response: dict[str, object],
-        status: int = 500,
+        status: int = 500, action: str = "create",
     ) -> None:
         """Exactly one durable SQL completion then same-object Witness completion."""
         store = SnapshotStore(self.sqlite, create_if_missing=False)
@@ -508,7 +516,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with FenceLedger(self.ledger) as owner:
             session = owner.open_session()
             owner.execution_started(
-                session, key=key, sha=SHA, action="create",
+                session, key=key, sha=SHA, action=action,
             )
             store.complete_write_api_request(
                 idempotency_key=key, request_sha256=SHA,
@@ -524,6 +532,135 @@ class PairedRestorePreflightTests(unittest.TestCase):
             )
             self.assertEqual(outcome, "ambiguous")
             owner.seal_session(session)
+
+    def test_media_completed_response_requires_matching_witness_action(self) -> None:
+        # RED: a hash-consistent forged Witness may claim any allowed action
+        # while SQLite's canonical HTTP payload unambiguously says Create+Media.
+        key = "media:forged-witness-action"
+        response = {
+            "error": "write_execution_error",
+            "idempotency_key": key,
+            "media_persistence_confirmed": False,
+            "platform_retry_authorized": False,
+        }
+        self._completed_response_pair(
+            key=key, response=response, action="create_media",
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["witness_unresolved"],
+            [[key, SHA]],
+        )
+        self._rewrite_witness_events(forged_started_action="delete")
+        with self.assertRaisesRegex(PairPreflightError, "witness action"):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_media_uncompleted_response_requires_matching_witness_action(self) -> None:
+        # Crash before Witness completion must not let a forged action pass.
+        key = "media:uncompleted-forged-action"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=500,
+            response_json=_canonical({
+                "error": "write_execution_error",
+                "idempotency_key": key,
+                "media_persistence_confirmed": False,
+                "platform_retry_authorized": False,
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        self._rewrite_witness_events(forged_started_action="activate")
+        with self.assertRaisesRegex(PairPreflightError, "witness action"):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_oversized_owner_write_record_reply_is_not_restorable(self) -> None:
+        # A canonical stored HTTP response may fit SQLite but not the
+        # owner's actual claim/read/replay response envelope.
+        key = "complete:oversized-owner-reply"
+        self._start(key=key)
+        SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=500,
+            response_json=_canonical({
+                "error": "write_execution_error", "detail": "x" * 40000,
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        # This oversized response cannot cross Witness completion either,
+        # so the valid paired case retains the original unresolved start.
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_bounded_owner_write_record_reply_remains_restorable(self) -> None:
+        key = "complete:bounded-owner-reply"
+        self._completed_response_pair(
+            key=key, response={"error": "write_execution_error",
+                               "detail": "x" * 28000},
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["witness_unresolved"],
+            [[key, SHA]],
+        )
+
+    def test_owner_write_reply_exact_frame_edge(self) -> None:
+        # The byte-bound is checked on the *complete* Owner response. Its
+        # last admissible byte is replayable; the next byte must fail closed.
+        from mark_api.storage_owner import _record_as_json, _reply_frame_fits
+
+        key = "complete:exact-owner-frame"
+        self._start(key=key)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        started = store.write_api_request(key)
+        self.assertIsNotNone(started)
+        assert started is not None
+
+        def response(length: int) -> str:
+            return json.dumps(
+                {"detail": "x" * length, "error": "write_execution_error"},
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            )
+
+        def envelope(length: int) -> dict[str, object]:
+            completed = replace(
+                started, state="completed", completed_at=AT,
+                response_status=500, response_json=response(length),
+            )
+            return {"created": False, "record": _record_as_json(completed)}
+
+        lower, upper = 0, 40000
+        while lower < upper:
+            candidate = (lower + upper + 1) // 2
+            if _reply_frame_fits(envelope(candidate)):
+                lower = candidate
+            else:
+                upper = candidate - 1
+        boundary = lower
+        self.assertTrue(_reply_frame_fits(envelope(boundary)))
+        self.assertFalse(_reply_frame_fits(envelope(boundary + 1)))
+        self.assertEqual(
+            len(_canonical({"ok": True, "result": envelope(boundary)}) + b"\n"),
+            32 * 1024 + 1,
+        )
+
+        store.complete_write_api_request(
+            idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=500, response_json=response(boundary),
+            completed_at=AT,
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"][
+                "witness_unresolved"
+            ],
+            [[key, SHA]],
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE write_api_requests SET response_json=? "
+                "WHERE idempotency_key=?",
+                (response(boundary + 1), key),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_invalid_completed_http_status_is_not_restorable(self) -> None:
         key = "complete:bad-http"
@@ -911,7 +1048,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
             "media_persistence_confirmed": False,
             "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
         }
-        self._completed_response_pair(key=key, status=500, response=response)
+        self._completed_response_pair(key=key, status=500, response=response, action="create_media")
         SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
             idempotency_key=key, request_sha256=SHA,
             verification_kind="media_submit_reconciled",
@@ -940,7 +1077,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
             "media_persistence_confirmed": False,
             "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
         }
-        self._completed_response_pair(key=key, status=500, response=response)
+        self._completed_response_pair(key=key, status=500, response=response, action="create_media")
         SnapshotStore(self.sqlite, create_if_missing=False).record_write_recovery_clearance(
             idempotency_key=key, request_sha256=SHA,
             verification_kind="operator_verified_postread",
@@ -1093,7 +1230,7 @@ class PairedRestorePreflightTests(unittest.TestCase):
     def _persist_media_http_response(
         self, *, key: str, status: int, envelope: dict[str, object],
     ) -> None:
-        self._start(key=key)
+        self._start(key=key, action="create_media")
         SnapshotStore(self.sqlite, create_if_missing=False).complete_write_api_request(
             idempotency_key=key, request_sha256=SHA, claim_owner="pair-owner",
             response_status=status,
@@ -1432,6 +1569,454 @@ class PairedRestorePreflightTests(unittest.TestCase):
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
+    def test_operator_clearance_rejects_http_checkpoint_status_divergence(self) -> None:
+        from mark_api.write_api import _create_receipt_to_dict
+
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        checkpoint, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        final = replace(
+            checkpoint, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        store.append_create_operation_receipt(final)
+        wire = _create_receipt_to_dict(final)
+        wire["pre_read_status"] = "incompatible-pre-read"
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=202,
+            response_json=_canonical({
+                "media_persistence_confirmed": False, "operation_receipt": wire,
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:independent-operator",
+                observed_at=AT,
+            )
+
+    def test_operator_core_clearance_rejects_all_immutable_http_mismatches(self) -> None:
+        from mark_api.write_api import _create_receipt_to_dict
+
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        checkpoint, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        final = replace(
+            checkpoint, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        store.append_create_operation_receipt(final)
+        original_wire = _create_receipt_to_dict(final)
+        def attempt(wire: dict[str, object]) -> None:
+            with sqlite3.connect(self.sqlite) as db:
+                db.execute(
+                    "UPDATE write_api_requests SET state='completed', "
+                    "response_status=202, completed_at=?, response_json=? "
+                    "WHERE idempotency_key=?",
+                    (AT.isoformat(), _canonical({
+                        "idempotency_key": KEY,
+                        "platform_retry_authorized": False,
+                        "media_persistence_confirmed": False,
+                        "media_post_read_status": "unknown",
+                        "operation_receipt": wire,
+                    }).decode("ascii"), KEY),
+                )
+            with self.assertRaises(ValueError):
+                store.record_write_recovery_clearance(
+                    idempotency_key=KEY, request_sha256=SHA,
+                    verification_kind="operator_verified_postread",
+                    evidence_reference="synthetic:adversarial-http",
+                    observed_at=AT,
+                )
+
+        changes = {
+            "started_at": "2026-10-13T17:00:00+01:00",
+            "completed_at": "2026-10-13T15:59:59.999999+00:00",
+            "pre_read_status": "read_changed",
+            "confirmation_pre_read_status": "confirmation_changed",
+            "post_read_status": "post_read_changed",
+            "confirmation_post_read_status": "confirmation_post_changed",
+            "content_post_read_status": "content_post_changed",
+            "writer_error": "forged-unrelated-error",
+            "authorization_by": "another-operator",
+            "authorization_reference": "write-api:other-key",
+            "created_ad_id": "202",
+            "media_post_read_status": ["unknown"],
+        }
+        for field, altered in changes.items():
+            with self.subTest(field=field):
+                wire = dict(original_wire)
+                wire[field] = altered
+                attempt(wire)
+        for mode in ("missing", "extra"):
+            with self.subTest(mode=mode):
+                wire = dict(original_wire)
+                if mode == "missing":
+                    del wire["post_read_status"]
+                else:
+                    wire["untrusted_extra_status"] = "confirmed"
+                attempt(wire)
+
+    def test_operator_core_clearance_rejects_final_snapshot_or_duplicate(self) -> None:
+        from mark_api.write_api import _create_receipt_to_dict
+
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        checkpoint, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        final = replace(
+            checkpoint, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        store.append_create_operation_receipt(final)
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=202,
+            response_json=_canonical({
+                "idempotency_key": KEY,
+                "platform_retry_authorized": False,
+                "media_persistence_confirmed": False,
+                "media_post_read_status": "unknown",
+                "operation_receipt": _create_receipt_to_dict(final),
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        with sqlite3.connect(self.sqlite) as db:
+            snapshots = dict(zip(
+                ("post_snapshot_json", "confirmation_post_snapshot_json",
+                 "content_post_snapshot_json"),
+                db.execute(
+                    "SELECT post_snapshot_json,confirmation_post_snapshot_json,"
+                    "content_post_snapshot_json FROM create_operation_receipts"
+                ).fetchone(),
+            ))
+        for column in snapshots:
+            with self.subTest(column=column):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {column}=?",
+                        ('{"ad_id":"201"}',),
+                    )
+                with self.assertRaises(ValueError):
+                    store.record_write_recovery_clearance(
+                        idempotency_key=KEY, request_sha256=SHA,
+                        verification_kind="operator_verified_postread",
+                        evidence_reference="synthetic:forged-snapshot",
+                        observed_at=AT,
+                    )
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {column}=?",
+                        (snapshots[column],),
+                    )
+        store.append_create_operation_receipt(final)
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:duplicate-final",
+                observed_at=AT,
+            )
+
+    def test_confirmed_core_operator_clearance_requires_original_open_checkpoint(self) -> None:
+        # No browser-committed before_media_post_read checkpoint exists,
+        # despite a response claiming confirmed core Create. A local operator
+        # must not manufacture evidence for a nonexistent durable fence, even
+        # if the independent Witness reply and clearance are well-formed.
+        key = "media:core-no-original-checkpoint"
+        response = {
+            "media_persistence_confirmed": False,
+            "operation_receipt": {
+                "operation": "create", "outcome": "confirmed",
+                "writer_invoked": True, "created_ad_id": "201",
+                "authorization_by": "offline-test-owner",
+                "authorization_reference": "write-api:" + key,
+                "media_post_read_status": "unknown",
+            },
+        }
+        self._completed_response_pair(key=key, response=response, status=200)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=key, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:imagined-checkpoint",
+                observed_at=AT,
+            )
+        # A directly forged SQLite clearance with correct key/SHA and
+        # independent Witness operator proof must ALSO be rejected offline.
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "INSERT INTO write_recovery_clearances "
+                "(idempotency_key,request_sha256,observed_at,"
+                "verification_kind,evidence_reference) VALUES(?,?,?,?,?)",
+                (key, SHA, AT.isoformat(), "operator_verified_postread",
+                 "synthetic:forged-nonexistent-checkpoint"),
+            )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:witness-reconciled",
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_confirmed_core_operator_cannot_clear_duplicate_checkpoints(self) -> None:
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        receipt, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        # A second Create checkpoint with the same key could represent a
+        # second external effect: one operator observation is insufficient.
+        store.append_create_operation_checkpoint(receipt)
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=200,
+            response_json=_canonical({
+                "media_persistence_confirmed": False,
+                "operation_receipt": {
+                    "operation": "create", "outcome": "confirmed",
+                    "writer_invoked": True, "created_ad_id": "201",
+                    "authorization_by": "offline-test-owner",
+                    "authorization_reference": "write-api:" + KEY,
+                    "media_post_read_status": "unknown",
+                },
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:inadequate-duplicate-proof",
+                observed_at=AT,
+            )
+
+    def test_confirmed_core_operator_cannot_clear_settled_checkpoint(self) -> None:
+        self._start()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        receipt, _ = self._create_checkpoint(reference="write-api:" + KEY)
+        store.append_create_operation_receipt(replace(
+            receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        ))
+        # A mismatched later HTTP envelope must not allow an invented
+        # independent operator clearance for an already settled checkpoint.
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA, claim_owner="pair-owner",
+            response_status=200,
+            response_json=_canonical({
+                "media_persistence_confirmed": False,
+                "operation_receipt": {
+                    "operation": "create", "outcome": "confirmed",
+                    "writer_invoked": True, "created_ad_id": "201",
+                    "authorization_by": "offline-test-owner",
+                    "authorization_reference": "write-api:" + KEY,
+                    "media_post_read_status": "unknown",
+                },
+            }).decode("ascii"),
+            completed_at=AT,
+        )
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="operator_verified_postread",
+                evidence_reference="synthetic:already-settled-checkpoint",
+                observed_at=AT,
+            )
+
+    def test_witness_only_ambiguous_media_with_completion_is_diagnostic(self) -> None:
+        # A genuine Witness-completed ambiguous media reply may remain an
+        # explicitly open SQLite recovery fence after Witness-only operator
+        # clearance. Without completion the same state must be rejected.
+        key = "media:witness-completed-with-open-sqlite"
+        self._completed_response_pair(
+            key=key, status=500, action="create_media", response={
+                "media_persistence_confirmed": False,
+                "operation_receipt": {"outcome": "ambiguous", "writer_invoked": True},
+            },
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=key, sha=SHA, evidence="synthetic:witness-only-postread",
+            )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["sqlite_media_unresolved"], [[key, SHA]])
+        self.assertEqual(observed["fences"]["witness_unresolved"], [])
+        self.assertEqual(observed["fences"]["sqlite_unverified_replay"], [])
+        self.assertTrue(
+            SnapshotStore(self.sqlite, create_if_missing=False).create_recovery_pending(
+                exclude_idempotency_key="next-after-witness-only",
+                claim_owner="other-owner",
+            ),
+        )
+
+    def test_witness_only_clearance_preserves_unverified_media_checkpoint(self) -> None:
+        # An operator-cleared Witness alone does not attest the SQLite media
+        # effect, even if the persisted HTTP response says core confirmed.
+        # It remains a visible OPEN fence, never inferred restore authority.
+        self._start(action="create_media")
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        receipt, checkpoint = self._create_checkpoint(
+            reference="write-api:" + KEY,
+        )
+        store.append_create_operation_receipt(replace(
+            receipt, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        ))
+        response = _canonical({
+            "media_persistence_confirmed": False,
+            "operation_receipt": {
+                "operation": "create", "outcome": "confirmed",
+                "writer_invoked": True, "created_ad_id": "201",
+                "authorization_by": "offline-test-owner",
+                "authorization_reference": "write-api:" + KEY,
+                "media_post_read_status": "unknown",
+            },
+        }).decode("ascii")
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA,
+            claim_owner="pair-owner", response_status=200,
+            response_json=response, completed_at=AT,
+        )
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=KEY, sha=SHA, evidence="synthetic:witness-operator-only",
+            )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["ambiguous_creates"], [checkpoint])
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertEqual(
+            [r[:2] for r in inspected["fences"]["sqlite_unverified_replay"]],
+            [[KEY, SHA]],
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new-after-witness", claim_owner="another",
+        ))
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="media_submit_reconciled",
+                evidence_reference="synthetic:executor-only",
+                observed_at=AT,
+            )
+
+    def test_operator_only_dual_clearance_settles_unconfirmed_media_checkpoint(self) -> None:
+        # Confirmed core Create + unresolved media is NOT automatically
+        # settled. Only actual independent operator clearances in both
+        # persistent authorities can permit a future Create after restore.
+        self._start(action="create_media")
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        receipt, checkpoint = self._create_checkpoint(
+            reference="write-api:" + KEY,
+        )
+        final = replace(
+            receipt, media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        store.append_create_operation_receipt(final)
+        from mark_api.write_api import _create_receipt_to_dict
+
+        # This is the *actual* canonical Write API wire projection, not a
+        # abbreviated synthetic subset admitted only for test convenience.
+        response = _canonical({
+            "idempotency_key": KEY,
+            "platform_retry_authorized": False,
+            "media_persistence_confirmed": False,
+            "media_post_read_status": "unknown",
+            "operation_receipt": _create_receipt_to_dict(final),
+        }).decode("ascii")
+        store.complete_write_api_request(
+            idempotency_key=KEY, request_sha256=SHA,
+            claim_owner="pair-owner", response_status=202,
+            response_json=response, completed_at=AT,
+        )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [checkpoint],
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new-after-media", claim_owner="another",
+        ))
+        with self.assertRaises(ValueError):
+            store.record_write_recovery_clearance(
+                idempotency_key=KEY, request_sha256=SHA,
+                verification_kind="media_submit_reconciled",
+                evidence_reference="synthetic:executor-only",
+                observed_at=AT,
+            )
+        store.record_write_recovery_clearance(
+            idempotency_key=KEY, request_sha256=SHA,
+            verification_kind="operator_verified_postread",
+            evidence_reference="synthetic:independent-verified-media-outcome",
+            observed_at=AT,
+        )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+        with FenceLedger(self.ledger) as witness:
+            witness.operator_clearance(
+                key=KEY, sha=SHA, evidence="synthetic:independent-operator",
+            )
+        inspected = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(inspected["fences"]["ambiguous_creates"], [])
+        self.assertEqual(inspected["fences"]["witness_unresolved"], [])
+        self.assertTrue(inspected["fences"]["sqlite_unverified_replay"])
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="new-after-media", claim_owner="another",
+        ))
+
+    def test_none_authorization_does_not_settle_mismatched_final_identity(self) -> None:
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        original, _ = self._create_checkpoint()
+        unbound = replace(
+            original, authorization_by=None, authorization_reference=None,
+        )
+        for field, value in (
+            ("authorization_by", "unrelated-operator"),
+            ("authorization_reference", "write-api:unrelated-key"),
+        ):
+            with self.subTest(field=field):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute("DELETE FROM create_operation_checkpoints")
+                    db.execute("DELETE FROM create_operation_receipts")
+                store.append_create_operation_checkpoint(unbound)
+                mismatched = replace(
+                    unbound, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+                    media_persistence_confirmed=True, **{field: value},
+                )
+                store.append_create_operation_receipt(mismatched)
+                self.assertTrue(store.create_recovery_pending(
+                    exclude_idempotency_key="unrelated-new-create",
+                    claim_owner="separate-owner",
+                ))
+                self.assertEqual(
+                    len(inspect_offline_pair(
+                        self.sqlite, self.ledger,
+                    )["fences"]["ambiguous_creates"]),
+                    1,
+                )
+
+    def test_matching_none_authorization_checkpoint_is_settled(self) -> None:
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        bound, _ = self._create_checkpoint()
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute("DELETE FROM create_operation_checkpoints")
+        unbound = replace(
+            bound, authorization_by=None, authorization_reference=None,
+        )
+        store.append_create_operation_checkpoint(unbound)
+        store.append_create_operation_receipt(replace(
+            unbound, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        ))
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="new-key", claim_owner="other-owner",
+        ))
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [],
+        )
+
     def test_confirmed_create_checkpoint_without_final_receipt_is_unresolved(self) -> None:
         receipt, checkpoint = self._create_checkpoint()
         inspected = inspect_offline_pair(self.sqlite, self.ledger)
@@ -1457,6 +2042,334 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 self.sqlite, self.ledger, self.manifest,
                 expected_manifest_sha256=externally_anchored,
             )
+
+    def test_forged_final_receipt_completed_before_start_cannot_settle_checkpoint(self) -> None:
+        # A valid-looking final receipt matching the checkpoint's selected
+        # SQL fields must still satisfy CreateOperationReceipt.__post_init__.
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_receipts SET completed_at=? "
+                "WHERE id=(SELECT MAX(id) FROM create_operation_receipts)",
+                ("2026-10-13T15:59:59+00:00",),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_forged_final_receipt_empty_required_status_cannot_settle_checkpoint(self) -> None:
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(self.sqlite, create_if_missing=False).append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_receipts SET confirmation_pre_read_status='' "
+                "WHERE id=(SELECT MAX(id) FROM create_operation_receipts)"
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_final_media_time_preceding_checkpoint_cannot_close_fence(self) -> None:
+        # The real runtime builds final via max(checkpoint.completed_at,
+        # clock()), so a separately valid earlier final is NOT a continuation.
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt,
+            completed_at=AT.replace(second=2),
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_checkpoints SET completed_at=? WHERE id=?",
+                (AT.replace(second=3).isoformat(), checkpoint),
+            )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(
+            observed["fences"]["ambiguous_creates"], [checkpoint],
+        )
+
+    def test_final_media_time_after_offset_checkpoint_remains_settled(self) -> None:
+        # Compare instants, not ISO strings: +02:00 and +00:00 can represent
+        # the same operation and the final still chronologically follows.
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt,
+            completed_at=AT.replace(second=3),
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_checkpoints SET completed_at=? WHERE id=?",
+                ("2026-10-13T18:00:02+02:00", checkpoint),
+            )
+        observed = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(observed["fences"]["ambiguous_creates"], [])
+
+    def test_mismatched_immutable_checkpoint_final_receipt_fields_remain_fenced(self) -> None:
+        # Independently valid receipts may still be unrelated to the durable
+        # before-media checkpoint: only exact immutable fields can settle it.
+        # The genuine media runtime derives final from the same original
+        # CreateOperationReceipt; status/error fields cannot change.
+        changes = (
+            ("pre_read_status", "success_nonempty"),
+            ("confirmation_pre_read_status", "success_nonempty"),
+            ("post_read_status", "success_empty"),
+            ("confirmation_post_read_status", "success_empty"),
+            ("content_post_read_status", "success_empty"),
+            ("writer_error", "synthetic:altered-core-error"),
+        )
+        for field_name, changed_value in changes:
+            with self.subTest(field=field_name):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute("DELETE FROM create_operation_checkpoints")
+                    db.execute("DELETE FROM create_operation_receipts")
+                receipt, checkpoint = self._create_checkpoint()
+                final = replace(
+                    receipt,
+                    media_post_read_status=MediaPostReadStatus.CONFIRMED,
+                    media_persistence_confirmed=True,
+                )
+                SnapshotStore(
+                    self.sqlite, create_if_missing=False,
+                ).append_create_operation_receipt(final)
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {field_name}=?",
+                        (changed_value,),
+                    )
+                inspected = inspect_offline_pair(self.sqlite, self.ledger)
+                self.assertEqual(
+                    inspected["fences"]["ambiguous_creates"], [checkpoint],
+                )
+                self.assertTrue(
+                    SnapshotStore(self.sqlite, create_if_missing=False)
+                    .create_recovery_pending(
+                        exclude_idempotency_key="new:postrestore",
+                        claim_owner="new-owner",
+                    )
+                )
+
+    def test_runtime_checkpoint_fence_matches_offline_immutable_fields(self) -> None:
+        # RED: an offline-open confirmed checkpoint must also block a new
+        # Create in the restored runtime, including a forged final receipt.
+        receipt, checkpoint = self._create_checkpoint()
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [checkpoint],
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new:postrestore",
+            claim_owner="new-owner",
+        ))
+        final = replace(
+            receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        store.append_create_operation_receipt(final)
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [],
+        )
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="new:postrestore",
+            claim_owner="new-owner",
+        ))
+        changes = (
+            ("pre_read_status", "success_nonempty"),
+            ("confirmation_pre_read_status", "success_nonempty"),
+            ("post_read_status", "success_empty"),
+            ("confirmation_post_read_status", "success_empty"),
+            ("content_post_read_status", "success_empty"),
+            ("writer_error", "synthetic:altered-core-error"),
+        )
+        for field_name, changed_value in changes:
+            with self.subTest(field=field_name):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {field_name}=?",
+                        (changed_value,),
+                    )
+                self.assertEqual(
+                    inspect_offline_pair(self.sqlite, self.ledger)
+                    ["fences"]["ambiguous_creates"], [checkpoint],
+                )
+                self.assertTrue(store.create_recovery_pending(
+                    exclude_idempotency_key="new:postrestore",
+                    claim_owner="new-owner",
+                ))
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_receipts SET {field_name}=?",
+                        (getattr(receipt, field_name),),
+                    )
+                self.assertFalse(store.create_recovery_pending(
+                    exclude_idempotency_key="new:postrestore",
+                    claim_owner="new-owner",
+                ))
+
+    def test_runtime_checkpoint_microsecond_inversion_remains_fenced(self) -> None:
+        receipt, checkpoint = self._create_checkpoint()
+        final = replace(
+            receipt, completed_at=AT.replace(microsecond=1),
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.append_create_operation_receipt(final)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_checkpoints SET completed_at=? WHERE id=?",
+                (AT.replace(microsecond=2).isoformat(), checkpoint),
+            )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [checkpoint],
+        )
+        self.assertTrue(store.create_recovery_pending(
+            exclude_idempotency_key="new:postrestore", claim_owner="new-owner",
+        ))
+        # The same exact instant with another timezone offset remains valid.
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE create_operation_checkpoints SET completed_at=? WHERE id=?",
+                ("2026-10-13T18:00:00.000001+02:00", checkpoint),
+            )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"]["ambiguous_creates"],
+            [],
+        )
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="new:postrestore", claim_owner="new-owner",
+        ))
+
+    def test_runtime_malformed_completed_response_is_fail_closed(self) -> None:
+        key = "complete:non-json-recovery"
+        self._nonmedia_crash_without_witness_completion(key=key)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertFalse(store.create_recovery_pending(
+            exclude_idempotency_key="another", claim_owner="new-owner",
+        ))
+        for raw in ("not-json", "null", "[]", "42", '"text"'):
+            with self.subTest(raw=raw):
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        "UPDATE write_api_requests SET response_json=? "
+                        "WHERE idempotency_key=?",
+                        (raw, key),
+                    )
+                # Valid JSON primitives are not valid owner-produced HTTP
+                # envelopes either, so none may silently release a fence.
+                self.assertTrue(store.create_recovery_pending(
+                    exclude_idempotency_key="another", claim_owner="new-owner",
+                ))
+
+    def test_ambiguous_final_create_may_contain_legitimate_unbound_snapshot(self) -> None:
+        # A domain-valid ambiguous Create can retain an observation without
+        # claiming a confirmed created_ad_id; it remains a recovery fence.
+        observed = AdSnapshot(
+            ad_id="201", observed_at=AT, source="management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Unconfirmed synthetic item",
+        )
+        receipt = CreateOperationReceipt(
+            operation="create", started_at=AT, completed_at=AT,
+            outcome=OperationOutcome.AMBIGUOUS,
+            pre_read_status="success_empty",
+            confirmation_pre_read_status="success_empty",
+            post_read_status="unknown",
+            confirmation_post_read_status="unknown",
+            content_post_read_status="unknown",
+            writer_invoked=True, created_ad_id=None,
+            authorization_by="offline-test-owner",
+            authorization_reference="write-api:ambiguous-observation",
+            post_snapshot=observed,
+            media_post_read_status=MediaPostReadStatus.UNKNOWN,
+            media_persistence_confirmed=False,
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).append_create_operation_receipt(receipt)
+        observed_pair = inspect_offline_pair(self.sqlite, self.ledger)
+        self.assertEqual(len(observed_pair["fences"]["ambiguous_final_creates"]), 1)
+
+    def test_truncated_matching_snapshot_payloads_cannot_settle_checkpoint(self) -> None:
+        # RED: matching but truncated snapshot JSON is not owner-produced
+        # AdSnapshot evidence. The original checkpoint must never disappear.
+        receipt, _ = self._create_checkpoint()
+        final = replace(
+            receipt,
+            media_post_read_status=MediaPostReadStatus.CONFIRMED,
+            media_persistence_confirmed=True,
+        )
+        SnapshotStore(
+            self.sqlite, create_if_missing=False,
+        ).append_create_operation_receipt(final)
+        truncated = '{"ad_id": "201"}'
+        with sqlite3.connect(self.sqlite) as db:
+            for table in (
+                "create_operation_checkpoints", "create_operation_receipts",
+            ):
+                db.execute(
+                    f"UPDATE {table} SET post_snapshot_json=?, "
+                    "confirmation_post_snapshot_json=?, "
+                    "content_post_snapshot_json=?",
+                    (truncated, truncated, truncated),
+                )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_forged_checkpoint_domain_contract_cannot_be_settled_by_valid_final(self) -> None:
+        # Even the EXACT matching final receipt cannot hide a forged durable
+        # checkpoint whose values append_create_operation_checkpoint could
+        # never have accepted. Every subcase recreates a trusted source pair.
+        bad_rows = (
+            ("outcome", "ambiguous"),
+            ("writer_invoked", 0),
+            ("completed_at", "not-an-iso-date"),
+            ("completed_at", "2026-10-13T15:59:59+00:00"),
+            ("pre_read_status", ""),
+            ("confirmation_pre_read_status", ""),
+            ("content_post_read_status", ""),
+            ("authorization_by", ""),
+            ("post_snapshot_json", '{"ad_id":"unrelated"}'),
+        )
+        for field_name, bad_value in bad_rows:
+            with self.subTest(field=field_name, bad=bad_value):
+                # Recreate the pair for each input to avoid hidden dependencies.
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute("DELETE FROM create_operation_checkpoints")
+                    db.execute("DELETE FROM create_operation_receipts")
+                receipt, _ = self._create_checkpoint()
+                final = replace(
+                    receipt, media_post_read_status=MediaPostReadStatus.CONFIRMED,
+                    media_persistence_confirmed=True,
+                )
+                SnapshotStore(
+                    self.sqlite, create_if_missing=False,
+                ).append_create_operation_receipt(final)
+                with sqlite3.connect(self.sqlite) as db:
+                    db.execute(
+                        f"UPDATE create_operation_checkpoints SET {field_name}=?",
+                        (bad_value,),
+                    )
+                with self.assertRaises(PairPreflightError):
+                    inspect_offline_pair(self.sqlite, self.ledger)
 
     def test_other_receipt_cannot_settle_a_crashed_checkpoint(self) -> None:
         receipt, checkpoint = self._create_checkpoint()
@@ -1662,6 +2575,85 @@ class PairedRestorePreflightTests(unittest.TestCase):
                     [[scope, resource, "pending:valid-route", acknowledged]],
                 )
 
+    def test_dashboard_pending_escaped_page_overflow_is_not_restorable(self) -> None:
+        # Inner JSON is below 32 KiB, while double-escaping in the actual
+        # StorageOwner dashboard_pending_page response exceeds its IPC frame.
+        payload = json.dumps(
+            {"title": '"' * 15000}, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"),
+        )
+        self.assertLess(len(payload.encode("utf-8")), 32 * 1024)
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO dashboard_pending_writes "
+                "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                ("create", "create", "pending:escaped-overflow", "POST",
+                 "/api/write/ads", payload, None, 0),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_dashboard_pending_page_exact_escaped_frame_edge(self) -> None:
+        # A heavily escaped inner intent still has a valid final page byte.
+        # Do not reject it early or admit the next-byte overflow.
+        from mark_api.storage_owner import (
+            _pending_as_json, _pending_from_json, _reply_frame_fits,
+        )
+
+        key = "pending:exact-escaped-frame"
+        def payload(length: int) -> str:
+            return json.dumps(
+                {"padding": "x" * length, "title": '"' * 7000},
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            )
+
+        def envelope(length: int) -> dict[str, object]:
+            pending = _pending_from_json({
+                "scope": "create", "resource_key": "create",
+                "idempotency_key": key, "method": "POST",
+                "path": "/api/write/ads", "payload_json": payload(length),
+                "ad_id": None, "acknowledged": False,
+            })
+            return {"rows": [_pending_as_json(pending)], "more": False}
+
+        lower, upper = 0, 30000
+        while lower < upper:
+            candidate = (lower + upper + 1) // 2
+            if _reply_frame_fits(envelope(candidate)):
+                lower = candidate
+            else:
+                upper = candidate - 1
+        boundary = lower
+        self.assertTrue(_reply_frame_fits(envelope(boundary)))
+        self.assertFalse(_reply_frame_fits(envelope(boundary + 1)))
+        self.assertEqual(
+            len(_canonical({"ok": True, "result": envelope(boundary)}) + b"\n"),
+            32 * 1024 + 1,
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "INSERT INTO dashboard_pending_writes "
+                "(scope,resource_key,idempotency_key,method,path,payload_json,"
+                "ad_id,acknowledged) VALUES (?,?,?,?,?,?,?,?)",
+                ("create", "create", key, "POST", "/api/write/ads",
+                 payload(boundary), None, 0),
+            )
+        self.assertEqual(
+            inspect_offline_pair(self.sqlite, self.ledger)["fences"][
+                "dashboard_pending"
+            ],
+            [["create", "create", key, 0]],
+        )
+        with sqlite3.connect(self.sqlite) as connection:
+            connection.execute(
+                "UPDATE dashboard_pending_writes SET payload_json=? "
+                "WHERE idempotency_key=?",
+                (payload(boundary + 1), key),
+            )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
     def test_dashboard_pending_key_is_validated_by_storage_owner_reader(self) -> None:
         with sqlite3.connect(self.sqlite) as connection:
             connection.execute(
@@ -1803,6 +2795,49 @@ class PairedRestorePreflightTests(unittest.TestCase):
                 "UPDATE write_api_requests SET execution_started_at=? "
                 "WHERE idempotency_key=?", ("2026-10-13T16:00:00", KEY),
             )
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_unstarted_ownerless_in_progress_claim_cannot_restore(self) -> None:
+        # A claim that never began must remain takeover/cancel-able.
+        # Ownerlessness is not a legitimate current-schema write path.
+        key = "unstarted:ownerless-open"
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertTrue(store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="first-runtime", requested_at=AT,
+        ).created)
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE write_api_requests SET claim_owner=NULL WHERE idempotency_key=?",
+                (key,),
+            )
+        self.assertFalse(store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="replacement-runtime", requested_at=AT,
+            allow_abandoned_takeover=True,
+        ).created)
+        with self.assertRaises(PairPreflightError):
+            inspect_offline_pair(self.sqlite, self.ledger)
+
+    def test_unstarted_ownerless_cancelled_claim_cannot_restore(self) -> None:
+        key = "unstarted:ownerless-cancelled"
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        self.assertTrue(store.claim_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="first-runtime", requested_at=AT,
+        ).created)
+        store.cancel_unstarted_write_api_request(
+            idempotency_key=key, request_sha256=SHA,
+            claim_owner="first-runtime", cancelled_at=AT,
+        )
+        with sqlite3.connect(self.sqlite) as db:
+            db.execute(
+                "UPDATE write_api_requests SET claim_owner=NULL WHERE idempotency_key=?",
+                (key,),
+            )
+        # Exact 409 response alone is not sufficient: the storage owner's
+        # cancellation protocol could never have persisted a NULL owner.
         with self.assertRaises(PairPreflightError):
             inspect_offline_pair(self.sqlite, self.ledger)
 
