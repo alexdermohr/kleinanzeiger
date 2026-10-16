@@ -19,7 +19,7 @@ from typing import Iterator
 from .paired_backup_operator import (
     PairedBackupOperatorError, _ZERO, _check_generation_dir,
     _fsync_dir, _new_file, _private_root, _read_head,
-    _validate_anchored_history, reconcile_committed_inflight,
+    _validate_anchored_history, _reconcile_committed_inflight,
     seal_offline_pair,
 )
 from .paired_restore_preflight import (
@@ -566,7 +566,7 @@ class BackupIntentAuthority:
                         or inflight_info.st_nlink != 1
                     ):
                         raise BackupIntentError("crash marker is not a regular file")
-                    reconcile_committed_inflight(
+                    _reconcile_committed_inflight(
                         output, anchor,
                         expected_current_head_sha256=head_sha,
                         expected_generation=gen,

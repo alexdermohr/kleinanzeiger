@@ -286,7 +286,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_reconcile_refuses_head_changed_after_last_pair_verification(self) -> None:
         from mark_api import paired_backup_operator as operator
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         original_verify = operator.verify_offline_pair
@@ -339,7 +339,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_reconcile_keeps_intent_after_verified_image_is_removed(self) -> None:
         from mark_api import paired_backup_operator as operator
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         current = self._crash_after_durable_head()
         original_verify = operator.verify_offline_pair
@@ -366,7 +366,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_reconcile_keeps_intent_after_verified_image_is_mutated(self) -> None:
         from mark_api import paired_backup_operator as operator
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         current = self._crash_after_durable_head()
         original_verify = operator.verify_offline_pair
@@ -625,7 +625,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
         return self._hash(self.anchor / "latest.json")
 
     def test_reconcile_cannot_attest_forged_pair_from_self_hashed_head(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
         from mark_api.paired_restore_preflight import _canonical, inspect_offline_pair
 
         attested_sqlite = self._hash(self.sqlite)
@@ -670,7 +670,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
         self.assertTrue((self.anchor / ".inflight").is_file())
 
     def test_reconcile_cannot_reclear_previously_acknowledged_head(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         previous = self._seal()
         marker = self.anchor / ".inflight"
@@ -691,7 +691,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
         # RED: without an explicit pinned-HEAD recovery primitive a
         # successful HEAD followed by a crashed sentinel unlink deadlocks
         # all future generations. Never remove an incomplete generation.
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         with self.assertRaises(PairedBackupOperatorError):
@@ -715,7 +715,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_reconcile_rejects_pre_head_crash_and_does_not_skip_generation(self) -> None:
         from mark_api import paired_backup_operator as operator
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         first = self._seal()
         original = operator._new_file
@@ -748,7 +748,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
             self._seal(generation="3" * 32, previous=first["head_sha256"])
 
     def test_reconcile_rejects_wrong_external_head_and_tampered_pair(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         with self.assertRaises(PairedBackupOperatorError):
@@ -774,7 +774,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
         self.assertTrue((self.anchor / ".inflight").is_file())
 
     def test_reconcile_refuses_unexpected_staging_artifacts(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         next_head = self.anchor / (".next-" + SECOND)
@@ -804,7 +804,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
         self.assertTrue((self.anchor / ".inflight").is_file())
 
     def test_reconcile_refuses_symlinked_or_missing_intent_marker(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         marker = self.anchor / ".inflight"
@@ -833,7 +833,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
             )
 
     def test_reconcile_does_not_claim_success_without_crashed_intent(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         first = self._seal()
         with self.assertRaises(PairedBackupOperatorError):
@@ -847,7 +847,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
             )
 
     def test_reconcile_refuses_orphaned_published_pair_after_durable_head(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         orphan = self.output / SECOND
@@ -865,7 +865,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_reconcile_refuses_damaged_predecessor_in_durable_head_chain(self) -> None:
         from mark_api import paired_backup_operator as operator
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         first = self._seal()
         original_unlink = operator.os.unlink
@@ -895,7 +895,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_reconcile_rejects_corrupted_predecessor_pair_image(self) -> None:
         from mark_api import paired_backup_operator as operator
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         first = self._seal()
         original_unlink = operator.os.unlink
@@ -925,7 +925,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
         self.assertTrue((self.anchor / ".inflight").is_file())
 
     def test_reconcile_rejects_wrong_inflight_generation_bytes(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         (self.anchor / ".inflight").write_bytes(SECOND.encode("ascii"))
@@ -942,7 +942,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_reconcile_respects_concurrent_authority_lock(self) -> None:
         import fcntl
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         with (self.anchor / ".authority.lock").open("rb") as guard:
@@ -962,7 +962,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
         self.assertTrue((self.anchor / ".inflight").is_file())
 
     def test_reconcile_must_not_recreate_missing_operator_authority_lock(self) -> None:
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         digest = self._crash_after_durable_head()
         lock_path = self.anchor / ".authority.lock"
@@ -981,7 +981,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_post_head_pre_fsync_crash_keeps_intent_if_reconcile_fsync_fails(self) -> None:
         from mark_api import paired_backup_operator as operator
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         original_fsync = operator._fsync_dir
 
@@ -1040,7 +1040,7 @@ class PairedBackupOperatorTests(unittest.TestCase):
 
     def test_reconcile_success_keeps_pending_write_fences(self) -> None:
         from mark_api import paired_backup_operator as operator
-        from mark_api.paired_backup_operator import reconcile_committed_inflight
+        from mark_api.paired_backup_operator import _reconcile_committed_inflight as reconcile_committed_inflight
 
         first = self._seal()
         self._start_write()
