@@ -19,6 +19,8 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
 from uuid import uuid4
 from unittest.mock import patch
@@ -34,10 +36,11 @@ if os.environ.get("MARK_REQUIRE_RAW_SEALER_UID") == "1" and not IMAGE_OK:
     raise ValueError("required raw-sealer UID test has no pinned local image")
 
 
-def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
+def _docker(*args: str, allow_failure: bool = False,
+            timeout_seconds: float = 90) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         ["/usr/bin/docker", *args], capture_output=True, text=True,
-        check=False, timeout=90,
+        check=False, timeout=timeout_seconds,
     )
     if result.returncode and not allow_failure:
         raise AssertionError("isolated Docker operation failed: " + result.stderr[-900:])
@@ -265,6 +268,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
         }
         created: list[str] = []
         named_containers: list[str] = []
+        # A CLI timeout/error does not terminate an in-flight daemon request.
+        # Never infer terminality solely from later inspection 404 replies.
+        unsettled: set[tuple[str, str]] = set()
         with tempfile.TemporaryDirectory(prefix="mark-rawseal-real-uid-") as tmp:
             root = Path(tmp)
             head = subprocess.run(
@@ -318,6 +324,7 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     'synthetic container name not proven absent or Docker unavailable',
                 )
                 named_containers.append(name)  # before a potentially uncertain Docker run
+                unsettled.add(("container", name))
                 args = [
                     "run", "--rm", "--pull", "never", "--name", name,
                     "--label", label_value,
@@ -330,10 +337,14 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 if evidence:
                     args.extend(item for k, v in evidence.items()
                                 for item in ("-e", k + "=" + v))
-                return _docker(
+                completed = _docker(
                     *args, "--entrypoint", PYTHON, *mounts,
                     IMAGE, "-B", "-c", script,
                 )
+                if completed.returncode:
+                    raise AssertionError("docker run did not complete successfully")
+                unsettled.remove(("container", name))
+                return completed
 
             try:
                 self.assertEqual(
@@ -355,7 +366,11 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     # Register the unique name BEFORE Docker starts. A daemon
                     # may have created it even when the CLI later times out.
                     created.append(volume)
-                    _docker("volume", "create", "--label", label_value, volume)
+                    unsettled.add(("volume", volume))
+                    complete = _docker("volume", "create", "--label", label_value, volume)
+                    if complete.returncode:
+                        raise AssertionError("docker volume create did not complete")
+                    unsettled.remove(("volume", volume))
                     driver = _docker(
                         "volume", "inspect", "--format",
                         '{{.Driver}} {{json .Options}} '
@@ -373,7 +388,8 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     'synthetic seed container not proven absent or Docker unavailable',
                 )
                 named_containers.append(seed_name)  # before uncertain run
-                _docker(
+                unsettled.add(("container", seed_name))
+                seeded = _docker(
                     "run", "--rm", "--pull", "never", "--name", seed_name,
                     "--label", label_value,
                     "--network", "none", "--read-only", "--user", "0:0",
@@ -386,6 +402,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     "chown 50043:50043 /source /output /anchor /intent; "
                     "chown 50044:50044 /control; "
                 )
+                if seeded.returncode:
+                    raise AssertionError("seed docker run did not complete")
+                unsettled.remove(("container", seed_name))
                 trusted = run_python("seal", 50043, _TRUSTED_SEAL)
                 matched = re.search(
                     r"^PINNED_TRUSTED_SEAL=(\{[^\n]+\})$",
@@ -436,59 +455,74 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
             finally:
                 cleanup_errors: list[str] = []
 
-                def was_created_by_this_test(kind: str, name: str) -> bool:
-                    # Never remove a pre-existing/foreign resource after a
-                    # create/launch timeout, collision or daemon error.
+                def reconcile(kind: str, name: str) -> None:
+                    # Only exact names previously checked absent, plus matching
+                    # run labels, authorize removal. No wildcard or foreign rm.
                     expr = ('{{index .Config.Labels "mark.a6.rawseal.run"}}'
                             if kind == "container"
                             else '{{index .Labels "mark.a6.rawseal.run"}}')
-                    observed = _docker(kind, "inspect", "--format", expr,
-                                       name, allow_failure=True)
-                    if observed.returncode:
-                        if _docker_reports_missing(observed, kind, name):
-                            return False  # no creation or --rm already ran
-                        cleanup_errors.append(
-                            name + ": ownership inspect failed, not 404: " +
-                            (observed.stdout + observed.stderr)[-180:]
-                        )
-                        return False
-                    if observed.stdout.strip() != suffix:
-                        cleanup_errors.append(
-                            name + ": ownership label mismatch; refuse cleanup"
-                        )
-                        return False
-                    return True
-
-                def confirm_removed(kind: str, name: str) -> None:
-                    # A --rm container can disappear between inspect and rm.
-                    # Re-inspection accepts only an exact daemon not-found.
-                    final = _docker(kind, "inspect", name, allow_failure=True)
-                    if not _docker_reports_missing(final, kind, name):
-                        cleanup_errors.append(
-                            name + ": not proven removed: " +
-                            (final.stdout + final.stderr)[-180:]
-                        )
-
-                for name in reversed(named_containers):
                     try:
-                        if not was_created_by_this_test("container", name):
-                            continue
-                        _docker("rm", "-f", name, allow_failure=True)
-                        confirm_removed("container", name)
+                        observed = _docker(kind, "inspect", "--format", expr,
+                                           name, allow_failure=True,
+                                           timeout_seconds=5)
+                        if observed.returncode:
+                            if _docker_reports_missing(observed, kind, name):
+                                return  # absence NOW; not daemon-request completion
+                            cleanup_errors.append(
+                                name + ": ownership inspect failed, not 404: " +
+                                (observed.stdout + observed.stderr)[-180:]
+                            )
+                            return
+                        if observed.stdout.strip() != suffix:
+                            cleanup_errors.append(
+                                name + ": ownership label mismatch; refuse cleanup"
+                            )
+                            return
+                        if kind == "container":
+                            # A --rm container may disappear after inspect.
+                            _docker("rm", "-f", name, allow_failure=True,
+                                    timeout_seconds=5)
+                        else:
+                            _docker("volume", "rm", name, allow_failure=True,
+                                    timeout_seconds=5)
+                        final = _docker(kind, "inspect", name,
+                                        allow_failure=True, timeout_seconds=5)
+                        if not _docker_reports_missing(final, kind, name):
+                            cleanup_errors.append(
+                                name + ": not proven absent after rm: " +
+                                (final.stdout + final.stderr)[-180:]
+                            )
                     except Exception as exc:
                         cleanup_errors.append(name + ": " + repr(exc))
-                for volume in reversed(created):
-                    try:
-                        if not was_created_by_this_test("volume", volume):
-                            continue
-                        _docker("volume", "rm", volume, allow_failure=True)
-                        confirm_removed("volume", volume)
-                    except Exception as exc:
-                        cleanup_errors.append(volume + ": " + repr(exc))
-                self.assertFalse(cleanup_errors,
-                                 "unconfirmed cleanup of synthetic Docker resources: " +
-                                 repr(cleanup_errors))
 
+                for name in reversed(named_containers):
+                    reconcile("container", name)
+                for name in reversed(created):
+                    reconcile("volume", name)
+
+                if unsettled:
+                    # A bounded best-effort sweep can catch delayed creation,
+                    # but no number of 404s certifies that the original daemon
+                    # request has finished. Keep the result permanently NO-GO.
+                    deadline = time.monotonic() + 1.5
+                    while time.monotonic() < deadline:
+                        for kind, name in sorted(unsettled):
+                            reconcile(kind, name)
+                        remaining = deadline - time.monotonic()
+                        if remaining > 0:
+                            time.sleep(min(0.12, remaining))
+                    for kind, name in sorted(unsettled):
+                        cleanup_errors.append(
+                            kind + " " + name +
+                            ": unresolved Docker create/run after unclear CLI "
+                            "outcome; daemon completion not proven; even "
+                            "repeated 404 is not final cleanup evidence"
+                        )
+                self.assertFalse(
+                    cleanup_errors,
+                    "unconfirmed cleanup of synthetic Docker resources: " +
+                    repr(cleanup_errors),
+                )
 
     def test_created_volume_is_cleaned_when_docker_client_times_out(self) -> None:
         # A CLI TimeoutExpired does not mean the daemon failed to create the
@@ -519,9 +553,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 nested.run(result)
             self.assertTrue(injected)
             self.assertIsNotNone(created)
-            self.assertEqual(len(result.errors), 1, result.errors)
-            self.assertFalse(result.failures, result.failures)
-            self.assertIn("TimeoutExpired", result.errors[0][1])
+            self.assertFalse(result.errors, result.errors)
+            self.assertEqual(len(result.failures), 1, result.failures)
+            self.assertIn("unresolved Docker create/run", result.failures[0][1])
             absent = original("volume", "inspect", created,
                               allow_failure=True)
             self.assertTrue(
@@ -546,6 +580,166 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     original("volume", "rm", created)
                     self.fail("orphaned test volume required emergency cleanup")
 
+
+    def test_late_docker_volume_create_after_exact_404_stays_no_go(self) -> None:
+        # Real Docker creates the volume only AFTER cleanup's first 404.
+        # This was the independently reproduced P2 at the old PR HEAD.
+        original = _docker
+        release = threading.Event()
+        state: dict[str, object] = {
+            "name": None, "worker": None, "result": None, "first_404": False,
+        }
+
+        def delayed_create(args: tuple[str, ...]) -> None:
+            if not release.wait(30):
+                state["result"] = "daemon simulation did not receive release"
+                return
+            time.sleep(0.08)  # definitely after the first negative inspection
+            try:
+                state["result"] = original(*args, timeout_seconds=25)
+            except Exception as exc:
+                state["result"] = exc
+
+        def late_daemon(*args: str, **kwargs: object
+                        ) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ("volume", "create") and state["name"] is None:
+                name = args[-1]
+                self.assertRegex(name, r"^mark-rawseal-[0-9a-f]{12}-source$")
+                state["name"] = name
+                worker = threading.Thread(target=delayed_create, args=(args,),
+                                          daemon=True)
+                state["worker"] = worker
+                worker.start()
+                raise subprocess.TimeoutExpired(
+                    cmd=["/usr/bin/docker", *args], timeout=90,
+                )
+            if (state["name"] is not None and
+                    args[:2] == ("volume", "inspect") and
+                    args[-1] == state["name"] and "--format" in args and
+                    not state["first_404"]):
+                prior = original(*args, **kwargs)
+                self.assertTrue(
+                    _docker_reports_missing(prior, "volume", str(state["name"])),
+                )
+                state["first_404"] = True
+                release.set()
+                return prior
+            return original(*args, **kwargs)
+
+        leaked = False
+        try:
+            trial = type(self)(
+                "test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer",
+            )
+            result = unittest.TestResult()
+            with patch(__name__ + "._docker", side_effect=late_daemon):
+                trial.run(result)
+            self.assertTrue(state["first_404"])
+            self.assertFalse(result.errors, result.errors)
+            self.assertEqual(len(result.failures), 1, result.failures)
+            self.assertIn("unresolved Docker create/run", result.failures[0][1])
+            release.set()
+            worker = state["worker"]
+            self.assertIsNotNone(worker)
+            worker.join(timeout=35)
+            self.assertFalse(worker.is_alive(), "late Docker worker is stuck")
+            self.assertIsInstance(state["result"], subprocess.CompletedProcess)
+            self.assertEqual(state["result"].returncode, 0)
+            name = str(state["name"])
+            final = original("volume", "inspect", name, allow_failure=True)
+            leaked = not _docker_reports_missing(final, "volume", name)
+            self.assertFalse(leaked, "late volume not removed by bounded recheck")
+        finally:
+            # Emergency cleanup is only permitted for our exact label.
+            release.set()
+            worker = state["worker"]
+            if isinstance(worker, threading.Thread):
+                worker.join(timeout=35)
+            if state["name"] is not None:
+                name = str(state["name"])
+                owned = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    name, allow_failure=True,
+                )
+                if owned.returncode == 0:
+                    self.assertEqual(owned.stdout.strip(), name.split("-")[2])
+                    original("volume", "rm", name)
+                    leaked = True
+                else:
+                    self.assertTrue(
+                        _docker_reports_missing(owned, "volume", name),
+                        "cannot establish late test-volume identity",
+                    )
+                absent = original("volume", "inspect", name, allow_failure=True)
+                self.assertTrue(_docker_reports_missing(absent, "volume", name))
+        self.assertFalse(leaked, "emergency cleanup had to remove late volume")
+        print("P2_GREEN_LATE_CREATE_NO_FALSE_CLEAN_AND_VOLUME_ABSENT", flush=True)
+
+    def test_failed_create_without_volume_still_requires_completion_proof(self) -> None:
+        original = _docker
+        state: dict[str, str] = {}
+
+        def rejected_create(*args: str, **kwargs: object
+                            ) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ("volume", "create"):
+                state["name"] = args[-1]
+                raise OSError("injected ambiguous Docker create rejection")
+            return original(*args, **kwargs)
+
+        trial = type(self)(
+            "test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer",
+        )
+        result = unittest.TestResult()
+        with patch(__name__ + "._docker", side_effect=rejected_create):
+            trial.run(result)
+        self.assertFalse(result.errors, result.errors)
+        self.assertEqual(len(result.failures), 1, result.failures)
+        self.assertIn("unresolved Docker create/run", result.failures[0][1])
+        self.assertIn("name", state)
+        absent = original("volume", "inspect", state["name"],
+                          allow_failure=True)
+        self.assertTrue(_docker_reports_missing(absent, "volume", state["name"]))
+
+    def test_foreign_label_is_never_deleted_after_uncertain_create(self) -> None:
+        original = _docker
+        state: dict[str, object] = {"name": None, "removed": False}
+
+        def forged_foreign(*args: str, **kwargs: object
+                           ) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ("volume", "create"):
+                state["name"] = args[-1]
+                raise subprocess.TimeoutExpired(
+                    cmd=["/usr/bin/docker", *args], timeout=90,
+                )
+            if (state["name"] and args[:2] == ("volume", "inspect") and
+                    args[-1] == state["name"] and "--format" in args):
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0,
+                    stdout="another-owner\n", stderr="",
+                )
+            if args[:2] == ("volume", "rm") and args[-1] == state["name"]:
+                state["removed"] = True
+                raise AssertionError("test attempted to remove foreign volume")
+            return original(*args, **kwargs)
+
+        trial = type(self)(
+            "test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer",
+        )
+        result = unittest.TestResult()
+        with patch(__name__ + "._docker", side_effect=forged_foreign):
+            trial.run(result)
+        self.assertEqual(len(result.failures), 1, result.failures)
+        self.assertFalse(result.errors, result.errors)
+        self.assertIn("ownership label mismatch", result.failures[0][1])
+        self.assertIn("unresolved Docker create/run", result.failures[0][1])
+        self.assertFalse(state["removed"])
+        self.assertIsNotNone(state["name"])
+        absent = original("volume", "inspect", str(state["name"]),
+                          allow_failure=True)
+        self.assertTrue(_docker_reports_missing(
+            absent, "volume", str(state["name"]),
+        ))
 
     def test_docker_missing_evidence_rejects_daemon_failures(self) -> None:
         name = "mark-rawseal-fake-test-resource"
