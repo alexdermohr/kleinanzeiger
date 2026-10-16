@@ -363,7 +363,7 @@ def _authority_lock(
 
 
 
-def reconcile_committed_inflight(
+def _reconcile_committed_inflight(
     output_root: Path,
     anchor_root: Path,
     *,
@@ -519,6 +519,31 @@ def reconcile_committed_inflight(
         raise PairedBackupOperatorError(
             "committed generation not reconciled; preserve recovery evidence"
         ) from exc
+
+
+def reconcile_committed_inflight(
+    output_root: Path,
+    anchor_root: Path,
+    *,
+    expected_current_head_sha256: str,
+    expected_generation: str,
+    expected_previous_head_sha256: str | None,
+    expected_sqlite_sha256: str,
+    expected_witness_sha256: str,
+) -> dict[str, object]:
+    """Reject direct marker clearance without a durable external one-shot intent.
+
+    The caller-controlled hashes and a reconstructed .inflight marker cannot
+    prove that an independent operator has an unconsumed committing record.
+    BackupIntentAuthority.acknowledge validates and consumes that record under
+    the protected operator lock before reporting success. The internal helper
+    above is only usable inside that locked, trusted operator transaction.
+    This does not replace the separate host UID/mount/FD security boundary.
+    """
+    raise PairedBackupOperatorError(
+        "direct reconciliation forbidden: use BackupIntentAuthority.acknowledge "
+        "with an unconsumed external committing intent"
+    )
 
 
 def seal_offline_pair(
