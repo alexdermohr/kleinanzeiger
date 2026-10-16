@@ -458,7 +458,7 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 def reconcile(kind: str, name: str) -> None:
                     # Only exact names previously checked absent, plus matching
                     # run labels, authorize removal. No wildcard or foreign rm.
-                    expr = ('{{index .Config.Labels "mark.a6.rawseal.run"}}'
+                    expr = ('{{.Id}} {{index .Config.Labels "mark.a6.rawseal.run"}}'
                             if kind == "container"
                             else '{{index .Labels "mark.a6.rawseal.run"}}')
                     try:
@@ -473,16 +473,26 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                                 (observed.stdout + observed.stderr)[-180:]
                             )
                             return
-                        if observed.stdout.strip() != suffix:
-                            cleanup_errors.append(
-                                name + ": ownership label mismatch; refuse cleanup"
-                            )
-                            return
                         if kind == "container":
-                            # A --rm container may disappear after inspect.
-                            _docker("rm", "-f", name, allow_failure=True,
+                            # The daemon returns a stable immutable container
+                            # ID and label together. Remove ONLY that ID: a
+                            # foreign same-name replacement must never be rm'd.
+                            identity = observed.stdout.strip().split()
+                            if (len(identity) != 2
+                                    or not re.fullmatch(r"[a-f0-9]{64}", identity[0])
+                                    or identity[1] != suffix):
+                                cleanup_errors.append(
+                                    name + ": ownership label mismatch; refuse cleanup"
+                                )
+                                return
+                            _docker("rm", "-f", identity[0], allow_failure=True,
                                     timeout_seconds=5)
                         else:
+                            if observed.stdout.strip() != suffix:
+                                cleanup_errors.append(
+                                    name + ": ownership label mismatch; refuse cleanup"
+                                )
+                                return
                             _docker("volume", "rm", name, allow_failure=True,
                                     timeout_seconds=5)
                         final = _docker(kind, "inspect", name,
@@ -492,6 +502,12 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                                 name + ": not proven absent after rm: " +
                                 (final.stdout + final.stderr)[-180:]
                             )
+                        elif kind == "container":
+                            # A positive ID+label inspection followed by its
+                            # terminal removal and negative name check proves
+                            # that this single daemon run reached creation.
+                            # A mere 404 without that positive control cannot.
+                            unsettled.discard(("container", name))
                     except Exception as exc:
                         cleanup_errors.append(name + ": " + repr(exc))
 
@@ -605,6 +621,8 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
         original = _docker
         volumes: list[str] = []
         delayed: tuple[str, ...] | None = None
+        replay_submitted = False
+        replay_completed = False
 
         def defer_seed_run(*args: str, **kwargs: object
                            ) -> subprocess.CompletedProcess[str]:
@@ -648,8 +666,10 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                                  "named mount ownership changed")
             # Now perform the delayed real Docker run against the retained,
             # already correctly labelled volumes.
+            replay_submitted = True
             completed = original(*delayed)
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            replay_completed = True
             for volume in volumes:
                 label = original(
                     "volume", "inspect", "--format",
@@ -659,6 +679,15 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 self.assertEqual(label.returncode, 0)
                 self.assertEqual(label.stdout.strip(), volume.split("-")[2])
         finally:
+            # If the replayed Docker CLI times out, it may create the named
+            # mounts after this process exits. A 404 or a retained owner label
+            # does not prove termination. Do not remove their names here.
+            if replay_submitted and not replay_completed:
+                self.fail(
+                    "unresolved replayed docker run; retain labelled named "
+                    "mount volumes until independent daemon completion proof: "
+                    + repr(volumes)
+                )
             # A real delayed run is executed only if the prior mounts stayed
             # owned. Perform guarded emergency cleanup *after* its completion.
             for volume in reversed(volumes):
@@ -680,6 +709,159 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                                  allow_failure=True)
                 self.assertTrue(_docker_reports_missing(final, "volume", volume))
         print("LATE_RUN_NAMED_MOUNTS_RETAINED_UNTIL_DAEMON_COMPLETED", flush=True)
+
+    def test_replayed_docker_run_timeout_retains_named_mounts(self) -> None:
+        # The replay CLI may itself lose an acknowledgement. Simulate that
+        # failure *without dispatching the Docker run*: the outer harness can
+        # then safely reclaim exactly labelled disposable volumes afterward.
+        real = _docker
+        created: list[str] = []
+
+        def lose_replay_ack(*args: str, **kwargs: object
+                            ) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ("volume", "create"):
+                result = real(*args, **kwargs)
+                created.append(args[-1])
+                return result
+            if args and args[0] == "run" and "--name" in args:
+                name = args[args.index("--name") + 1]
+                if name.endswith("-seed"):
+                    raise subprocess.TimeoutExpired(
+                        cmd=["/usr/bin/docker", *args], timeout=90,
+                    )
+            return real(*args, **kwargs)
+
+        try:
+            nested = type(self)(
+                "test_uncertain_late_run_must_retain_named_volumes",
+            )
+            result = unittest.TestResult()
+            with patch(__name__ + "._docker", side_effect=lose_replay_ack):
+                nested.run(result)
+            self.assertEqual(len(created), 5)
+            self.assertFalse(result.errors, result.errors)
+            self.assertEqual(len(result.failures), 1, result.failures)
+            self.assertIn(
+                "unresolved replayed docker run", result.failures[0][1],
+            )
+            for volume in created:
+                label = real(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
+                )
+                self.assertEqual(label.returncode, 0)
+                self.assertEqual(label.stdout.strip(), volume.split("-")[2])
+        finally:
+            # This simulation knows it did not submit the replay command.
+            # Such a guarantee is NOT available to the actual timed-out path.
+            for volume in reversed(created):
+                label = real(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
+                )
+                if label.returncode == 0:
+                    self.assertEqual(label.stdout.strip(), volume.split("-")[2])
+                    real("volume", "rm", volume)
+                else:
+                    self.assertTrue(
+                        _docker_reports_missing(label, "volume", volume),
+                    )
+                gone = real("volume", "inspect", volume, allow_failure=True)
+                self.assertTrue(
+                    _docker_reports_missing(gone, "volume", volume),
+                )
+        print("P2_GREEN_REPLAY_TIMEOUT_RETAINS_LABELLED_MOUNTS", flush=True)
+
+    def test_recognized_timeout_run_releases_owned_mounts(self) -> None:
+        # A timed-out run may have created its named, owned container.
+        # Exact positive label+terminal removal proves that *this* request
+        # produced the container, allowing the five mounts to be reclaimed.
+        original = _docker
+        volumes: list[str] = []
+        seed: str | None = None
+        intercepted = False
+
+        def create_then_lose_ack(*args: str, **kwargs: object
+                                 ) -> subprocess.CompletedProcess[str]:
+            nonlocal seed, intercepted
+            if args[:2] == ("volume", "create"):
+                response = original(*args, **kwargs)
+                volumes.append(args[-1])
+                return response
+            if args and args[0] == "run" and "--name" in args:
+                name = args[args.index("--name") + 1]
+                if name.endswith("-seed") and not intercepted:
+                    self.assertIsNone(seed)
+                    seed = name
+                    label_value = args[args.index("--label") + 1]
+                    created = original(
+                        "create", "--pull", "never", "--name", name,
+                        "--label", label_value, "--network", "none",
+                        "--read-only", "--cap-drop", "ALL",
+                        "--entrypoint", "/bin/sh", IMAGE, "-c", "true",
+                    )
+                    self.assertEqual(created.returncode, 0, created.stderr)
+                    intercepted = True
+                    raise subprocess.TimeoutExpired(
+                        cmd=["/usr/bin/docker", *args], timeout=90,
+                    )
+            return original(*args, **kwargs)
+
+        try:
+            trial = type(self)(
+                "test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer",
+            )
+            result = unittest.TestResult()
+            with patch(__name__ + "._docker", side_effect=create_then_lose_ack):
+                trial.run(result)
+            self.assertTrue(intercepted)
+            self.assertEqual(len(volumes), 5)
+            self.assertFalse(result.failures, result.failures)
+            self.assertEqual(len(result.errors), 1, result.errors)
+            self.assertIn("TimeoutExpired", result.errors[0][1])
+            for volume in volumes:
+                absent = original("volume", "inspect", volume,
+                                  allow_failure=True)
+                self.assertTrue(
+                    _docker_reports_missing(absent, "volume", volume),
+                    "owned mount was incorrectly retained despite positive "
+                    "run identity and terminal container removal",
+                )
+        finally:
+            # RED mutation must not leave any real synthetic Docker resource.
+            if seed:
+                probe = original(
+                    "container", "inspect", "--format",
+                    '{{index .Config.Labels "mark.a6.rawseal.run"}}',
+                    seed, allow_failure=True,
+                )
+                if probe.returncode == 0:
+                    self.assertEqual(probe.stdout.strip(), seed.split("-")[2])
+                    original("rm", "-f", seed)
+                else:
+                    self.assertTrue(
+                        _docker_reports_missing(probe, "container", seed),
+                        "unexpected container identity; refuse foreign deletion",
+                    )
+            for volume in reversed(volumes):
+                probe = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
+                )
+                if probe.returncode == 0:
+                    self.assertEqual(probe.stdout.strip(), volume.split("-")[2])
+                    original("volume", "rm", volume)
+                else:
+                    self.assertTrue(
+                        _docker_reports_missing(probe, "volume", volume),
+                        "unexpected volume identity; refuse foreign deletion",
+                    )
+                final = original("volume", "inspect", volume, allow_failure=True)
+                self.assertTrue(_docker_reports_missing(final, "volume", volume))
+        print("RECOGNIZED_TIMEOUT_RUN_RECLAIMS_OWNED_MOUNTS", flush=True)
 
     def test_late_docker_volume_create_after_exact_404_stays_no_go(self) -> None:
         # Real Docker creates the volume only AFTER cleanup's first 404.
@@ -887,9 +1069,11 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 observed_positive = True
                 suffix = seed.split("-")[2]
                 return subprocess.CompletedProcess(
-                    args=args, returncode=0, stdout=suffix, stderr="",
+                    args=args, returncode=0, stdout=("a" * 64 + " " + suffix),
+                    stderr="",
                 )
-            if seed is not None and args[:2] == ("rm", "-f") and args[-1] == seed:
+            if (seed is not None and args[:2] == ("rm", "-f")
+                    and args[-1] == "a" * 64):
                 attempted_remove = True
                 # Force the documented losing race even if this local Docker
                 # version returns 0 for an already auto-removed --rm seed:
