@@ -1064,6 +1064,15 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
             persisted_completed_at,
             ((NOW + timedelta(seconds=3)).isoformat(),),
         )
+        # This actual media service uses its legitimate None/None default
+        # authorization. Matching durable checkpoint + confirmed final
+        # receipt must retire the fence; the next Create is not blocked.
+        self.assertFalse(
+            SnapshotStore(db_path, create_if_missing=False).create_recovery_pending(
+                exclude_idempotency_key="new-after-confirmed-media",
+                claim_owner="separate-media-test",
+            )
+        )
         runtime.close()
 
     def test_media_create_service_consumes_product_handle_after_stabilizing(self) -> None:
