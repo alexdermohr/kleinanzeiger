@@ -23,6 +23,7 @@ import sys
 from typing import Iterator
 
 from .container_draft import container_draft_denied
+from .domain import CreateOperationReceipt, MediaPostReadStatus, OperationOutcome
 from .fence_witness import (
     FenceLedger, FenceWitnessError,
     _ACTIONS as _WITNESS_ACTIONS,
@@ -36,7 +37,8 @@ from .storage import SnapshotStore
 from .storage_owner import (
     StorageOwnerError, _KEY as _STORAGE_KEY, _pending_from_json,
     _dashboard_pending_contract, _validate_pending_wire_body,
-    _record_from_json,
+    _record_from_json, _record_as_json, _pending_as_json,
+    _reply_frame_fits, _snapshot_from_json,
 )
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -460,17 +462,72 @@ def _validate_sqlite_clearances(conn: sqlite3.Connection) -> None:
         ):
             raise PairPreflightError("SQLite clearance is not media recovery")
         receipt = envelope.get("operation_receipt")
+        # Keep parity with the trusted SnapshotStore clearance API: a core
+        # Create that is confirmed but still media-unverified can only be
+        # reconciled by an operator after independent post-read evidence.
+        # Executor-only media reconciliation cannot clear this checkpoint.
+        operator_reconciled_core = (
+            kind == "operator_verified_postread"
+            and envelope["media_persistence_confirmed"] is False
+            and isinstance(receipt, dict)
+            and receipt.get("operation") == "create"
+            and receipt.get("outcome") == "confirmed"
+            and receipt.get("writer_invoked") is True
+            and receipt.get("media_post_read_status") in {
+                "not_read", "verifier_unavailable", "mismatch", "unknown",
+            }
+            and type(receipt.get("created_ad_id")) is str
+            and bool(receipt["created_ad_id"].strip())
+            and receipt.get("authorization_reference") == "write-api:" + key
+            and SnapshotStore._original_unsettled_media_checkpoint(
+                conn, idempotency_key=key, operation_receipt=receipt,
+            )
+        )
         if receipt is not None and not (
             isinstance(receipt, dict)
             and receipt.get("writer_invoked") is True
             and receipt.get("outcome") == "ambiguous"
+            or operator_reconciled_core
         ):
-            raise PairPreflightError("SQLite clearance was not ambiguous")
+            raise PairPreflightError("SQLite clearance has no reconcilable media outcome")
 
+
+
+def _response_bound_witness_action(response: dict[str, object]) -> str | None:
+    """Recover an action only when the persisted Write API response identifies it.
+
+    Witness starts are a separate authority, not an arbitrary action label:
+    WriteApiHandler emits media_persistence_confirmed/media_post_read_status
+    only for create_media; other operation_receipt.operation values identify
+    their respective routes. Plain execution errors do not identify a route.
+    """
+    receipt = response.get("operation_receipt")
+    operation = receipt.get("operation") if type(receipt) is dict else None
+    actions = {
+        "create": "create",
+        "update_content": "update_content",
+        "set_state:paused": "pause",
+        "set_state:active": "activate",
+        "delete": "delete",
+    }
+    if operation is not None and (
+        type(operation) is not str or operation not in actions
+    ):
+        raise PairPreflightError("SQLite receipt has unsupported Write API operation")
+    media_response = (
+        "media_persistence_confirmed" in response
+        or "media_post_read_status" in response
+    )
+    if media_response:
+        if operation is not None and operation != "create":
+            raise PairPreflightError("SQLite media response conflicts with operation")
+        return "create_media"
+    return actions.get(operation) if operation is not None else None
 
 
 def _validate_sqlite_write_request_records(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection, *,
+    action_bindings: dict[str, str] | None = None,
 ) -> list[list[str]]:
     """Validate every persisted owner record and digest each completed reply.
 
@@ -496,6 +553,24 @@ def _validate_sqlite_write_request_records(
             raise PairPreflightError(
                 "SQLite persisted write request is unreadable by storage owner"
             ) from exc
+        # Claim/replay must fit the actual StorageOwner reply frame, including
+        # the created boolean and JSON escaping, not just the decoded fields.
+        if not _reply_frame_fits({
+            "created": False, "record": _record_as_json(record),
+        }):
+            raise PairPreflightError(
+                "SQLite write request exceeds StorageOwner reply frame"
+            )
+        # Every current-schema unstarted claim is owned at insertion, and
+        # owner-only cancellation preserves that owner. A NULL owner cannot
+        # be taken over by SnapshotStore on restart, permanently trapping an
+        # in_progress key; a forged completed cancellation is equally not
+        # owner-reachable. Started historical records remain separately
+        # governed by durable SQLite/Witness execution fences.
+        if record.execution_started_at is None and record.claim_owner is None:
+            raise PairPreflightError(
+                "SQLite unstarted write claim lacks original owner"
+            )
         if record.state != "completed":
             continue
         response = record.response_json
@@ -523,6 +598,10 @@ def _validate_sqlite_write_request_records(
         except (TypeError, ValueError, UnicodeError,
                 RecursionError, OverflowError) as exc:
             raise PairPreflightError("SQLite completed response cannot replay") from exc
+        if action_bindings is not None and record.execution_started_at is not None:
+            expected_action = _response_bound_witness_action(value)
+            if expected_action is not None:
+                action_bindings[record.idempotency_key] = expected_action
         # A completed claim that never crossed the owner Begin gate cannot
         # have a Witness start. The *only* owner-reachable terminal transition
         # is cancel_unstarted_write_api_request(), whose entire HTTP 409
@@ -560,6 +639,198 @@ def _witness_completed_response_bindings(
 
 
 
+
+def _validate_persisted_create_snapshot(
+    raw: object, *, created_ad_id: str | None,
+) -> None:
+    """Require complete, canonical AdSnapshot data emitted by SnapshotStore.
+
+    A matching but truncated JSON object could otherwise allow a forged
+    final media receipt to retire an unresolved durable Create checkpoint.
+    The independent StorageOwner wire decoder checks every field, bounds,
+    counters, timestamps and lifecycle, while the roundtrip checks the
+    original SnapshotStore persistence bytes. No owner inventory is inferred.
+    """
+    if raw is None:
+        return
+    if type(raw) is not str:
+        raise ValueError("create snapshot must be JSON text")
+    payload = json.loads(
+        raw, object_pairs_hook=_unique_object,
+        parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+    )
+    snapshot = _snapshot_from_json(payload)
+    if created_ad_id is not None and snapshot.ad_id != created_ad_id:
+        raise ValueError("create snapshot does not match created ad")
+    if SnapshotStore._snapshot_json(snapshot) != raw:
+        raise ValueError("create snapshot differs from persisted owner format")
+
+
+def _validate_sqlite_create_receipts(conn: sqlite3.Connection) -> None:
+    """Reject final receipts that the real CreateOperationReceipt cannot emit.
+
+    A forged terminal receipt can otherwise match the checkpoint's selected
+    columns and falsely retire a still-open media recovery fence. Domain
+    construction verifies the exact timestamps, outcome, media relationship,
+    nonempty statuses and created-ad identity without authorizing any write.
+    Historical snapshot JSON remains read-only evidence, not platform truth.
+    """
+    fields = (
+        "id", "operation", "created_ad_id", "started_at", "completed_at",
+        "outcome", "pre_read_status", "confirmation_pre_read_status",
+        "post_read_status", "confirmation_post_read_status",
+        "content_post_read_status", "writer_invoked", "authorization_by",
+        "authorization_reference", "media_post_read_status",
+        "media_persistence_confirmed", "writer_error", "post_snapshot_json",
+        "confirmation_post_snapshot_json", "content_post_snapshot_json",
+    )
+
+    def persisted_time(raw: object) -> datetime:
+        if type(raw) is not str or not 1 <= len(raw) <= 80:
+            raise PairPreflightError("SQLite final receipt timestamp is invalid")
+        value = datetime.fromisoformat(raw)
+        if (
+            value.tzinfo is None or value.utcoffset() is None
+            or value.isoformat() != raw
+        ):
+            raise PairPreflightError("SQLite final receipt timestamp is not canonical")
+        return value
+
+    for row in _rows(
+        conn, "SELECT " + ",".join(fields) + " FROM create_operation_receipts ORDER BY id",
+    ):
+        rec = dict(zip(fields, row))
+        try:
+            if type(rec["id"]) is not int or rec["id"] <= 0:
+                raise ValueError("receipt row id invalid")
+            if (
+                type(rec["writer_invoked"]) is not int
+                or rec["writer_invoked"] not in (0, 1)
+                or type(rec["media_persistence_confirmed"]) is not int
+                or rec["media_persistence_confirmed"] not in (0, 1)
+            ):
+                raise ValueError("receipt boolean field invalid")
+            persisted = CreateOperationReceipt(
+                operation=rec["operation"],
+                created_ad_id=rec["created_ad_id"],
+                started_at=persisted_time(rec["started_at"]),
+                completed_at=persisted_time(rec["completed_at"]),
+                outcome=OperationOutcome(rec["outcome"]),
+                pre_read_status=rec["pre_read_status"],
+                confirmation_pre_read_status=rec["confirmation_pre_read_status"],
+                post_read_status=rec["post_read_status"],
+                confirmation_post_read_status=rec["confirmation_post_read_status"],
+                content_post_read_status=rec["content_post_read_status"],
+                writer_invoked=bool(rec["writer_invoked"]),
+                authorization_by=rec["authorization_by"],
+                authorization_reference=rec["authorization_reference"],
+                media_post_read_status=(
+                    MediaPostReadStatus(rec["media_post_read_status"])
+                    if rec["media_post_read_status"] is not None else None
+                ),
+                media_persistence_confirmed=bool(rec["media_persistence_confirmed"]),
+                writer_error=rec["writer_error"],
+            )
+            for name in (
+                "post_snapshot_json",
+                "confirmation_post_snapshot_json",
+                "content_post_snapshot_json",
+            ):
+                _validate_persisted_create_snapshot(
+                    rec[name], created_ad_id=persisted.created_ad_id,
+                )
+        except PairPreflightError:
+            raise
+        except (
+            AttributeError, KeyError, TypeError, ValueError,
+            OverflowError, UnicodeError, RecursionError, StorageOwnerError,
+        ) as exc:
+            raise PairPreflightError(
+                "SQLite final create receipt violates domain contract"
+            ) from exc
+
+
+
+def _validate_sqlite_create_checkpoints(conn: sqlite3.Connection) -> None:
+    """Validate every durable pre-media checkpoint before final-receipt matching.
+
+    A later receipt must never erase a checkpoint whose persisted values
+    append_create_operation_checkpoint() could not have produced. Reuse the
+    actual CreateOperationReceipt invariants, without assuming a platform
+    response, changing recovery state, or inventing owner evidence.
+    """
+    fields = (
+        "id", "checkpoint_kind", "operation", "created_ad_id",
+        "started_at", "completed_at", "outcome", "pre_read_status",
+        "confirmation_pre_read_status", "post_read_status",
+        "confirmation_post_read_status", "content_post_read_status",
+        "writer_invoked", "authorization_by", "authorization_reference",
+        "writer_error", "post_snapshot_json",
+        "confirmation_post_snapshot_json", "content_post_snapshot_json",
+    )
+
+    def persisted_time(raw: object) -> datetime:
+        if type(raw) is not str or not 1 <= len(raw) <= 80:
+            raise ValueError("checkpoint timestamp length or type invalid")
+        value = datetime.fromisoformat(raw)
+        if (
+            value.tzinfo is None or value.utcoffset() is None
+            or value.isoformat() != raw
+        ):
+            raise ValueError("checkpoint timestamp not canonical timezone-aware ISO")
+        return value
+
+    for row in _rows(
+        conn, "SELECT " + ",".join(fields)
+        + " FROM create_operation_checkpoints ORDER BY id",
+    ):
+        rec = dict(zip(fields, row))
+        try:
+            if (
+                type(rec["id"]) is not int or rec["id"] <= 0
+                or rec["checkpoint_kind"] != "before_media_post_read"
+                or type(rec["writer_invoked"]) is not int
+                or rec["writer_invoked"] != 1
+                or rec["outcome"] != OperationOutcome.CONFIRMED.value
+            ):
+                raise ValueError("checkpoint state cannot be created by owner")
+            receipt = CreateOperationReceipt(
+                operation=rec["operation"],
+                created_ad_id=rec["created_ad_id"],
+                started_at=persisted_time(rec["started_at"]),
+                completed_at=persisted_time(rec["completed_at"]),
+                outcome=OperationOutcome(rec["outcome"]),
+                pre_read_status=rec["pre_read_status"],
+                confirmation_pre_read_status=rec["confirmation_pre_read_status"],
+                post_read_status=rec["post_read_status"],
+                confirmation_post_read_status=rec["confirmation_post_read_status"],
+                content_post_read_status=rec["content_post_read_status"],
+                writer_invoked=True,
+                authorization_by=rec["authorization_by"],
+                authorization_reference=rec["authorization_reference"],
+                writer_error=rec["writer_error"],
+                media_post_read_status=None,
+                media_persistence_confirmed=False,
+            )
+            for name in (
+                "post_snapshot_json",
+                "confirmation_post_snapshot_json",
+                "content_post_snapshot_json",
+            ):
+                _validate_persisted_create_snapshot(
+                    rec[name], created_ad_id=receipt.created_ad_id,
+                )
+        except PairPreflightError:
+            raise
+        except (
+            AttributeError, KeyError, TypeError, ValueError,
+            OverflowError, UnicodeError, RecursionError, StorageOwnerError,
+        ) as exc:
+            raise PairPreflightError(
+                "SQLite create checkpoint violates original owner contract"
+            ) from exc
+
+
 def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
         raise PairPreflightError("SQLite integrity check failed")
@@ -569,6 +840,8 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
         raise PairPreflightError("SQLite recovery schema v2 is required")
     _validate_sqlite_write_request_records(conn)
     _validate_sqlite_clearances(conn)
+    _validate_sqlite_create_receipts(conn)
+    _validate_sqlite_create_checkpoints(conn)
     starts = [
         [_write_key(row[0]), _text(row[1])] for row in _rows(
             conn, "SELECT idempotency_key,request_sha256 "
@@ -670,12 +943,20 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
             # reply decoder alone does not bind ad_id, scope or resource to
             # the exact Write method/path, nor does it require canonical
             # serialized payloads. Never invent independent route grammars.
-            _pending_from_json({
+            pending_record = _pending_from_json({
                 "scope": scope, "resource_key": resource,
                 "idempotency_key": key, "method": method, "path": path,
                 "payload_json": payload, "ad_id": ad_id,
                 "acknowledged": bool(acknowledged),
             })
+            # A canonical inner payload may double in size when JSON escaped
+            # again inside the StorageOwner's single-record page envelope.
+            if not _reply_frame_fits({
+                "rows": [_pending_as_json(pending_record)], "more": False,
+            }):
+                raise StorageOwnerError(
+                    "dashboard pending record exceeds owner RPC frame"
+                )
             expected = _dashboard_pending_contract(method, path)
             if (
                 expected is None
@@ -695,28 +976,70 @@ def _sqlite_inventory(conn: sqlite3.Connection) -> dict[str, object]:
     # Only a narrowly matched and media-confirmed final receipt settles
     # this local checkpoint; claimed browser results do NOT independently
     # establish an external platform outcome or recovery clearance.
-    ambiguous = [
+    # Domain checks above validate both source and final timestamps, but
+    # the media post-read can only move completion time FORWARD:
+    # PrivateWebRuntime._with_media_post_read uses max(original, clock()).
+    # SQLite lexical ISO comparisons (and ms-rounded julianday) cannot
+    # compare arbitrary timezone offsets and submillisecond instants exactly.
+    # Match all immutable source fields in SQL and compare aware datetimes
+    # before an otherwise plausible final is allowed to retire the fence.
+    settlement_matches = (
+        "FROM create_operation_checkpoints AS c "
+        "JOIN create_operation_receipts AS r ON "
+        "c.operation=r.operation "
+        "AND c.created_ad_id=r.created_ad_id "
+        "AND c.started_at=r.started_at "
+        "AND c.authorization_by IS r.authorization_by "
+        "AND c.authorization_reference IS r.authorization_reference "
+        "AND c.pre_read_status=r.pre_read_status "
+        "AND c.confirmation_pre_read_status=r.confirmation_pre_read_status "
+        "AND c.post_read_status IS r.post_read_status "
+        "AND c.confirmation_post_read_status IS r.confirmation_post_read_status "
+        "AND c.content_post_read_status IS r.content_post_read_status "
+        "AND c.writer_error IS r.writer_error "
+        "AND c.post_snapshot_json IS r.post_snapshot_json "
+        "AND c.confirmation_post_snapshot_json IS r.confirmation_post_snapshot_json "
+        "AND c.content_post_snapshot_json IS r.content_post_snapshot_json "
+        "WHERE r.outcome='confirmed' "
+        "AND r.writer_invoked=1 "
+        "AND r.media_persistence_confirmed=1 "
+        "AND r.media_post_read_status='confirmed'"
+    )
+    settled_checkpoints: set[int] = set()
+    for checkpoint_id, checkpoint_completed, final_completed in _rows(
+        conn,
+        "SELECT c.id,c.completed_at,r.completed_at "
+        + settlement_matches + " ORDER BY c.id,r.id",
+    ):
+        if datetime.fromisoformat(final_completed) >= datetime.fromisoformat(
+            checkpoint_completed
+        ):
+            settled_checkpoints.add(int(checkpoint_id))
+    # The only other authority that can retire a before-media checkpoint is
+    # a persisted exact-key/SHA operator clearance of its originally started
+    # Write. The clearance row was domain-validated above; the independently
+    # sealed Witness side is verified before the pair can be attested.
+    # An executor-only media_submit_reconciled row can NEVER retire it.
+    operator_cleared_checkpoints = {
         int(row[0]) for row in _rows(
             conn,
             "SELECT c.id FROM create_operation_checkpoints AS c "
-            "WHERE NOT EXISTS ("
-            "SELECT 1 FROM create_operation_receipts AS r "
-            "WHERE c.operation=r.operation "
-            "AND c.created_ad_id=r.created_ad_id "
-            "AND c.started_at=r.started_at "
-            "AND c.authorization_by IS NOT NULL "
-            "AND c.authorization_by=r.authorization_by "
-            "AND c.authorization_reference IS NOT NULL "
-            "AND c.authorization_reference=r.authorization_reference "
-            "AND c.post_snapshot_json IS r.post_snapshot_json "
-            "AND c.confirmation_post_snapshot_json IS r.confirmation_post_snapshot_json "
-            "AND c.content_post_snapshot_json IS r.content_post_snapshot_json "
-            "AND r.outcome='confirmed' "
-            "AND r.writer_invoked=1 "
-            "AND r.media_persistence_confirmed=1 "
-            "AND r.media_post_read_status='confirmed'"
-            ") ORDER BY c.id",
+            "JOIN write_api_requests AS w "
+            "ON c.authorization_reference=('write-api:' || w.idempotency_key) "
+            "AND w.execution_started_at IS NOT NULL "
+            "JOIN write_recovery_clearances AS verified "
+            "ON verified.idempotency_key=w.idempotency_key "
+            "AND verified.request_sha256=w.request_sha256 "
+            "AND verified.verification_kind='operator_verified_postread' "
+            "ORDER BY c.id",
         )
+    }
+    ambiguous = [
+        int(row[0]) for row in _rows(
+            conn, "SELECT id FROM create_operation_checkpoints ORDER BY id",
+        )
+        if int(row[0]) not in settled_checkpoints
+        and int(row[0]) not in operator_cleared_checkpoints
     ]
     if any(row <= 0 for row in ambiguous):
         raise PairPreflightError("SQLite ambiguous create identity invalid")
@@ -1170,8 +1493,18 @@ def inspect_offline_pair(
             ):
                 sql_fences = _sqlite_inventory(sql_db)
                 wit_fences = _witness_inventory(wit_db)
-                sql_completed = _validate_sqlite_write_request_records(sql_db)
+                response_actions: dict[str, str] = {}
+                sql_completed = _validate_sqlite_write_request_records(
+                    sql_db, action_bindings=response_actions,
+                )
                 wit_completed = _witness_completed_response_bindings(wit_db)
+                witness_actions = {
+                    _write_key(key): _text(action)
+                    for key, action in _rows(
+                        wit_db,
+                        "SELECT request_key,action FROM events WHERE kind='started'",
+                    )
+                }
                 # Every SQL clearance has already passed the authoritative
                 # SnapshotStore state/key/SHA checks in _sqlite_inventory.
                 # The Witness is independently checked for exact operation-
@@ -1185,14 +1518,16 @@ def inspect_offline_pair(
                         "ORDER BY idempotency_key",
                     )
                 }
-                # SnapshotStore accepts an independent SQLite clearance
-                # only for in_progress, the exact owner-202 UNKNOWN, or a
-                # locally ambiguous media result. The inventory immediately
-                # above already mirrors the latter TWO completed-reply
-                # predicates. No second response-grammar or status guess:
-                # a completed confirmed/precondition media reply has no
-                # local recovery fence, just like any completed nonmedia
-                # reply, and its SQLite clearance API is unavailable.
+                # SnapshotStore permits an independent SQLite clearance
+                # for in_progress, exact owner-202 UNKNOWN, ambiguous media,
+                # AND confirmed-core Create with unverified media if a durable
+                # before_media_post_read checkpoint remains open. This last
+                # case is not in sqlite_media_unresolved: it remains in
+                # ambiguous_creates until exact-key/SHA operator-only SQLite
+                # clearance. A Witness-only clearance can be diagnosed with
+                # that checkpoint still open, never as recovery authority.
+                # Other completed confirmed/precondition/nonmedia responses
+                # with NO local checkpoint have no SQLite clearance path.
                 # An independently operator-cleared Witness still cannot
                 # attest safe replay or actual external platform success.
                 # Executor-only media clearances are recognized as valid
@@ -1212,6 +1547,14 @@ def inspect_offline_pair(
                 }
             if sql_fences["sqlite_started"] != wit_fences["witness_started"]:
                 raise PairPreflightError("pair has unmatched durable write starts")
+            # Bind even crash-after-SQLite-completion states with no Witness
+            # completion. A correctly rehashed ledger can otherwise claim
+            # 'delete' for a durable media Create and mislead recovery.
+            for key, action in response_actions.items():
+                if witness_actions.get(key) != action:
+                    raise PairPreflightError(
+                        "witness action does not match durable SQLite response"
+                    )
             # UID50044 may crash AFTER persisting the SQLite response but
             # BEFORE appending its independent Witness completion. That is
             # genuinely unresolved and must survive restore as a visible fence.
