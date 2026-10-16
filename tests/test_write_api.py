@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import select
+import signal
 import socket
+import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -2828,6 +2834,129 @@ class WriteApiTests(unittest.TestCase):
         self.assertEqual(repeated, first_body)
         self.assertEqual(media.calls, [])
         self.assertEqual(plain.calls, [])
+
+    @unittest.skipUnless(hasattr(signal, "SIGKILL"), "POSIX SIGKILL required")
+    def test_media_unknown_fence_survives_sigkill_without_reexecuting(self) -> None:
+        """Kill the actual HTTP-writer process after durable ambiguous completion.
+
+        This simulates Docker's SIGKILL before graceful media settlement.
+        Fresh create keys must be refused after a real process restart, and
+        replaying the original key must not invoke the platform delegate.
+        All writers are local fakes; there are no Kleinanzeigen requests.
+        """
+        payload = {
+            "category_path": ["Haus & Garten", "Dekoration"],
+            "title": "Synthetic vase", "description": "No platform call",
+            "price_eur": 12, "media_refs": ["cover_01"],
+        }
+        repo = Path(__file__).resolve().parents[1]
+        child_code = textwrap.dedent("""\
+            import json
+            import pathlib
+            import sys
+            import time
+            from urllib.request import ProxyHandler, build_opener
+
+            root = pathlib.Path.cwd()
+            sys.path.insert(0, str(root / "tests"))
+            sys.path.insert(0, str(root / "src"))
+            from test_write_api import (
+                FakeMediaWriteService, FakeWriteService, OperationOutcome,
+                SnapshotStore, WriteApiTests, WriteCapability,
+            )
+
+            fixture = WriteApiTests(
+                "test_ambiguous_media_submit_blocks_new_create_keys_after_restart"
+            )
+            fixture.opener = build_opener(ProxyHandler({}))
+            fixture.store = SnapshotStore(pathlib.Path(sys.argv[1]))
+            payload = json.loads(sys.argv[2])
+            with fixture.server(
+                FakeWriteService(),
+                media_service=FakeMediaWriteService(
+                    outcome=OperationOutcome.AMBIGUOUS,
+                ),
+                capabilities=frozenset({WriteCapability.CREATE_MEDIA}),
+            ) as server:
+                status, _, response = fixture.request(
+                    server, "POST", "/api/write/media/ads",
+                    payload=payload, idempotency_key="media-sigkill-original",
+                )
+                assert status == 202
+                assert response["platform_retry_authorized"] is False
+                record = fixture.store.write_api_request("media-sigkill-original")
+                assert record is not None and record.state == "completed"
+                print("COMPLETED_MEDIA_AMBIGUOUS_DURABLE", flush=True)
+                time.sleep(40)
+        """)
+        with tempfile.TemporaryDirectory(prefix="mark-media-sigkill-") as tmp:
+            path = Path(tmp) / "mark.sqlite"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.pathsep.join((
+                str(repo / "tests"), str(repo / "src"),
+            ))
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            process = subprocess.Popen(
+                [sys.executable, "-B", "-c", child_code, str(path),
+                 json.dumps(payload)],
+                cwd=repo, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            try:
+                assert process.stdout is not None
+                ready, _, _ = select.select([process.stdout], [], [], 20)
+                self.assertTrue(ready, "child HTTP completion was not attested")
+                self.assertEqual(
+                    process.stdout.readline().strip(),
+                    "COMPLETED_MEDIA_AMBIGUOUS_DURABLE",
+                )
+                self.assertIsNone(process.poll())
+                os.kill(process.pid, signal.SIGKILL)
+                self.assertEqual(process.wait(timeout=10), -signal.SIGKILL)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=10)
+
+            self.store = SnapshotStore(path, create_if_missing=False)
+            original_record = self.store.write_api_request("media-sigkill-original")
+            self.assertIsNotNone(original_record)
+            assert original_record is not None
+            self.assertEqual(original_record.state, "completed")
+            self.assertEqual(original_record.response_status, 202)
+
+            media = FakeMediaWriteService()
+            plain = FakeWriteService()
+            with self.server(
+                plain, media_service=media,
+                capabilities=frozenset({
+                    WriteCapability.CREATE, WriteCapability.CREATE_MEDIA,
+                }),
+            ) as server:
+                status, _, response = self.request(
+                    server, "POST", "/api/write/ads",
+                    payload={k: v for k, v in payload.items() if k != "media_refs"},
+                    idempotency_key="fresh-after-sigkill",
+                )
+                media_status, _, media_response = self.request(
+                    server, "POST", "/api/write/media/ads",
+                    payload=payload, idempotency_key="fresh-media-after-sigkill",
+                )
+                replay_status, replay_headers, replay_body = self.request(
+                    server, "POST", "/api/write/media/ads",
+                    payload=payload, idempotency_key="media-sigkill-original",
+                )
+            self.assertEqual((status, media_status, replay_status), (409, 409, 202))
+            self.assertEqual(response["error"], "create_recovery_pending")
+            self.assertEqual(media_response["error"], "create_recovery_pending")
+            self.assertFalse(response["platform_retry_authorized"])
+            self.assertEqual(replay_headers.get("Idempotency-Replayed"), "true")
+            self.assertEqual(replay_body, json.loads(original_record.response_json))
+            self.assertEqual(self.store.write_api_request(
+                "media-sigkill-original",
+            ), original_record)
+            self.assertEqual(plain.calls, [])
+            self.assertEqual(media.calls, [])
 
     def test_executed_in_progress_write_blocks_new_create_after_restart(self) -> None:
         self.store.claim_write_api_request(
