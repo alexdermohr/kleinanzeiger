@@ -92,20 +92,10 @@ print('TRUSTED_TEST_ROOTS_TRAVERSABLE_NO_FILE_DAC_CHANGE',flush=True)
 """
 
 
-_ATTACK = r"""
-import errno,os,re
+_DAC_PROBE = r"""
+import errno,os
 from pathlib import Path
-import mark_api
-from mark_api.paired_backup_operator import seal_offline_pair,PairedBackupOperatorError
-from mark_api.backup_intent_authority import BackupIntentAuthority
-
 assert os.geteuid()==50044
-assert Path(mark_api.__file__).as_posix().startswith('/src/mark_api/')
-sha_sql=os.environ['MARK_TEST_SQLITE_SHA']
-sha_witness=os.environ['MARK_TEST_WITNESS_SHA']
-sha_head=os.environ['MARK_TEST_HEAD_SHA']
-for value in (sha_sql,sha_witness,sha_head):
-    assert re.fullmatch(r'[0-9a-f]{64}',value),value
 
 # Positive control: UID50044 can really mutate a separately owned RW volume.
 control=Path('/control/raw-sealer-attacker-probe')
@@ -127,6 +117,34 @@ for item in ('/source/mark.sqlite','/source/witness.sqlite',
         else:
             os.close(fd)
             raise AssertionError('foreign UID opened protected file '+item)
+
+print('ROOTS_0711_FILE_DAC_DENIED_WITH_RW_POSITIVE_CONTROL',flush=True)
+"""
+
+
+_ATTACK = r"""
+import errno,os,re,stat
+from pathlib import Path
+import mark_api
+from mark_api.paired_backup_operator import seal_offline_pair,PairedBackupOperatorError
+from mark_api.backup_intent_authority import BackupIntentAuthority
+
+assert os.geteuid()==50044
+assert Path(mark_api.__file__).as_posix().startswith('/src/mark_api/')
+sha_sql=os.environ['MARK_TEST_SQLITE_SHA']
+sha_witness=os.environ['MARK_TEST_WITNESS_SHA']
+sha_head=os.environ['MARK_TEST_HEAD_SHA']
+for value in (sha_sql,sha_witness,sha_head):
+    assert re.fullmatch(r'[0-9a-f]{64}',value),value
+
+# The raw API must be rejected when the actual trusted private roots
+# have their original owner/mode (50043/0700), not merely because the trusted
+# harness temporarily relaxed them to 0711 for direct file-DAC probing.
+for name in ('source','output','anchor','intent'):
+    info=Path('/'+name).stat()
+    assert info.st_uid==50043,(name,info)
+    assert stat.S_IMODE(info.st_mode)==0o700,(name,info)
+assert Path('/control/raw-sealer-attacker-probe').read_bytes()==b'RW_UID50044_CONFIRMED'
 
 print('ACTUAL_PRODUCT_RAW_SEALER_IMPORTED_WITH_CORRECT_SOURCE_DIGESTS',flush=True)
 # Crucial: the test is not just checking a bad digest or missing code path.
@@ -339,18 +357,23 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     "MARK_TEST_HEAD_SHA": prepared["head_sha256"],
                 }
                 try:
-                    attacked = run_python("attack", 50044, _ATTACK, evidence=env)
+                    direct = run_python("attack-dac", 50044, _DAC_PROBE)
                     self.assertIn(
-                        "HOSTILE_UID50044_RAW_SEALER_AND_INTENT_WRITE_DENIED",
-                        attacked.stdout,
-                    )
-                    self.assertIn(
-                        "ACTUAL_PRODUCT_RAW_SEALER_IMPORTED_WITH_CORRECT_SOURCE_DIGESTS",
-                        attacked.stdout,
+                        "ROOTS_0711_FILE_DAC_DENIED_WITH_RW_POSITIVE_CONTROL",
+                        direct.stdout,
                     )
                 finally:
                     restored = run_python("restore", 50043, _RESTORE)
                     self.assertIn("TRUSTED_TEST_ROOTS_RESET_0700", restored.stdout)
+                attacked = run_python("attack-raw", 50044, _ATTACK, evidence=env)
+                self.assertIn(
+                    "HOSTILE_UID50044_RAW_SEALER_AND_INTENT_WRITE_DENIED",
+                    attacked.stdout,
+                )
+                self.assertIn(
+                    "ACTUAL_PRODUCT_RAW_SEALER_IMPORTED_WITH_CORRECT_SOURCE_DIGESTS",
+                    attacked.stdout,
+                )
                 checked = run_python("recheck", 50043, _RECHECK, evidence=env)
                 self.assertIn(
                     "TRUSTED_ANCHOR_PAIR_AND_ONE_SHOT_INTENT_UNCHANGED",
