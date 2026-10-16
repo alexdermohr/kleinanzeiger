@@ -1,9 +1,12 @@
 """Opt-in real Linux/Docker DAC test for the offline backup-intent operator.
 
-Only uniquely named disposable Docker volumes and synthetic SQLite/Witness
-images are touched. This is not a live service, historic mmap revocation,
-host quiescence or platform-write acceptance test. The caller must select an
-already verified local immutable test image; no pulling is permitted.
+Only synthetic SQLite/Witness fixtures are permitted here until the host
+enforces exclusive Docker-daemon administration (or atomic immutable-identity
+volume reclamation). The real-Docker test is intentionally fail-closed BEFORE
+creating a container or named volume. Unique names do not make name-based
+Docker deletion safe against competing administrators. This is not live
+host-quiescence, historic mmap revocation, or platform-write acceptance.
+The caller must select an immutable local image; no pulling is permitted.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 
@@ -30,7 +34,40 @@ if os.environ.get("MARK_REQUIRE_INTENT_MULTIUID") == "1" and not IMAGE_OK:
     raise ValueError("required real-UID test has no immutable Docker image")
 
 
+def _require_exclusive_docker_admin_authority() -> None:
+    """Never run the real-UID fixture on a shared Docker daemon.
+
+    The installed test host has no independent exclusive-daemon attestation.
+    A caller-controlled flag or a random resource name cannot supply one.
+    Keep this guard until a host-enforced exclusive context is implemented
+    and verified; a required real test must fail rather than silently skip.
+    """
+    message = (
+        "exclusive Docker-admin authority not established: name-based "
+        "volume/container cleanup can remove a foreign replacement"
+    )
+    if os.environ.get("MARK_REQUIRE_INTENT_MULTIUID") == "1":
+        raise AssertionError(message)
+    raise unittest.SkipTest(message)
+
+
 def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
+    # Enforce a positive, passive-only Docker command boundary. Docker CLI
+    # aliases (volume remove) and other mutating families (system prune,
+    # container run/rm, image rm, network remove) must never reach subprocess.
+    # A TestCase can be invoked without setUpClass(), so this is essential.
+    if not (
+        args[:1] == ("info",)
+        or args[:2] in (
+            ("image", "inspect"),
+            ("container", "inspect"),
+            ("volume", "inspect"),
+        )
+    ):
+        raise AssertionError(
+            "exclusive Docker-admin authority not established: "
+            "Docker mutation forbidden before subprocess"
+        )
     result = subprocess.run(
         ["/usr/bin/docker", *args], check=False, capture_output=True,
         text=True, timeout=60,
@@ -267,7 +304,19 @@ print('REAL_UID50043_EXACT_CHAIN_AND_SINGLE_USE_REPLAY_DENIAL',flush=True)
 
 @unittest.skipUnless(IMAGE_OK, "Set immutable MARK_INTENT_MULTIUID_TEST_IMAGE")
 class BackupIntentMultiUidDockerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        _require_exclusive_docker_admin_authority()
+
+    def setUp(self) -> None:
+        # A direct TestCase.run() does not execute setUpClass().
+        super().setUp()
+        _require_exclusive_docker_admin_authority()
+
     def test_hostile_executor_cannot_access_independent_offline_intent(self) -> None:
+        # Direct TestCase.method() calls do not execute setUpClass().
+        _require_exclusive_docker_admin_authority()
         suffix = uuid4().hex[:12]
         names = {name: "mark-intent-" + suffix + "-" + name
                  for name in ("source", "output", "anchor", "intent", "control")}
@@ -437,6 +486,108 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
                         self.fail(message)
                     else:
                         print(message, file=sys.stderr)
+
+
+class SharedDockerAuthorityContractTests(unittest.TestCase):
+    """Unsafe cleanup cannot rely on mutable Docker resource names."""
+
+    def test_shared_daemon_mutations_are_blocked_before_client_dispatch(self) -> None:
+        # A blacklist of volume rm/run would miss Docker CLI aliases.
+        for args in (
+            ("volume", "create", "mark-intent-abc123abc123-source"),
+            ("volume", "rm", "mark-intent-abc123abc123-source"),
+            ("volume", "remove", "mark-intent-abc123abc123-source"),
+            ("volume", "prune", "--force"),
+            ("system", "prune", "--volumes"),
+            ("container", "run", "--rm", "synthetic"),
+            ("container", "rm", "-f", "synthetic"),
+            ("container", "create", "synthetic"),
+            ("run", "--rm", "--name", "mark-intent-abc123abc123-seed"),
+            ("rm", "-f", "mark-intent-abc123abc123-seed"),
+            ("image", "rm", "synthetic"),
+            ("network", "remove", "synthetic"),
+            ("network", "create", "synthetic"),
+        ):
+            with self.subTest(args=args):
+                with patch(__name__ + ".subprocess.run") as launched:
+                    with self.assertRaisesRegex(
+                        AssertionError, "exclusive Docker-admin authority",
+                    ):
+                        _docker(*args, allow_failure=True)
+                    launched.assert_not_called()
+
+    def test_explicit_passive_commands_are_the_only_dispatched_forms(self) -> None:
+        for args in (
+            ("info", "--format", "{{json .SecurityOptions}}"),
+            ("image", "inspect", "sha256:" + "a" * 64),
+            ("container", "inspect", "synthetic"),
+            ("volume", "inspect", "synthetic"),
+        ):
+            with self.subTest(args=args):
+                fake = subprocess.CompletedProcess(
+                    args=["/usr/bin/docker", *args],
+                    returncode=0, stdout="MOCK_ONLY", stderr="",
+                )
+                with patch(__name__ + ".subprocess.run", return_value=fake) as dispatched:
+                    self.assertIs(_docker(*args), fake)
+                    dispatched.assert_called_once()
+
+    def test_direct_testcase_run_still_enforces_authority(self) -> None:
+        # unittest skips setUpClass for a directly instantiated TestCase.
+        name = "test_hostile_executor_cannot_access_independent_offline_intent"
+        with patch.object(BackupIntentMultiUidDockerTests, "__unittest_skip__", False):
+            for required in ("0", "1"):
+                with self.subTest(required=required):
+                    trial = BackupIntentMultiUidDockerTests(name)
+                    result = unittest.TestResult()
+                    with patch.dict(os.environ, {"MARK_REQUIRE_INTENT_MULTIUID": required}):
+                        with patch(__name__ + ".uuid4") as allocate:
+                            with patch(__name__ + ".subprocess.run") as called:
+                                trial.run(result)
+                            called.assert_not_called()
+                            allocate.assert_not_called()
+                    self.assertEqual(result.testsRun, 1)
+                    self.assertFalse(result.errors)
+                    if required == "0":
+                        self.assertEqual(len(result.skipped), 1)
+                        self.assertFalse(result.failures)
+                        self.assertIn("exclusive Docker-admin authority", result.skipped[0][1])
+                    else:
+                        self.assertEqual(len(result.failures), 1)
+                        self.assertFalse(result.skipped)
+                        self.assertIn("exclusive Docker-admin authority", result.failures[0][1])
+
+    def test_required_real_uid_suite_blocks_before_name_allocation(self) -> None:
+        trial = BackupIntentMultiUidDockerTests(
+            "test_hostile_executor_cannot_access_independent_offline_intent"
+        )
+        with patch(__name__ + ".IMAGE_OK", True):
+            with patch.dict(os.environ, {"MARK_REQUIRE_INTENT_MULTIUID": "1"}):
+                with patch(
+                    __name__ + ".uuid4",
+                    side_effect=AssertionError("unsafe name allocation before authority"),
+                ) as allocate:
+                    with self.assertRaisesRegex(
+                        AssertionError, "exclusive Docker-admin authority",
+                    ):
+                        trial.test_hostile_executor_cannot_access_independent_offline_intent()
+                    allocate.assert_not_called()
+
+    def test_optional_real_uid_suite_skips_before_name_allocation(self) -> None:
+        trial = BackupIntentMultiUidDockerTests(
+            "test_hostile_executor_cannot_access_independent_offline_intent"
+        )
+        with patch(__name__ + ".IMAGE_OK", True):
+            with patch.dict(os.environ, {"MARK_REQUIRE_INTENT_MULTIUID": "0"}):
+                with patch(
+                    __name__ + ".uuid4",
+                    side_effect=AssertionError("unsafe name allocation before authority"),
+                ) as allocate:
+                    with self.assertRaisesRegex(
+                        unittest.SkipTest, "exclusive Docker-admin authority",
+                    ):
+                        trial.test_hostile_executor_cannot_access_independent_offline_intent()
+                    allocate.assert_not_called()
 
 
 if __name__ == "__main__":
