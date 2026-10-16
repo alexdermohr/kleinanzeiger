@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -88,6 +89,7 @@ def _utc_now() -> datetime:
 
 _MEDIA_PERSISTENCE_VERIFY_TIMEOUT_SECONDS = 10.0
 _WRITE_HANDLER_DRAIN_SECONDS = 12.0
+_WRITE_OPERATION_DRAIN_SECONDS = 2.0
 
 
 def _pending_dashboard_media_refs(store: SnapshotStore) -> frozenset[str]:
@@ -127,6 +129,19 @@ class PrivateWebRuntimeClosedError(WriteNotAttemptedError):
 
 class PrivateWebRuntimeSetupError(WriteNotAttemptedError):
     """Per-call private-Web page setup failed before any platform write."""
+
+
+@contextmanager
+def _bounded_write_shutdown_lock(lock):
+    """Never hold service shutdown on an operation lock indefinitely."""
+    if not lock.acquire(timeout=_WRITE_OPERATION_DRAIN_SECONDS):
+        raise PrivateWebRuntimeSetupError(
+            "active write operation prevents safe shutdown; retain recovery fences"
+        )
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 class _RejectManagementRedirectHandler(HTTPRedirectHandler):
@@ -1339,7 +1354,7 @@ class PrivateWebWriteApiRuntime:
                 )
 
             media_unknown: PrivateWebSubmitUnknownError | None = None
-            with self._operation_lock:
+            with _bounded_write_shutdown_lock(self._operation_lock):
                 if self._media_runtime is not None:
                     try:
                         self._media_runtime.close()
