@@ -70,13 +70,16 @@ def _docker_reports_missing(
 
 
 def _remove_owned_synthetic_container(
-    name: str, run_suffix: str, docker,
+    name: str, run_suffix: str, original_create_id: str, docker,
 ) -> None:
     """Best-effort cleanup of one test container, never by its mutable name.
 
     This is NOT proof that a previously timed-out daemon-side run is terminal.
-    Only the already observed immutable ID is eligible for a remove attempt.
+    A completed original create ACK must pin this test-owned immutable ID;
+    merely matching the name and run label may identify a foreign decoy.
     """
+    if not re.fullmatch(r"[0-9a-f]{64}", original_create_id):
+        raise AssertionError("original synthetic create identity not proven")
     observed = docker(
         "container", "inspect", "--format",
         '{{.Id}} {{index .Config.Labels "mark.a6.rawseal.run"}}',
@@ -89,6 +92,7 @@ def _remove_owned_synthetic_container(
     fields = observed.stdout.strip().split()
     if (len(fields) != 2
             or not re.fullmatch(r"[0-9a-f]{64}", fields[0])
+            or fields[0] != original_create_id
             or fields[1] != run_suffix):
         raise AssertionError("refuse to remove foreign synthetic container")
     docker("rm", "-f", fields[0], allow_failure=True)
@@ -821,11 +825,12 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
         original = _docker
         volumes: list[str] = []
         seed: str | None = None
+        created_seed_id: str | None = None
         delayed = False
 
         def finish_after_first_404(*args: str, **kwargs: object
                                    ) -> subprocess.CompletedProcess[str]:
-            nonlocal seed, delayed
+            nonlocal seed, delayed, created_seed_id
             if args[:2] == ("volume", "create"):
                 result = original(*args, **kwargs)
                 volumes.append(args[-1])
@@ -854,6 +859,8 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     "--entrypoint", "/bin/sh", IMAGE, "-c", "true",
                 )
                 self.assertEqual(created.returncode, 0, created.stderr)
+                created_seed_id = created.stdout.strip()
+                self.assertRegex(created_seed_id, r"^[0-9a-f]{64}$")
                 delayed = True
                 return prior
             return original(*args, **kwargs)
@@ -882,8 +889,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 self.assertEqual(retained.stdout.strip(), volume.split("-")[2])
         finally:
             if seed is not None:
+                self.assertIsNotNone(created_seed_id, "no completed create identity")
                 _remove_owned_synthetic_container(
-                    seed, seed.split("-")[2], original,
+                    seed, seed.split("-")[2], created_seed_id, original,
                 )
             for volume in reversed(volumes):
                 observed = original(
@@ -914,11 +922,12 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
         original = _docker
         volumes: list[str] = []
         seed: str | None = None
+        created_seed_id: str | None = None
         intercepted = False
 
         def create_then_lose_ack(*args: str, **kwargs: object
                                  ) -> subprocess.CompletedProcess[str]:
-            nonlocal seed, intercepted
+            nonlocal seed, intercepted, created_seed_id
             if args[:2] == ("volume", "create"):
                 response = original(*args, **kwargs)
                 volumes.append(args[-1])
@@ -936,6 +945,8 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                         "--entrypoint", "/bin/sh", IMAGE, "-c", "true",
                     )
                     self.assertEqual(created.returncode, 0, created.stderr)
+                    created_seed_id = created.stdout.strip()
+                    self.assertRegex(created_seed_id, r"^[0-9a-f]{64}$")
                     intercepted = True
                     raise subprocess.TimeoutExpired(
                         cmd=["/usr/bin/docker", *args], timeout=90,
@@ -966,8 +977,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
         finally:
             # RED mutation must not leave any real synthetic Docker resource.
             if seed:
+                self.assertIsNotNone(created_seed_id, "no completed create identity")
                 _remove_owned_synthetic_container(
-                    seed, seed.split("-")[2], original,
+                    seed, seed.split("-")[2], created_seed_id, original,
                 )
             for volume in reversed(volumes):
                 probe = original(
@@ -1302,7 +1314,7 @@ class SyntheticContainerCleanupContractTests(unittest.TestCase):
                 )
             raise AssertionError("unexpected Docker operation " + repr(args))
 
-        _remove_owned_synthetic_container(name, "abc123abc123", fake)
+        _remove_owned_synthetic_container(name, "abc123abc123", "a" * 64, fake)
         self.assertEqual([a for a in calls if a[:2] == ("rm", "-f")],
                          [("rm", "-f", pinned)])
 
@@ -1331,8 +1343,32 @@ class SyntheticContainerCleanupContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError,
                                     "removal not proven absent"):
-            _remove_owned_synthetic_container(name, "abc123abc123", fake)
+            _remove_owned_synthetic_container(name, "abc123abc123", "a" * 64, fake)
         self.assertEqual(removed, [pinned])
+
+    def test_emergency_cleanup_rejects_preinspection_decoy_with_matching_label(self) -> None:
+        name = "mark-rawseal-abc123abc123-seed"
+        original_id = "a" * 64  # original, separately acknowledged create
+        foreign_id = "b" * 64   # decoy before inspection
+        remove_calls: list[str] = []
+
+        def fake(*args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ("container", "inspect") and "--format" in args:
+                return subprocess.CompletedProcess(
+                    args, 0, foreign_id + " abc123abc123\n", "",
+                )
+            if args[:2] == ("rm", "-f"):
+                remove_calls.append(args[-1])
+                raise AssertionError("foreign decoy removal attempted")
+            raise AssertionError("unexpected Docker operation " + repr(args))
+
+        with self.assertRaisesRegex(
+            AssertionError, "refuse to remove foreign synthetic container",
+        ):
+            _remove_owned_synthetic_container(
+                name, "abc123abc123", original_id, fake,
+            )
+        self.assertFalse(remove_calls)
 
     def test_emergency_cleanup_refuses_mismatch_or_daemon_500(self) -> None:
         name = "mark-rawseal-abc123abc123-seed"
@@ -1352,7 +1388,7 @@ class SyntheticContainerCleanupContractTests(unittest.TestCase):
                 return result
 
             with self.assertRaisesRegex(AssertionError, message):
-                _remove_owned_synthetic_container(name, "abc123abc123", fake)
+                _remove_owned_synthetic_container(name, "abc123abc123", "a" * 64, fake)
             self.assertFalse(removed)
 
 
