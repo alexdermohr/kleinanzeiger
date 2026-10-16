@@ -7,9 +7,10 @@ already verified local immutable test image; no pulling is permitted.
 """
 from __future__ import annotations
 
+import io
 import os
 import re
-import shutil
+import tarfile
 import subprocess
 import sys
 import tempfile
@@ -243,8 +244,16 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
             self.assertFalse(source_status.stdout.strip(),
                              "Docker source differs from committed HEAD")
             package = Path(temp) / "src" / "mark_api"
-            shutil.copytree(ROOT / "src" / "mark_api", package,
-                            ignore=shutil.ignore_patterns("__pycache__"))
+            # Extract exactly HEAD's archived tracked modules: an ignored
+            # local .so, legacy .pyc or other build artifact cannot enter /src.
+            product_archive = subprocess.run(
+                ["git", "-C", str(ROOT), "archive", "--format=tar",
+                 head, "src/mark_api"],
+                check=True, capture_output=True, timeout=30,
+            ).stdout
+            with tarfile.open(fileobj=io.BytesIO(product_archive), mode="r:") as archive:
+                archive.extractall(temp, filter="data")
+            self.assertTrue((package / "__init__.py").is_file())
             for item in (Path(temp), package.parent, *package.parent.rglob("*")):
                 if item.is_dir():
                     item.chmod(0o755)
