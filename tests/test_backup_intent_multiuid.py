@@ -8,6 +8,7 @@ already verified local immutable test image; no pulling is permitted.
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import tarfile
@@ -40,7 +41,7 @@ def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProc
 
 
 _SEAL = """
-import os,stat
+import hashlib,json,os,stat
 from pathlib import Path
 import mark_api
 from mark_api.backup_intent_authority import BackupIntentAuthority
@@ -91,6 +92,17 @@ files=[
 for path in files:
     info=path.stat()
     assert info.st_uid==50043 and stat.S_IMODE(info.st_mode)==0o600,(path,info)
+sealed_files={
+    'head':Path('/anchor/latest.json'),
+    'sqlite':pair/'mark.sqlite',
+    'witness':pair/'witness.sqlite',
+    'manifest':pair/'manifest.json',
+}
+sealed_hashes={
+    label:hashlib.sha256(path.read_bytes()).hexdigest()
+    for label,path in sealed_files.items()
+}
+print('MARK_UID_SEAL_BASELINE='+json.dumps(sealed_hashes,sort_keys=True),flush=True)
 print('REAL_UID50043_COMPLETE_ARTIFACT_DAC_AND_INTENT_SEALED',flush=True)
 """
 
@@ -130,6 +142,12 @@ for item in protected:
     try:Path(item).read_bytes()
     except PermissionError:pass
     else:raise AssertionError('hostile UID read protected image: '+item)
+print('REAL_UID50044_PRODUCT_FILE_OPEN_DAC_DENIED',flush=True)
+
+# Namespace mutations are denied by harness-provisioned 0711 root directories.
+# The nested generation directory is product-created with mode 0700.
+# These checks do NOT demonstrate product control of root mount policy.
+for item in protected:
     try:os.unlink(item)
     except OSError as exc:
         assert exc.errno in (errno.EACCES,errno.EPERM),(item,'unlink',exc)
@@ -147,6 +165,7 @@ try:os.rename('/anchor/latest.json','/anchor/rolled-back.json')
 except OSError as exc:
     assert exc.errno in (errno.EACCES,errno.EPERM),exc
 else:raise AssertionError('hostile UID replaced the anchored HEAD')
+print('REAL_UID50044_HARNESS_ROOT_NAMESPACE_DAC_DENIED',flush=True)
 print('REAL_UID50044_DAC_DENIED_WITH_RW_VOLUME_POSITIVE_CONTROL',flush=True)
 """
 
@@ -184,6 +203,22 @@ assert Path(mark_api.__file__).as_posix().startswith('/src/mark_api/')
 generation='1'*32
 root=Path('/output')/generation
 anchor=Path('/anchor')
+expected={
+    'head':os.environ['MARK_UID_SEAL_HEAD_SHA'],
+    'sqlite':os.environ['MARK_UID_SEAL_SQLITE_SHA'],
+    'witness':os.environ['MARK_UID_SEAL_WITNESS_SHA'],
+    'manifest':os.environ['MARK_UID_SEAL_MANIFEST_SHA'],
+}
+for label,digest in expected.items():
+    assert len(digest)==64 and all(c in '0123456789abcdef' for c in digest),(label,digest)
+sealed_files={
+    'head':anchor/'latest.json',
+    'sqlite':root/'mark.sqlite',
+    'witness':root/'witness.sqlite',
+    'manifest':root/'manifest.json',
+}
+for label,path in sealed_files.items():
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==expected[label],(label,path)
 head_bytes=(anchor/'latest.json').read_bytes()
 head_sha=hashlib.sha256(head_bytes).hexdigest()
 head=json.loads(head_bytes)
@@ -222,6 +257,8 @@ for action,message in checks:
 assert (anchor/'latest.json').read_bytes()==head_bytes
 for path in pairs:
     assert hashlib.sha256(path.read_bytes()).hexdigest()==original[str(path)]
+for label,path in sealed_files.items():
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==expected[label],(label,path)
 assert not (anchor/'.inflight').exists()
 assert (Path('/intent')/(generation+'.acknowledged.json')).is_file()
 print('REAL_UID50043_EXACT_CHAIN_AND_SINGLE_USE_REPLAY_DENIAL',flush=True)
@@ -278,10 +315,19 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
             ]
 
             def run_python(role: str, uid: int, script: str,
-                           *, source_visible: bool) -> subprocess.CompletedProcess[str]:
+                           *, source_visible: bool,
+                           evidence: dict[str, str] | None = None
+                           ) -> subprocess.CompletedProcess[str]:
                 name = f"mark-intent-{suffix}-{role}"
                 launched.append(name)
                 opts = [*source_mount, "-e", "PYTHONPATH=/src"] if source_visible else []
+                if evidence:
+                    for key, value in evidence.items():
+                        if not re.fullmatch(r"MARK_UID_SEAL_[A-Z]+_SHA", key):
+                            raise AssertionError("untrusted Docker evidence name")
+                        if not re.fullmatch(r"[0-9a-f]{64}", value):
+                            raise AssertionError("untrusted Docker evidence digest")
+                        opts.extend(("-e", key + "=" + value))
                 return _docker(
                     "run", "--rm", "--pull", "never", "--name", name,
                     "--network", "none", "--read-only", "--cap-drop", "ALL",
@@ -294,8 +340,9 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
 
             try:
                 for volume in names.values():
-                    _docker("volume", "create", volume)
+                    # Register before a possibly timed-out Docker create.
                     created.append(volume)
+                    _docker("volume", "create", volume)
                 seed_name = f"mark-intent-{suffix}-seed"
                 launched.append(seed_name)
                 _docker(
@@ -313,13 +360,29 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
                 first = run_python("seal", 50043, _SEAL, source_visible=True)
                 self.assertIn("REAL_UID50043_COMPLETE_ARTIFACT_DAC_AND_INTENT_SEALED",
                               first.stdout)
-                # 0711 permits a hostile UID to traverse all harness roots.
-                # Access denial must now come from the product-created 0600
-                # files and 0700 generation directory, not the root harness.
+                captured = re.search(
+                    r"^MARK_UID_SEAL_BASELINE=(\{[^\n]+\})$",
+                    first.stdout, flags=re.MULTILINE,
+                )
+                self.assertIsNotNone(captured, first.stdout)
+                seal_hashes = json.loads(captured.group(1))
+                self.assertEqual(set(seal_hashes),
+                                 {"head", "sqlite", "witness", "manifest"})
+                self.assertTrue(all(
+                    isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                    for value in seal_hashes.values()
+                ))
+                # 0711 harness roots grant traversal. 0600 file-open denials
+                # prove artifact DAC; namespace denials prove harness root DAC.
+
                 relaxed = run_python("relax", 50043, _RELAX_ROOTS, source_visible=False)
                 self.assertIn("TRUSTED_ROOTS_TRAVERSABLE_ARTIFACT_DAC_UNCHANGED",
                               relaxed.stdout)
                 attack = run_python("attack", 50044, _ATTACK, source_visible=False)
+                self.assertIn("REAL_UID50044_PRODUCT_FILE_OPEN_DAC_DENIED",
+                              attack.stdout)
+                self.assertIn("REAL_UID50044_HARNESS_ROOT_NAMESPACE_DAC_DENIED",
+                              attack.stdout)
                 self.assertIn(
                     "REAL_UID50044_DAC_DENIED_WITH_RW_VOLUME_POSITIVE_CONTROL",
                     attack.stdout,
@@ -327,7 +390,15 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
                 restored = run_python("restore", 50043, _RESTORE_ROOTS,
                                       source_visible=False)
                 self.assertIn("TRUSTED_ROOTS_RESTRICTED_AGAIN", restored.stdout)
-                verify = run_python("verify", 50043, _RECHECK, source_visible=True)
+                verify = run_python(
+                    "verify", 50043, _RECHECK, source_visible=True,
+                    evidence={
+                        "MARK_UID_SEAL_HEAD_SHA": seal_hashes["head"],
+                        "MARK_UID_SEAL_SQLITE_SHA": seal_hashes["sqlite"],
+                        "MARK_UID_SEAL_WITNESS_SHA": seal_hashes["witness"],
+                        "MARK_UID_SEAL_MANIFEST_SHA": seal_hashes["manifest"],
+                    },
+                )
                 self.assertIn(
                     "REAL_UID50043_EXACT_CHAIN_AND_SINGLE_USE_REPLAY_DENIAL",
                     verify.stdout,
