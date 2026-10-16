@@ -513,43 +513,52 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
 
                 for name in reversed(named_containers):
                     reconcile("container", name)
-                # A daemon-side Docker run can start only AFTER our first
-                # container 404 and implicitly re-create a removed named
-                # volume *without* our ownership label. Never remove the
-                # original labelled mounts while any run request has an
-                # uncertain completion state. Retain them as explicitly
-                # unresolved instead of allowing an unlabelled orphan.
-                unsettled_runs = {
+
+                def bounded_retry(kind: str) -> None:
+                    # Never promote finite negative inspection to proof that
+                    # the original daemon request has actually terminated.
+                    if not any(k == kind for k, _ in unsettled):
+                        return
+                    deadline = time.monotonic() + 1.5
+                    while time.monotonic() < deadline:
+                        for k, name in sorted(unsettled):
+                            if k == kind:
+                                reconcile(k, name)
+                        if not any(k == kind for k, _ in unsettled):
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining > 0:
+                            time.sleep(min(0.12, remaining))
+
+                # Resolve pending Docker runs FIRST. Deleting named volumes
+                # while a daemon run can still begin would let a delayed run
+                # re-create the names without the private owner run label.
+                bounded_retry("container")
+                unsettled_runs = sorted(
                     name for kind, name in unsettled if kind == "container"
-                }
+                )
                 if unsettled_runs:
+                    # Never delete the volumes still needed by an unknown run.
                     cleanup_errors.append(
                         "named volumes intentionally retained pending "
                         "independent completion of uncertain Docker run: " +
-                        repr(sorted(unsettled_runs))
+                        repr(unsettled_runs)
                     )
                 else:
                     for name in reversed(created):
                         reconcile("volume", name)
+                    # The original volume-create request can also complete
+                    # after a first exact 404; detect late arrivals but keep
+                    # the final verdict NO-GO absent proof of completion.
+                    bounded_retry("volume")
 
-                if unsettled:
-                    # A bounded best-effort sweep can catch delayed creation,
-                    # but no number of 404s certifies that the original daemon
-                    # request has finished. Keep the result permanently NO-GO.
-                    deadline = time.monotonic() + 1.5
-                    while time.monotonic() < deadline:
-                        for kind, name in sorted(unsettled):
-                            reconcile(kind, name)
-                        remaining = deadline - time.monotonic()
-                        if remaining > 0:
-                            time.sleep(min(0.12, remaining))
-                    for kind, name in sorted(unsettled):
-                        cleanup_errors.append(
-                            kind + " " + name +
-                            ": unresolved Docker create/run after unclear CLI "
-                            "outcome; daemon completion not proven; even "
-                            "repeated 404 is not final cleanup evidence"
-                        )
+                for kind, name in sorted(unsettled):
+                    cleanup_errors.append(
+                        kind + " " + name +
+                        ": unresolved Docker create/run after unclear CLI "
+                        "outcome; daemon completion not proven; even "
+                        "repeated 404 is not final cleanup evidence"
+                    )
                 self.assertFalse(
                     cleanup_errors,
                     "unconfirmed cleanup of synthetic Docker resources: " +
@@ -773,6 +782,108 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     _docker_reports_missing(gone, "volume", volume),
                 )
         print("P2_GREEN_REPLAY_TIMEOUT_RETAINS_LABELLED_MOUNTS", flush=True)
+
+    def test_late_recognized_run_after_first_404_cleans_mounts(self) -> None:
+        # Docker run has timed out. The *first* cleanup inspect accurately
+        # returns 404, then the daemon finishes creating the exact named
+        # container. Later bounded rechecks must settle this single run,
+        # and only then clean the labelled mount volumes.
+        original = _docker
+        volumes: list[str] = []
+        seed: str | None = None
+        delayed = False
+
+        def finish_after_first_404(*args: str, **kwargs: object
+                                   ) -> subprocess.CompletedProcess[str]:
+            nonlocal seed, delayed
+            if args[:2] == ("volume", "create"):
+                result = original(*args, **kwargs)
+                volumes.append(args[-1])
+                return result
+            if args and args[0] == "run" and "--name" in args:
+                name = args[args.index("--name") + 1]
+                if name.endswith("-seed") and seed is None:
+                    seed = name
+                    return_code = subprocess.TimeoutExpired(
+                        cmd=["/usr/bin/docker", *args], timeout=90,
+                    )
+                    raise return_code
+            if (seed is not None and not delayed
+                    and args[:2] == ("container", "inspect")
+                    and "--format" in args and args[-1] == seed):
+                prior = original(*args, **kwargs)
+                self.assertTrue(
+                    _docker_reports_missing(prior, "container", seed),
+                    "first cleanup response must be a real Docker 404",
+                )
+                suffix = seed.split("-")[2]
+                created = original(
+                    "create", "--pull", "never", "--name", seed,
+                    "--label", "mark.a6.rawseal.run=" + suffix,
+                    "--network", "none", "--read-only", "--cap-drop", "ALL",
+                    "--entrypoint", "/bin/sh", IMAGE, "-c", "true",
+                )
+                self.assertEqual(created.returncode, 0, created.stderr)
+                delayed = True
+                return prior
+            return original(*args, **kwargs)
+
+        try:
+            trial = type(self)(
+                "test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer",
+            )
+            result = unittest.TestResult()
+            with patch(__name__ + "._docker",
+                       side_effect=finish_after_first_404):
+                trial.run(result)
+            self.assertTrue(delayed)
+            self.assertEqual(len(volumes), 5)
+            self.assertFalse(result.failures, result.failures)
+            self.assertEqual(len(result.errors), 1, result.errors)
+            self.assertIn("TimeoutExpired", result.errors[0][1])
+            for volume in volumes:
+                final = original("volume", "inspect", volume,
+                                 allow_failure=True)
+                self.assertTrue(
+                    _docker_reports_missing(final, "volume", volume),
+                    "late proven run left its named mount volume behind",
+                )
+        finally:
+            if seed is not None:
+                observed = original(
+                    "container", "inspect", "--format",
+                    '{{index .Config.Labels "mark.a6.rawseal.run"}}',
+                    seed, allow_failure=True,
+                )
+                if observed.returncode == 0:
+                    self.assertEqual(observed.stdout.strip(), seed.split("-")[2])
+                    original("rm", "-f", seed)
+                else:
+                    self.assertTrue(
+                        _docker_reports_missing(observed, "container", seed),
+                        "cannot attest synthetic container for emergency cleanup",
+                    )
+            for volume in reversed(volumes):
+                observed = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
+                )
+                if observed.returncode == 0:
+                    self.assertEqual(
+                        observed.stdout.strip(), volume.split("-")[2],
+                        "never remove an untrusted Docker volume",
+                    )
+                    original("volume", "rm", volume)
+                else:
+                    self.assertTrue(
+                        _docker_reports_missing(observed, "volume", volume),
+                        "cannot attest synthetic volume for emergency cleanup",
+                    )
+                final = original("volume", "inspect", volume,
+                                 allow_failure=True)
+                self.assertTrue(_docker_reports_missing(final, "volume", volume))
+        print("LATE_RECOGNIZED_RUN_AFTER_404_MOUNTS_ABSENT", flush=True)
 
     def test_recognized_timeout_run_releases_owned_mounts(self) -> None:
         # A timed-out run may have created its named, owned container.
