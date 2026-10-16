@@ -497,8 +497,24 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
 
                 for name in reversed(named_containers):
                     reconcile("container", name)
-                for name in reversed(created):
-                    reconcile("volume", name)
+                # A daemon-side Docker run can start only AFTER our first
+                # container 404 and implicitly re-create a removed named
+                # volume *without* our ownership label. Never remove the
+                # original labelled mounts while any run request has an
+                # uncertain completion state. Retain them as explicitly
+                # unresolved instead of allowing an unlabelled orphan.
+                unsettled_runs = {
+                    name for kind, name in unsettled if kind == "container"
+                }
+                if unsettled_runs:
+                    cleanup_errors.append(
+                        "named volumes intentionally retained pending "
+                        "independent completion of uncertain Docker run: " +
+                        repr(sorted(unsettled_runs))
+                    )
+                else:
+                    for name in reversed(created):
+                        reconcile("volume", name)
 
                 if unsettled:
                     # A bounded best-effort sweep can catch delayed creation,
@@ -580,6 +596,90 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     original("volume", "rm", created)
                     self.fail("orphaned test volume required emergency cleanup")
 
+
+    def test_uncertain_late_run_must_retain_named_volumes(self) -> None:
+        # If a run times out *before* daemon-side container creation, a first
+        # container 404 is not permission to remove its named mount volumes.
+        # Simulate the delayed daemon command and then actually issue that
+        # command after cleanup; no unlabeled volume may be auto-created.
+        original = _docker
+        volumes: list[str] = []
+        delayed: tuple[str, ...] | None = None
+
+        def defer_seed_run(*args: str, **kwargs: object
+                           ) -> subprocess.CompletedProcess[str]:
+            nonlocal delayed
+            if args[:2] == ("volume", "create"):
+                result = original(*args, **kwargs)
+                volumes.append(args[-1])
+                return result
+            if args and args[0] == "run" and "--name" in args:
+                name = args[args.index("--name") + 1]
+                if name.endswith("-seed") and delayed is None:
+                    delayed = args
+                    raise subprocess.TimeoutExpired(
+                        cmd=["/usr/bin/docker", *args], timeout=90,
+                    )
+            return original(*args, **kwargs)
+
+        try:
+            nested = type(self)(
+                "test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer",
+            )
+            result = unittest.TestResult()
+            with patch(__name__ + "._docker", side_effect=defer_seed_run):
+                nested.run(result)
+            self.assertIsNotNone(delayed)
+            self.assertEqual(len(volumes), 5)
+            self.assertFalse(result.errors, result.errors)
+            self.assertEqual(len(result.failures), 1, result.failures)
+            self.assertIn("unresolved Docker create/run", result.failures[0][1])
+            # The original request is not known to have finished; keep all
+            # five existing run-labelled mounts until externally reconciled.
+            for volume in volumes:
+                label = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
+                )
+                self.assertEqual(label.returncode, 0,
+                                 "pending docker run lost its named mount")
+                self.assertEqual(label.stdout.strip(), volume.split("-")[2],
+                                 "named mount ownership changed")
+            # Now perform the delayed real Docker run against the retained,
+            # already correctly labelled volumes.
+            completed = original(*delayed)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            for volume in volumes:
+                label = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
+                )
+                self.assertEqual(label.returncode, 0)
+                self.assertEqual(label.stdout.strip(), volume.split("-")[2])
+        finally:
+            # A real delayed run is executed only if the prior mounts stayed
+            # owned. Perform guarded emergency cleanup *after* its completion.
+            for volume in reversed(volumes):
+                owned = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
+                )
+                if owned.returncode == 0:
+                    self.assertEqual(owned.stdout.strip(), volume.split("-")[2],
+                                     "never remove an unowned replacement")
+                    original("volume", "rm", volume)
+                else:
+                    self.assertTrue(
+                        _docker_reports_missing(owned, "volume", volume),
+                        "foreign or uncertain Docker volume: no removal",
+                    )
+                final = original("volume", "inspect", volume,
+                                 allow_failure=True)
+                self.assertTrue(_docker_reports_missing(final, "volume", volume))
+        print("LATE_RUN_NAMED_MOUNTS_RETAINED_UNTIL_DAEMON_COMPLETED", flush=True)
 
     def test_late_docker_volume_create_after_exact_404_stays_no_go(self) -> None:
         # Real Docker creates the volume only AFTER cleanup's first 404.
