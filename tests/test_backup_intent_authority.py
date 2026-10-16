@@ -90,6 +90,30 @@ class BackupIntentAuthorityTests(unittest.TestCase):
         self.assertEqual(marker.read_bytes(), FIRST.encode("ascii"))
         self.assertEqual(first["head_sha256"], self._hash(self.anchor / "latest.json"))
 
+    def test_public_reconciliation_cannot_consume_replayed_acknowledged_intent(self) -> None:
+        from mark_api.paired_backup_operator import reconcile_committed_inflight
+
+        committed = self._seal()
+        marker = self.anchor / ".inflight"
+        marker.write_bytes(FIRST.encode("ascii"))
+        marker.chmod(0o600)
+        original_sha = self._hash(self.sqlite)
+        witness_sha = self._hash(self.witness)
+        with self.assertRaisesRegex(
+            PairedBackupOperatorError, "direct reconciliation forbidden",
+        ):
+            reconcile_committed_inflight(
+                self.output, self.anchor,
+                expected_current_head_sha256=committed["head_sha256"],
+                expected_generation=FIRST,
+                expected_previous_head_sha256=None,
+                expected_sqlite_sha256=original_sha,
+                expected_witness_sha256=witness_sha,
+            )
+        self.assertEqual(marker.read_bytes(), FIRST.encode("ascii"))
+        with self.assertRaisesRegex(BackupIntentError, "no unconsumed"):
+            self.operator.acknowledge(FIRST, self.output, self.anchor)
+
     def test_second_generation_must_extend_independently_acknowledged_tip(self) -> None:
         first = self._seal()
         with self.assertRaisesRegex(BackupIntentError, "predecessor"):
