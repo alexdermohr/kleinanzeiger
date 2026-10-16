@@ -17,7 +17,7 @@ operator-owned, separately protected private directory:
 - GEN.acknowledged.json: exact committing-record SHA-256 plus the actual
   independently reverified published HEAD digest.
 - GEN.abandoned.json: terminal create-only, fsynced proof bound to the exact
-  prepared record, optional committing record and original predecessor HEAD.
+  prepared record, a zero committing-record digest and original predecessor HEAD.
   This is neither an ACK nor a reusable generation; records are never deleted.
 
 Every retained acknowledgement is checked to reconstruct a single linear
@@ -121,49 +121,60 @@ op.acknowledge(
 Failure or mismatch preserves the pending intent and recovery fences.
 Never delete .inflight to force a retry.
 
-## Exceptional recovery from an effect-free failure
+## Prepared-only cancellation; committing intents stay fenced
 
-A committed intent remains pending after any uncertain operation. The trusted
-independent operator may instead call `abandon(generation, output, anchor)`
-**manually only after** independent host evidence proves that every process
-which could still seal that generation has terminated and all old image, UDS,
-filesystem and writable mapping access has been revoked. The code does not
-create or attest this host-level quiescence or serialize an out-of-process
-sealer; a concurrent sealer makes cancellation unsafe.
+A generation in **prepared** state has not been authorized to start a seal.
+If the independent operator confirms that no committing record was persisted,
+the private `abandon(generation, output, anchor)` method may irreversibly retire
+that prepared-only generation. It retains a create-only, fsynced
+`GEN.abandoned.json` bound to the prepared record and its independently
+acknowledged predecessor; `committing_sha256` is the all-zero sentinel.
+The identifier can never be used again. A different new generation may
+then be prepared against the same acknowledged predecessor.
 
-`abandon` checks the original independently acknowledged predecessor HEAD,
-requires no generation output/anchor record, no `.inflight`, no staging HEAD,
-and no partial generation. It fsyncs both roots and rechecks the effects before
-persisting `GEN.abandoned.json` under the protected operator lock. All
-cooperating `seal_prepared` and `abandon` calls also hold a separate exclusive
-Linux directory `flock` on the immutable protected operator root for the
-entire process, so manual abandonment is rejected while an in-process seal
-has not finished; a reproducible threaded RED/GREEN test enforces this.
-The lock is only a coordination aid, not a protection against a hostile UID
-or an external sealer that ignores the protocol.
-Any ambiguity remains pending and needs manual forensic recovery. After a
-valid abandonment, a **new generation identifier** may be prepared against
-the same trusted predecessor; the abandoned identifier can never be
-committed, acknowledged or prepared again.
+This limited operation checks absence of generation output/HEAD records,
+`.inflight`, `.next-*` and `.partial-*`, validates the acknowledged chain,
+fsyncs both output and anchor roots, and repeats the effect check before
+recording an abandonment. Negative cases include after a *previously
+acknowledged* generation and adversarial changes during directory fsync.
 
-An already published HEAD, an unknown outcome, a damaged directory tree, a
-concurrent operator, or a remaining crash marker can **never** be made safe by
-deleting local files or invoking `abandon` blindly. The API must not be
-exposed to the untrusted Mark service or invoked without independent
-operator-controlled process shutdown and trusted provenance.
+**A durable committing intent cannot be abandoned by this library, even if
+there is no visible output.** An external `seal_offline_pair()` may already
+hold its anchor lock and be paused before its first file effect. A finite
+filesystem scan and the private operator directory `flock` cannot certify
+that it has terminated; a concurrent external sealer can otherwise publish
+the same generation *after* an abandoned record. Any `committing` intent
+therefore remains pending, with all crash/recovery fences preserved. The
+module rejects a forged/legacy `GEN.abandoned.json` paired with a committing
+record on restart as an unsafe state.
 
-The lock bootstrap currently binds device/inode identity. Inode numbers may
-be reused after all descriptors close; absence of a matching inode is
-detectable, but recreation with inode reuse is not a cryptographic guarantee.
-Lock-state migration/recovery and hostile-UID assurance remain explicit
-deployment gates.
+Do not delete `committing`, `.inflight`, generation files, or locks to force
+progress. A future recovery mechanism must have an independently enforced
+operator/host quiescence and a separate revisions-bound security review
+before it could retire such an intent. A caller-supplied hash, statement,
+PID listing, filesystem permission or passed Python test is **not** proof
+of FD/mmap/namespace revocation. No such release mechanism is provided here.
+
+All cooperating `seal_prepared` calls and prepared-only abandons coordinate
+through an exclusive directory flock on the protected operator root.
+The lock cannot revoke already running or malicious out-of-process sealer
+access. The library, without a securely installed host boundary, is not a
+production backup/restore release authorization. No Mark platform write is
+authorized by an abandoned record.
+
+The lock bootstrap also binds device/inode identity. Inode numbers may be
+reused after all descriptors close; absence of a matching inode is
+detectable, but recreation with inode reuse is not a cryptographic
+guarantee. Lock-state migration and hostile-UID assurance remain
+explicit deployment gates.
 
 ## Adversarial matrix
 
 | Failure point | Required result |
 | --- | --- |
 | Before committing | Prepared only, new generations blocked |
-| Committing before HEAD | No blind retry; pending until an independently quiesced, proven effect-free manual abandon |
+| Prepared-only, verified effect-free | One-shot abandonment may retire the unused identifier; no committing record |
+| Committing before HEAD | No blind retry or local abandon; retain pending intent and all fences |
 | Abandoned generation replay | Original identity permanently consumed; only a fresh generation may start |
 | Inflight symlink or unsynced anchor | No ACK; retained committing intent requires investigation |
 | HEAD published, .inflight remains | Only the unconsumed external intent permits verified reconciliation |

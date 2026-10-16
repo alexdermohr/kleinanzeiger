@@ -263,6 +263,11 @@ def _state(root: Path) -> tuple[str, dict[str, dict[str, dict[str, object]]]]:
         if "abandoned" in paths:
             if "acknowledged" in paths:
                 raise BackupIntentError("operator intent has conflicting terminal states")
+            # No independent live host/process/FD quiescence authority exists
+            # here. An old committing record cannot be cancelled by a
+            # finite local inspection, even if its HEAD is not yet visible.
+            if "committing" in paths:
+                raise BackupIntentError("committing abandonment lacks independent quiescence")
             abandoned, _ = _read(paths["abandoned"], {
                 "schema_version", "generation", "prepared_sha256",
                 "committing_sha256", "previous_head_sha256",
@@ -426,18 +431,18 @@ class BackupIntentAuthority:
     def abandon(
         self, generation: str, output_root: Path, anchor_root: Path,
     ) -> dict[str, object]:
-        """Retire an effect-free generation after independently attested quiescence."""
+        """Retire a prepared-only identity before any commit may take effect."""
         with _operation_lock(self.root):
             return self._abandon_exclusive(generation, output_root, anchor_root)
 
     def _abandon_exclusive(
         self, generation: str, output_root: Path, anchor_root: Path,
     ) -> dict[str, object]:
-        """Manual, one-shot retirement ONLY after trusted operator quiescence.
+        """Retire an uncommitted preparation without reclaiming its identity.
 
-        A privileged caller must independently establish that no old sealer
-        still runs. These finite local tests do not attest a same-UID boundary.
-        The committed audit trail is never deleted or re-used.
+        Once a committing record exists, a separate sealer may have already
+        started while leaving no filesystem effects. This library has no
+        independent host-quiescence attestation and must preserve that fence.
         """
         gen = _generation(generation)
         try:
@@ -446,6 +451,11 @@ class BackupIntentAuthority:
                 phases = records.get(gen)
                 if phases is None or "acknowledged" in phases or "abandoned" in phases:
                     raise BackupIntentError("no safely abortable one-shot intent")
+                if "committing" in phases:
+                    raise BackupIntentError(
+                        "committing intent requires independent host quiescence; "
+                        "cannot abandon with local proof"
+                    )
                 prepared = phases["prepared"]
                 previous = prepared["previous_head_sha256"]
                 if previous != tip:
@@ -487,10 +497,7 @@ class BackupIntentAuthority:
                     "schema_version": 1,
                     "generation": gen,
                     "prepared_sha256": _digest(_canonical(prepared)),
-                    "committing_sha256": (
-                        _digest(_canonical(phases["committing"]))
-                        if "committing" in phases else _ZERO_HEAD
-                    ),
+                    "committing_sha256": _ZERO_HEAD,
                     "previous_head_sha256": previous,
                 }
                 _new_file(_record(self.root, gen, "abandoned"), _canonical(abandoned))

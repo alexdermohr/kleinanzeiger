@@ -299,22 +299,126 @@ class BackupIntentAuthorityTests(unittest.TestCase):
         self.assertEqual(result["generation"], FIRST)
         self.assertEqual(lock.stat().st_ino, original_inode)
 
-    def test_effect_free_committing_may_be_abandoned_once(self) -> None:
+    def test_out_of_process_sealer_must_not_race_committing_abandon(self) -> None:
+        """A sealer with no effect yet may still own the independent anchor lock."""
+        from threading import current_thread
+        from mark_api import paired_backup_operator as sealer
+
+        prepared = self._prepare()
+        self.operator.begin_commit(FIRST)
+        original = sealer._no_sidecars
+        entered, release = Event(), Event()
+        result: dict[str, object] = {}
+        worker: Thread | None = None
+
+        def before_first_effect(path: Path) -> None:
+            if current_thread() is worker and not entered.is_set():
+                entered.set()
+                if not release.wait(timeout=10):
+                    raise RuntimeError("synthetic external sealer did not resume")
+            original(path)
+
+        def external_seal() -> None:
+            try:
+                result["sealed"] = seal_offline_pair(
+                    self.sqlite, self.witness, self.output, self.anchor,
+                    expected_sqlite_sha256=prepared["sqlite_sha256"],
+                    expected_witness_sha256=prepared["witness_sha256"],
+                    expected_previous_head_sha256=None, generation=FIRST,
+                )
+            except Exception as exc:
+                result["error"] = exc
+
+        with patch("mark_api.paired_backup_operator._no_sidecars",
+                   side_effect=before_first_effect):
+            worker = Thread(target=external_seal, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(timeout=6))
+                self.assertFalse((self.anchor / ".inflight").exists())
+                self.assertFalse((self.anchor / "latest.json").exists())
+                with self.assertRaisesRegex(BackupIntentError, "quiescence"):
+                    self.operator.abandon(FIRST, self.output, self.anchor)
+            finally:
+                release.set()
+                worker.join(timeout=15)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", result)
+        self.assertIn("sealed", result)
+        self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+        self.assertTrue((self.anchor / "latest.json").is_file())
+        acknowledged = self.operator.acknowledge(FIRST, self.output, self.anchor)
+        self.assertTrue(acknowledged["acknowledged_once"])
+
+    def test_after_ack_prepared_abandon_rejects_individual_artifacts(self) -> None:
+        """Check named fences after a predecessor, not only the genesis empty-root shortcut."""
+        first = self._seal()
+        self._prepare(SECOND, first["head_sha256"])
+        head_before = (self.anchor / "latest.json").read_bytes()
+        cases = (
+            ("output", SECOND, True, "generation output may already have effects"),
+            ("anchor", SECOND + ".json", False, "generation head record may already exist"),
+            ("output", ".partial-orphan", True, "partial generation may contain effects"),
+            ("anchor", ".inflight", False, "crash fence or pending HEAD exists"),
+            ("anchor", ".next-orphan", False, "crash fence or pending HEAD exists"),
+        )
+        for location, name, directory, expected_reason in cases:
+            with self.subTest(location=location, artifact=name):
+                artifact = (self.output if location == "output" else self.anchor) / name
+                if directory:
+                    artifact.mkdir(mode=0o700)
+                else:
+                    artifact.write_bytes(b"synthetic-blocking-artifact")
+                    artifact.chmod(0o600)
+                try:
+                    with self.assertRaisesRegex(BackupIntentError, expected_reason):
+                        self.operator.abandon(SECOND, self.output, self.anchor)
+                    self.assertFalse((self.intents / f"{SECOND}.abandoned.json").exists())
+                    self.assertEqual((self.anchor / "latest.json").read_bytes(), head_before)
+                    self.assertTrue((self.intents / f"{SECOND}.prepared.json").is_file())
+                finally:
+                    if directory:
+                        artifact.rmdir()
+                    else:
+                        artifact.unlink()
+
+    def test_after_ack_second_effect_proof_rejects_fsync_race(self) -> None:
+        """The second check matters even with a previously acknowledged history."""
+        from mark_api import backup_intent_authority as module
+
+        first = self._seal()
+        self._prepare(SECOND, first["head_sha256"])
+        head_before = (self.anchor / "latest.json").read_bytes()
+        original = module._fsync_dir
+        injected = False
+
+        def create_generation_during_sync(path: Path) -> None:
+            nonlocal injected
+            original(path)
+            if path == self.output and not injected:
+                injected = True
+                (self.output / SECOND).mkdir(mode=0o700)
+
+        with patch("mark_api.backup_intent_authority._fsync_dir",
+                   side_effect=create_generation_during_sync):
+            with self.assertRaisesRegex(BackupIntentError, "generation output may already have effects"):
+                self.operator.abandon(SECOND, self.output, self.anchor)
+        self.assertTrue(injected)
+        self.assertFalse((self.intents / f"{SECOND}.abandoned.json").exists())
+        self.assertEqual((self.anchor / "latest.json").read_bytes(), head_before)
+
+    def test_committing_requires_independent_quiescence_and_remains_pending(self) -> None:
         self._prepare()
         self.operator.begin_commit(FIRST)
         with self.assertRaisesRegex(BackupIntentError, "pending"):
             self._prepare(SECOND)
-        result = self.operator.abandon(FIRST, self.output, self.anchor)
-        self.assertEqual(result["generation"], FIRST)
-        self.assertTrue(result["abandoned_once"])
-        self.assertTrue((self.intents / f"{FIRST}.abandoned.json").is_file())
-        self.assertFalse((self.anchor / "latest.json").exists())
-        with self.assertRaises(BackupIntentError):
-            self._prepare(FIRST)
-        with self.assertRaises(BackupIntentError):
-            self.operator.begin_commit(FIRST)
-        self.assertEqual(self._seal(SECOND)["generation"], SECOND)
-
+        with self.assertRaisesRegex(BackupIntentError, "independent host quiescence"):
+            self.operator.abandon(FIRST, self.output, self.anchor)
+        self.assertTrue((self.intents / f"{FIRST}.committing.json").is_file())
+        self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
+        self.assertFalse((self.intents / f"{FIRST}.acknowledged.json").exists())
+        with self.assertRaisesRegex(BackupIntentError, "pending"):
+            self._prepare(SECOND)
     def test_effect_free_prepared_only_can_be_abandoned(self) -> None:
         self._prepare()
         self.operator.abandon(FIRST, self.output, self.anchor)
@@ -342,21 +446,18 @@ class BackupIntentAuthorityTests(unittest.TestCase):
 
     def test_abandon_refuses_open_inflight_and_preserves_fences(self) -> None:
         self._prepare()
-        self.operator.begin_commit(FIRST)
         (self.anchor / ".inflight").write_bytes(FIRST.encode("ascii"))
-        with self.assertRaises(BackupIntentError):
+        with self.assertRaisesRegex(BackupIntentError, "crash fence or pending HEAD"):
             self.operator.abandon(FIRST, self.output, self.anchor)
         self.assertTrue((self.anchor / ".inflight").exists())
+        self.assertTrue((self.intents / f"{FIRST}.prepared.json").exists())
         self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
-
     def test_abandon_refuses_existing_generation_artifact(self) -> None:
         self._prepare()
-        self.operator.begin_commit(FIRST)
         (self.output / FIRST).mkdir(mode=0o700)
-        with self.assertRaises(BackupIntentError):
+        with self.assertRaisesRegex(BackupIntentError, "generation output may already have effects"):
             self.operator.abandon(FIRST, self.output, self.anchor)
         self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
-
     def test_abandon_refuses_running_cooperating_sealer_without_publishing_fork(self) -> None:
         from mark_api import backup_intent_authority as module
 
@@ -437,14 +538,15 @@ class BackupIntentAuthorityTests(unittest.TestCase):
         self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
 
     def test_abandon_refuses_pending_head_and_partial_generation_artifacts(self) -> None:
-        cases = (("anchor", ".next-synthetic", False),
-                 ("output", ".partial-synthetic", True),
-                 ("anchor", f"{FIRST}.json", False),
-                 ("anchor", "unrecognized-bootstrap-artifact", False),
-                 ("output", "unrecognized-bootstrap-artifact", False))
+        cases = (
+            ("anchor", ".next-synthetic", False, "crash fence or pending HEAD"),
+            ("output", ".partial-synthetic", True, "partial generation may contain effects"),
+            ("anchor", f"{FIRST}.json", False, "generation head record may already exist"),
+            ("anchor", "unrecognized-bootstrap-artifact", False, "bootstrap state is ambiguous"),
+            ("output", "unrecognized-bootstrap-artifact", False, "bootstrap state is ambiguous"),
+        )
         self._prepare()
-        self.operator.begin_commit(FIRST)
-        for where, name, directory in cases:
+        for where, name, directory, reason in cases:
             with self.subTest(root=where, name=name):
                 item = (self.anchor if where == "anchor" else self.output) / name
                 if directory:
@@ -453,20 +555,18 @@ class BackupIntentAuthorityTests(unittest.TestCase):
                     item.write_bytes(b"nonempty-untrusted-artifact")
                     item.chmod(0o600)
                 try:
-                    with self.assertRaises(BackupIntentError):
+                    with self.assertRaisesRegex(BackupIntentError, reason):
                         self.operator.abandon(FIRST, self.output, self.anchor)
                     self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
-                    self.assertTrue((self.intents / f"{FIRST}.committing.json").exists())
+                    self.assertTrue((self.intents / f"{FIRST}.prepared.json").is_file())
                 finally:
                     if directory:
                         item.rmdir()
                     else:
                         item.unlink()
-
     def test_abandon_second_proof_detects_effect_injected_during_directory_fsync(self) -> None:
         from mark_api import backup_intent_authority as module
         self._prepare()
-        self.operator.begin_commit(FIRST)
         true_fsync = module._fsync_dir
         injected = False
 
@@ -479,13 +579,13 @@ class BackupIntentAuthorityTests(unittest.TestCase):
 
         with patch("mark_api.backup_intent_authority._fsync_dir",
                    side_effect=inject_on_first_output_sync):
-            with self.assertRaises(BackupIntentError):
+            with self.assertRaisesRegex(BackupIntentError, "generation output may already have effects"):
                 self.operator.abandon(FIRST, self.output, self.anchor)
         self.assertTrue(injected)
         self.assertTrue((self.output / FIRST).is_dir())
-        self.assertTrue((self.intents / f"{FIRST}.committing.json").exists())
+        self.assertTrue((self.intents / f"{FIRST}.prepared.json").exists())
+        self.assertFalse((self.intents / f"{FIRST}.committing.json").exists())
         self.assertFalse((self.intents / f"{FIRST}.abandoned.json").exists())
-
     def test_operator_rejects_conflicting_acknowledged_and_abandoned_transitions(self) -> None:
         first = self._seal()
         abandoned = {
@@ -519,7 +619,7 @@ class BackupIntentAuthorityTests(unittest.TestCase):
             "prepared_sha256": self._hash(self.intents / f"{FIRST}.prepared.json"),
         }
         self._write_canonical_record(self.intents / f"{FIRST}.committing.json", committing)
-        with self.assertRaisesRegex(BackupIntentError, "not bound"):
+        with self.assertRaisesRegex(BackupIntentError, "committing abandonment lacks independent quiescence"):
             self._prepare(SECOND)
         self.assertFalse((self.intents / f"{SECOND}.prepared.json").exists())
 
@@ -539,9 +639,28 @@ class BackupIntentAuthorityTests(unittest.TestCase):
             self._prepare(SECOND)
         self.assertFalse((self.intents / f"{SECOND}.prepared.json").exists())
 
-    def test_operator_restart_never_reuses_abandoned_identity(self) -> None:
+    def test_committing_plus_abandoned_record_must_fail_closed_on_restart(self) -> None:
+        """A forged historical cancelled committing intent is not an authority."""
         self._prepare()
         self.operator.begin_commit(FIRST)
+        self._write_canonical_record(
+            self.intents / f"{FIRST}.abandoned.json",
+            {
+                "schema_version": 1,
+                "generation": FIRST,
+                "prepared_sha256": self._hash(self.intents / f"{FIRST}.prepared.json"),
+                "committing_sha256": self._hash(self.intents / f"{FIRST}.committing.json"),
+                "previous_head_sha256": "0" * 64,
+            },
+        )
+        with self.assertRaisesRegex(BackupIntentError, "committing abandonment lacks independent quiescence"):
+            BackupIntentAuthority(self.intents).prepare(
+                SECOND, self.sqlite, self.witness, previous_head_sha256=None,
+            )
+        self.assertFalse((self.intents / f"{SECOND}.prepared.json").exists())
+
+    def test_operator_restart_never_reuses_abandoned_identity(self) -> None:
+        self._prepare()
         self.operator.abandon(FIRST, self.output, self.anchor)
         restarted = BackupIntentAuthority(self.intents)
         with self.assertRaises(BackupIntentError):
@@ -552,7 +671,6 @@ class BackupIntentAuthorityTests(unittest.TestCase):
             restarted.prepare(SECOND, self.sqlite, self.witness, previous_head_sha256=None)["generation"],
             SECOND,
         )
-
     def test_external_ack_requires_anchor_fsync_before_ack(self) -> None:
         from mark_api import backup_intent_authority as module
         prepared = self._prepare()
