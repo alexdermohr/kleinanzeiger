@@ -209,7 +209,15 @@ checks=(
 for action,message in checks:
     try:action()
     except BackupIntentError as exc:
-        assert message in str(exc),(message,str(exc))
+        # Both variants reject replay of an already consumed generation.
+        # An integrated backup authority can fail earlier in preflight.
+        assert (
+            message in str(exc)
+            or (
+                message == 'generation not singly prepared; never retry commit'
+                and str(exc) == 'operator intent not singly prepared'
+            )
+        ),(message,str(exc))
     else:raise AssertionError('original acknowledged intent was replayed')
 assert (anchor/'latest.json').read_bytes()==head_bytes
 for path in pairs:
