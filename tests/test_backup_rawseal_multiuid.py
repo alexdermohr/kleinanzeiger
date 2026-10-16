@@ -51,6 +51,21 @@ def _docker(*args: str, allow_failure: bool = False,
             "name-based Docker volume deletion is unsafe without an "
             "independently enforced exclusive Docker-admin authority"
         )
+    # Only passive daemon metadata is admissible on a shared Docker socket.
+    # A nested TestCase.run() or a direct test method can bypass setUpClass,
+    # so protect the subprocess boundary in addition to unittest setup.
+    if not (
+        args[:1] == ("info",)
+        or args[:2] in (
+            ("image", "inspect"),
+            ("container", "inspect"),
+            ("volume", "inspect"),
+        )
+    ):
+        raise AssertionError(
+            "exclusive Docker-admin authority not established: "
+            "Docker resource mutation forbidden before subprocess"
+        )
     result = subprocess.run(
         ["/usr/bin/docker", *args], capture_output=True, text=True,
         check=False, timeout=timeout_seconds,
@@ -324,6 +339,11 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
+        _require_exclusive_docker_volume_authority()
+
+    def setUp(self) -> None:
+        # Unlike setUpClass, this always runs for direct TestCase.run() calls.
+        super().setUp()
         _require_exclusive_docker_volume_authority()
 
     def test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer(self) -> None:
@@ -1447,6 +1467,59 @@ class VolumeNameReuseSafetyTests(unittest.TestCase):
                     ):
                         _docker(*args, allow_failure=True)
                     run.assert_not_called()
+
+    def test_all_resource_mutations_rejected_before_subprocess(self) -> None:
+        # The class-wide guard is not the actual Docker command boundary.
+        for args in (
+            ("run", "--rm", "untrusted"),
+            ("volume", "create", "mark-rawseal-test"),
+            ("volume", "rm", "mark-rawseal-test"),
+            ("volume", "prune", "--force"),
+            ("rm", "-f", "a" * 64),
+            ("container", "create", "untrusted"),
+            ("network", "create", "mark-rawseal-test"),
+        ):
+            with self.subTest(args=args):
+                with patch(__name__ + ".subprocess.run") as run:
+                    with self.assertRaisesRegex(
+                        AssertionError, "Docker-admin authority",
+                    ):
+                        _docker(*args, allow_failure=True)
+                    run.assert_not_called()
+
+    def test_direct_testcase_run_cannot_bypass_class_level_guard(self) -> None:
+        # A direct TestCase.run() does NOT call setUpClass(). Both optional
+        # and required opt-in modes must still stop before any Docker access.
+        test_names = (
+            "test_docker_missing_evidence_rejects_daemon_failures",
+            "test_created_volume_is_cleaned_when_docker_client_times_out",
+        )
+        with patch.object(RawSealerHostileUidDockerTests, "__unittest_skip__", False):
+            for required in ("0", "1"):
+                for name in test_names:
+                    with self.subTest(required=required, method=name):
+                        with patch.dict(
+                            os.environ, {"MARK_REQUIRE_RAW_SEALER_UID": required},
+                        ):
+                            result = unittest.TestResult()
+                            with patch(__name__ + ".subprocess.run") as run:
+                                RawSealerHostileUidDockerTests(name).run(result)
+                            run.assert_not_called()
+                            self.assertEqual(result.testsRun, 1)
+                            if required == "0":
+                                self.assertEqual(len(result.skipped), 1)
+                                self.assertFalse(result.failures or result.errors)
+                                self.assertIn(
+                                    "exclusive Docker-admin authority",
+                                    result.skipped[0][1],
+                                )
+                            else:
+                                self.assertEqual(len(result.failures), 1)
+                                self.assertFalse(result.skipped or result.errors)
+                                self.assertIn(
+                                    "exclusive Docker-admin authority",
+                                    result.failures[0][1],
+                                )
 
     def test_required_real_uid_test_fails_before_resource_creation(self) -> None:
         with patch(__name__ + ".IMAGE_OK", True):
