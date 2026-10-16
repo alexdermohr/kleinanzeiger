@@ -69,6 +69,34 @@ def _docker_reports_missing(
     return result.stderr.strip() in accepted
 
 
+def _remove_owned_synthetic_container(
+    name: str, run_suffix: str, docker,
+) -> None:
+    """Best-effort cleanup of one test container, never by its mutable name.
+
+    This is NOT proof that a previously timed-out daemon-side run is terminal.
+    Only the already observed immutable ID is eligible for a remove attempt.
+    """
+    observed = docker(
+        "container", "inspect", "--format",
+        '{{.Id}} {{index .Config.Labels "mark.a6.rawseal.run"}}',
+        name, allow_failure=True,
+    )
+    if observed.returncode:
+        if _docker_reports_missing(observed, "container", name):
+            return
+        raise AssertionError("synthetic container identity not proven")
+    fields = observed.stdout.strip().split()
+    if (len(fields) != 2
+            or not re.fullmatch(r"[0-9a-f]{64}", fields[0])
+            or fields[1] != run_suffix):
+        raise AssertionError("refuse to remove foreign synthetic container")
+    docker("rm", "-f", fields[0], allow_failure=True)
+    final = docker("container", "inspect", name, allow_failure=True)
+    if not _docker_reports_missing(final, "container", name):
+        raise AssertionError("synthetic container removal not proven absent")
+
+
 _TRUSTED_SEAL = r"""
 import json,os,stat
 from pathlib import Path
@@ -854,19 +882,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 self.assertEqual(retained.stdout.strip(), volume.split("-")[2])
         finally:
             if seed is not None:
-                observed = original(
-                    "container", "inspect", "--format",
-                    '{{index .Config.Labels "mark.a6.rawseal.run"}}',
-                    seed, allow_failure=True,
+                _remove_owned_synthetic_container(
+                    seed, seed.split("-")[2], original,
                 )
-                if observed.returncode == 0:
-                    self.assertEqual(observed.stdout.strip(), seed.split("-")[2])
-                    original("rm", "-f", seed)
-                else:
-                    self.assertTrue(
-                        _docker_reports_missing(observed, "container", seed),
-                        "cannot attest synthetic container for emergency cleanup",
-                    )
             for volume in reversed(volumes):
                 observed = original(
                     "volume", "inspect", "--format",
@@ -948,19 +966,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
         finally:
             # RED mutation must not leave any real synthetic Docker resource.
             if seed:
-                probe = original(
-                    "container", "inspect", "--format",
-                    '{{index .Config.Labels "mark.a6.rawseal.run"}}',
-                    seed, allow_failure=True,
+                _remove_owned_synthetic_container(
+                    seed, seed.split("-")[2], original,
                 )
-                if probe.returncode == 0:
-                    self.assertEqual(probe.stdout.strip(), seed.split("-")[2])
-                    original("rm", "-f", seed)
-                else:
-                    self.assertTrue(
-                        _docker_reports_missing(probe, "container", seed),
-                        "unexpected container identity; refuse foreign deletion",
-                    )
             for volume in reversed(volumes):
                 probe = original(
                     "volume", "inspect", "--format",
@@ -1270,6 +1278,82 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
         self.assertFalse(result.errors, result.errors)
         self.assertEqual(len(result.failures), 1, result.failures)
         self.assertIn("not proven absent", result.failures[0][1])
+
+
+class SyntheticContainerCleanupContractTests(unittest.TestCase):
+    """No Docker daemon required: positive identity, swap and error controls."""
+
+    def test_emergency_cleanup_removes_only_pinned_id(self) -> None:
+        name = "mark-rawseal-abc123abc123-seed"
+        pinned = "a" * 64
+        calls: list[tuple[str, ...]] = []
+
+        def fake(*args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args[:2] == ("container", "inspect") and "--format" in args:
+                return subprocess.CompletedProcess(args, 0, pinned + " abc123abc123\n", "")
+            if args[:2] == ("rm", "-f"):
+                self.assertEqual(args[-1], pinned)
+                return subprocess.CompletedProcess(args, 0, name + "\n", "")
+            if args == ("container", "inspect", name):
+                return subprocess.CompletedProcess(
+                    args, 1, "[]",
+                    "Error response from daemon: No such container: " + name,
+                )
+            raise AssertionError("unexpected Docker operation " + repr(args))
+
+        _remove_owned_synthetic_container(name, "abc123abc123", fake)
+        self.assertEqual([a for a in calls if a[:2] == ("rm", "-f")],
+                         [("rm", "-f", pinned)])
+
+    def test_emergency_cleanup_same_name_foreign_swap_fails_closed(self) -> None:
+        name = "mark-rawseal-abc123abc123-seed"
+        pinned = "a" * 64
+        foreign = "b" * 64
+        removed: list[str] = []
+
+        def fake(*args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ("container", "inspect") and "--format" in args:
+                return subprocess.CompletedProcess(args, 0, pinned + " abc123abc123\n", "")
+            if args[:2] == ("rm", "-f"):
+                removed.append(args[-1])
+                if args[-1] == name:
+                    raise AssertionError("FOREIGN_CONTAINER_DELETE_BY_NAME")
+                self.assertEqual(args[-1], pinned)
+                # A second administrator already replaced the container:
+                # the pinned ID no longer exists and rm reports nonzero.
+                return subprocess.CompletedProcess(
+                    args, 1, "", "Error: No such container: " + pinned,
+                )
+            if args == ("container", "inspect", name):
+                return subprocess.CompletedProcess(args, 0, foreign, "")
+            raise AssertionError("unexpected Docker operation " + repr(args))
+
+        with self.assertRaisesRegex(AssertionError,
+                                    "removal not proven absent"):
+            _remove_owned_synthetic_container(name, "abc123abc123", fake)
+        self.assertEqual(removed, [pinned])
+
+    def test_emergency_cleanup_refuses_mismatch_or_daemon_500(self) -> None:
+        name = "mark-rawseal-abc123abc123-seed"
+        for result, message in (
+            (subprocess.CompletedProcess((), 0, "b" * 64 + " foreign\n", ""),
+             "refuse to remove foreign"),
+            (subprocess.CompletedProcess((), 1, "[]", "500 Internal Server Error"),
+             "identity not proven"),
+        ):
+            removed: list[tuple[str, ...]] = []
+
+            def fake(*args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if args[:2] == ("rm", "-f"):
+                    removed.append(args)
+                    raise AssertionError("must not delete")
+                self.assertEqual(args[:2], ("container", "inspect"))
+                return result
+
+            with self.assertRaisesRegex(AssertionError, message):
+                _remove_owned_synthetic_container(name, "abc123abc123", fake)
+            self.assertFalse(removed)
 
 
 if __name__ == "__main__":
