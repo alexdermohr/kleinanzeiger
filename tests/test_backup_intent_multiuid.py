@@ -47,7 +47,7 @@ from mark_api.fence_witness import FenceLedger
 from mark_api.storage import SnapshotStore
 assert os.geteuid()==50043
 assert Path(mark_api.__file__).as_posix().startswith('/src/mark_api/')
-os.umask(0o077)
+os.umask(0o022)
 source=Path('/source')
 sqlite=source/'mark.sqlite'
 witness=source/'witness.sqlite'
@@ -101,6 +101,13 @@ assert os.geteuid()==50044
 control=Path('/control/probe')
 control.write_bytes(b'UID50044-RW-ALLOWED')
 assert control.read_bytes()==b'UID50044-RW-ALLOWED'
+# The trusted harness has made its protected roots traversable (0711).
+# Before denial, this UID can stat concrete product files through them.
+for name in ('source','output','anchor','intent'):
+    assert os.access('/'+name,os.X_OK),name
+for item in ('/source/mark.sqlite','/anchor/latest.json','/intent/.intent.lock'):
+    assert Path(item).stat().st_size>=0,item
+assert Path('/output/'+'1'*32).is_dir()
 # All protected volumes are ALSO intentionally mounted RW to this UID.
 protected=(
     '/intent/.intent.lock',
@@ -140,6 +147,29 @@ except OSError as exc:
     assert exc.errno in (errno.EACCES,errno.EPERM),exc
 else:raise AssertionError('hostile UID replaced the anchored HEAD')
 print('REAL_UID50044_DAC_DENIED_WITH_RW_VOLUME_POSITIVE_CONTROL',flush=True)
+"""
+
+
+_RELAX_ROOTS = """
+import os,stat
+from pathlib import Path
+assert os.geteuid()==50043
+for name in ('source','output','anchor','intent'):
+    root=Path('/'+name)
+    assert stat.S_IMODE(root.stat().st_mode)==0o700
+    root.chmod(0o711)
+print('TRUSTED_ROOTS_TRAVERSABLE_ARTIFACT_DAC_UNCHANGED',flush=True)
+"""
+
+_RESTORE_ROOTS = """
+import os,stat
+from pathlib import Path
+assert os.geteuid()==50043
+for name in ('source','output','anchor','intent'):
+    root=Path('/'+name)
+    assert stat.S_IMODE(root.stat().st_mode)==0o711
+    root.chmod(0o700)
+print('TRUSTED_ROOTS_RESTRICTED_AGAIN',flush=True)
 """
 
 _RECHECK = """
@@ -198,6 +228,20 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
         created: list[str] = []
         launched: list[str] = []
         with tempfile.TemporaryDirectory(prefix="mark-intent-realuid-") as temp:
+            # A green Docker run must use the exact committed product modules,
+            # not silently import a locally modified or untracked source tree.
+            head = subprocess.run(
+                ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"],
+                check=True, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            self.assertRegex(head, r"^[0-9a-f]{40}$")
+            source_status = subprocess.run(
+                ["git", "-C", str(ROOT), "status", "--porcelain",
+                 "--untracked-files=all", "--", "src/mark_api"],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+            self.assertFalse(source_status.stdout.strip(),
+                             "Docker source differs from committed HEAD")
             package = Path(temp) / "src" / "mark_api"
             shutil.copytree(ROOT / "src" / "mark_api", package,
                             ignore=shutil.ignore_patterns("__pycache__"))
@@ -252,16 +296,33 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
                 first = run_python("seal", 50043, _SEAL, source_visible=True)
                 self.assertIn("REAL_UID50043_COMPLETE_ARTIFACT_DAC_AND_INTENT_SEALED",
                               first.stdout)
+                # 0711 permits a hostile UID to traverse all harness roots.
+                # Access denial must now come from the product-created 0600
+                # files and 0700 generation directory, not the root harness.
+                relaxed = run_python("relax", 50043, _RELAX_ROOTS, source_visible=False)
+                self.assertIn("TRUSTED_ROOTS_TRAVERSABLE_ARTIFACT_DAC_UNCHANGED",
+                              relaxed.stdout)
                 attack = run_python("attack", 50044, _ATTACK, source_visible=False)
                 self.assertIn(
                     "REAL_UID50044_DAC_DENIED_WITH_RW_VOLUME_POSITIVE_CONTROL",
                     attack.stdout,
                 )
+                restored = run_python("restore", 50043, _RESTORE_ROOTS,
+                                      source_visible=False)
+                self.assertIn("TRUSTED_ROOTS_RESTRICTED_AGAIN", restored.stdout)
                 verify = run_python("verify", 50043, _RECHECK, source_visible=True)
                 self.assertIn(
                     "REAL_UID50043_EXACT_CHAIN_AND_SINGLE_USE_REPLAY_DENIAL",
                     verify.stdout,
                 )
+                self.assertEqual(
+                    subprocess.run(
+                        ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"],
+                        check=True, capture_output=True, text=True, timeout=10,
+                    ).stdout.strip(), head,
+                    "committed product HEAD changed during the Docker test",
+                )
+                print("MARK_UID_TEST_EXACT_COMMITTED_HEAD=" + head, flush=True)
             finally:
                 cleanup_errors: list[str] = []
                 # Even a Docker CLI timeout cannot orphan an anonymous
