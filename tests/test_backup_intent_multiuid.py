@@ -47,6 +47,7 @@ from mark_api.fence_witness import FenceLedger
 from mark_api.storage import SnapshotStore
 assert os.geteuid()==50043
 assert Path(mark_api.__file__).as_posix().startswith('/src/mark_api/')
+os.umask(0o077)
 source=Path('/source')
 sqlite=source/'mark.sqlite'
 witness=source/'witness.sqlite'
@@ -60,12 +61,22 @@ assert prepared['generation']==generation
 result=op.seal_prepared(generation,Path('/output'),Path('/anchor'))
 assert result['external_operator_intent_acknowledged'] is True
 assert not (Path('/anchor')/'.inflight').exists()
+# Parent permissions are intentionally set by the trusted test harness.
+# Check every actual source and product-created artifact independently.
 for name in ('source','output','anchor','intent'):
-    info=Path('/'+name).stat()
-    assert info.st_uid==50043 and stat.S_IMODE(info.st_mode)==0o700,(name,info)
+    directory=Path('/'+name)
+    info=directory.lstat()
+    assert info.st_uid==50043 and stat.S_ISDIR(info.st_mode)
+    assert stat.S_IMODE(info.st_mode)==0o700,(name,info)
+    for artifact in directory.rglob('*'):
+        info=artifact.lstat()
+        assert info.st_uid==50043,(artifact,info)
+        if stat.S_ISDIR(info.st_mode):
+            assert stat.S_IMODE(info.st_mode)==0o700,(artifact,info)
+        else:
+            assert stat.S_ISREG(info.st_mode),(artifact,info)
+            assert stat.S_IMODE(info.st_mode)==0o600,(artifact,info)
 pair=Path('/output')/generation
-info=pair.stat()
-assert info.st_uid==50043 and stat.S_IMODE(info.st_mode)==0o700
 files=[
     Path('/intent/.intent.lock'),
     Path('/intent/.intent.bootstrap.json'),
@@ -79,7 +90,7 @@ files=[
 for path in files:
     info=path.stat()
     assert info.st_uid==50043 and stat.S_IMODE(info.st_mode)==0o600,(path,info)
-print('REAL_UID50043_OPERATOR_MODES_AND_OFFLINE_INTENT_SEALED',flush=True)
+print('REAL_UID50043_COMPLETE_ARTIFACT_DAC_AND_INTENT_SEALED',flush=True)
 """
 
 _ATTACK = """
@@ -231,14 +242,15 @@ class BackupIntentMultiUidDockerTests(unittest.TestCase):
                     "--network", "none", "--read-only", "--user", "0:0",
                     "--cap-drop", "ALL", "--cap-add", "CHOWN",
                     *volume_mounts, "--entrypoint", "/bin/sh", IMAGE, "-ec",
+                    "for d in /source /output /anchor /intent /control; do "
+                    "out=$(ls -A \"$d\") || exit 1; "
+                    "[ -z \"$out\" ] || exit 1; done; "
                     "chmod 0700 /source /output /anchor /intent /control; "
                     "chown 50043:50043 /source /output /anchor /intent; "
-                    "chown 50044:50044 /control; "
-                    "for d in /source /output /anchor /intent /control; do "
-                    "[ -z \"$(ls -A \"$d\")\" ] || exit 1; done",
+                    "chown 50044:50044 /control",
                 )
                 first = run_python("seal", 50043, _SEAL, source_visible=True)
-                self.assertIn("REAL_UID50043_OPERATOR_MODES_AND_OFFLINE_INTENT_SEALED",
+                self.assertIn("REAL_UID50043_COMPLETE_ARTIFACT_DAC_AND_INTENT_SEALED",
                               first.stdout)
                 attack = run_python("attack", 50044, _ATTACK, source_visible=False)
                 self.assertIn(
