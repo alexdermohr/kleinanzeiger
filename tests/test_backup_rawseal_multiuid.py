@@ -485,6 +485,14 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                                     name + ": ownership label mismatch; refuse cleanup"
                                 )
                                 return
+                            # The client can time out before the
+                            # daemon creates *its* container. A second Docker
+                            # actor can create a decoy with the same name and
+                            # label, so even seeing/removing the pinned ID
+                            # cannot prove the original daemon request ended.
+                            # Leave the name and mounts unresolved/NO-GO.
+                            if ("container", name) in unsettled:
+                                return
                             _docker("rm", "-f", identity[0], allow_failure=True,
                                     timeout_seconds=5)
                         else:
@@ -502,12 +510,6 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                                 name + ": not proven absent after rm: " +
                                 (final.stdout + final.stderr)[-180:]
                             )
-                        elif kind == "container":
-                            # A positive ID+label inspection followed by its
-                            # terminal removal and negative name check proves
-                            # that this single daemon run reached creation.
-                            # A mere 404 without that positive control cannot.
-                            unsettled.discard(("container", name))
                     except Exception as exc:
                         cleanup_errors.append(name + ": " + repr(exc))
 
@@ -783,7 +785,7 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 )
         print("P2_GREEN_REPLAY_TIMEOUT_RETAINS_LABELLED_MOUNTS", flush=True)
 
-    def test_late_recognized_run_after_first_404_cleans_mounts(self) -> None:
+    def test_late_container_after_404_cannot_settle_daemon_request(self) -> None:
         # Docker run has timed out. The *first* cleanup inspect accurately
         # returns 404, then the daemon finishes creating the exact named
         # container. Later bounded rechecks must settle this single run,
@@ -838,16 +840,18 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 trial.run(result)
             self.assertTrue(delayed)
             self.assertEqual(len(volumes), 5)
-            self.assertFalse(result.failures, result.failures)
-            self.assertEqual(len(result.errors), 1, result.errors)
-            self.assertIn("TimeoutExpired", result.errors[0][1])
+            self.assertFalse(result.errors, result.errors)
+            self.assertEqual(len(result.failures), 1, result.failures)
+            self.assertIn("unresolved Docker create/run", result.failures[0][1])
             for volume in volumes:
-                final = original("volume", "inspect", volume,
-                                 allow_failure=True)
-                self.assertTrue(
-                    _docker_reports_missing(final, "volume", volume),
-                    "late proven run left its named mount volume behind",
+                retained = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
                 )
+                self.assertEqual(retained.returncode, 0,
+                                 "do not drop mounts for a possibly spoofed run")
+                self.assertEqual(retained.stdout.strip(), volume.split("-")[2])
         finally:
             if seed is not None:
                 observed = original(
@@ -883,9 +887,9 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 final = original("volume", "inspect", volume,
                                  allow_failure=True)
                 self.assertTrue(_docker_reports_missing(final, "volume", volume))
-        print("LATE_RECOGNIZED_RUN_AFTER_404_MOUNTS_ABSENT", flush=True)
+        print("P2_GREEN_LATE_DECOY_AFTER_404_STILL_UNRESOLVED", flush=True)
 
-    def test_recognized_timeout_run_releases_owned_mounts(self) -> None:
+    def test_recognized_timeout_run_decoy_stays_no_go(self) -> None:
         # A timed-out run may have created its named, owned container.
         # Exact positive label+terminal removal proves that *this* request
         # produced the container, allowing the five mounts to be reclaimed.
@@ -929,17 +933,18 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 trial.run(result)
             self.assertTrue(intercepted)
             self.assertEqual(len(volumes), 5)
-            self.assertFalse(result.failures, result.failures)
-            self.assertEqual(len(result.errors), 1, result.errors)
-            self.assertIn("TimeoutExpired", result.errors[0][1])
+            self.assertFalse(result.errors, result.errors)
+            self.assertEqual(len(result.failures), 1, result.failures)
+            self.assertIn("unresolved Docker create/run", result.failures[0][1])
             for volume in volumes:
-                absent = original("volume", "inspect", volume,
-                                  allow_failure=True)
-                self.assertTrue(
-                    _docker_reports_missing(absent, "volume", volume),
-                    "owned mount was incorrectly retained despite positive "
-                    "run identity and terminal container removal",
+                retained = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    volume, allow_failure=True,
                 )
+                self.assertEqual(retained.returncode, 0,
+                                 "a decoy container cannot authorize mount rm")
+                self.assertEqual(retained.stdout.strip(), volume.split("-")[2])
         finally:
             # RED mutation must not leave any real synthetic Docker resource.
             if seed:
@@ -972,7 +977,7 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                     )
                 final = original("volume", "inspect", volume, allow_failure=True)
                 self.assertTrue(_docker_reports_missing(final, "volume", volume))
-        print("RECOGNIZED_TIMEOUT_RUN_RECLAIMS_OWNED_MOUNTS", flush=True)
+        print("P2_GREEN_DECOY_CONTAINER_DID_NOT_SETTLE_DAEMON_RUN", flush=True)
 
     def test_late_docker_volume_create_after_exact_404_stays_no_go(self) -> None:
         # Real Docker creates the volume only AFTER cleanup's first 404.
