@@ -21,6 +21,7 @@ import tarfile
 import tempfile
 import unittest
 from uuid import uuid4
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -273,6 +274,8 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 elif path.is_file():
                     path.chmod(0o644)
 
+            label_key = "mark.a6.rawseal.run"
+            label_value = label_key + "=" + suffix
             mounts: list[str] = []
             for key, volume in volumes.items():
                 mounts += [
@@ -287,9 +290,13 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                            *, evidence: dict[str, str] | None = None
                            ) -> subprocess.CompletedProcess[str]:
                 name = "mark-rawseal-" + suffix + "-" + label
-                named_containers.append(name)
+                prior = _docker("container", "inspect", name, allow_failure=True)
+                self.assertNotEqual(prior.returncode, 0,
+                                    "synthetic container name already exists")
+                named_containers.append(name)  # before a potentially uncertain Docker run
                 args = [
                     "run", "--rm", "--pull", "never", "--name", name,
+                    "--label", label_value,
                     "--network", "none", "--read-only", "--cap-drop", "ALL",
                     "--security-opt", "no-new-privileges:true",
                     "--user", f"{uid}:{uid}", "--workdir", "/",
@@ -315,19 +322,32 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 self.assertNotIn("name=userns", security)
                 self.assertNotIn("name=rootless", security)
                 for volume in volumes.values():
-                    _docker("volume", "create", volume)
+                    prior = _docker("volume", "inspect", volume,
+                                    allow_failure=True)
+                    self.assertNotEqual(prior.returncode, 0,
+                                        "synthetic volume name already exists")
+                    # Register the unique name BEFORE Docker starts. A daemon
+                    # may have created it even when the CLI later times out.
                     created.append(volume)
+                    _docker("volume", "create", "--label", label_value, volume)
                     driver = _docker(
                         "volume", "inspect", "--format",
-                        "{{.Driver}} {{json .Options}}", volume,
+                        '{{.Driver}} {{json .Options}} '
+                        '{{index .Labels "mark.a6.rawseal.run"}}', volume,
                     ).stdout.strip()
-                    self.assertIn(driver, ("local null", "local {}"))
+                    self.assertIn(driver,
+                                  ("local null " + suffix, "local {} " + suffix))
                 # Root touches *only* the disposable volume directory ownership.
                 # No host UID, global Docker options or services are changed.
                 seed_name = "mark-rawseal-" + suffix + "-seed"
-                named_containers.append(seed_name)
+                prior = _docker("container", "inspect", seed_name,
+                                allow_failure=True)
+                self.assertNotEqual(prior.returncode, 0,
+                                    "synthetic seed container already exists")
+                named_containers.append(seed_name)  # before uncertain run
                 _docker(
                     "run", "--rm", "--pull", "never", "--name", seed_name,
+                    "--label", label_value,
                     "--network", "none", "--read-only", "--user", "0:0",
                     "--cap-drop", "ALL", "--cap-add", "CHOWN",
                     *mounts, "--entrypoint", "/bin/sh", IMAGE, "-ec",
@@ -387,25 +407,106 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                 print("RAW_SEALER_DAC_EXACT_COMMITTED_HEAD=" + head, flush=True)
             finally:
                 cleanup_errors: list[str] = []
+
+                def was_created_by_this_test(kind: str, name: str) -> bool:
+                    # Never remove a pre-existing/foreign resource after a
+                    # create/launch timeout, collision or daemon error.
+                    expr = ('{{index .Config.Labels "mark.a6.rawseal.run"}}'
+                            if kind == "container"
+                            else '{{index .Labels "mark.a6.rawseal.run"}}')
+                    observed = _docker(kind, "inspect", "--format", expr,
+                                       name, allow_failure=True)
+                    if observed.returncode:
+                        message = (observed.stdout + observed.stderr).lower()
+                        if "no such" in message or "not found" in message:
+                            return False  # creation had not happened or --rm ran
+                        cleanup_errors.append(name + ": ownership read failed: " +
+                                              message[-160:])
+                        return False
+                    if observed.stdout.strip() != suffix:
+                        cleanup_errors.append(
+                            name + ": ownership label mismatch; refuse cleanup"
+                        )
+                        return False
+                    return True
+
                 for name in reversed(named_containers):
                     try:
+                        if not was_created_by_this_test("container", name):
+                            continue
                         out = _docker("rm", "-f", name, allow_failure=True)
-                        if out.returncode and "No such container" not in (
-                            out.stdout + out.stderr
-                        ):
+                        if out.returncode:
                             cleanup_errors.append(name + ": " + out.stderr[-160:])
                     except Exception as exc:
                         cleanup_errors.append(name + ": " + repr(exc))
                 for volume in reversed(created):
                     try:
+                        if not was_created_by_this_test("volume", volume):
+                            continue
                         out = _docker("volume", "rm", volume, allow_failure=True)
                         if out.returncode:
                             cleanup_errors.append(volume + ": " + out.stderr[-160:])
                     except Exception as exc:
                         cleanup_errors.append(volume + ": " + repr(exc))
                 self.assertFalse(cleanup_errors,
-                                 "synthetic Docker resources left behind: " +
+                                 "unconfirmed cleanup of synthetic Docker resources: " +
                                  repr(cleanup_errors))
+
+
+    def test_created_volume_is_cleaned_when_docker_client_times_out(self) -> None:
+        # A CLI TimeoutExpired does not mean the daemon failed to create the
+        # requested volume. Reproduce the effect *after* the first create.
+        original = _docker
+        created: str | None = None
+        injected = False
+
+        def lose_create_ack(*args: str, **kwargs: object
+                            ) -> subprocess.CompletedProcess[str]:
+            nonlocal created, injected
+            if args[:2] == ("volume", "create") and not injected:
+                response = original(*args, **kwargs)
+                self.assertEqual(response.returncode, 0)
+                created = args[-1]
+                injected = True
+                raise subprocess.TimeoutExpired(
+                    cmd=["/usr/bin/docker", *args], timeout=90,
+                )
+            return original(*args, **kwargs)
+
+        try:
+            with patch(__name__ + "._docker", side_effect=lose_create_ack):
+                nested = type(self)(
+                    "test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer",
+                )
+                result = unittest.TestResult()
+                nested.run(result)
+            self.assertTrue(injected)
+            self.assertIsNotNone(created)
+            self.assertEqual(len(result.errors), 1, result.errors)
+            self.assertFalse(result.failures, result.failures)
+            self.assertIn("TimeoutExpired", result.errors[0][1])
+            absent = original("volume", "inspect", created,
+                              allow_failure=True)
+            self.assertNotEqual(
+                absent.returncode, 0, "uncertain created volume was orphaned",
+            )
+            print("DOCKER_VOLUME_CREATE_TIMEOUT_CLEANED", flush=True)
+        finally:
+            # A future broken cleanup must not leak even this negative test.
+            if created is not None:
+                owned = original(
+                    "volume", "inspect", "--format",
+                    '{{index .Labels "mark.a6.rawseal.run"}}',
+                    created, allow_failure=True,
+                )
+                if owned.returncode == 0:
+                    expected_suffix = created.split("-")[2]
+                    self.assertEqual(
+                        owned.stdout.strip(), expected_suffix,
+                        "refuse to remove a non-test Docker volume",
+                    )
+                    original("volume", "rm", created)
+                    self.fail("orphaned test volume required emergency cleanup")
 
 
 if __name__ == "__main__":
