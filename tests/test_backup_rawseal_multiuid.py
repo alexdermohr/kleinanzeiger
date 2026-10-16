@@ -1,6 +1,10 @@
 """Opt-in real Docker UID/DAC negative: raw sealer cannot bypass protected intent.
 
-All data and volumes are synthetic, uniquely named, and removed afterward.
+All data and volumes are synthetic and uniquely named. The real-Docker suite
+fails closed before resource creation because this host has no independently
+attested exclusive Docker-admin context: deleting a named volume after an
+inspect is not atomic. The suite cannot be claimed as passing or executed on
+a shared daemon until that security boundary is implemented and verified.
 A compromised executor UID 50044 receives even RW mounts of every protected
 directory and the *correct* independent input hashes, but never becomes UID
 50043. The installed image is selected by immutable sha256 ID and never pulled.
@@ -38,6 +42,15 @@ if os.environ.get("MARK_REQUIRE_RAW_SEALER_UID") == "1" and not IMAGE_OK:
 
 def _docker(*args: str, allow_failure: bool = False,
             timeout_seconds: float = 90) -> subprocess.CompletedProcess[str]:
+    # Docker exposes only name-based deletion for volumes. An administrator
+    # can replace a correctly labelled volume after inspect but before rm;
+    # neither a second inspect nor a final 404 prevents foreign deletion.
+    # This suite has no independent exclusive-daemon attestation yet.
+    if args[:2] in (("volume", "rm"), ("volume", "prune")):
+        raise AssertionError(
+            "name-based Docker volume deletion is unsafe without an "
+            "independently enforced exclusive Docker-admin authority"
+        )
     result = subprocess.run(
         ["/usr/bin/docker", *args], capture_output=True, text=True,
         check=False, timeout=timeout_seconds,
@@ -290,9 +303,32 @@ print('TRUSTED_ANCHOR_PAIR_AND_ONE_SHOT_INTENT_UNCHANGED',flush=True)
 """
 
 
+def _require_exclusive_docker_volume_authority() -> None:
+    """Never create named test volumes if safe cleanup cannot be guaranteed.
+
+    No independently enforced Docker-daemon exclusivity or immutable
+    volume-delete primitive has been verified for this test harness.
+    An opt-in image or environment variable is NOT security attestation.
+    """
+    message = (
+        "exclusive Docker-admin authority not established: named volume "
+        "cleanup would be subject to foreign name-reuse deletion"
+    )
+    if os.environ.get("MARK_REQUIRE_RAW_SEALER_UID") == "1":
+        raise AssertionError(message)
+    raise unittest.SkipTest(message)
+
+
 @unittest.skipUnless(IMAGE_OK, "Explicit immutable MARK_RAW_SEALER_UID_TEST_IMAGE required")
 class RawSealerHostileUidDockerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        _require_exclusive_docker_volume_authority()
+
     def test_hostile_uid_with_all_rw_mounts_cannot_invoke_raw_sealer(self) -> None:
+        # Guard direct/nested TestCase.run() calls which skip setUpClass().
+        _require_exclusive_docker_volume_authority()
         suffix = uuid4().hex[:12]
         volumes = {
             key: "mark-rawseal-" + suffix + "-" + key
@@ -533,8 +569,12 @@ class RawSealerHostileUidDockerTests(unittest.TestCase):
                                     name + ": ownership label mismatch; refuse cleanup"
                                 )
                                 return
-                            _docker("volume", "rm", name, allow_failure=True,
-                                    timeout_seconds=5)
+                            cleanup_errors.append(
+                                name + ": named volume intentionally retained; "
+                                "independent exclusive Docker-admin authority "
+                                "is required before deletion"
+                            )
+                            return
                         final = _docker(kind, "inspect", name,
                                         allow_failure=True, timeout_seconds=5)
                         if not _docker_reports_missing(final, kind, name):
@@ -1390,6 +1430,39 @@ class SyntheticContainerCleanupContractTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, message):
                 _remove_owned_synthetic_container(name, "abc123abc123", "a" * 64, fake)
             self.assertFalse(removed)
+
+
+class VolumeNameReuseSafetyTests(unittest.TestCase):
+    """Guard against label-inspect then name-rm on a shared Docker daemon."""
+
+    def test_name_based_volume_deletion_rejected_before_docker(self) -> None:
+        for args in (
+            ("volume", "rm", "mark-rawseal-abc123abc123-source"),
+            ("volume", "prune", "--force"),
+        ):
+            with self.subTest(args=args):
+                with patch(__name__ + ".subprocess.run") as run:
+                    with self.assertRaisesRegex(
+                        AssertionError, "name-based Docker volume deletion",
+                    ):
+                        _docker(*args, allow_failure=True)
+                    run.assert_not_called()
+
+    def test_required_real_uid_test_fails_before_resource_creation(self) -> None:
+        with patch(__name__ + ".IMAGE_OK", True):
+            with patch.dict(os.environ, {"MARK_REQUIRE_RAW_SEALER_UID": "1"}):
+                with self.assertRaisesRegex(
+                    AssertionError, "exclusive Docker-admin authority",
+                ):
+                    RawSealerHostileUidDockerTests.setUpClass()
+
+    def test_optional_real_uid_test_skips_without_host_authority(self) -> None:
+        with patch(__name__ + ".IMAGE_OK", True):
+            with patch.dict(os.environ, {"MARK_REQUIRE_RAW_SEALER_UID": "0"}):
+                with self.assertRaisesRegex(
+                    unittest.SkipTest, "exclusive Docker-admin authority",
+                ):
+                    RawSealerHostileUidDockerTests.setUpClass()
 
 
 if __name__ == "__main__":
