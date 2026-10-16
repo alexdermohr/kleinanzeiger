@@ -1119,4 +1119,11 @@ class PairedBackupOperatorTests(unittest.TestCase):
             )
 
     def test_completed_generation_is_create_only(self) -> None:
-        self._seal()
+        first = self._seal()
+        immutable_head = (self.anchor / "latest.json").read_bytes()
+        with self.assertRaises(PairedBackupOperatorError):
+            self._seal()
+        self.assertEqual((self.anchor / "latest.json").read_bytes(), immutable_head)
+        self.assertEqual(self._hash(self.anchor / "latest.json"), first["head_sha256"])
+        self.assertEqual({p.name for p in self.output.iterdir()}, {FIRST})
+        self.assertFalse((self.anchor / ".inflight").exists())

@@ -148,6 +148,44 @@ def _locked(root: Path) -> Iterator[None]:
         raise BackupIntentError("operator state or lock untrusted") from exc
 
 
+@contextmanager
+def _operation_lock(root: Path) -> Iterator[None]:
+    """Serialize cooperating complete seals and manual abandons.
+
+    The directory flock is separate from the short-lived intent record lock,
+    which the sealer reacquires. It provides local cooperating-process safety,
+    not revocation or protection against a compromised owner UID.
+    """
+    fd = -1
+    try:
+        try:
+            _private_root(root)
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            st = os.fstat(fd)
+            original = (st.st_dev, st.st_ino)
+            current = root.lstat()
+            if not stat.S_ISDIR(st.st_mode) or original != (current.st_dev, current.st_ino):
+                raise BackupIntentError("operator state root changed before operation")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise BackupIntentError("another trusted seal or abandon is in progress") from exc
+            current = root.lstat()
+            if original != (current.st_dev, current.st_ino):
+                raise BackupIntentError("operator state root changed while locking")
+        except (OSError, PairPreflightError, PairedBackupOperatorError) as exc:
+            raise BackupIntentError("operator operation lock could not be trusted") from exc
+        try:
+            # Body exceptions retain their original public API type, notably
+            # PairedBackupOperatorError for a crash after committing an intent.
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _state(root: Path) -> tuple[str, dict[str, dict[str, dict[str, object]]]]:
     """Read immutable transitions; reject replay, orphaned and forked history."""
     files: dict[str, dict[str, Path]] = {}
@@ -158,7 +196,7 @@ def _state(root: Path) -> tuple[str, dict[str, dict[str, dict[str, object]]]]:
         if path.name in {".intent.lock", _BOOTSTRAP_NAME}:
             continue
         match = re.fullmatch(
-            r"([0-9a-f]{32})\.(prepared|committing|acknowledged)\.json",
+            r"([0-9a-f]{32})\.(prepared|committing|acknowledged|abandoned)\.json",
             path.name, re.ASCII,
         )
         if match is None:
@@ -222,6 +260,30 @@ def _state(root: Path) -> tuple[str, dict[str, dict[str, dict[str, object]]]]:
             _sha(ack["head_sha256"], "acknowledged HEAD")
             phases["acknowledged"] = ack
             acknowledged[gen] = ack
+        if "abandoned" in paths:
+            if "acknowledged" in paths:
+                raise BackupIntentError("operator intent has conflicting terminal states")
+            # No independent live host/process/FD quiescence authority exists
+            # here. An old committing record cannot be cancelled by a
+            # finite local inspection, even if its HEAD is not yet visible.
+            if "committing" in paths:
+                raise BackupIntentError("committing abandonment lacks independent quiescence")
+            abandoned, _ = _read(paths["abandoned"], {
+                "schema_version", "generation", "prepared_sha256",
+                "committing_sha256", "previous_head_sha256",
+            })
+            if (
+                type(abandoned["schema_version"]) is not int
+                or abandoned["schema_version"] != 1
+                or abandoned["generation"] != gen
+                or abandoned["prepared_sha256"] != _digest(pbytes)
+                or abandoned["committing_sha256"] != (
+                    _ZERO_HEAD if cbytes is None else _digest(cbytes)
+                )
+                or abandoned["previous_head_sha256"] != prepared["previous_head_sha256"]
+            ):
+                raise BackupIntentError("abandoned intent not bound to immutable predecessor")
+            phases["abandoned"] = abandoned
         records[gen] = phases
 
     # Every retained acknowledged generation must extend exactly one earlier
@@ -243,7 +305,17 @@ def _state(root: Path) -> tuple[str, dict[str, dict[str, dict[str, object]]]]:
         visited_heads.add(tip)
         remaining.remove(gen)
 
-    pending = [gen for gen, phases in records.items() if "acknowledged" not in phases]
+    known_heads = visited_heads | {_ZERO_HEAD}
+    for gen, phases in records.items():
+        if (
+            "abandoned" in phases
+            and phases["prepared"]["previous_head_sha256"] not in known_heads
+        ):
+            raise BackupIntentError("abandoned intent predecessor not acknowledged")
+    pending = [
+        gen for gen, phases in records.items()
+        if "acknowledged" not in phases and "abandoned" not in phases
+    ]
     if len(pending) > 1:
         raise BackupIntentError("multiple pending operator intents")
     if pending and records[pending[0]]["prepared"]["previous_head_sha256"] != tip:
@@ -311,7 +383,10 @@ class BackupIntentAuthority:
                 raise BackupIntentError("cold image paths must be absolute normalized")
             with _locked(self.root):
                 tip, records = _state(self.root)
-                if gen in records or any("acknowledged" not in p for p in records.values()):
+                if gen in records or any(
+                    "acknowledged" not in p and "abandoned" not in p
+                    for p in records.values()
+                ):
                     raise BackupIntentError("operator generation already used or pending")
                 if tip != prev:
                     raise BackupIntentError("operator predecessor not last acknowledged HEAD")
@@ -339,7 +414,10 @@ class BackupIntentAuthority:
         with _locked(self.root):
             _, records = _state(self.root)
             phases = records.get(gen)
-            if phases is None or "committing" in phases or "acknowledged" in phases:
+            if (
+                phases is None or "committing" in phases
+                or "acknowledged" in phases or "abandoned" in phases
+            ):
                 raise BackupIntentError("generation not singly prepared; never retry commit")
             prepared = phases["prepared"]
             committing = {
@@ -350,6 +428,87 @@ class BackupIntentAuthority:
             _fsync_dir(self.root)
             return {k: str(v) for k, v in prepared.items() if k != "schema_version"}
 
+    def abandon(
+        self, generation: str, output_root: Path, anchor_root: Path,
+    ) -> dict[str, object]:
+        """Retire a prepared-only identity before any commit may take effect."""
+        with _operation_lock(self.root):
+            return self._abandon_exclusive(generation, output_root, anchor_root)
+
+    def _abandon_exclusive(
+        self, generation: str, output_root: Path, anchor_root: Path,
+    ) -> dict[str, object]:
+        """Retire an uncommitted preparation without reclaiming its identity.
+
+        Once a committing record exists, a separate sealer may have already
+        started while leaving no filesystem effects. This library has no
+        independent host-quiescence attestation and must preserve that fence.
+        """
+        gen = _generation(generation)
+        try:
+            with _locked(self.root):
+                tip, records = _state(self.root)
+                phases = records.get(gen)
+                if phases is None or "acknowledged" in phases or "abandoned" in phases:
+                    raise BackupIntentError("no safely abortable one-shot intent")
+                if "committing" in phases:
+                    raise BackupIntentError(
+                        "committing intent requires independent host quiescence; "
+                        "cannot abandon with local proof"
+                    )
+                prepared = phases["prepared"]
+                previous = prepared["previous_head_sha256"]
+                if previous != tip:
+                    raise BackupIntentError("operator predecessor changed before abandon")
+                output = _private_root(output_root)
+                anchor = _private_root(anchor_root)
+                if output == anchor or output in anchor.parents or anchor in output.parents:
+                    raise BackupIntentError("operator backup roots overlap")
+
+                def prove_no_effect() -> None:
+                    if any(p.name == gen for p in output.iterdir()):
+                        raise BackupIntentError("generation output may already have effects")
+                    if any(p.name == gen + ".json" for p in anchor.iterdir()):
+                        raise BackupIntentError("generation head record may already exist")
+                    if any(p.name.startswith(".partial-") for p in output.iterdir()):
+                        raise BackupIntentError("partial generation may contain effects")
+                    if any(
+                        p.name == ".inflight" or p.name.startswith(".next-")
+                        for p in anchor.iterdir()
+                    ):
+                        raise BackupIntentError("crash fence or pending HEAD exists")
+                    if previous == _ZERO_HEAD:
+                        if (
+                            any(p.name != ".authority.lock" for p in anchor.iterdir())
+                            or any(output.iterdir())
+                        ):
+                            raise BackupIntentError("bootstrap state is ambiguous")
+                    else:
+                        prior = _read_head(anchor, previous)
+                        if prior is None:
+                            raise BackupIntentError("acknowledged predecessor missing")
+                        _validate_anchored_history(anchor, output, previous, prior)
+
+                prove_no_effect()
+                _fsync_dir(output)
+                _fsync_dir(anchor)
+                prove_no_effect()
+                abandoned = {
+                    "schema_version": 1,
+                    "generation": gen,
+                    "prepared_sha256": _digest(_canonical(prepared)),
+                    "committing_sha256": _ZERO_HEAD,
+                    "previous_head_sha256": previous,
+                }
+                _new_file(_record(self.root, gen, "abandoned"), _canonical(abandoned))
+                _fsync_dir(self.root)
+                return {
+                    "generation": gen, "abandoned_once": True,
+                    "restore_authorized": False, "external_write_authorized": False,
+                }
+        except (OSError, PairPreflightError, PairedBackupOperatorError) as exc:
+            raise BackupIntentError("effect-free abandon proof uncertain; preserve fences") from exc
+
     def acknowledge(
         self, generation: str, output_root: Path, anchor_root: Path,
     ) -> dict[str, object]:
@@ -359,7 +518,10 @@ class BackupIntentAuthority:
             with _locked(self.root):
                 _, records = _state(self.root)
                 phases = records.get(gen)
-                if phases is None or "committing" not in phases or "acknowledged" in phases:
+                if (
+                    phases is None or "committing" not in phases
+                    or "acknowledged" in phases or "abandoned" in phases
+                ):
                     raise BackupIntentError("no unconsumed external committing intent")
                 prepared = phases["prepared"]
                 output = _private_root(output_root)
@@ -393,7 +555,17 @@ class BackupIntentAuthority:
                 if verified["generation"] != gen:
                     raise BackupIntentError("published generation invalid")
                 reconciled = False
-                if (anchor / ".inflight").exists():
+                inflight = anchor / ".inflight"
+                try:
+                    inflight_info = inflight.lstat()
+                except FileNotFoundError:
+                    inflight_info = None
+                if inflight_info is not None:
+                    if (
+                        not stat.S_ISREG(inflight_info.st_mode)
+                        or inflight_info.st_nlink != 1
+                    ):
+                        raise BackupIntentError("crash marker is not a regular file")
                     reconcile_committed_inflight(
                         output, anchor,
                         expected_current_head_sha256=head_sha,
@@ -411,6 +583,9 @@ class BackupIntentAuthority:
                 # Last full-history verification is immediately before durable
                 # external acknowledgement; this remains same-UID-race-limited.
                 _verify_anchored_pairs(output, anchor, head_sha)
+                _fsync_dir(anchor)
+                if _read_head(anchor, head_sha) != head:
+                    raise BackupIntentError("HEAD changed before durable external ACK")
                 acknowledged = {
                     "schema_version": 1, "generation": gen,
                     "committing_sha256": _digest(_canonical(phases["committing"])),
@@ -429,8 +604,43 @@ class BackupIntentAuthority:
     def seal_prepared(
         self, generation: str, output_root: Path, anchor_root: Path,
     ) -> dict[str, object]:
-        """Durably mark committing before any seal; no retry on unknown outcome."""
-        intent = self.begin_commit(generation)
+        """Serialize the complete preflight, commit, publication and ACK."""
+        with _operation_lock(self.root):
+            return self._seal_prepared_exclusive(generation, output_root, anchor_root)
+
+    def _seal_prepared_exclusive(
+        self, generation: str, output_root: Path, anchor_root: Path,
+    ) -> dict[str, object]:
+        """Preflight trusted cold inputs before consuming a one-shot commit."""
+        gen = _generation(generation)
+        with _locked(self.root):
+            tip, records = _state(self.root)
+            phases = records.get(gen)
+            if (
+                phases is None or "committing" in phases
+                or "acknowledged" in phases or "abandoned" in phases
+            ):
+                raise BackupIntentError("operator intent not singly prepared")
+            prepared = phases["prepared"]
+            if tip != prepared["previous_head_sha256"]:
+                raise BackupIntentError("preflight predecessor no longer acknowledged")
+            cold = {k: str(v) for k, v in prepared.items() if k != "schema_version"}
+        if cold["previous_head_sha256"] != _ZERO_HEAD:
+            _verify_anchored_pairs(
+                output_root, anchor_root, cold["previous_head_sha256"],
+            )
+        try:
+            inspected = inspect_offline_pair(
+                Path(cold["sqlite_path"]), Path(cold["witness_path"]),
+            )
+        except (OSError, PairPreflightError, PairedBackupOperatorError) as exc:
+            raise BackupIntentError("cold source preflight uncertain") from exc
+        if (
+            inspected["sqlite_sha256"] != cold["sqlite_sha256"]
+            or inspected["witness_sha256"] != cold["witness_sha256"]
+        ):
+            raise BackupIntentError("cold image changed since independent preparation")
+        intent = self.begin_commit(gen)
         # A previously acknowledged pair that has since been damaged must
         # block the next seal *before* it publishes a successor HEAD.
         if intent["previous_head_sha256"] != _ZERO_HEAD:

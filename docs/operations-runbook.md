@@ -861,7 +861,14 @@ oder mit precondition_failed abgeschlossener Submit legitimiert sie nicht.
 
 Sämtliche Write-Request-Zeilen müssen durch den realen StorageOwner-
 Record-Decoder lesbar sein; auch Status, Owner, Ergebnisübergang und
-kanonische JSON-Antwort sind Teil der Prüfung. Eine als `completed`
+kanonische JSON-Antwort sind Teil der Prüfung. Bei **jeder ungestarteten**
+Operation (also `execution_started_at=NULL`) muss der ursprüngliche
+`claim_owner` erhalten sein: der aktuelle StorageOwner erstellt Claims
+ausschließlich mit gültigem Owner, und ein `in_progress`-Claim ohne
+Owner ist nach Neustart nicht einmal durch den zulässigen
+`allow_abandoned_takeover`-Pfad übernehmbar. Solche historischen oder
+manipulierten Claims dürfen im Offline-Paarrestore nicht als
+fence-frei attestiert werden. Eine als `completed`
 persistierte Operation **ohne** `execution_started_at` hat keinen
 Witness-Start: Sie darf ausschließlich den vom StorageOwner selbst
 konstruierten HTTP-409-Abbruch `write_claim_cancelled_before_begin`
@@ -922,38 +929,82 @@ gemeinsam durchgesetzter StorageOwner-/Witness-Laufzeitautorität
 produktiv integriert werden. Der bestehende No-Witness-Lokalmodus
 wird durch diesen rein diagnostischen Sicherheits-Stop nicht verändert.
 
-**Abgeschlossene Antwort ohne lokalen SQLite-Clearance-Vertrag:**
-Für jeden begonnenen, dauerhaft abgeschlossenen Write **ohne**
-offenen lokalen `sqlite_quarantined`- oder
-`sqlite_media_unresolved`-Fence gibt es in
+**Abgeschlossene Antworten und der offene Media-Checkpoint-Ausnahmefall:**
+Für einen begonnenen, dauerhaft abgeschlossenen Write **ohne** offenen
+`sqlite_quarantined`-, `sqlite_media_unresolved`- **oder**
+`before_media_post_read`-Checkpoint-Fence gibt es im
 `SnapshotStore.record_write_recovery_clearance()` keinen zusätzlichen
-SQLite-Operator-Clearance-Pfad. Das umfasst kanonische Nicht-Media-
-Antworten (HTTP 200, 409, 500) ebenso wie bereits **nicht mehr
-ambivalente** Media-Antworten mit bestätigtem oder
-`precondition_failed`-Receipt. Die Klassifikation entspricht den
-vorher vollständig geprüften lokalen Fence-Inventaren, nicht allein
-dem HTTP-Status oder der Anwesenheit von
-`media_persistence_confirmed`. Owner-HTTP-202-
-`write_outcome_unverified` und noch ambivalente Media-Replies
-bleiben ausdrücklich **ausgenommen** und verlangen unabhängige
-SQLite-Operator-Evidenz zum Schließen ihrer lokalen Fences.
-Hat der unabhängig verwaltete Witness nach versiegelter Ursprungssession
-genau diese Operation (Key/SHA/Session) **operatorseitig** geklärt,
-kann das Paar ohne zusätzliche nicht unterstützte SQLite-Clearance
-als **reine Offline-Diagnose** attestiert werden. Die mangels
-Witness-Completion nicht unabhängig gebundene SQLite-Antwort bleibt
-**immer** in `sqlite_unverified_replay`, selbst wenn sie HTTP 200
-oder eine erfolgreiche Create-/Lifecycle-Operation behauptet. Sie ist
-niemals eine Replay-Bestätigung und autorisiert **keinen** erneuten
-Plattform-Write. Der unabhängige Operator muss die externe Wirkung
-vor seiner Witness-Clearance tatsächlich selbst reconciliert haben.
-Jeder begonnene `in_progress`-Write sowie alle HTTP-202-UNKNOWN- und
-Media-Recovery-Fences verlangen dagegen eine echte, genau passende
-SQLite-`operator_verified_postread`- und Witness-Operator-Clearance,
-bevor der ursprüngliche Fence entfallen darf. Ein SQL-only- oder
-Witness-only-Zwischenstand ist **kein** freigegebener Paar-Restore.
-Auch `media_submit_reconciled` aus dem Executor zählt niemals als
-solche unabhängige Operator-Clearance.
+SQLite-Operator-Clearance-Pfad. Das gilt für kanonische Nicht-Media-
+Antworten (HTTP 200, 409, 500), vollständig bestätigte Media-
+Persistenz sowie `precondition_failed`-Receipts ohne offenen
+Create-Checkpoint. Der HTTP-Status und das bloße Vorkommen von
+`media_persistence_confirmed` begründen weder eine Clearance noch
+eine erneute Plattform-Write-Autorisierung.
+
+**Wichtige Ausnahme: Kern-Create bestätigt, Media nicht bestätigt.**
+Ein abgeschlossenes Create kann `operation_receipt.outcome=confirmed`
+und eine gültige `created_ad_id` haben, aber zugleich
+`media_persistence_confirmed=false` und den Media-Post-Read-Status
+`not_read`, `verifier_unavailable`, `mismatch` oder `unknown`.
+Auch wenn diese HTTP-Antwort **nicht** in `sqlite_media_unresolved`
+auftaucht, hält der zuvor persistierte
+`before_media_post_read`-Checkpoint in `ambiguous_creates` die
+Create-Recovery-Sperre ausdrücklich offen. Nur nach unabhängigem,
+autorisiertem Post-Read-Nachweis zur **exakt begonnenen**
+Ursprungsoperation (Idempotency-Key und Request-SHA) darf der
+StorageOwner `operator_verified_postread` persistieren;
+`media_submit_reconciled` aus dem Executor wird dafür verweigert.
+Der Witness benötigt zusätzlich seine **eigene**, genau an
+Key/SHA/Session gebundene Operator-Clearance. Nach einer einseitigen
+SQLite-Clearance bei noch offenem Witness lehnt der Offline-Preflight
+die Paar-Generation ab. Eine **nur** im Witness persistierte
+Operator-Clearance ist lediglich diagnostizierbar: der SQLite-Checkpoint
+bleibt in `ambiguous_creates`, `create_recovery_pending()` bleibt
+`true`, und eine SQLite-Antwort ohne Witness-Completion bleibt in
+`sqlite_unverified_replay`. Ein solcher Zwischenstand ist weder
+Fence-Closure noch sicherer Paar-Restore, Replay, Host-Cutover oder
+Plattform-Schreibrecht. Erst beide unabhängigen, passenden Clearances
+können diesen Create-Checkpoint schließen.
+
+Owner-HTTP-202-`write_outcome_unverified` und abgeschlossene
+ambivalente Media-Replies mit eigenem lokalen
+`sqlite_quarantined`- bzw. `sqlite_media_unresolved`-Fence verlangen
+zum **Schließen** des Fences stets die exakt an dieselbe ursprüngliche
+Operation gebundene SQLite-`operator_verified_postread`-Clearance und
+die unabhängig belegte Witness-Operator-Clearance.
+
+**Witness-only ist nicht immer ein zulässiger Offline-Zwischenstand.**
+Ist bei einem solchen lokalen 202-/Media-Recovery-Fence die
+Witness-Completion **nicht** dauerhaft vorhanden, lehnt der
+Paar-Preflight eine bloße Witness-Operator-Clearance **auch als reine
+Offline-Diagnose** ab. Liegt dagegen eine vollständig passende,
+hashgebundene Witness-Completion bereits vor, kann derselbe
+Witness-only-Zustand bei weiterhin offenem SQLite-Fence als
+`sqlite_quarantined` bzw. `sqlite_media_unresolved` **diagnostiziert**
+werden; das ist ausdrücklich keine Fence-Schließung oder Wiederfreigabe.
+Diese Differenz wird durch die negativen Tests
+`test_quarantined_202_without_sqlite_clearance_cannot_use_nonmedia_exception`
+und `test_missing_completion_with_operator_clearance_is_not_safe_replay`
+sowie durch
+`test_witness_only_ambiguous_media_with_completion_is_diagnostic`
+festgelegt.
+
+Eine **abgeschlossene Nicht-Media-Antwort ohne offenen lokalen
+Recovery-Fence** hat dagegen keinen künstlich zu erzwingenden
+SQLite-Clearance-Pfad: Fehlt ihre Witness-Completion, darf sie nach
+unabhängiger Witness-Operator-Clearance lediglich als offene
+`sqlite_unverified_replay`-Diagnose erhalten bleiben, niemals als
+bestätigtes Replay oder Plattform-Ergebnis. Ebenso ist der oben
+gesondert behandelte `before_media_post_read`-Checkpoint bei
+bestätigtem Kern-Create und unbestätigter Media-Antwort **nicht**
+automatisch ein `sqlite_media_unresolved`-Reply-Fence: Witness-only
+darf hier den offenen `ambiguous_creates`-Checkpoint sowie das
+unverifizierte Replay sichtbar erhalten, aber nie autorisieren.
+
+In keinem dieser Zustände darf der lokale Executor eine echte
+unabhängige Post-Read-Evidenz durch `media_submit_reconciled`
+ersetzen. Reine SQLite- oder Witness-Nachweise allein erteilen keine
+Host-Cutover-, Restore-, Replay- oder erneute externe Write-Erlaubnis.
 
 Ist ein Witness-Completion-Digest inkonsistent oder fehlt der
 SQLite-Gegenpart, wird der Restore-Kandidat verworfen. Fehlt auch
@@ -986,7 +1037,41 @@ Alle Identitäten sind sortiert und bei der Paarsicherung durch die
 **unabhängige** Backup-Autorität zu attestieren. Der Checker verifiziert
 vollständige File-Digests, SQLite-Integrität/Schemata, die Witness-
 Hashkette, Operation-/Key-/SHA-Übereinstimmung und den Erhalt aller
-im extern verankerten Manifest enthaltenen Pending-Fences. Ein vor dem
+im extern verankerten Manifest enthaltenen Pending-Fences. Jede persistierte finale `create_operation_receipts`-Zeile muss
+vor jeder Checkpoint-Suppression dem tatsächlichen
+`CreateOperationReceipt`-Vertrag genügen: insbesondere kanonische
+zeitzonenbewusste Start-/Endzeiten in korrekter Reihenfolge, gültige
+Outcome-/Media-Kombinationen, typisierte Statusfelder und passende
+Snapshot-Anzeigenidentitäten. Ein künstlich geänderter Final-Receipt,
+der lediglich die für den SQL-Join verwendeten Spalten erfüllt,
+darf einen offenen Create-Checkpoint nicht verbergen.
+Auch ein für sich gültiger Final-Receipt ist keine Fortsetzung des
+gleichen Checkpoints, wenn die bei Create-Persistenz unveränderlichen
+Kernfelder abweichen: `pre_read_status`,
+`confirmation_pre_read_status`, `post_read_status`,
+`confirmation_post_read_status`, `content_post_read_status` oder
+`writer_error`. Die Offline-Inspektion behält den ursprünglichen
+Checkpoint dann als `ambiguous_creates` bei, statt einen
+recoverypflichtigen Create fälschlich als abgeschlossen auszugeben.
+Gleiches gilt, wenn ein an sich gültiger Media-Final-Receipt ein
+**früheres** `completed_at` als der ursprüngliche vor dem
+Media-Postread persistierte Checkpoint trägt. Der echte Runtime-
+Übergang setzt den Endzeitpunkt mit `max(previous, clock())`;
+der Checker vergleicht dafür tatsächliche timezone-aware
+Zeitpunkte in Python, nicht fehleranfällige ISO-Textreihenfolge oder
+auf Millisekunden gerundete SQLite-Zeitstempel. Legitime unterschiedliche
+Offsets dürfen die Recovery-Fence dagegen nicht künstlich offenhalten.
+
+Auch **jede persistierte ursprüngliche** `create_operation_checkpoints`-Zeile
+wird unabhängig von späteren finalen Receipts auf den von
+`append_create_operation_checkpoint()` zugelassenen Zustand geprüft:
+`before_media_post_read`, bestätigter ausgeführter Create mit Anzeigen-ID,
+zeitzonenbewusste und korrekt geordnete Zeitpunkte, gültige Pflichtstatus
+und die unveränderten Snapshot-Anzeigenidentitäten. Eine nachträglich
+manipulierte Ursprungszeile darf daher auch bei passend erscheinendem
+finalen Receipt keine verschwundene Recovery-Fence ergeben.
+
+Ein vor dem
 Media-Postread dauerhaft geschriebenes Create-Checkpoint trägt
 `outcome=confirmed` und bleibt bei Prozessabsturz **ohne** passendes
 abschließendes Media-Receipt offen. Auch ein fremdes Receipt oder ein
