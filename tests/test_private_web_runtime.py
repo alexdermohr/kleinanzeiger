@@ -3970,6 +3970,60 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
             self.assertEqual([s for s, _ in responses], [200])
             self.assertEqual(close_events, ["content"])
 
+    def test_shutdown_operation_lock_is_bounded_and_retains_store_lease(self) -> None:
+        # A concurrent non-HTTP reconciliation can retain this lock after
+        # active HTTP handlers drain. Shutdown cannot wait forever for it.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "runtime.sqlite")
+            close_events: list[str] = []
+            runtime = compose_private_web_write_api_runtime(
+                content_runtime=self._content_runtime(
+                    OwnerReader(ReadResult.success_empty(())), close_events,
+                ),
+                store=store,
+                access=WriteApiAccess(
+                    principal="runtime-test",
+                    bearer_token=self.TOKEN,
+                    capabilities=frozenset(),
+                ),
+            )
+            close_errors: list[BaseException] = []
+
+            def close_worker() -> None:
+                try:
+                    runtime.close()
+                except BaseException as exc:
+                    close_errors.append(exc)
+
+            runtime._operation_lock.acquire()
+            worker = threading.Thread(target=close_worker, daemon=True)
+            try:
+                with patch(
+                    "mark_api.private_web_runtime._WRITE_OPERATION_DRAIN_SECONDS",
+                    0.1, create=True,
+                ):
+                    worker.start()
+                    worker.join(timeout=0.6)
+                self.assertFalse(
+                    worker.is_alive(),
+                    "shutdown blocked on a non-HTTP write operation",
+                )
+                self.assertEqual(len(close_errors), 1)
+                self.assertIsInstance(
+                    close_errors[0], PrivateWebRuntimeSetupError,
+                )
+                self.assertIn("active write operation", str(close_errors[0]))
+                self.assertEqual(close_events, [])
+                with self.assertRaisesRegex(RuntimeError, "already active"):
+                    acquire_write_api_store_lock(store)
+            finally:
+                runtime._operation_lock.release()
+                if worker.ident is not None:
+                    worker.join(timeout=2)
+                runtime.close()
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(close_events, ["content"])
+
     def test_close_preserves_runtimes_if_http_cannot_quiesce(self) -> None:
         class StuckThread:
             def __init__(self) -> None:
