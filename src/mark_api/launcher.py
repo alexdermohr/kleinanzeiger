@@ -38,6 +38,10 @@ from .write_api import WriteApiAccess, WriteCapability, _WriteFence
 
 _LAUNCHER_SOURCE = "private-web-product-launcher"
 _SHUTDOWN_MEDIA_RECONCILE_SECONDS = 25.0
+# Owner Docker stop_grace_period is 60s. The entire cleanup,
+# including frontend relay, browser/media and borrowed witness, must stay
+# below that deadline. A timeout is UNKNOWN, never permission to retry writes.
+_SHUTDOWN_OWNER_BUDGET_SECONDS = 50.0
 
 
 class ProductLauncherError(RuntimeError):
@@ -788,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
     witness: FenceWitnessClient | None = None
     frontend_relay: UnixDashboardRelay | None = None
     settle_thread: Thread | None = None
+    shutdown_handed_off = False
 
     def _on_sigterm(_signum: int, _frame: object) -> None:
         nonlocal shutdown_requested, serving
@@ -836,6 +841,7 @@ def main(argv: list[str] | None = None) -> int:
             print("mark-api-launch: invalid startup configuration", file=sys.stderr)
             return 2
 
+        frontend_failed = False
         if args.frontend_socket is not None and not shutdown_requested:
             try:
                 dashboard_host, dashboard_port = launcher.server_address
@@ -848,20 +854,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 frontend_relay.start()
             except (OSError, DashboardRelayError, ValueError):
-                if frontend_relay is not None:
-                    try:
-                        frontend_relay.stop()
-                    except Exception:
-                        pass
-                try:
-                    launcher.close()
-                except Exception:
-                    pass
+                # Use the same globally bounded shutdown as the serving
+                # path. Direct cleanup here could block before any watchdog
+                # exists, particularly if relay.start partially succeeded.
+                frontend_failed = True
                 print("mark-api-launch: trusted dashboard transport unavailable",
                       file=sys.stderr)
-                return 2
 
-        if not shutdown_requested:
+        if not shutdown_requested and not frontend_failed:
             write_host, write_port = launcher.write_server_address
             print(f"Mark dashboard: {launcher.dashboard_url}", flush=True)
             print(
@@ -888,9 +888,9 @@ def main(argv: list[str] | None = None) -> int:
                     flush=True,
                 )
 
-        exit_code = 0
+        exit_code = 2 if frontend_failed else 0
         try:
-            if not shutdown_requested:
+            if not shutdown_requested and not frontend_failed:
                 serving = True
                 try:
                     launcher.serve_forever()
@@ -905,69 +905,105 @@ def main(argv: list[str] | None = None) -> int:
             )
             exit_code = 2
         finally:
-            # Stop accepting untrusted dashboard/HTTP traffic before the
-            # executor drains its witnessed write handlers and closes CDP.
-            if frontend_relay is not None:
+            # One absolute shutdown deadline covers relay, browser cleanup,
+            # media settlement and the borrowed witness. In particular,
+            # neither a hung relay.shutdown() nor content_runtime.close()
+            # may consume Docker's full stop grace before SIGKILL.
+            outcomes: list[int] = []
+
+            def _stop_owner() -> None:
+                nonlocal settle_thread
+                stop_code = exit_code
                 try:
-                    relay_drained = frontend_relay.stop()
-                except Exception:
-                    relay_drained = False
-                if not relay_drained:
-                    print("mark-api-launch: frontend transport drain failed",
-                          file=sys.stderr)
-                    exit_code = 2
-            try:
-                launcher.close()
-            except PrivateWebSubmitUnknownError:
-                # Every shutdown path, including SIGINT and an unexpected
-                # dashboard stop, has a finite media settlement deadline.
-                # Any timeout is UNKNOWN and retains the durable recovery
-                # fence; never automatically re-submit to the platform.
-                reconciled: list[bool] = []
-
-                def _settle_before_stop() -> None:
+                    # Frontend streams are revoked before the write executor
+                    # drains. If relay close itself hangs, PID 1 can still
+                    # return fail-closed without releasing its write fences.
+                    if frontend_relay is not None:
+                        try:
+                            relay_drained = frontend_relay.stop()
+                        except Exception:
+                            relay_drained = False
+                        if not relay_drained:
+                            print(
+                                "mark-api-launch: frontend transport drain failed",
+                                file=sys.stderr,
+                            )
+                            stop_code = 2
                     try:
-                        launcher.reconcile_media_submit()
                         launcher.close()
-                    except Exception:
-                        return
-                    else:
-                        reconciled.append(True)
-                    finally:
-                        # Keep the borrowed session alive while this worker
-                        # may still be issuing its operation-bound IPC.
-                        if witness is not None:
-                            witness.close()
+                    except PrivateWebSubmitUnknownError:
+                        # Only observation-only reconciliation of the original
+                        # operation is permitted. A timed-out daemon retains
+                        # borrowed witness ownership until it finishes.
+                        reconciled: list[bool] = []
 
-                settle_thread = Thread(
-                    target=_settle_before_stop,
-                    daemon=True,
-                    name="mark-media-stop-reconciliation",
+                        def _settle_before_stop() -> None:
+                            try:
+                                launcher.reconcile_media_submit()
+                                launcher.close()
+                            except Exception:
+                                return
+                            else:
+                                reconciled.append(True)
+                            finally:
+                                if witness is not None:
+                                    witness.close()
+
+                        settle_thread = Thread(
+                            target=_settle_before_stop,
+                            daemon=True,
+                            name="mark-media-stop-reconciliation",
+                        )
+                        settle_thread.start()
+                        settle_thread.join(_SHUTDOWN_MEDIA_RECONCILE_SECONDS)
+                        if settle_thread.is_alive() or not reconciled:
+                            print(
+                                "mark-api-launch: media submit reconciliation required",
+                                file=sys.stderr,
+                            )
+                            stop_code = 2
+                    except ProductLauncherError as exc:
+                        print(f"mark-api-launch: {exc}", file=sys.stderr)
+                        stop_code = 2
+                except BaseException:
+                    # Unexpected shutdown failures must never allow a clean
+                    # stop claim or an implicit replay of uncertain writes.
+                    stop_code = 2
+                finally:
+                    try:
+                        if witness is not None and (
+                            settle_thread is None or not settle_thread.is_alive()
+                        ):
+                            witness.close()
+                    except Exception:
+                        stop_code = 2
+                    outcomes.append(stop_code)
+
+            worker = Thread(
+                target=_stop_owner, daemon=True, name="mark-owner-stop",
+            )
+            worker.start()
+            shutdown_handed_off = True
+            worker.join(_SHUTDOWN_OWNER_BUDGET_SECONDS)
+            if worker.is_alive() or not outcomes:
+                print(
+                    "mark-api-launch: owner shutdown deadline exceeded; "
+                    "retain recovery fences",
+                    file=sys.stderr,
                 )
-                settle_thread.start()
-                settle_thread.join(_SHUTDOWN_MEDIA_RECONCILE_SECONDS)
-                media_settled = not settle_thread.is_alive() and bool(reconciled)
-                if not media_settled:
-                    print(
-                        "mark-api-launch: media submit reconciliation required",
-                        file=sys.stderr,
-                    )
-                    exit_code = 2
-            except ProductLauncherError as exc:
-                print(f"mark-api-launch: {exc}", file=sys.stderr)
                 exit_code = 2
+            else:
+                exit_code = outcomes[0]
         return exit_code
 
     finally:
         try:
-            # A timed-out daemon settlement may still be reading/writing the
-            # witness. Never block PID 1 on its IPC guard or poison the
-            # in-flight session; the worker closes it when it finishes.
-            # On hard process exit the kernel closes sockets and the ledger
-            # retains its durable unknown-outcome fence.
-            if witness is not None and (
-                settle_thread is None or not settle_thread.is_alive()
-            ):
+            # Startup failures, before a shutdown worker owns the borrowed
+            # session, still close the authenticated witness here. Once the
+            # worker starts it alone owns that lifetime. If Docker kills PID 1,
+            # the kernel closes any remaining sockets without fabricating
+            # recovery clearance.
+            if witness is not None and not shutdown_handed_off:
                 witness.close()
         finally:
             try:
