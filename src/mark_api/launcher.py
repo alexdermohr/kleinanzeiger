@@ -12,6 +12,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Thread, current_thread
+from time import monotonic
 from typing import Protocol
 from urllib.parse import quote
 
@@ -42,6 +43,9 @@ _SHUTDOWN_MEDIA_RECONCILE_SECONDS = 25.0
 # including frontend relay, browser/media and borrowed witness, must stay
 # below that deadline. A timeout is UNKNOWN, never permission to retry writes.
 _SHUTDOWN_OWNER_BUDGET_SECONDS = 50.0
+# Programmatic ProductLauncherRuntime.close() also needs a bounded caller wait.
+# Its background worker, not the caller, keeps SQLite/inventory/Witness users alive.
+_PRODUCT_CLOSE_TOTAL_SECONDS = 12.0
 
 
 class ProductLauncherError(RuntimeError):
@@ -181,6 +185,9 @@ class ProductLauncherRuntime:
         self._startup_email_import_report = startup_email_import_report
         self._state_lock = Lock()
         self._close_lock = Lock()
+        self._close_worker_guard = Lock()
+        self._close_worker: Thread | None = None
+        self._close_worker_result: dict[str, BaseException] | None = None
         self._shutdown_started = False
         self._serve_thread: Thread | None = None
         self._server_quiesced = False
@@ -257,6 +264,66 @@ class ProductLauncherRuntime:
                     self._server_quiesced = True
 
     def close(self) -> None:
+        """Bound direct callers while one retained worker completes safe teardown."""
+        deadline = monotonic() + _PRODUCT_CLOSE_TOTAL_SECONDS
+        # No new admissions once a close is requested, even if another
+        # worker holds _state_lock or blocks within a cleanup callback.
+        self._shutdown_started = True
+        if self._serve_thread is current_thread():
+            raise ProductLauncherError(
+                "product launcher cannot close from serving thread"
+            )
+        if not self._close_worker_guard.acquire(
+            timeout=_PRODUCT_CLOSE_TOTAL_SECONDS,
+        ):
+            raise ProductLauncherError(
+                "product launcher shutdown deadline exceeded; retain recovery fences"
+            )
+        try:
+            worker = self._close_worker
+            outcome = self._close_worker_result
+            if worker is None or not worker.is_alive():
+                if (
+                    self._server_closed
+                    and self._write_closed
+                    and self._inventory_closed
+                ):
+                    return
+                outcome = {}
+
+                def finish_shutdown() -> None:
+                    try:
+                        self._close_impl()
+                    except BaseException as exc:
+                        outcome["error"] = exc
+
+                worker = Thread(
+                    target=finish_shutdown,
+                    daemon=True,
+                    name="mark-product-close",
+                )
+                self._close_worker = worker
+                self._close_worker_result = outcome
+                try:
+                    worker.start()
+                except RuntimeError as exc:
+                    self._close_worker = None
+                    raise ProductLauncherError(
+                        "product launcher shutdown worker unavailable; "
+                        "retain recovery fences"
+                    ) from exc
+        finally:
+            self._close_worker_guard.release()
+
+        worker.join(timeout=max(0.0, deadline - monotonic()))
+        if worker.is_alive():
+            raise ProductLauncherError(
+                "product launcher shutdown deadline exceeded; retain recovery fences"
+            )
+        if outcome is not None and "error" in outcome:
+            raise outcome["error"]
+
+    def _close_impl(self) -> None:
         with self._close_lock:
             with self._state_lock:
                 if (

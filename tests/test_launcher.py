@@ -974,6 +974,60 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertTrue(server.closed)
         self.assertTrue(inventory.closed)
 
+    def test_direct_close_has_total_deadline_without_releasing_owned_runtime(self) -> None:
+        _tmp, db = self.make_db()
+        inventory = InventoryRuntime(ReadResult.success_empty(()))
+
+        class HungDashboard(BlockingDashboardServer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.shutdown_started = threading.Event()
+                self.shutdown_release = threading.Event()
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+                self.shutdown_started.set()
+                if self.shutdown_release.wait(timeout=1.0):
+                    self.release.set()
+
+        server = HungDashboard()
+        launcher = build_product_launcher(
+            db_path=db,
+            cdp_port=9222,
+            runtime_factory=lambda **kwargs: inventory,
+            dashboard_factory=lambda *args, **kwargs: server,
+            clock=lambda: NOW,
+        )
+        serve_thread = threading.Thread(target=launcher.serve_forever, daemon=True)
+        self.addCleanup(server.shutdown_release.set)
+        self.addCleanup(server.release.set)
+        self.addCleanup(lambda: serve_thread.join(timeout=2))
+        serve_thread.start()
+        self.assertTrue(server.started.wait(timeout=1))
+
+        try:
+            with patch("mark_api.launcher._PRODUCT_CLOSE_TOTAL_SECONDS", 0.10, create=True):
+                before = monotonic()
+                with self.assertRaisesRegex(ProductLauncherError, "deadline"):
+                    launcher.close()
+                self.assertLess(monotonic() - before, 0.5)
+                self.assertTrue(server.shutdown_started.wait(timeout=1))
+                self.assertEqual(server.shutdown_calls, 1)
+                self.assertEqual(self.write_runtime.close_calls, 0)
+                self.assertEqual(inventory.close_calls, 0)
+                with self.assertRaisesRegex(ProductLauncherError, "deadline"):
+                    launcher.close()
+                self.assertEqual(server.shutdown_calls, 1)
+        finally:
+            server.shutdown_release.set()
+
+        serve_thread.join(timeout=2)
+        self.assertFalse(serve_thread.is_alive())
+        launcher.close()
+        self.assertEqual(server.shutdown_calls, 1)
+        self.assertEqual(self.write_runtime.close_calls, 1)
+        self.assertEqual(inventory.close_calls, 1)
+
     def test_close_stops_real_dashboard_server_thread(self) -> None:
         _tmp, db = self.make_db()
         inventory = InventoryRuntime(ReadResult.success_empty(()))
