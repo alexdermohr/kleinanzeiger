@@ -4,6 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
+import subprocess
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Thread
 import tempfile
@@ -15,6 +19,7 @@ from mark_api.backup_intent_authority import (
 )
 from mark_api.fence_witness import FenceLedger
 from mark_api.paired_backup_operator import PairedBackupOperatorError, seal_offline_pair
+from mark_api.paired_restore_preflight import inspect_offline_pair
 from mark_api.storage import SnapshotStore
 
 
@@ -139,6 +144,106 @@ class BackupIntentAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(BackupIntentError, "pending"):
             self._prepare(SECOND)
         self.assertFalse((self.intents / (FIRST + ".acknowledged.json")).exists())
+
+    @unittest.skipUnless(
+        os.name == "posix" and hasattr(signal, "SIGKILL"), "POSIX SIGKILL required",
+    )
+    def test_real_sigkill_after_persisted_head_recovers_once_with_both_fences(self) -> None:
+        # This kills a fresh *synthetic* sealer after durable HEAD publication.
+        # It does not attest independent host UID/FD/MAP_SHARED isolation.
+        key, request_sha = "pair:real-sigkill-pending", "b" * 64
+        now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+        store = SnapshotStore(self.sqlite, create_if_missing=False)
+        store.claim_write_api_request(
+            idempotency_key=key, request_sha256=request_sha,
+            requested_at=now, claim_owner="synthetic-owner",
+        )
+        store.begin_write_api_request(
+            idempotency_key=key, request_sha256=request_sha,
+            execution_started_at=now, claim_owner="synthetic-owner",
+            strict_owner_fence=True,
+        )
+        with FenceLedger(self.witness) as witness:
+            session = witness.open_session()
+            witness.execution_started(
+                session, key=key, sha=request_sha, action="create",
+            )
+            witness.seal_session(session)
+        self._prepare()
+
+        env = dict(
+            os.environ,
+            PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"),
+            MARK_PLATFORM_WRITES_ENABLED="false",
+            PYTHONDONTWRITEBYTECODE="1",
+        )
+        kill_after_head = r"""
+import os, signal, sys
+from pathlib import Path
+from mark_api.backup_intent_authority import BackupIntentAuthority
+from mark_api import paired_backup_operator as backup
+intent, output, anchor, generation = map(Path, sys.argv[1:5])
+real_unlink = backup.os.unlink
+def kill_before_crash_marker_release(path, *args, **kwargs):
+    if Path(path) == anchor / ".inflight":
+        os.kill(os.getpid(), signal.SIGKILL)
+    return real_unlink(path, *args, **kwargs)
+backup.os.unlink = kill_before_crash_marker_release
+BackupIntentAuthority(intent).seal_prepared(str(generation), output, anchor)
+raise AssertionError("post-HEAD SIGKILL hook not reached")
+"""
+        def child(script: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    sys.executable, "-B", "-c", script, str(self.intents),
+                    str(self.output), str(self.anchor), FIRST,
+                ],
+                cwd=self.temp.name, env=env,
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+
+        terminated = child(kill_after_head)
+        self.assertEqual(terminated.returncode, -signal.SIGKILL, terminated.stderr)
+        self.assertTrue((self.anchor / "latest.json").is_file())
+        self.assertTrue((self.anchor / ".inflight").is_file())
+        self.assertTrue((self.intents / f"{FIRST}.committing.json").is_file())
+        self.assertFalse((self.intents / f"{FIRST}.acknowledged.json").exists())
+
+        def pending_fences() -> tuple[int, int]:
+            checked = inspect_offline_pair(
+                self.output / FIRST / "mark.sqlite",
+                self.output / FIRST / "witness.sqlite",
+            )["fences"]
+            return (
+                len(checked["sqlite_started"]),
+                len(checked["witness_unresolved"]),
+            )
+
+        original_fences = pending_fences()
+        self.assertEqual(original_fences, (1, 1))
+
+        restart_once = r"""
+import sys
+from pathlib import Path
+from mark_api.backup_intent_authority import BackupIntentAuthority, BackupIntentError
+intent, output, anchor, generation = sys.argv[1:5]
+operator = BackupIntentAuthority(Path(intent))
+receipt = operator.acknowledge(generation, Path(output), Path(anchor))
+assert receipt["reconciled"] and receipt["acknowledged_once"]
+assert not receipt["restore_authorized"] and not receipt["external_write_authorized"]
+try:
+    operator.acknowledge(generation, Path(output), Path(anchor))
+except BackupIntentError:
+    print("REPLAY_DENIED")
+else:
+    raise AssertionError("replayed operator intent accepted")
+"""
+        restarted = child(restart_once)
+        self.assertEqual(restarted.returncode, 0, restarted.stderr)
+        self.assertIn("REPLAY_DENIED", restarted.stdout)
+        self.assertFalse((self.anchor / ".inflight").exists())
+        self.assertTrue((self.intents / f"{FIRST}.acknowledged.json").is_file())
+        self.assertEqual(pending_fences(), original_fences)
 
     def test_crash_before_head_keeps_external_intent_and_inflight(self) -> None:
         self._prepare()
