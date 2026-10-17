@@ -1910,6 +1910,30 @@ def _handler_factory(
         server_version = "mark-api-readonly/0.1"
         sys_version = ""
 
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            # The TCP listener is loopback-only, but external DNS names can
+            # resolve to loopback. Reject foreign, missing and duplicate Host
+            # before both read-only routes and the optional write proxy.
+            local_host, local_port = self.server.server_address
+            canonical_host = _dashboard_http_origin(
+                "127.0.0.1", int(local_port),
+            ).removeprefix("http://")
+            # For the standard HTTP port, common clients omit :80 but an
+            # explicit port-80 Host is also valid. Other ports stay exact.
+            allowed_hosts = {canonical_host, f"127.0.0.1:{int(local_port)}"}
+            hosts = self.headers.get_all("Host") or []
+            if (
+                str(local_host) != "127.0.0.1"
+                or len(hosts) != 1
+                or hosts[0] not in allowed_hosts
+            ):
+                self.close_connection = True
+                self.send_error(421, "Misdirected Request")
+                return False
+            return True
+
         def log_message(self, format: str, *args: object) -> None:
             return
 
