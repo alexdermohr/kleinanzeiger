@@ -1,8 +1,9 @@
 """Opt-in REAL Linux/Docker peer-UID and network-namespace regression.
 
 Set MARK_RELAY_TEST_IMAGE to an already present immutable sha256 image ID.
-Only creates uniquely named, temporary Docker volumes/network/containers, then
-destroys them. No Kleinanzeigen or production DB/browser/account is contacted.
+Unique names cannot prevent a concurrent Docker resource name swap.
+Mutating tests fail closed until independent exclusive Docker administration
+is established. No Kleinanzeigen or production DB/browser/account is contacted.
 Without this explicit image this test is skipped, never called a release proof.
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 
@@ -24,12 +26,42 @@ IMAGE_OK = bool(re.fullmatch(r"sha256:[0-9a-f]{64}", IMAGE))
 PYTHON = "/opt/mark-api/venv/bin/python"
 
 
-def _docker(*args: str, timeout: float = 45) -> subprocess.CompletedProcess[str]:
+if os.environ.get("MARK_REQUIRE_RELAY_UID") == "1" and not IMAGE_OK:
+    raise ValueError("required Docker UID test lacks a pinned image")
+
+
+_DOCKER_AUTHORITY_ERROR = (
+    "exclusive Docker-admin authority not established: shared-daemon Docker "
+    "resource mutation forbidden before subprocess"
+)
+
+
+def _require_exclusive_docker_admin_authority() -> None:
+    """Real test may only run with independent, enforced daemon exclusivity."""
+    if os.environ.get("MARK_REQUIRE_RELAY_UID") == "1":
+        raise AssertionError(_DOCKER_AUTHORITY_ERROR)
+    raise unittest.SkipTest(_DOCKER_AUTHORITY_ERROR)
+
+
+def _docker(
+    *args: str, timeout: float = 45, allow_failure: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    # Positive allowlist: neither name-based cleanup nor command aliases may
+    # dispatch without independently enforced exclusive Docker authority.
+    if not (
+        args[:1] == ("info",)
+        or args[:2] in (
+            ("image", "inspect"),
+            ("container", "inspect"),
+            ("volume", "inspect"),
+        )
+    ):
+        raise AssertionError(_DOCKER_AUTHORITY_ERROR)
     proc = subprocess.run(
         ["/usr/bin/docker", *args], capture_output=True, text=True,
         timeout=timeout, check=False,
     )
-    if proc.returncode:
+    if proc.returncode and not allow_failure:
         raise AssertionError(
             "isolated Docker invocation failed (no retry); "
             + proc.stderr[:600]
@@ -153,12 +185,22 @@ finally:
 
 @unittest.skipUnless(IMAGE_OK, "No explicitly attested synthetic immutable Docker image")
 class RealMultiUidDashboardRelayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        _require_exclusive_docker_admin_authority()
+
+    def setUp(self) -> None:
+        super().setUp()
+        _require_exclusive_docker_admin_authority()
+
     def test_foreign_uid_cannot_open_or_map_owner_sqlite_wal_shm(self) -> None:
         """Actual Linux-Docker file DAC under distinct numeric UIDs.
 
         This does NOT attest old pre-cutover writable FDs or mmap references;
         those require an offline cutover with live host process inventory.
         """
+        _require_exclusive_docker_admin_authority()
         volume = "mark-relay-store-" + uuid4().hex[:14]
         created = False
         files = ("mark.sqlite", "mark.sqlite-wal", "mark.sqlite-shm")
@@ -220,9 +262,8 @@ print('FOREIGN_UID_SQLITE_WAL_SHM_DENIED', flush=True)
             self.assertIn("FOREIGN_UID_SQLITE_WAL_SHM_DENIED", denied.stdout)
         finally:
             if created:
-                cleanup = subprocess.run(
-                    ["/usr/bin/docker", "volume", "rm", "-f", volume],
-                    capture_output=True, text=True, timeout=25, check=False,
+                cleanup = _docker(
+                    "volume", "rm", "-f", volume, timeout=25, allow_failure=True,
                 )
                 self.assertEqual(
                     cleanup.returncode, 0,
@@ -230,6 +271,7 @@ print('FOREIGN_UID_SQLITE_WAL_SHM_DENIED', flush=True)
                 )
 
     def test_owner_socket_permissions_and_frontend_net_namespace(self) -> None:
+        _require_exclusive_docker_admin_authority()
         suffix = uuid4().hex[:14]
         owner_name = "mark-relay-owner-" + suffix
         frontend_name = "mark-relay-frontend-" + suffix
@@ -348,24 +390,64 @@ print('FOREIGN_UID_SQLITE_WAL_SHM_DENIED', flush=True)
                         break
                 self.assertTrue(reached, "localhost-published isolated frontend unreachable")
             finally:
-                subprocess.run(
-                    ["/usr/bin/docker", "rm", "-f", frontend_name],
-                    capture_output=True, timeout=25, check=False,
+                _docker(
+                    "rm", "-f", frontend_name, timeout=25, allow_failure=True,
                 )
-                subprocess.run(
-                    ["/usr/bin/docker", "rm", "-f", owner_name],
-                    capture_output=True, timeout=25, check=False,
+                _docker(
+                    "rm", "-f", owner_name, timeout=25, allow_failure=True,
                 )
                 if created_network:
-                    subprocess.run(
-                        ["/usr/bin/docker", "network", "rm", isolated_net],
-                        capture_output=True, timeout=25, check=False,
+                    _docker(
+                        "network", "rm", isolated_net, timeout=25, allow_failure=True,
                     )
                 if created_volume:
-                    subprocess.run(
-                        ["/usr/bin/docker", "volume", "rm", "-f", socket_volume],
-                        capture_output=True, timeout=25, check=False,
+                    _docker(
+                        "volume", "rm", "-f", socket_volume,
+                        timeout=25, allow_failure=True,
                     )
+
+
+class DockerAuthorityGuardTests(unittest.TestCase):
+    """Mock-only shared-daemon safety checks; no real Docker operation."""
+
+    def test_mutation_aliases_block_before_subprocess(self) -> None:
+        for args in (
+            ("volume", "rm", "decoy"), ("volume", "remove", "decoy"),
+            ("volume", "prune"), ("rm", "-f", "decoy"),
+            ("container", "rm", "decoy"), ("network", "rm", "decoy"),
+            ("system", "prune", "--volumes"), ("run", "--rm", "fake-image"),
+        ):
+            with self.subTest(args=args):
+                with patch.object(subprocess, "run") as dispatched:
+                    with self.assertRaisesRegex(
+                        AssertionError, "exclusive Docker-admin authority",
+                    ):
+                        _docker(*args)
+                    dispatched.assert_not_called()
+
+    def test_passive_metadata_and_direct_testcase_gates(self) -> None:
+        for args in (
+            ("info",), ("image", "inspect", "sha256:" + "0" * 64),
+            ("container", "inspect", "decoy"), ("volume", "inspect", "decoy"),
+        ):
+            fake = subprocess.CompletedProcess(["/usr/bin/docker", *args], 0, "", "")
+            with patch.object(subprocess, "run", return_value=fake) as dispatched:
+                self.assertIs(_docker(*args), fake)
+                dispatched.assert_called_once()
+        with patch.dict(os.environ, {"MARK_REQUIRE_RELAY_UID": "1"}):
+            with self.assertRaisesRegex(
+                AssertionError, "exclusive Docker-admin authority",
+            ):
+                _require_exclusive_docker_admin_authority()
+        with patch.dict(os.environ, {"MARK_REQUIRE_RELAY_UID": "0"}):
+            with patch.object(RealMultiUidDashboardRelayTests, "__unittest_skip__", False, create=True):
+                case = RealMultiUidDashboardRelayTests(
+                    "test_owner_socket_permissions_and_frontend_net_namespace"
+                )
+                result = case.run(unittest.TestResult())
+        self.assertEqual(len(result.skipped), 1, result.skipped)
+        self.assertFalse(result.errors)
+        self.assertFalse(result.failures)
 
 
 if __name__ == "__main__":
