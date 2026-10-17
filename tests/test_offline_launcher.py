@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from email import policy
+from email.message import EmailMessage
+from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request, build_opener
+
+import mark_api.offline_launcher as offline
+from mark_api.dashboard import create_server as real_create_server
+from mark_api.storage import SnapshotStore
+
+
+def notification(*, sender: str = "Kleinanzeigen <noreply@mail.kleinanzeigen.de>") -> bytes:
+    message = EmailMessage(policy=policy.default)
+    message["From"] = sender
+    message["To"] = "owner@example.invalid"
+    message["Date"] = "Thu, 24 Sep 2026 10:37:48 +0000"
+    message["Message-ID"] = "<offline-message-a@chat.kleinanzeigen.de>"
+    message["X-Conversation-ID"] = "conv-a:thread:one"
+    message["X-Message-ID"] = "offline-message-a"
+    message.set_content(
+        "Anfrage zu deiner Anzeige\n(Anzeigennummer: 1234567890)\n"
+        "Um auf diese Nachricht zu antworten: "
+        "https://www.kleinanzeigen.de/m-nachrichten.html?"
+        "conversationId=conv-a:thread:one"
+    )
+    return message.as_bytes(policy=policy.default)
+
+
+class ImmediateServer:
+    server_address = ("127.0.0.1", 17000)
+
+    def __init__(self):
+        self.served = 0
+        self.closed = 0
+
+    def serve_forever(self):
+        self.served += 1
+
+    def server_close(self):
+        self.closed += 1
+
+
+class OfflineLauncherTests(unittest.TestCase):
+    def _email(self, root: Path, *, sender: str = "Kleinanzeigen <noreply@mail.kleinanzeigen.de>") -> Path:
+        path = root / "notification.eml"
+        path.write_bytes(notification(sender=sender))
+        return path
+
+    def test_missing_database_fails_without_creation_or_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "missing.sqlite"
+            with (
+                patch.object(offline, "create_server", side_effect=AssertionError("server must not start")),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as exc,
+            ):
+                offline.main(["--db", str(db)])
+            self.assertEqual(exc.exception.code, 2)
+            self.assertFalse(db.exists())
+
+    def test_bad_port_rejected_before_database_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "new.sqlite"
+            with (
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as exc,
+            ):
+                offline.main(["--db", str(db), "--init-db", "--port", "65536"])
+            self.assertEqual(exc.exception.code, 2)
+            self.assertFalse(db.exists())
+
+    def test_invalid_email_aborts_before_dashboard_bind_and_keeps_events_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "mark.sqlite"
+            store = SnapshotStore(db)
+            email = self._email(root, sender="Other <noreply@example.invalid>")
+            with (
+                patch.object(offline, "create_server", side_effect=AssertionError("server must not start")),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as exc,
+            ):
+                offline.main(["--db", str(db), "--email", str(email)])
+            self.assertEqual(exc.exception.code, 2)
+            self.assertEqual(store.inbound_message_ad_ids(), ())
+
+    def test_idempotent_import_and_no_write_proxy_construction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "mark.sqlite"
+            email = self._email(root)
+            servers = []
+
+            def factory(store, *, port, analytics_contract):
+                self.assertEqual(port, 0)
+                self.assertIsNone(analytics_contract.reaction_metric)
+                self.assertIsNone(analytics_contract.objective_metric)
+                server = ImmediateServer()
+                servers.append(server)
+                return server
+
+            with patch.object(offline, "create_server", side_effect=factory):
+                outputs = []
+                for i in range(2):
+                    out = io.StringIO()
+                    with redirect_stdout(out):
+                        code = offline.main(
+                            ["--db", str(db)]
+                            + (["--init-db"] if i == 0 else [])
+                            + ["--port", "0", "--email", str(email)]
+                        )
+                    self.assertEqual(code, 0)
+                    outputs.append(out.getvalue())
+
+            self.assertIn("1 new event(s)", outputs[0])
+            self.assertIn("0 new event(s)", outputs[1])
+            self.assertIn("Platform sync and writes: disabled", outputs[0])
+            self.assertTrue(all(server.served == 1 and server.closed == 1 for server in servers))
+            self.assertEqual(SnapshotStore(db, create_if_missing=False).inbound_message_ad_ids(), ("1234567890",))
+
+    def test_real_loopback_http_is_get_only_and_contains_local_email_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "mark.sqlite"
+            email = self._email(root)
+            started = threading.Event()
+            captured = {}
+            output = io.StringIO()
+
+            def factory(store, *, port, analytics_contract):
+                server = real_create_server(store, port=port, analytics_contract=analytics_contract)
+                captured["server"] = server
+                started.set()
+                return server
+
+            def target():
+                with patch.object(offline, "create_server", side_effect=factory):
+                    with redirect_stdout(output):
+                        captured["exit_code"] = offline.main(
+                            ["--db", str(db), "--init-db", "--port", "0", "--email", str(email)]
+                        )
+
+            worker = threading.Thread(target=target, daemon=True)
+            worker.start()
+            self.assertTrue(started.wait(6), "read-only server was not created")
+            server = captured["server"]
+            host, port = server.server_address
+            self.assertEqual(host, "127.0.0.1")
+            opener = build_opener(ProxyHandler({}))
+            base = f"http://127.0.0.1:{port}"
+            try:
+                def get(path):
+                    with opener.open(Request(base + path, method="GET"), timeout=5) as response:
+                        return response.status, json.loads(response.read())
+
+                self.assertEqual(get("/healthz"), (200, {"status": "ok"}))
+                status, reaction = get("/api/email-reactions")
+                self.assertEqual(status, 200)
+                self.assertEqual(len(reaction), 1)
+                self.assertEqual(reaction[0]["ad_id"], "1234567890")
+                self.assertEqual(reaction[0]["inbound_message_count"], 1)
+                status, ranking = get(
+                    "/api/analytics/ads?metric=email_inbound_message_count"
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(ranking[0]["value"], 1)
+                with self.assertRaises(HTTPError) as post_exc:
+                    opener.open(
+                        Request(base + "/api/email-reactions", data=b"{}", method="POST"),
+                        timeout=5,
+                    )
+                self.assertEqual(post_exc.exception.code, 405)
+                post_exc.exception.close()
+                with self.assertRaises(HTTPError) as write_exc:
+                    opener.open(Request(base + "/api/write/delete", method="GET"), timeout=5)
+                self.assertEqual(write_exc.exception.code, 404)
+                write_exc.exception.close()
+            finally:
+                server.shutdown()
+                worker.join(timeout=6)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(captured.get("exit_code"), 0)
+            self.assertIn(f"Mark offline dashboard: http://127.0.0.1:{port}/", output.getvalue())
+
+    def test_module_import_does_not_load_platform_drivers(self):
+        repo = Path(__file__).resolve().parents[1]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(repo / "src")
+        child = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; import mark_api.offline_launcher; "
+             "bad=[m for m in sys.modules if m.startswith(('mark_api.private_web', "
+             "'mark_api.adapters', 'mark_api.monkrel'))]; "
+             "print(bad); raise SystemExit(bool(bad))"],
+            cwd=repo, env=env, capture_output=True, text=True,
+            timeout=10, check=False,
+        )
+        self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+        self.assertEqual(child.stdout.strip(), "[]")
+
+
+if __name__ == "__main__":
+    unittest.main()

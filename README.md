@@ -2,6 +2,42 @@
 
 Öffentliche Projektdokumentation für die mit Mark besprochene Kleinanzeigen-Agent-/API-Integration.
 
+## Freigabestatus und Offline-Modus (17.10.2026)
+
+**Vollprodukt: NO-GO.** Der bisherige Einstieg `mark-api-launch` verwendet
+automatisierte Private-Web-/CDP-Zugriffe einschließlich standardmäßig
+aktivierter Write-Komposition. Ohne gesondert nachgewiesene Berechtigung
+ist dieser Pfad **nicht zur Nutzung freigegeben**; ein eingeloggter Browser
+oder technische Idempotenz-/Recovery-Gates sind keine Plattformberechtigung.
+Siehe [Release-Blocker #111](https://github.com/alexdermohr/mark-api/issues/111)
+und [Kleinanzeigen-Nutzungsbedingungen, § 5](https://themen.kleinanzeigen.de/nutzungsbedingungen/).
+
+Der neue **rein lokale** Einstieg `mark-api-offline` verwendet ausschließlich
+explizit übergebene lokale RFC822-/EML-Dateien und die bestehende
+SQLite-/Analytics-Implementierung. Er kontaktiert Kleinanzeigen nicht,
+startet keine CDP-Sitzung, liest keinen Plattformbestand und stellt
+keine Plattform-Write-API bereit. Das Dashboard ist nur auf
+`127.0.0.1` erreichbar und GET-only.
+
+```bash
+python -m pip install .
+mark-api-offline --db /pfad/mark.sqlite --init-db --email /pfad/nachricht.eml
+# Danach ohne --init-db:
+mark-api-offline --db /pfad/mark.sqlite --email /pfad/weitere-nachricht.eml
+# Ohne neue Nachrichten nur das bestehende Offline-Dashboard anzeigen:
+mark-api-offline --db /pfad/mark.sqlite
+```
+
+Der Import ist batch-atomar und idempotent. Für den Offline-Pfad sind keine
+Kleinanzeigen-Zugangsdaten oder `private-web`-Extras erforderlich.
+Daten aus E-Mails gelten **nicht** als aktueller Plattformbestand,
+automatische Synchronisation oder bestätigte Eigentümerdaten. Der
+Offline-Einstieg gibt weder die technische A6-/Recovery-Abnahme noch
+einen späteren autorisierten offiziellen API-Betrieb frei.
+
+Die nachstehenden historischen Private-Web-/Launcher-Beschreibungen
+dokumentieren Implementierungen, **keine Nutzungsfreigabe**.
+
 ## Status
 
 **Core, Dashboard und Analytics implementiert / PrivateWebWriter + Runtime-Smoke real belegt / Product Launcher mit Default-on Write Composition, lokalem Reaction-Import und Same-Origin Dashboard Write UX implementiert / Write-API-Auth-/Idempotency-Runtime crash-sicher gehärtet** — Stand: 05.10.2026.
