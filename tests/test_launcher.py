@@ -1386,7 +1386,7 @@ class ProductLauncherTests(unittest.TestCase):
                 build.assert_not_called()
                 connect.assert_not_called()
 
-    def test_main_startup_failure_closes_authenticated_witness(self) -> None:
+    def test_main_startup_failure_keeps_witness_without_quiescence_proof(self) -> None:
         closed: list[str] = []
         class Witness:
             def close(self) -> None:
@@ -1405,8 +1405,233 @@ class ProductLauncherTests(unittest.TestCase):
                 "--witness-owner-uid", str(os.geteuid() + 10000),
             ])
         self.assertEqual(status, 2)
-        self.assertEqual(closed, ["closed"])
+        # An exception from the builder can follow partial asynchronous Write
+        # API cleanup, so only process-level teardown may revoke Witness.
+        self.assertEqual(closed, [])
         self.assertIs(signal.getsignal(signal.SIGTERM), original)
+
+    def test_main_failed_builder_retains_witness_while_unknown_inner_cleanup_runs(self) -> None:
+        # A startup error does not certify quiescence: a partially created
+        # Write API may still own the borrowed Witness from a cleanup worker.
+        release = threading.Event()
+        inner_started = threading.Event()
+        inner_checked = threading.Event()
+        witness_closed = threading.Event()
+        events: list[str] = []
+        worker_threads: list[threading.Thread] = []
+
+        class Witness:
+            def close(self) -> None:
+                events.append("witness-close")
+                witness_closed.set()
+
+            def retained_ipc(self) -> None:
+                if witness_closed.is_set():
+                    events.append("premature-witness-close")
+                inner_checked.set()
+
+        witness = Witness()
+
+        def failed_builder(**kwargs: object) -> None:
+            self.assertIs(kwargs["fence_witness"], witness)
+
+            def inner_cleanup() -> None:
+                inner_started.set()
+                if release.wait(timeout=2):
+                    witness.retained_ipc()
+
+            child = threading.Thread(target=inner_cleanup, daemon=True)
+            worker_threads.append(child)
+            child.start()
+            self.assertTrue(inner_started.wait(timeout=1))
+            raise ProductLauncherError("synthetic partial startup cleanup is unresolved")
+
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", return_value=witness),
+                patch("mark_api.launcher.build_product_launcher", side_effect=failed_builder),
+                patch("sys.stderr", io.StringIO()) as errors,
+            ):
+                code = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+            self.assertEqual(code, 2)
+            self.assertTrue(inner_started.is_set())
+            self.assertFalse(witness_closed.is_set(),
+                             "failed builder did not prove inner cleanup quiescence")
+            self.assertIn("startup cleanup is unresolved", errors.getvalue())
+        finally:
+            release.set()
+            for child in worker_threads:
+                child.join(timeout=2)
+        self.assertTrue(inner_checked.wait(timeout=2))
+        self.assertEqual(events, [])
+
+    def test_main_unexpected_relay_failure_keeps_witness_until_launcher_cleanup(self) -> None:
+        # An unforeseen relay exception must use bounded owner cleanup, not
+        # the early startup return which closes borrowed Witness too soon.
+        events: list[str] = []
+
+        class Witness:
+            def close(self) -> None:
+                events.append("witness-close")
+
+        class Launcher:
+            server_address = ("127.0.0.1", 18875)
+
+            def close(self) -> None:
+                events.append("launcher-close")
+
+            def serve_forever(self) -> None:
+                self.fail = "must not serve after transport startup failure"
+                raise AssertionError("unexpected serving after relay failure")
+
+        class Relay:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+            def start(self) -> None:
+                events.append("relay-start")
+                raise RuntimeError("synthetic unexpected partial relay failure")
+
+            def stop(self) -> bool:
+                events.append("relay-stop")
+                return True
+
+        with (
+            patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+            patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+            patch("mark_api.launcher.UnixDashboardRelay", Relay),
+            patch("sys.stdout", io.StringIO()),
+            patch("sys.stderr", io.StringIO()) as errors,
+        ):
+            code = main([
+                "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                "--witness-socket", "/tmp/synthetic-witness.sock",
+                "--witness-owner-uid", str(os.geteuid() + 10000),
+                "--frontend-socket", "/tmp/synthetic-frontend.sock",
+                "--frontend-uid", str(os.geteuid() + 20000),
+                "--frontend-gid", str(os.getegid() + 20000),
+            ])
+        self.assertEqual(code, 2)
+        self.assertEqual(
+            events,
+            ["relay-start", "relay-stop", "launcher-close", "witness-close"],
+        )
+        self.assertIn("trusted dashboard transport unavailable", errors.getvalue())
+
+    def test_main_unexpected_relay_failure_timeout_keeps_witness_owned(self) -> None:
+        # The direct error path cannot bypass the global owner deadline or
+        # release the borrowed Witness while the close worker is still active.
+        close_started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+        witness_closed = threading.Event()
+
+        class Witness:
+            def close(self) -> None:
+                witness_closed.set()
+
+        class Launcher:
+            server_address = ("127.0.0.1", 18875)
+
+            def close(self) -> None:
+                close_started.set()
+                if release.wait(timeout=2):
+                    closed.set()
+
+            def serve_forever(self) -> None:
+                raise AssertionError("must not serve on unexpected relay failure")
+
+        class Relay:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("synthetic unexpected relay failure")
+
+            def stop(self) -> bool:
+                return True
+
+        def release_after_timeout() -> None:
+            if close_started.wait(timeout=1):
+                sleep(0.4)
+            release.set()
+
+        releaser = threading.Thread(target=release_after_timeout, daemon=True)
+        releaser.start()
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+                patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+                patch("mark_api.launcher.UnixDashboardRelay", Relay),
+                patch("mark_api.launcher._SHUTDOWN_OWNER_BUDGET_SECONDS", 0.1),
+                patch("sys.stdout", io.StringIO()),
+                patch("sys.stderr", io.StringIO()) as errors,
+            ):
+                before = monotonic()
+                code = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                    "--frontend-socket", "/tmp/synthetic-frontend.sock",
+                    "--frontend-uid", str(os.geteuid() + 20000),
+                    "--frontend-gid", str(os.getegid() + 20000),
+                ])
+                elapsed = monotonic() - before
+            self.assertEqual(code, 2)
+            self.assertTrue(close_started.is_set())
+            self.assertLess(elapsed, 0.35)
+            self.assertFalse(witness_closed.is_set())
+            self.assertIn("owner shutdown deadline exceeded", errors.getvalue())
+        finally:
+            release.set()
+            releaser.join(timeout=2)
+        self.assertTrue(closed.wait(timeout=2))
+        self.assertTrue(witness_closed.wait(timeout=2))
+
+    def test_main_startup_status_failure_cleans_before_witness_release(self) -> None:
+        # A property used for startup display can raise after the launcher has
+        # already acquired Write/Inventory/Witness lifetimes. Do not take an
+        # early return or propagate before the bounded owner cleanup.
+        events: list[str] = []
+
+        class Witness:
+            def close(self) -> None:
+                events.append("witness-close")
+
+        class Launcher:
+            @property
+            def write_server_address(self) -> tuple[str, int]:
+                events.append("startup-status-read")
+                raise RuntimeError("synthetic startup presentation failure")
+
+            def close(self) -> None:
+                events.append("launcher-close")
+
+            def serve_forever(self) -> None:
+                raise AssertionError("failed startup status must not serve")
+
+        with (
+            patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+            patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+            patch("sys.stdout", io.StringIO()),
+            patch("sys.stderr", io.StringIO()) as errors,
+        ):
+            try:
+                code = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+            finally:
+                self.assertEqual(
+                    events, ["startup-status-read", "launcher-close", "witness-close"],
+                )
+        self.assertEqual(code, 2)
+        self.assertIn("dashboard server stopped unexpectedly", errors.getvalue())
 
     def test_main_unavailable_witness_fails_before_product_start(self) -> None:
         with (
@@ -1684,6 +1909,264 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertEqual(launcher.reconcile_calls, 1)
         self.assertEqual(launcher.close_calls, 2)
 
+
+    def test_main_sigterm_blocked_witness_connect_never_starts_builder(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        witness_closed = threading.Event()
+
+        class Witness:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                handler = signal.getsignal(signal.SIGTERM)
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                entered.set()
+                if not release.wait(timeout=1.5):
+                    raise AssertionError("synthetic Witness IPC never resumed")
+
+            def close(self) -> None:
+                witness_closed.set()
+
+        releaser = threading.Thread(
+            target=lambda: (entered.wait(timeout=2), sleep(0.55), release.set()),
+            daemon=True,
+        )
+        releaser.start()
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", Witness),
+                patch("mark_api.launcher.build_product_launcher") as build,
+                patch("mark_api.launcher._SHUTDOWN_OWNER_BUDGET_SECONDS", 0.1),
+                patch("sys.stderr", io.StringIO()) as errors,
+            ):
+                started = monotonic()
+                code = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+                elapsed = monotonic() - started
+            self.assertEqual(code, 2)
+            self.assertLess(elapsed, 0.35)
+            self.assertTrue(entered.is_set())
+            self.assertFalse(witness_closed.is_set())
+            build.assert_not_called()
+            self.assertIn("startup deadline exceeded", errors.getvalue())
+        finally:
+            release.set()
+            releaser.join(timeout=2)
+        self.assertTrue(witness_closed.wait(timeout=2))
+
+    def test_main_sigterm_blocked_startup_retains_borrowed_witness(self) -> None:
+        # An interrupted builder may own the original witness connection
+        # until it finishes; the outer caller cannot wait without a bound.
+        builder_entered = threading.Event()
+        release = threading.Event()
+        build_finished = threading.Event()
+        launcher_closed = threading.Event()
+        witness_closed = threading.Event()
+        order: list[str] = []
+
+        class Witness:
+            def close(self) -> None:
+                order.append("witness-close")
+                witness_closed.set()
+
+        class Launcher:
+            def close(self) -> None:
+                order.append("launcher-close")
+                launcher_closed.set()
+
+            def serve_forever(self) -> None:
+                raise AssertionError("SIGTERM startup must not serve")
+
+        def blocked_build(**_kwargs: object) -> Launcher:
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+            builder_entered.set()
+            if not release.wait(timeout=1.5):
+                raise AssertionError("synthetic startup was not released")
+            build_finished.set()
+            return Launcher()
+
+        releaser = threading.Thread(
+            target=lambda: (builder_entered.wait(timeout=2), sleep(0.55), release.set()),
+            daemon=True,
+        )
+        releaser.start()
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+                patch("mark_api.launcher.build_product_launcher", side_effect=blocked_build),
+                patch("mark_api.launcher._SHUTDOWN_OWNER_BUDGET_SECONDS", 0.1),
+                patch("sys.stdout", io.StringIO()),
+                patch("sys.stderr", io.StringIO()) as errors,
+            ):
+                before = monotonic()
+                code = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+                elapsed = monotonic() - before
+            self.assertEqual(code, 2)
+            self.assertLess(elapsed, 0.35, "SIGTERM blocked in builder beyond stop budget")
+            self.assertTrue(builder_entered.is_set())
+            self.assertFalse(witness_closed.is_set())
+            self.assertIn("startup deadline exceeded", errors.getvalue())
+        finally:
+            release.set()
+            releaser.join(timeout=2)
+        self.assertTrue(build_finished.wait(timeout=2))
+        self.assertTrue(launcher_closed.wait(timeout=2))
+        self.assertTrue(witness_closed.wait(timeout=2))
+        self.assertEqual(order, ["launcher-close", "witness-close"])
+
+    def test_main_sigterm_blocked_frontend_start_preserves_owner(self) -> None:
+        startup_entered = threading.Event()
+        release = threading.Event()
+        frontend_stopped = threading.Event()
+        launcher_closed = threading.Event()
+        witness_closed = threading.Event()
+        order: list[str] = []
+
+        class Witness:
+            def close(self) -> None:
+                order.append("witness-close")
+                witness_closed.set()
+
+        class Launcher:
+            server_address = ("127.0.0.1", 18875)
+
+            def close(self) -> None:
+                order.append("launcher-close")
+                launcher_closed.set()
+
+            def serve_forever(self) -> None:
+                raise AssertionError("interrupted relay may not serve")
+
+        class Relay:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+            def start(self) -> None:
+                handler = signal.getsignal(signal.SIGTERM)
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                startup_entered.set()
+                if not release.wait(timeout=1.5):
+                    raise AssertionError("relay startup did not release")
+
+            def stop(self) -> bool:
+                order.append("relay-stop")
+                frontend_stopped.set()
+                return True
+
+        releaser = threading.Thread(
+            target=lambda: (startup_entered.wait(timeout=2), sleep(0.55), release.set()),
+            daemon=True,
+        )
+        releaser.start()
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+                patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+                patch("mark_api.launcher.UnixDashboardRelay", Relay),
+                patch("mark_api.launcher._SHUTDOWN_OWNER_BUDGET_SECONDS", 0.1),
+                patch("sys.stdout", io.StringIO()),
+                patch("sys.stderr", io.StringIO()) as errors,
+            ):
+                before = monotonic()
+                code = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                    "--frontend-socket", "/tmp/synthetic-frontend.sock",
+                    "--frontend-uid", str(os.geteuid() + 20000),
+                    "--frontend-gid", str(os.getegid() + 20000),
+                ])
+                elapsed = monotonic() - before
+            self.assertEqual(code, 2)
+            self.assertLess(elapsed, 0.35)
+            self.assertTrue(startup_entered.is_set())
+            self.assertFalse(witness_closed.is_set())
+            self.assertIn("startup deadline exceeded", errors.getvalue())
+        finally:
+            release.set()
+            releaser.join(timeout=2)
+        self.assertTrue(frontend_stopped.wait(timeout=2))
+        self.assertTrue(launcher_closed.wait(timeout=2))
+        self.assertTrue(witness_closed.wait(timeout=2))
+        self.assertEqual(order, ["relay-stop", "launcher-close", "witness-close"])
+
+    def test_main_real_sigterm_while_startup_blocked_keeps_write_fence(self) -> None:
+        # SIGTERM against a real child PID before any main-loop serving; all
+        # persistence is synthetic and the original in_progress key is durable.
+        child = r"""
+import sys,time
+from pathlib import Path
+from datetime import datetime,timezone
+from unittest.mock import patch
+from mark_api.launcher import main
+from mark_api.storage import SnapshotStore
+db,ready=map(Path,sys.argv[1:3])
+store=SnapshotStore(db)
+now=datetime.now(timezone.utc)
+sha="a"*64
+store.claim_write_api_request(
+ idempotency_key="startup-real-sigterm",request_sha256=sha,
+ claim_owner="synthetic",requested_at=now,
+)
+store.begin_write_api_request(
+ idempotency_key="startup-real-sigterm",request_sha256=sha,
+ claim_owner="synthetic",execution_started_at=now,
+)
+def blocked_build(**_kwargs):
+ ready.write_text("ready")
+ time.sleep(6)
+ raise RuntimeError("synthetic blocked startup may not finish")
+with patch("mark_api.launcher.build_product_launcher",side_effect=blocked_build),patch(
+ "mark_api.launcher._SHUTDOWN_OWNER_BUDGET_SECONDS",0.2,
+):
+ raise SystemExit(main(["--db",str(db),"--cdp-port","9222"]))
+"""
+        with tempfile.TemporaryDirectory(prefix="mark-startup-sigterm-") as folder:
+            root = Path(folder)
+            db, ready = root / "synthetic.sqlite", root / "ready"
+            env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"),
+                       PYTHONDONTWRITEBYTECODE="1", MARK_PLATFORM_WRITES_ENABLED="false")
+            proc = subprocess.Popen(
+                [sys.executable, "-B", "-c", child, str(db), str(ready)],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                until = monotonic() + 4
+                while not ready.exists() and proc.poll() is None:
+                    self.assertLess(monotonic(), until, "startup never reached builder")
+                    sleep(0.02)
+                self.assertTrue(ready.exists())
+                before = monotonic()
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    out, err = proc.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.fail("SIGTERM startup exceeded child termination budget")
+                self.assertEqual(proc.returncode, 2, (out, err))
+                self.assertLess(monotonic() - before, 1.5)
+                self.assertIn("startup deadline exceeded", err)
+                with sqlite3.connect(db) as conn:
+                    row = conn.execute(
+                        "SELECT state,execution_started_at FROM write_api_requests "
+                        "WHERE idempotency_key='startup-real-sigterm'"
+                    ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row[0], "in_progress")
+                self.assertIsNotNone(row[1])
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=3)
 
     def test_main_sigterm_during_startup_defers_cleanup(self) -> None:
         original = signal.getsignal(signal.SIGTERM)
