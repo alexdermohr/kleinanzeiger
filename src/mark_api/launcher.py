@@ -1038,35 +1038,34 @@ def main(argv: list[str] | None = None) -> int:
             print("mark-api-launch: trusted dashboard transport unavailable",
                   file=sys.stderr)
 
-        if not shutdown_requested and not frontend_failed:
-            write_host, write_port = launcher.write_server_address
-            print(f"Mark dashboard: {launcher.dashboard_url}", flush=True)
-            print(
-                f"Mark write API: http://{write_host}:{write_port}/api/write/",
-                flush=True,
-            )
-            print(
-                f"Mark write bearer token: {launcher.write_bearer_token}",
-                flush=True,
-            )
-            print(
-                "Startup sync: "
-                f"{launcher.startup_inventory_count} current ad(s), "
-                f"{launcher.startup_persisted_count} observation(s) persisted.",
-                flush=True,
-            )
-            if args.email_paths:
-                email_report = launcher.startup_email_import_report
-                print(
-                    "Startup reaction import: "
-                    f"{email_report.parsed_files} email file(s), "
-                    f"{email_report.inserted_events} new event(s), "
-                    f"{email_report.duplicate_events} duplicate event(s).",
-                    flush=True,
-                )
-
         exit_code = 2 if frontend_failed else 0
         try:
+            if not shutdown_requested and not frontend_failed:
+                write_host, write_port = launcher.write_server_address
+                print(f"Mark dashboard: {launcher.dashboard_url}", flush=True)
+                print(
+                    f"Mark write API: http://{write_host}:{write_port}/api/write/",
+                    flush=True,
+                )
+                print(
+                    f"Mark write bearer token: {launcher.write_bearer_token}",
+                    flush=True,
+                )
+                print(
+                    "Startup sync: "
+                    f"{launcher.startup_inventory_count} current ad(s), "
+                    f"{launcher.startup_persisted_count} observation(s) persisted.",
+                    flush=True,
+                )
+                if args.email_paths:
+                    email_report = launcher.startup_email_import_report
+                    print(
+                        "Startup reaction import: "
+                        f"{email_report.parsed_files} email file(s), "
+                        f"{email_report.inserted_events} new event(s), "
+                        f"{email_report.duplicate_events} duplicate event(s).",
+                        flush=True,
+                    )
             if not shutdown_requested and not frontend_failed:
                 serving = True
                 try:

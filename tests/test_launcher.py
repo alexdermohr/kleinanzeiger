@@ -1592,6 +1592,47 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertTrue(closed.wait(timeout=2))
         self.assertTrue(witness_closed.wait(timeout=2))
 
+    def test_main_startup_status_failure_cleans_before_witness_release(self) -> None:
+        # A property used for startup display can raise after the launcher has
+        # already acquired Write/Inventory/Witness lifetimes. Do not take an
+        # early return or propagate before the bounded owner cleanup.
+        events: list[str] = []
+
+        class Witness:
+            def close(self) -> None:
+                events.append("witness-close")
+
+        class Launcher:
+            @property
+            def write_server_address(self) -> tuple[str, int]:
+                events.append("startup-status-read")
+                raise RuntimeError("synthetic startup presentation failure")
+
+            def close(self) -> None:
+                events.append("launcher-close")
+
+            def serve_forever(self) -> None:
+                raise AssertionError("failed startup status must not serve")
+
+        with (
+            patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+            patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+            patch("sys.stdout", io.StringIO()),
+            patch("sys.stderr", io.StringIO()) as errors,
+        ):
+            try:
+                code = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+            finally:
+                self.assertEqual(
+                    events, ["startup-status-read", "launcher-close", "witness-close"],
+                )
+        self.assertEqual(code, 2)
+        self.assertIn("dashboard server stopped unexpectedly", errors.getvalue())
+
     def test_main_unavailable_witness_fails_before_product_start(self) -> None:
         with (
             patch("mark_api.launcher.FenceWitnessClient",
