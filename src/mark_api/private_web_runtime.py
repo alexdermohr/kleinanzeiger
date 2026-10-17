@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from time import monotonic
 from contextlib import contextmanager
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -91,6 +92,7 @@ _MEDIA_PERSISTENCE_VERIFY_TIMEOUT_SECONDS = 10.0
 _WRITE_HANDLER_DRAIN_SECONDS = 12.0
 _WRITE_SERVER_SHUTDOWN_SECONDS = 2.0
 _WRITE_OPERATION_DRAIN_SECONDS = 2.0
+_WRITE_CLOSE_TOTAL_SECONDS = 8.0
 
 
 def _pending_dashboard_media_refs(store: SnapshotStore) -> frozenset[str]:
@@ -1149,6 +1151,9 @@ class PrivateWebWriteApiRuntime:
         self._fence_witness = fence_witness
         self._state_lock = Lock()
         self._close_lock = Lock()
+        self._close_worker_guard = Lock()
+        self._close_worker: Thread | None = None
+        self._close_worker_result: dict[str, BaseException] | None = None
         self._server_thread: Thread | None = None
         self._server_shutdown = False
         self._server_shutdown_worker: Thread | None = None
@@ -1296,6 +1301,76 @@ class PrivateWebWriteApiRuntime:
             )
 
     def close(self) -> None:
+        """Bound the *entire* shutdown, including browser and witness cleanup.
+
+        A single daemon worker retains ownership of all runtimes and the SQLite
+        store lease while any close phase remains unsettled. Subsequent calls
+        observe that same worker instead of launching overlapping cleanup.
+        """
+        deadline = monotonic() + _WRITE_CLOSE_TOTAL_SECONDS
+        if not self._close_worker_guard.acquire(timeout=_WRITE_CLOSE_TOTAL_SECONDS):
+            raise PrivateWebRuntimeSetupError(
+                "private Web write API shutdown deadline exceeded; "
+                "retain recovery fences"
+            )
+        try:
+            if self._closed:
+                return
+            if (
+                self._server_thread is not None
+                and current_thread() is self._server_thread
+            ):
+                raise PrivateWebRuntimeSetupError(
+                    "private Web write API runtime cannot close from its server thread"
+                )
+            if current_thread() is self._close_worker:
+                raise PrivateWebRuntimeSetupError(
+                    "private Web write API shutdown worker cannot close itself"
+                )
+            # Keep start() fail-closed even when another thread owns the
+            # lifecycle state lock: only the shutdown worker may wait for it.
+            self._stopping = True
+
+            worker = self._close_worker
+            outcome = self._close_worker_result
+            if worker is None or not worker.is_alive():
+                outcome = {}
+
+                def finish_shutdown() -> None:
+                    try:
+                        self._close_impl()
+                    except BaseException as exc:
+                        outcome["error"] = exc
+
+                worker = Thread(
+                    target=finish_shutdown,
+                    daemon=True,
+                    name="mark-private-web-total-stop",
+                )
+                self._close_worker = worker
+                self._close_worker_result = outcome
+                try:
+                    worker.start()
+                except RuntimeError as exc:
+                    self._close_worker = None
+                    raise PrivateWebRuntimeSetupError(
+                        "private Web write API shutdown worker unavailable; "
+                        "retain recovery fences"
+                    ) from exc
+
+        finally:
+            self._close_worker_guard.release()
+
+        worker.join(timeout=max(0.0, deadline - monotonic()))
+        if worker.is_alive():
+            raise PrivateWebRuntimeSetupError(
+                "private Web write API shutdown deadline exceeded; "
+                "retain recovery fences"
+            )
+        if outcome is not None and "error" in outcome:
+            raise outcome["error"]
+
+    def _close_impl(self) -> None:
         with self._close_lock:
             with self._state_lock:
                 if self._closed:

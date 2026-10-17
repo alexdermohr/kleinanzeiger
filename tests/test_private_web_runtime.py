@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+from time import monotonic
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -4153,6 +4154,127 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 runtime._server_thread = None
                 runtime.close()
             self.assertEqual(close_events, ["content"])
+
+
+
+    def test_close_total_deadline_does_not_wait_unbounded_for_state_lock(self) -> None:
+        """A blocked lifecycle lock must not consume the whole stop deadline."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "runtime.sqlite")
+            close_events: list[str] = []
+            runtime = compose_private_web_write_api_runtime(
+                content_runtime=self._content_runtime(
+                    OwnerReader(ReadResult.success_empty(())), close_events,
+                ),
+                store=store,
+                access=WriteApiAccess(
+                    principal="runtime-test",
+                    bearer_token=self.TOKEN,
+                    capabilities=frozenset(),
+                ),
+            )
+            errors: list[BaseException] = []
+
+            def close_thread() -> None:
+                try:
+                    runtime.close()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            runtime._state_lock.acquire()
+            caller = threading.Thread(target=close_thread, daemon=True)
+            try:
+                with patch(
+                    "mark_api.private_web_runtime._WRITE_CLOSE_TOTAL_SECONDS",
+                    0.10, create=True,
+                ):
+                    begin = monotonic()
+                    caller.start()
+                    caller.join(timeout=0.65)
+                    self.assertFalse(
+                        caller.is_alive(),
+                        "close() blocked forever before starting its shutdown worker",
+                    )
+                    self.assertLess(monotonic() - begin, 0.65)
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], PrivateWebRuntimeSetupError)
+                    self.assertIn("shutdown deadline", str(errors[0]))
+                    self.assertTrue(runtime._stopping)
+                    with self.assertRaisesRegex(RuntimeError, "already active"):
+                        acquire_write_api_store_lock(store)
+            finally:
+                runtime._state_lock.release()
+                if caller.ident is not None:
+                    caller.join(timeout=2)
+                worker = getattr(runtime, "_close_worker", None)
+                if worker is not None:
+                    worker.join(timeout=2)
+                runtime.close()
+            self.assertEqual(close_events, ["content"])
+            lock = acquire_write_api_store_lock(store)
+            lock.close()
+
+    def test_close_total_deadline_retains_store_during_hung_browser_cleanup(self) -> None:
+        """A stalled browser cleanup cannot outlive the caller's stop deadline."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "runtime.sqlite")
+            entered = threading.Event()
+            release = threading.Event()
+            events: list[str] = []
+
+            def slow_cleanup() -> None:
+                events.append("entered")
+                entered.set()
+                release.wait(timeout=2)
+                events.append("completed")
+
+            runtime = compose_private_web_write_api_runtime(
+                content_runtime=PrivateWebContentRuntime(
+                    owner_reader=OwnerReader(ReadResult.success_empty(())),
+                    page_factory=lambda: (_ for _ in ()).throw(
+                        AssertionError("browser page must remain lazy")
+                    ),
+                    close_runtime=slow_cleanup,
+                ),
+                store=store,
+                access=WriteApiAccess(
+                    principal="runtime-test",
+                    bearer_token=self.TOKEN,
+                    capabilities=frozenset(),
+                ),
+            )
+            try:
+                with patch(
+                    "mark_api.private_web_runtime._WRITE_CLOSE_TOTAL_SECONDS",
+                    0.10, create=True,
+                ):
+                    begin = monotonic()
+                    with self.assertRaisesRegex(
+                        PrivateWebRuntimeSetupError, "shutdown deadline",
+                    ):
+                        runtime.close()
+                    self.assertLess(monotonic() - begin, 0.75)
+                    self.assertTrue(entered.is_set())
+                    self.assertFalse(runtime._closed)
+                    # A retry must observe the SAME cleanup worker, not launch
+                    # a second browser close against one live SQLite lease.
+                    with self.assertRaisesRegex(
+                        PrivateWebRuntimeSetupError, "shutdown deadline",
+                    ):
+                        runtime.close()
+                    self.assertEqual(events, ["entered"])
+                    with self.assertRaisesRegex(RuntimeError, "already active"):
+                        acquire_write_api_store_lock(store)
+            finally:
+                release.set()
+                worker = getattr(runtime, "_close_worker", None)
+                if worker is not None:
+                    worker.join(timeout=2)
+                runtime.close()
+            self.assertEqual(events, ["entered", "completed"])
+            self.assertTrue(runtime._closed)
+            lock = acquire_write_api_store_lock(store)
+            lock.close()
 
     def test_runtime_cleanup_failure_stays_fail_closed_across_repeated_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1937,6 +1937,189 @@ class ProductLauncherTests(unittest.TestCase):
             self.assertTrue(witness_closed.wait(timeout=3))
         self.assertEqual(close_calls, ["owner-close", "witness-close"])
 
+    def test_main_inner_write_cleanup_error_must_not_close_borrowed_witness(self) -> None:
+        # The Write API may raise its caller deadline while the *inner*
+        # shutdown worker still uses witness IPC. Error != quiescence.
+        release = threading.Event()
+        running = threading.Event()
+        finished = threading.Event()
+        witness_closed = threading.Event()
+        observed: list[str] = []
+        child_workers: list[threading.Thread] = []
+
+        class Witness:
+            def close(self) -> None:
+                witness_closed.set()
+
+            def retained_ipc(self) -> None:
+                if witness_closed.is_set():
+                    raise AssertionError("witness closed before inner shutdown worker")
+                observed.append("pending-owner-ipc")
+                finished.set()
+
+        witness = Witness()
+
+        class Launcher:
+            dashboard_url = "http://127.0.0.1/#write_token=synthetic"
+            write_server_address = ("127.0.0.1", 18766)
+            write_bearer_token = "synthetic"
+            startup_inventory_count = 0
+            startup_persisted_count = 0
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def close(self) -> None:
+                def blocked_inner_close() -> None:
+                    running.set()
+                    if release.wait(timeout=3):
+                        witness.retained_ipc()
+
+                thread = threading.Thread(target=blocked_inner_close, daemon=True)
+                child_workers.append(thread)
+                thread.start()
+                if not running.wait(timeout=1):
+                    raise AssertionError("synthetic inner worker did not start")
+                raise ProductLauncherError("inner Write API cleanup deadline")
+
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", return_value=witness),
+                patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
+                patch("sys.stdout", io.StringIO()),
+                patch("sys.stderr", io.StringIO()),
+            ):
+                status = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+            self.assertEqual(status, 2)
+            self.assertFalse(witness_closed.is_set(),
+                             "caller timeout must not revoke inner worker IPC")
+        finally:
+            release.set()
+            for child in child_workers:
+                child.join(timeout=3)
+        self.assertTrue(finished.is_set())
+        self.assertEqual(observed, ["pending-owner-ipc"])
+
+    def test_main_failed_media_settlement_keeps_witness_for_inner_cleanup(self) -> None:
+        release = threading.Event()
+        running = threading.Event()
+        finished = threading.Event()
+        witness_closed = threading.Event()
+        child_workers: list[threading.Thread] = []
+
+        class Witness:
+            def close(self) -> None:
+                witness_closed.set()
+
+            def retained_ipc(self) -> None:
+                if witness_closed.is_set():
+                    raise AssertionError("media cleanup lost borrowed witness")
+                finished.set()
+
+        witness = Witness()
+
+        class Launcher:
+            dashboard_url = "http://127.0.0.1/#write_token=synthetic"
+            write_server_address = ("127.0.0.1", 18766)
+            write_bearer_token = "synthetic"
+            startup_inventory_count = 0
+            startup_persisted_count = 0
+            close_calls = 0
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def reconcile_media_submit(self) -> None:
+                # Observation only, never a second synthetic platform write.
+                return
+
+            def close(self) -> None:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise PrivateWebSubmitUnknownError("media pending")
+
+                def blocked_inner_close() -> None:
+                    running.set()
+                    if release.wait(timeout=3):
+                        witness.retained_ipc()
+
+                child = threading.Thread(target=blocked_inner_close, daemon=True)
+                child_workers.append(child)
+                child.start()
+                if not running.wait(timeout=1):
+                    raise AssertionError("synthetic inner worker did not start")
+                raise ProductLauncherError("still closing inner Write API")
+
+        launcher = Launcher()
+        try:
+            with (
+                patch("mark_api.launcher.FenceWitnessClient", return_value=witness),
+                patch("mark_api.launcher.build_product_launcher", return_value=launcher),
+                patch("sys.stdout", io.StringIO()),
+                patch("sys.stderr", io.StringIO()),
+            ):
+                status = main([
+                    "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                    "--witness-socket", "/tmp/synthetic-witness.sock",
+                    "--witness-owner-uid", str(os.geteuid() + 10000),
+                ])
+            self.assertEqual(status, 2)
+            self.assertEqual(launcher.close_calls, 2)
+            self.assertFalse(witness_closed.is_set(),
+                             "failed media settlement cannot imply quiescence")
+        finally:
+            release.set()
+            for child in child_workers:
+                child.join(timeout=3)
+        self.assertTrue(finished.is_set())
+
+    def test_main_successful_media_settlement_closes_witness_exactly_once(self) -> None:
+        witness_closes: list[str] = []
+
+        class Witness:
+            def close(self) -> None:
+                witness_closes.append("closed")
+
+        class Launcher:
+            dashboard_url = "http://127.0.0.1/#write_token=synthetic"
+            write_server_address = ("127.0.0.1", 18766)
+            write_bearer_token = "synthetic"
+            startup_inventory_count = 0
+            startup_persisted_count = 0
+            close_calls = 0
+            reconciled = False
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def reconcile_media_submit(self) -> None:
+                self.reconciled = True
+
+            def close(self) -> None:
+                self.close_calls += 1
+                if not self.reconciled:
+                    raise PrivateWebSubmitUnknownError("media outcome UNKNOWN")
+
+        launcher = Launcher()
+        with (
+            patch("mark_api.launcher.FenceWitnessClient", return_value=Witness()),
+            patch("mark_api.launcher.build_product_launcher", return_value=launcher),
+            patch("sys.stdout", io.StringIO()),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            code = main([
+                "--db", "/tmp/synthetic.sqlite", "--cdp-port", "9222",
+                "--witness-socket", "/tmp/synthetic-witness.sock",
+                "--witness-owner-uid", str(os.geteuid() + 10000),
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(launcher.close_calls, 2)
+        self.assertEqual(witness_closes, ["closed"])
+
     def test_main_real_sigterm_returns_with_durable_write_fence_when_close_hangs(self) -> None:
         # A real child SIGTERM must not depend on the untrusted browser
         # cleanup finishing before the owner container's stop deadline.
