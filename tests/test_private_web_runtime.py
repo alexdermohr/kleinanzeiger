@@ -4024,6 +4024,84 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertEqual(close_events, ["content"])
 
+    def test_http_server_shutdown_timeout_preserves_store_fence_until_retry(self) -> None:
+        # HTTPServer.shutdown() itself can block independently of the
+        # already bounded serve thread join and active-handler drain.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "runtime.sqlite")
+            close_events: list[str] = []
+            runtime = compose_private_web_write_api_runtime(
+                content_runtime=self._content_runtime(
+                    OwnerReader(ReadResult.success_empty(())), close_events,
+                ),
+                store=store,
+                access=WriteApiAccess(
+                    principal="runtime-test",
+                    bearer_token=self.TOKEN,
+                    capabilities=frozenset(),
+                ),
+            )
+            entered = threading.Event()
+            release = threading.Event()
+            errors: list[BaseException] = []
+            shutdown_invocations: list[str] = []
+            original_shutdown = runtime._server.shutdown
+
+            def blocked_shutdown() -> None:
+                shutdown_invocations.append("shutdown")
+                entered.set()
+                if not release.wait(timeout=3):
+                    raise AssertionError("test shutdown was not released")
+                original_shutdown()
+
+            def close_worker() -> None:
+                try:
+                    runtime.close()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            runtime.start()
+            closer = threading.Thread(target=close_worker, daemon=True)
+            try:
+                with (
+                    patch.object(runtime._server, "shutdown", side_effect=blocked_shutdown),
+                    patch(
+                        "mark_api.private_web_runtime._WRITE_SERVER_SHUTDOWN_SECONDS",
+                        0.1, create=True,
+                    ),
+                ):
+                    closer.start()
+                    self.assertTrue(entered.wait(timeout=1))
+                    closer.join(timeout=0.6)
+                    self.assertFalse(
+                        closer.is_alive(),
+                        "HTTP server shutdown is not bounded",
+                    )
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], PrivateWebRuntimeSetupError)
+                    self.assertIn("server shutdown timeout", str(errors[0]))
+                    # Retried close must not launch another shutdown worker.
+                    with self.assertRaisesRegex(
+                        PrivateWebRuntimeSetupError, "server shutdown timeout",
+                    ):
+                        runtime.close()
+                    self.assertEqual(shutdown_invocations, ["shutdown"])
+                    self.assertEqual(close_events, [])
+                    with self.assertRaisesRegex(RuntimeError, "already active"):
+                        acquire_write_api_store_lock(store)
+                    with self.assertRaisesRegex(
+                        PrivateWebRuntimeSetupError, "shutdown is pending",
+                    ):
+                        runtime.start()
+            finally:
+                release.set()
+                if closer.ident is not None:
+                    closer.join(timeout=3)
+                runtime.close()
+
+            self.assertFalse(closer.is_alive())
+            self.assertEqual(close_events, ["content"])
+
     def test_close_preserves_runtimes_if_http_cannot_quiesce(self) -> None:
         class StuckThread:
             def __init__(self) -> None:

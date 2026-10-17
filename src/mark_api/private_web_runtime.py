@@ -89,6 +89,7 @@ def _utc_now() -> datetime:
 
 _MEDIA_PERSISTENCE_VERIFY_TIMEOUT_SECONDS = 10.0
 _WRITE_HANDLER_DRAIN_SECONDS = 12.0
+_WRITE_SERVER_SHUTDOWN_SECONDS = 2.0
 _WRITE_OPERATION_DRAIN_SECONDS = 2.0
 
 
@@ -1150,6 +1151,8 @@ class PrivateWebWriteApiRuntime:
         self._close_lock = Lock()
         self._server_thread: Thread | None = None
         self._server_shutdown = False
+        self._server_shutdown_worker: Thread | None = None
+        self._server_shutdown_error: BaseException | None = None
         self._server_closed = False
         self._stopping = False
         self._closed = False
@@ -1309,18 +1312,41 @@ class PrivateWebWriteApiRuntime:
             if not self._server_shutdown:
                 if thread is None:
                     self._server_shutdown = True
-                elif thread.is_alive():
-                    try:
-                        self._server.shutdown()
-                    except Exception:
-                        cleanup_failed = True
-                    thread.join(timeout=2.0)
+                else:
+                    # HTTPServer.shutdown() itself waits without a deadline.
+                    # Run it once outside the caller thread and preserve the
+                    # exact worker across failed/retried shutdown attempts.
+                    # Never close the store or browser while it is still alive.
+                    worker = self._server_shutdown_worker
+                    if worker is None and thread.is_alive():
+                        def stop_http_server() -> None:
+                            try:
+                                self._server.shutdown()
+                            except BaseException as exc:
+                                self._server_shutdown_error = exc
+
+                        worker = Thread(
+                            target=stop_http_server,
+                            daemon=True,
+                            name="mark-write-http-stop",
+                        )
+                        worker.start()
+                        self._server_shutdown_worker = worker
+                    if worker is not None:
+                        worker.join(timeout=_WRITE_SERVER_SHUTDOWN_SECONDS)
+                        if worker.is_alive():
+                            raise PrivateWebRuntimeSetupError(
+                                "private Web write API server shutdown timeout; "
+                                "retain recovery fences"
+                            )
+                        if self._server_shutdown_error is not None:
+                            cleanup_failed = True
+                    if thread.is_alive():
+                        thread.join(timeout=2.0)
                     if thread.is_alive():
                         cleanup_failed = True
                     else:
                         self._server_shutdown = True
-                else:
-                    self._server_shutdown = True
 
             if not self._server_shutdown:
                 raise PrivateWebRuntimeSetupError(

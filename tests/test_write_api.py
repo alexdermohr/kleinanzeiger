@@ -2958,6 +2958,140 @@ class WriteApiTests(unittest.TestCase):
             self.assertEqual(plain.calls, [])
             self.assertEqual(media.calls, [])
 
+    @unittest.skipUnless(hasattr(signal, "SIGKILL"), "POSIX SIGKILL required")
+    def test_media_started_before_response_survives_sigkill_as_recovery_fence(self) -> None:
+        """Kill a fake media writer before it can persist any HTTP response.
+
+        The SQLite begin must already be durable when the media delegate is
+        entered. On restart, no fresh create key may reach either fake writer.
+        No external platform account, media upload or Docker daemon is used.
+        """
+        payload = {
+            "category_path": ["Haus & Garten", "Dekoration"],
+            "title": "Synthetic lamp", "description": "Local crash fixture",
+            "price_eur": 13, "media_refs": ["cover_02"],
+        }
+        repo = Path(__file__).resolve().parents[1]
+        child_code = textwrap.dedent("""\
+            import json
+            import pathlib
+            import sys
+            import threading
+            import time
+            from urllib.request import ProxyHandler, build_opener
+
+            root = pathlib.Path.cwd()
+            sys.path.insert(0, str(root / "tests"))
+            sys.path.insert(0, str(root / "src"))
+            from test_write_api import (
+                FakeMediaWriteService, FakeWriteService, SnapshotStore,
+                WriteApiTests, WriteCapability,
+            )
+
+            fixture = WriteApiTests(
+                "test_executed_in_progress_write_blocks_new_create_after_restart"
+            )
+            fixture.opener = build_opener(ProxyHandler({}))
+            fixture.store = SnapshotStore(pathlib.Path(sys.argv[1]))
+            payload = json.loads(sys.argv[2])
+
+            class UnfinishedMedia(FakeMediaWriteService):
+                def create_with_media(self, *args, **kwargs):
+                    record = fixture.store.write_api_request("media-precommit-original")
+                    assert record is not None
+                    assert record.state == "in_progress"
+                    assert record.execution_started_at is not None
+                    print("MEDIA_PRECOMMIT_EFFECT_ENTERED", flush=True)
+                    time.sleep(40)
+                    raise AssertionError("SIGKILL should stop this writer")
+
+            with fixture.server(
+                FakeWriteService(),
+                media_service=UnfinishedMedia(),
+                capabilities=frozenset({WriteCapability.CREATE_MEDIA}),
+            ) as server:
+                def submit():
+                    fixture.request(
+                        server, "POST", "/api/write/media/ads",
+                        payload=payload, idempotency_key="media-precommit-original",
+                    )
+                thread = threading.Thread(target=submit, daemon=True)
+                thread.start()
+                thread.join(timeout=40)
+                raise AssertionError("synthetic media writer unexpectedly settled")
+        """)
+        with tempfile.TemporaryDirectory(prefix="mark-media-precommit-kill-") as tmp:
+            path = Path(tmp) / "mark.sqlite"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.pathsep.join((
+                str(repo / "tests"), str(repo / "src"),
+            ))
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            process = subprocess.Popen(
+                [sys.executable, "-B", "-c", child_code, str(path),
+                 json.dumps(payload)],
+                cwd=repo, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            try:
+                assert process.stdout is not None
+                ready, _, _ = select.select([process.stdout], [], [], 20)
+                self.assertTrue(ready, "media delegate was not reached before kill")
+                self.assertEqual(
+                    process.stdout.readline().strip(),
+                    "MEDIA_PRECOMMIT_EFFECT_ENTERED",
+                )
+                self.assertIsNone(process.poll())
+                os.kill(process.pid, signal.SIGKILL)
+                self.assertEqual(process.wait(timeout=10), -signal.SIGKILL)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=10)
+
+            self.store = SnapshotStore(path, create_if_missing=False)
+            record = self.store.write_api_request("media-precommit-original")
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.state, "in_progress")
+            self.assertIsNotNone(record.execution_started_at)
+            self.assertIsNone(record.response_status)
+
+            plain = FakeWriteService()
+            media = FakeMediaWriteService()
+            with self.server(
+                plain, media_service=media,
+                capabilities=frozenset({
+                    WriteCapability.CREATE, WriteCapability.CREATE_MEDIA,
+                }),
+            ) as server:
+                plain_status, _, plain_response = self.request(
+                    server, "POST", "/api/write/ads",
+                    payload={k: v for k, v in payload.items() if k != "media_refs"},
+                    idempotency_key="fresh-plain-after-precommit-kill",
+                )
+                media_status, _, media_response = self.request(
+                    server, "POST", "/api/write/media/ads",
+                    payload=payload, idempotency_key="fresh-media-after-precommit-kill",
+                )
+                replay_status, _, replay_response = self.request(
+                    server, "POST", "/api/write/media/ads",
+                    payload=payload, idempotency_key="media-precommit-original",
+                )
+            self.assertEqual(
+                (plain_status, media_status, replay_status), (409, 409, 409),
+            )
+            self.assertEqual(plain_response["error"], "create_recovery_pending")
+            self.assertEqual(media_response["error"], "create_recovery_pending")
+            self.assertEqual(replay_response["error"], "idempotency_in_progress")
+            for response in (plain_response, media_response, replay_response):
+                self.assertFalse(response["platform_retry_authorized"])
+            self.assertEqual(
+                self.store.write_api_request("media-precommit-original"), record,
+            )
+            self.assertEqual(plain.calls, [])
+            self.assertEqual(media.calls, [])
+
     def test_executed_in_progress_write_blocks_new_create_after_restart(self) -> None:
         self.store.claim_write_api_request(
             idempotency_key="interrupted-execution",
