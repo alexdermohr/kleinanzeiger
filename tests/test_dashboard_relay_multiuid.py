@@ -203,7 +203,6 @@ class RealMultiUidDashboardRelayTests(unittest.TestCase):
         _require_exclusive_docker_admin_authority()
         volume = "mark-relay-store-" + uuid4().hex[:14]
         created = False
-        files = ("mark.sqlite", "mark.sqlite-wal", "mark.sqlite-shm")
         seed = """
 import os
 from pathlib import Path
