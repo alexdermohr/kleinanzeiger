@@ -183,5 +183,43 @@ else:
         self.assertTrue((self.intents / f"{GENERATION}.acknowledged.json").is_file())
 
 
+    @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork required")
+    def test_forked_child_never_inherits_parent_operation_lock_claim(self) -> None:
+        # Fork only a fresh Python child; the unittest runner may have threads.
+        # This synthetic check is no host-UID or historical-FD attestation.
+        source = Path(__file__).resolve().parents[1] / "src"
+        environment = dict(os.environ, MARK_PLATFORM_WRITES_ENABLED="false")
+        if source.is_dir():
+            environment["PYTHONPATH"] = str(source)
+        else:
+            environment.pop("PYTHONPATH", None)
+        fork_probe = r"""
+import os, tempfile
+from pathlib import Path
+from mark_api.backup_intent_authority import _operation_lock, BackupIntentError
+with tempfile.TemporaryDirectory(prefix="mark-intent-fork-") as temporary:
+    root = Path(temporary)
+    with _operation_lock(root):
+        child = os.fork()
+        if child == 0:
+            try:
+                with _operation_lock(root):
+                    os._exit(31)
+            except BackupIntentError as exc:
+                os._exit(0 if "another trusted seal or abandon" in str(exc) else 32)
+        _, status = os.waitpid(child, 0)
+        if os.waitstatus_to_exitcode(status) != 0:
+            raise AssertionError("forked child bypassed parent operation lock")
+        print("FORK_CHILD_ACK_DENIED")
+"""
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", fork_probe],
+            cwd=self.cold.parent, env=environment,
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FORK_CHILD_ACK_DENIED", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

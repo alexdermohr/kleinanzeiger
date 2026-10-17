@@ -170,8 +170,12 @@ def _operation_lock(root: Path) -> Iterator[None]:
             if not stat.S_ISDIR(st.st_mode) or original != (current.st_dev, current.st_ino):
                 raise BackupIntentError("operator state root changed before operation")
             held = getattr(_OPERATION_HELD, "inodes", None)
-            if held is None:
+            current_pid = os.getpid()
+            # A forked child inherits thread-local memory but does not own
+            # the parent's trusted operation. It must compete for the flock.
+            if held is None or getattr(_OPERATION_HELD, "pid", None) != current_pid:
                 held = set()
+                _OPERATION_HELD.pid = current_pid
                 _OPERATION_HELD.inodes = held
             # seal_prepared() calls its public acknowledge() hook while the
             # same trusted thread still owns the complete transaction.
