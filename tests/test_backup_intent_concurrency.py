@@ -221,5 +221,137 @@ with tempfile.TemporaryDirectory(prefix="mark-intent-fork-") as temporary:
         self.assertIn("FORK_CHILD_ACK_DENIED", result.stdout)
 
 
+    def test_external_begin_commit_must_not_preempt_active_seal(self) -> None:
+        self.operator.prepare(
+            GENERATION, self.sqlite, self.witness, previous_head_sha256=None,
+        )
+        entered, release = Event(), Event()
+        observed: dict[str, object] = {}
+        real_inspect = intent_module.inspect_offline_pair
+
+        def pause_before_commit(*args: object, **kwargs: object) -> object:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("synthetic seal did not resume")
+            return real_inspect(*args, **kwargs)
+
+        def seal() -> None:
+            try:
+                observed["result"] = self.operator.seal_prepared(
+                    GENERATION, self.output, self.anchor,
+                )
+            except BaseException as exc:
+                observed["error"] = exc
+
+        with patch(
+            "mark_api.backup_intent_authority.inspect_offline_pair",
+            side_effect=pause_before_commit,
+        ):
+            worker = Thread(target=seal, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                self.assertTrue(
+                    (self.intents / f"{GENERATION}.prepared.json").is_file()
+                )
+                with self.assertRaisesRegex(
+                    BackupIntentError, "another trusted seal or abandon",
+                ):
+                    self.operator.begin_commit(GENERATION)
+                source = Path(__file__).resolve().parents[1] / "src"
+                environment = dict(os.environ, MARK_PLATFORM_WRITES_ENABLED="false")
+                if source.is_dir():
+                    environment["PYTHONPATH"] = str(source)
+                else:
+                    environment.pop("PYTHONPATH", None)
+                external = r"""
+import sys
+from pathlib import Path
+from mark_api.backup_intent_authority import BackupIntentAuthority, BackupIntentError
+root, generation = sys.argv[1:]
+try:
+    BackupIntentAuthority(Path(root)).begin_commit(generation)
+except BackupIntentError as exc:
+    if "another trusted seal or abandon" not in str(exc):
+        raise
+    print("EXTERNAL_BEGIN_COMMIT_DENIED")
+else:
+    raise AssertionError("external operator stole the active seal's intent")
+"""
+                child = subprocess.run(
+                    [
+                        sys.executable, "-B", "-c", external,
+                        str(self.intents), GENERATION,
+                    ],
+                    cwd=self.cold.parent, env=environment,
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                self.assertEqual(child.returncode, 0, child.stderr)
+                self.assertIn("EXTERNAL_BEGIN_COMMIT_DENIED", child.stdout)
+                self.assertFalse(
+                    (self.intents / f"{GENERATION}.committing.json").exists()
+                )
+            finally:
+                release.set()
+                worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", observed)
+        self.assertTrue(observed["result"]["external_operator_intent_acknowledged"])
+        self.assertTrue((self.intents / f"{GENERATION}.acknowledged.json").is_file())
+        with self.assertRaises(BackupIntentError):
+            self.operator.begin_commit(GENERATION)
+
+    def test_begin_commit_cannot_turn_active_abandon_into_conflicting_intents(self) -> None:
+        self.operator.prepare(
+            GENERATION, self.sqlite, self.witness, previous_head_sha256=None,
+        )
+        entered, release = Event(), Event()
+        result: dict[str, object] = {}
+        real_fsync = intent_module._fsync_dir
+
+        def pause_after_abandon_proof(directory: Path) -> None:
+            if directory == self.output:
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise AssertionError("synthetic abandon did not resume")
+            real_fsync(directory)
+
+        def abandon() -> None:
+            try:
+                result["value"] = self.operator.abandon(
+                    GENERATION, self.output, self.anchor,
+                )
+            except BaseException as exc:
+                result["error"] = exc
+
+        with patch(
+            "mark_api.backup_intent_authority._fsync_dir",
+            side_effect=pause_after_abandon_proof,
+        ):
+            worker = Thread(target=abandon, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                # abandon already holds its short-lived record lock here.
+                # The operation lock is an additional, not the only, fence.
+                with self.assertRaises(BackupIntentError):
+                    self.operator.begin_commit(GENERATION)
+                self.assertFalse(
+                    (self.intents / f"{GENERATION}.committing.json").exists()
+                )
+            finally:
+                release.set()
+                worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", result)
+        self.assertTrue(result["value"]["abandoned_once"])
+        self.assertTrue((self.intents / f"{GENERATION}.abandoned.json").is_file())
+        self.assertFalse((self.intents / f"{GENERATION}.committing.json").exists())
+        with self.assertRaises(BackupIntentError):
+            self.operator.begin_commit(GENERATION)
+
+
 if __name__ == "__main__":
     unittest.main()
