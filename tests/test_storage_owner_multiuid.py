@@ -5,8 +5,9 @@ This deliberately mounts a *read-only test-only* volume under UID 50044 to
 prove that DAC independently denies old main/WAL/SHM raw access. No reused
 installed Mark DB/volume, no Chrome, no platform Write and no host UID changes.
 
-This is a partial owner-authority proof, NOT a migration / shared backup /
-historical preopened-fd revocation or production recovery release gate.
+Opt-in Docker mutation fails closed until independent exclusive daemon
+administration is installed. This is NOT historical FD/mmap revocation or a
+production recovery release gate.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 
@@ -31,7 +33,35 @@ if PYTHON not in {"/usr/local/bin/python", "/opt/mark-api/venv/bin/python"}:
     raise ValueError("unattested Docker test interpreter path")
 
 
+if os.environ.get("MARK_REQUIRE_STORAGE_OWNER_UID") == "1" and not IMAGE_OK:
+    raise ValueError("required Docker UID test lacks a pinned image")
+
+
+_DOCKER_AUTHORITY_ERROR = (
+    "exclusive Docker-admin authority not established: shared-daemon Docker "
+    "resource mutation forbidden before subprocess"
+)
+
+
+def _require_exclusive_docker_admin_authority() -> None:
+    """Real test may only run with independent, enforced daemon exclusivity."""
+    if os.environ.get("MARK_REQUIRE_STORAGE_OWNER_UID") == "1":
+        raise AssertionError(_DOCKER_AUTHORITY_ERROR)
+    raise unittest.SkipTest(_DOCKER_AUTHORITY_ERROR)
+
+
 def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
+    # Positive allowlist: neither name-based cleanup nor command aliases may
+    # dispatch without independently enforced exclusive Docker authority.
+    if not (
+        args[:1] == ("info",)
+        or args[:2] in (
+            ("image", "inspect"),
+            ("container", "inspect"),
+            ("volume", "inspect"),
+        )
+    ):
+        raise AssertionError(_DOCKER_AUTHORITY_ERROR)
     value = subprocess.run(
         ["/usr/bin/docker", *args], capture_output=True, text=True,
         timeout=45, check=False,
@@ -561,11 +591,21 @@ print("REAL_UID_INSTALLED_WHEEL_NONEMPTY_OWNER_CLI_AND_DRAFT_GATE_GREEN",flush=T
 
 @unittest.skipUnless(IMAGE_OK, "Explicit immutable preexisting Docker test image needed")
 class RealStorageOwnerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        _require_exclusive_docker_admin_authority()
+
+    def setUp(self) -> None:
+        super().setUp()
+        _require_exclusive_docker_admin_authority()
+
     @unittest.skipUnless(
         PYTHON == "/opt/mark-api/venv/bin/python",
         "requires exact installed Mark release-image Python",
     )
     def test_installed_wheel_nonempty_owner_inventory_and_draft_gate(self) -> None:
+        _require_exclusive_docker_admin_authority()
         # Separate source-free container path; the usual multi-UID test binds
         # /src and cannot attest whether the release Wheel includes the CLI.
         suffix = uuid4().hex[:12]
@@ -614,6 +654,7 @@ class RealStorageOwnerTests(unittest.TestCase):
                 self.assertEqual(deleted.returncode, 0, deleted.stderr[-300:])
 
     def test_foreign_uid_cannot_rewrite_or_clear_private_sqlite_fences(self) -> None:
+        _require_exclusive_docker_admin_authority()
         suffix = uuid4().hex[:12]
         store_volume = "mark-store-owner-db-" + suffix
         socket_volume = "mark-store-owner-rpc-" + suffix
@@ -755,3 +796,45 @@ class RealStorageOwnerTests(unittest.TestCase):
                 self.fail("synthetic storage service failed: " + found.stdout[-600:])
             time.sleep(0.2)
         self.fail("synthetic storage service did not start")
+
+
+
+class DockerAuthorityGuardTests(unittest.TestCase):
+    """Mock-only shared-daemon safety checks; no real Docker operation."""
+
+    def test_mutation_aliases_block_before_subprocess(self) -> None:
+        for args in (
+            ("volume", "rm", "decoy"), ("volume", "remove", "decoy"),
+            ("volume", "prune"), ("rm", "-f", "decoy"),
+            ("container", "rm", "decoy"), ("network", "rm", "decoy"),
+            ("system", "prune", "--volumes"), ("run", "--rm", "fake-image"),
+        ):
+            with self.subTest(args=args):
+                with patch.object(subprocess, "run") as dispatched:
+                    with self.assertRaisesRegex(
+                        AssertionError, "exclusive Docker-admin authority",
+                    ):
+                        _docker(*args)
+                    dispatched.assert_not_called()
+
+    def test_passive_metadata_and_direct_testcase_gates(self) -> None:
+        for args in (
+            ("info",), ("image", "inspect", "sha256:" + "0" * 64),
+            ("container", "inspect", "decoy"), ("volume", "inspect", "decoy"),
+        ):
+            fake = subprocess.CompletedProcess(["/usr/bin/docker", *args], 0, "", "")
+            with patch.object(subprocess, "run", return_value=fake) as dispatched:
+                self.assertIs(_docker(*args), fake)
+                dispatched.assert_called_once()
+        with patch.dict(os.environ, {"MARK_REQUIRE_STORAGE_OWNER_UID": "1"}):
+            with self.assertRaisesRegex(
+                AssertionError, "exclusive Docker-admin authority",
+            ):
+                _require_exclusive_docker_admin_authority()
+        with patch.dict(os.environ, {"MARK_REQUIRE_STORAGE_OWNER_UID": "0"}):
+            with patch.object(RealStorageOwnerTests, "__unittest_skip__", False, create=True):
+                case = RealStorageOwnerTests("test_foreign_uid_cannot_rewrite_or_clear_private_sqlite_fences")
+                result = case.run(unittest.TestResult())
+        self.assertEqual(len(result.skipped), 1, result.skipped)
+        self.assertFalse(result.errors)
+        self.assertFalse(result.failures)

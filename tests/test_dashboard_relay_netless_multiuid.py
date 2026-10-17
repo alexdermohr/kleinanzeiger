@@ -1,7 +1,9 @@
 """Opt-in synthetic rootful-Docker network:none, UID and Unix relay proof.
 
 Set MARK_NETLESS_TEST_IMAGE to an already locally present immutable image ID
-containing a reviewed Python entrypoint. All resources are uniquely named and removed.
+containing a reviewed Python entrypoint. Unique Docker names cannot prevent
+concurrent same-name replacement; mutating tests must fail closed until an
+independently enforced exclusive Docker context is available.
 No production volume, Chrome profile, account or platform Write is touched.
 A passed test proves this particular kernel/Docker host configuration only.
 """
@@ -17,6 +19,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 
@@ -28,7 +31,35 @@ if PYTHON not in {"/usr/local/bin/python", "/opt/mark-api/venv/bin/python"}:
     raise ValueError("unattested netless Docker test interpreter")
 
 
+if os.environ.get("MARK_REQUIRE_NETLESS_UID") == "1" and not IMAGE_OK:
+    raise ValueError("required Docker UID test lacks a pinned image")
+
+
+_DOCKER_AUTHORITY_ERROR = (
+    "exclusive Docker-admin authority not established: shared-daemon Docker "
+    "resource mutation forbidden before subprocess"
+)
+
+
+def _require_exclusive_docker_admin_authority() -> None:
+    """Real test may only run with independent, enforced daemon exclusivity."""
+    if os.environ.get("MARK_REQUIRE_NETLESS_UID") == "1":
+        raise AssertionError(_DOCKER_AUTHORITY_ERROR)
+    raise unittest.SkipTest(_DOCKER_AUTHORITY_ERROR)
+
+
 def _docker(*args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
+    # Positive allowlist: neither name-based cleanup nor command aliases may
+    # dispatch without independently enforced exclusive Docker authority.
+    if not (
+        args[:1] == ("info",)
+        or args[:2] in (
+            ("image", "inspect"),
+            ("container", "inspect"),
+            ("volume", "inspect"),
+        )
+    ):
+        raise AssertionError(_DOCKER_AUTHORITY_ERROR)
     result = subprocess.run(
         ["/usr/bin/docker", *args],
         capture_output=True, text=True, check=False, timeout=45,
@@ -142,7 +173,17 @@ else:
 
 @unittest.skipUnless(IMAGE_OK, "Set explicit immutable local Docker test image ID")
 class NetlessMultiUidDockerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        _require_exclusive_docker_admin_authority()
+
+    def setUp(self) -> None:
+        super().setUp()
+        _require_exclusive_docker_admin_authority()
+
     def test_networkless_frontend_live_loopback_ingress_and_stale_socket(self) -> None:
+        _require_exclusive_docker_admin_authority()
         suffix = uuid4().hex[:12]
         owner, frontend, ingress = (
             "mark-uds-owner-" + suffix,
@@ -294,3 +335,47 @@ class NetlessMultiUidDockerTests(unittest.TestCase):
                 self.fail("synthetic container failed: " + result.stdout[-900:])
             time.sleep(0.2)
         self.fail("synthetic container not ready: " + name)
+
+
+
+class DockerAuthorityGuardTests(unittest.TestCase):
+    """Mock-only shared-daemon safety checks; no real Docker operation."""
+
+    def test_mutation_aliases_block_before_subprocess(self) -> None:
+        for args in (
+            ("volume", "rm", "decoy"), ("volume", "remove", "decoy"),
+            ("volume", "prune"), ("rm", "-f", "decoy"),
+            ("container", "rm", "decoy"), ("network", "rm", "decoy"),
+            ("system", "prune", "--volumes"), ("run", "--rm", "fake-image"),
+        ):
+            with self.subTest(args=args):
+                with patch.object(subprocess, "run") as dispatched:
+                    with self.assertRaisesRegex(
+                        AssertionError, "exclusive Docker-admin authority",
+                    ):
+                        _docker(*args)
+                    dispatched.assert_not_called()
+
+    def test_passive_metadata_and_direct_testcase_gates(self) -> None:
+        for args in (
+            ("info",), ("image", "inspect", "sha256:" + "0" * 64),
+            ("container", "inspect", "decoy"), ("volume", "inspect", "decoy"),
+        ):
+            fake = subprocess.CompletedProcess(["/usr/bin/docker", *args], 0, "", "")
+            with patch.object(subprocess, "run", return_value=fake) as dispatched:
+                self.assertIs(_docker(*args), fake)
+                dispatched.assert_called_once()
+        with patch.dict(os.environ, {"MARK_REQUIRE_NETLESS_UID": "1"}):
+            with self.assertRaisesRegex(
+                AssertionError, "exclusive Docker-admin authority",
+            ):
+                _require_exclusive_docker_admin_authority()
+        with patch.dict(os.environ, {"MARK_REQUIRE_NETLESS_UID": "0"}):
+            with patch.object(NetlessMultiUidDockerTests, "__unittest_skip__", False, create=True):
+                case = NetlessMultiUidDockerTests(
+                    "test_networkless_frontend_live_loopback_ingress_and_stale_socket"
+                )
+                result = case.run(unittest.TestResult())
+        self.assertEqual(len(result.skipped), 1, result.skipped)
+        self.assertFalse(result.errors)
+        self.assertFalse(result.failures)
