@@ -75,6 +75,18 @@ jobs:
           python -m venv "$artifact_dir/venv"
           "$artifact_dir/venv/bin/python" -m pip install --no-deps "$artifact_dir"/wheels/mark_api-*.whl
 
+          # Installed entrypoint must exist without private-web dependencies,
+          # and must refuse an uninitialized/typo SQLite path before binding.
+          offline_bin="$artifact_dir/venv/bin/mark-api-offline"
+          "$offline_bin" --help > "$artifact_dir/offline-help.txt"
+          grep -q -- "--email" "$artifact_dir/offline-help.txt"
+          missing_db="$artifact_dir/not-initialized.sqlite"
+          if "$offline_bin" --db "$missing_db" > "$artifact_dir/offline-denial.txt" 2>&1; then
+            echo "offline launcher unexpectedly accepted a missing database" >&2
+            exit 1
+          fi
+          test ! -e "$missing_db"
+
           # Synthetic local email; no live accounts or Kleinanzeigen requests.
           python - "$artifact_dir/message.eml" <<'PY'
           from email import policy

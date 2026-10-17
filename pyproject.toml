@@ -14,6 +14,7 @@ private-web = ["websocket-client>=1.8,<2", "Pillow>=10.4,<13"]
 
 [project.scripts]
 mark-api-dashboard = "mark_api.dashboard:main"
+mark-api-offline = "mark_api.offline_launcher:main"
 mark-api-classify = "mark_api.classification_cli:main"
 mark-api-import-mail = "mark_api.email_import_cli:main"
 mark-api-local-smoke = "mark_api.local_smoke:main"
