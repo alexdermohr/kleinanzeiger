@@ -914,6 +914,9 @@ def main(argv: list[str] | None = None) -> int:
             def _stop_owner() -> None:
                 nonlocal settle_thread
                 stop_code = exit_code
+                # A failed close() does not prove the inner shutdown worker
+                # has stopped using the borrowed witness IPC.
+                owner_quiesced = False
                 try:
                     # Frontend streams are revoked before the write executor
                     # drains. If relay close itself hangs, PID 1 can still
@@ -931,6 +934,7 @@ def main(argv: list[str] | None = None) -> int:
                             stop_code = 2
                     try:
                         launcher.close()
+                        owner_quiesced = True
                     except PrivateWebSubmitUnknownError:
                         # Only observation-only reconciliation of the original
                         # operation is permitted. A timed-out daemon retains
@@ -938,16 +942,17 @@ def main(argv: list[str] | None = None) -> int:
                         reconciled: list[bool] = []
 
                         def _settle_before_stop() -> None:
+                            # This thread alone owns witness closure after an
+                            # UNKNOWN media outcome. A failure/timeout must
+                            # retain the client for any inner cleanup worker.
                             try:
                                 launcher.reconcile_media_submit()
                                 launcher.close()
-                            except Exception:
-                                return
-                            else:
-                                reconciled.append(True)
-                            finally:
                                 if witness is not None:
                                     witness.close()
+                            except Exception:
+                                return
+                            reconciled.append(True)
 
                         settle_thread = Thread(
                             target=_settle_before_stop,
@@ -971,8 +976,13 @@ def main(argv: list[str] | None = None) -> int:
                     stop_code = 2
                 finally:
                     try:
-                        if witness is not None and (
-                            settle_thread is None or not settle_thread.is_alive()
+                        # Never infer quiescence from a caller timeout/error.
+                        # With media settlement, its worker owns closure and
+                        # must not race a second witness.close() here.
+                        if (
+                            witness is not None
+                            and settle_thread is None
+                            and owner_quiesced
                         ):
                             witness.close()
                     except Exception:
