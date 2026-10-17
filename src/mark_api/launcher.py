@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock, Thread, current_thread
+from threading import Event, Lock, Thread, current_thread
 from time import monotonic
 from typing import Protocol
 from urllib.parse import quote
@@ -849,10 +849,12 @@ def main(argv: list[str] | None = None) -> int:
         objective_metric=args.objective_metric,
     )
 
-    # SIGTERM during startup is deferred until a runtime exists.
-    # While serving, unwind into the existing close/reconciliation path.
-    # Further SIGTERM signals during cleanup must not interrupt it.
+    # The main thread owns signals. A single daemon startup worker owns
+    # Witness IPC, inventory/CDP startup and optional frontend binding until
+    # their handoff is complete. On SIGTERM the caller may time out without
+    # closing any resource that this worker may still use.
     shutdown_requested = False
+    shutdown_deadline: float | None = None
     serving = False
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -860,73 +862,176 @@ def main(argv: list[str] | None = None) -> int:
     frontend_relay: UnixDashboardRelay | None = None
     settle_thread: Thread | None = None
     shutdown_handed_off = False
+    startup_unresolved = False
+    startup_cancelled = Event()
+    startup_complete = Event()
+    startup_guard = Lock()
+    startup_result: dict[str, object] = {}
+    startup_abandoned = False
 
     def _on_sigterm(_signum: int, _frame: object) -> None:
-        nonlocal shutdown_requested, serving
+        nonlocal shutdown_requested, serving, shutdown_deadline
+        if not shutdown_requested:
+            shutdown_deadline = monotonic() + _SHUTDOWN_OWNER_BUDGET_SECONDS
         shutdown_requested = True
+        startup_cancelled.set()
         if serving:
             serving = False
             raise KeyboardInterrupt
 
-    signal.signal(signal.SIGTERM, _on_sigterm)
-    signal.signal(signal.SIGINT, _on_sigterm)
-    try:
-
+    def _start_owner() -> None:
+        # Startup may be stuck in a foreign extension or remote IPC. No other
+        # thread may close borrowed Witness while this worker is unresolved.
+        local_witness: FenceWitnessClient | None = None
+        local_launcher: ProductLauncherRuntime | None = None
+        local_relay: UnixDashboardRelay | None = None
+        frontend_failed = False
+        error: str | None = None
+        builder_entered = False
+        abandoned = False
         try:
             if args.witness_socket is not None:
                 try:
-                    witness = FenceWitnessClient(
+                    local_witness = FenceWitnessClient(
                         args.witness_socket,
                         expected_owner_uid=args.witness_owner_uid,
                     )
                 except (FenceWitnessError, OSError):
-                    print(
-                        "mark-api-launch: independent recovery witness unavailable",
-                        file=sys.stderr,
+                    error = "mark-api-launch: independent recovery witness unavailable"
+            if error is None and not startup_cancelled.is_set():
+                builder_entered = True
+                try:
+                    local_launcher = build_product_launcher(
+                        db_path=args.db,
+                        initialize_db=args.init_db,
+                        cdp_port=args.cdp_port,
+                        dashboard_port=args.dashboard_port,
+                        write_port=args.write_port,
+                        timeout_seconds=args.timeout_seconds,
+                        analytics_contract=contract,
+                        email_paths=tuple(args.email_paths),
+                        **(
+                            {"fence_witness": local_witness}
+                            if local_witness is not None else {}
+                        ),
+                        **(
+                            {"public_origin_port": 8875}
+                            if args.frontend_socket is not None else {}
+                        ),
                     )
-                    return 2
-            launcher = build_product_launcher(
-                db_path=args.db,
-                initialize_db=args.init_db,
-                cdp_port=args.cdp_port,
-                dashboard_port=args.dashboard_port,
-                write_port=args.write_port,
-                timeout_seconds=args.timeout_seconds,
-                analytics_contract=contract,
-                email_paths=tuple(args.email_paths),
-                **({"fence_witness": witness} if witness is not None else {}),
-                # The untrusted frontend publishes only :8875. The owner
-                # listens on :18875 and must still enforce that public Origin
-                # rather than weakening the same-origin dashboard gate.
-                **({"public_origin_port": 8875}
-                   if args.frontend_socket is not None else {}),
-            )
-        except (ProductLauncherError, PrivateWebRuntimeDependencyError) as exc:
-            print(f"mark-api-launch: {exc}", file=sys.stderr)
-            return 2
-        except (TypeError, ValueError):
-            print("mark-api-launch: invalid startup configuration", file=sys.stderr)
+                except (ProductLauncherError, PrivateWebRuntimeDependencyError) as exc:
+                    error = f"mark-api-launch: {exc}"
+                except (TypeError, ValueError):
+                    error = "mark-api-launch: invalid startup configuration"
+                except Exception:
+                    error = "mark-api-launch: product startup failed"
+            elif error is None:
+                error = "mark-api-launch: startup interrupted"
+
+            if local_launcher is not None and args.frontend_socket is not None and not startup_cancelled.is_set():
+                try:
+                    dashboard_host, dashboard_port = local_launcher.server_address
+                    local_relay = UnixDashboardRelay(
+                        socket_path=args.frontend_socket,
+                        frontend_uid=args.frontend_uid,
+                        frontend_gid=args.frontend_gid,
+                        dashboard_host=dashboard_host,
+                        dashboard_port=dashboard_port,
+                    )
+                    local_relay.start()
+                except (OSError, DashboardRelayError, ValueError):
+                    frontend_failed = True
+        except BaseException:
+            # A partial startup has unknown provenance; no exception grants
+            # authority to retry writes, release leases or close IPC early.
+            error = "mark-api-launch: product startup failed"
+        finally:
+            with startup_guard:
+                abandoned = startup_abandoned
+                if not abandoned:
+                    startup_result.update(
+                        witness=local_witness,
+                        launcher=local_launcher,
+                        relay=local_relay,
+                        frontend_failed=frontend_failed,
+                        error=error,
+                        startup_unresolved=builder_entered and local_launcher is None,
+                    )
+                startup_complete.set()
+
+            if abandoned:
+                # No other caller has received these resources. After SIGTERM
+                # timeout only this worker may unwind them; a failed close
+                # leaves the borrowed Witness for kernel/process teardown.
+                quiesced = True
+                if local_relay is not None:
+                    try:
+                        if not local_relay.stop():
+                            quiesced = False
+                    except BaseException:
+                        quiesced = False
+                if local_launcher is not None:
+                    try:
+                        local_launcher.close()
+                    except BaseException:
+                        quiesced = False
+                elif builder_entered:
+                    # A failed/partial builder might have a live inner worker.
+                    quiesced = False
+                if local_witness is not None and quiesced:
+                    try:
+                        local_witness.close()
+                    except Exception:
+                        pass
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    signal.signal(signal.SIGINT, _on_sigterm)
+    try:
+        startup_worker = Thread(
+            target=_start_owner, daemon=True, name="mark-owner-start",
+        )
+        try:
+            startup_worker.start()
+        except RuntimeError:
+            print("mark-api-launch: owner startup worker unavailable", file=sys.stderr)
             return 2
 
-        frontend_failed = False
-        if args.frontend_socket is not None and not shutdown_requested:
-            try:
-                dashboard_host, dashboard_port = launcher.server_address
-                frontend_relay = UnixDashboardRelay(
-                    socket_path=args.frontend_socket,
-                    frontend_uid=args.frontend_uid,
-                    frontend_gid=args.frontend_gid,
-                    dashboard_host=dashboard_host,
-                    dashboard_port=dashboard_port,
-                )
-                frontend_relay.start()
-            except (OSError, DashboardRelayError, ValueError):
-                # Use the same globally bounded shutdown as the serving
-                # path. Direct cleanup here could block before any watchdog
-                # exists, particularly if relay.start partially succeeded.
-                frontend_failed = True
-                print("mark-api-launch: trusted dashboard transport unavailable",
-                      file=sys.stderr)
+        while not startup_complete.is_set():
+            if shutdown_requested and shutdown_deadline is not None:
+                remaining = shutdown_deadline - monotonic()
+                if remaining <= 0:
+                    with startup_guard:
+                        if not startup_complete.is_set():
+                            startup_abandoned = True
+                            print(
+                                "mark-api-launch: owner startup deadline exceeded; "
+                                "retain recovery fences",
+                                file=sys.stderr,
+                            )
+                            return 2
+                    continue
+                startup_complete.wait(timeout=min(remaining, 0.05))
+            else:
+                startup_complete.wait(timeout=0.05)
+
+        # Startup and resource ownership are now handed to this thread.
+        with startup_guard:
+            startup_outcome = dict(startup_result)
+        witness = startup_outcome.get("witness")
+        launcher = startup_outcome.get("launcher")
+        frontend_relay = startup_outcome.get("relay")
+        frontend_failed = bool(startup_outcome.get("frontend_failed"))
+        failure = startup_outcome.get("error")
+        startup_unresolved = bool(startup_outcome.get("startup_unresolved"))
+        if failure is not None:
+            print(str(failure), file=sys.stderr)
+            return 2
+        if launcher is None:
+            print("mark-api-launch: owner startup incomplete", file=sys.stderr)
+            return 2
+        if frontend_failed:
+            print("mark-api-launch: trusted dashboard transport unavailable",
+                  file=sys.stderr)
 
         if not shutdown_requested and not frontend_failed:
             write_host, write_port = launcher.write_server_address
@@ -1061,7 +1166,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             worker.start()
             shutdown_handed_off = True
-            worker.join(_SHUTDOWN_OWNER_BUDGET_SECONDS)
+            # SIGTERM consumed some of the global budget during startup.
+            # The final close worker receives only the remaining duration.
+            worker.join(
+                max(0.0, shutdown_deadline - monotonic())
+                if shutdown_deadline is not None
+                else _SHUTDOWN_OWNER_BUDGET_SECONDS
+            )
             if worker.is_alive() or not outcomes:
                 print(
                     "mark-api-launch: owner shutdown deadline exceeded; "
@@ -1080,7 +1191,11 @@ def main(argv: list[str] | None = None) -> int:
             # worker starts it alone owns that lifetime. If Docker kills PID 1,
             # the kernel closes any remaining sockets without fabricating
             # recovery clearance.
-            if witness is not None and not shutdown_handed_off:
+            if (
+                witness is not None
+                and not shutdown_handed_off
+                and not startup_unresolved
+            ):
                 witness.close()
         finally:
             try:
