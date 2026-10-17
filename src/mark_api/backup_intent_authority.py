@@ -14,10 +14,11 @@ import os
 from pathlib import Path
 import re
 import stat
+from threading import local
 from typing import Iterator
 
 from .paired_backup_operator import (
-    PairedBackupOperatorError, _ZERO, _check_generation_dir,
+    PairedBackupOperatorError, _check_generation_dir,
     _fsync_dir, _new_file, _private_root, _read_head,
     _validate_anchored_history, _reconcile_committed_inflight,
     seal_offline_pair,
@@ -37,6 +38,8 @@ _SHA = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _ZERO_HEAD = "0" * 64
 _MAX_RECORD = 4096
 _BOOTSTRAP_NAME = ".intent.bootstrap.json"
+# Only a thread already holding this *same inode* may nest the operation lock.
+_OPERATION_HELD = local()
 
 
 def _generation(value: str) -> str:
@@ -150,7 +153,7 @@ def _locked(root: Path) -> Iterator[None]:
 
 @contextmanager
 def _operation_lock(root: Path) -> Iterator[None]:
-    """Serialize cooperating complete seals and manual abandons.
+    """Serialize complete seals, manual abandons and external acknowledgements.
 
     The directory flock is separate from the short-lived intent record lock,
     which the sealer reacquires. It provides local cooperating-process safety,
@@ -166,21 +169,35 @@ def _operation_lock(root: Path) -> Iterator[None]:
             current = root.lstat()
             if not stat.S_ISDIR(st.st_mode) or original != (current.st_dev, current.st_ino):
                 raise BackupIntentError("operator state root changed before operation")
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise BackupIntentError("another trusted seal or abandon is in progress") from exc
+            held = getattr(_OPERATION_HELD, "inodes", None)
+            if held is None:
+                held = set()
+                _OPERATION_HELD.inodes = held
+            # seal_prepared() calls its public acknowledge() hook while the
+            # same trusted thread still owns the complete transaction.
+            # Different threads/processes always compete for the real flock.
+            nested = original in held
+            if not nested:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise BackupIntentError(
+                        "another trusted seal or abandon is in progress"
+                    ) from exc
             current = root.lstat()
             if original != (current.st_dev, current.st_ino):
                 raise BackupIntentError("operator state root changed while locking")
         except (OSError, PairPreflightError, PairedBackupOperatorError) as exc:
             raise BackupIntentError("operator operation lock could not be trusted") from exc
+        if not nested:
+            held.add(original)
         try:
-            # Body exceptions retain their original public API type, notably
-            # PairedBackupOperatorError for a crash after committing an intent.
+            # Preserve original exception types after an uncertain seal.
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if not nested:
+                held.remove(original)
+                fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -512,7 +529,14 @@ class BackupIntentAuthority:
     def acknowledge(
         self, generation: str, output_root: Path, anchor_root: Path,
     ) -> dict[str, object]:
-        """Verify the published HEAD, then consume one external commit intent."""
+        """Serialize external ACK with any active seal/abandon transaction."""
+        with _operation_lock(self.root):
+            return self._acknowledge_exclusive(generation, output_root, anchor_root)
+
+    def _acknowledge_exclusive(
+        self, generation: str, output_root: Path, anchor_root: Path,
+    ) -> dict[str, object]:
+        """Verify HEAD and consume one intent under the complete operation lock."""
         gen = _generation(generation)
         try:
             with _locked(self.root):
