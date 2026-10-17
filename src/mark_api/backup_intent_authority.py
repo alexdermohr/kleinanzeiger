@@ -431,6 +431,12 @@ class BackupIntentAuthority:
             raise BackupIntentError("independent cold image prepare failed") from exc
 
     def begin_commit(self, generation: str) -> dict[str, str]:
+        """Do not preempt a seal/abandon transaction holding the operator root."""
+        with _operation_lock(self.root):
+            return self._begin_commit_exclusive(generation)
+
+    def _begin_commit_exclusive(self, generation: str) -> dict[str, str]:
+        """Persist a one-shot commit intent while holding transaction authority."""
         gen = _generation(generation)
         with _locked(self.root):
             _, records = _state(self.root)
