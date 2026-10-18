@@ -1069,7 +1069,12 @@ def main(argv: list[str] | None = None) -> int:
             if not shutdown_requested and not frontend_failed:
                 serving = True
                 try:
-                    launcher.serve_forever()
+                    # A SIGTERM between the outer condition and serving=True
+                    # sets shutdown_requested while serving is still False.
+                    # Recheck after arming the handler. After this point any
+                    # SIGTERM raises KeyboardInterrupt and cannot enter serve.
+                    if not shutdown_requested:
+                        launcher.serve_forever()
                 finally:
                     serving = False
         except KeyboardInterrupt:
@@ -1165,27 +1170,40 @@ def main(argv: list[str] | None = None) -> int:
                         stop_code = 2
                     outcomes.append(stop_code)
 
-            worker = Thread(
-                target=_stop_owner, daemon=True, name="mark-owner-stop",
-            )
-            worker.start()
+            # No caller may close the borrowed Witness once the live
+            # launcher's shutdown needs a worker. Thread allocation/start
+            # failure is NOT proof of owner quiescence; preserve the
+            # independent fence until process/kernel teardown.
             shutdown_handed_off = True
-            # SIGTERM consumed some of the global budget during startup.
-            # The final close worker receives only the remaining duration.
-            worker.join(
-                max(0.0, shutdown_deadline - monotonic())
-                if shutdown_deadline is not None
-                else _SHUTDOWN_OWNER_BUDGET_SECONDS
-            )
-            if worker.is_alive() or not outcomes:
+            try:
+                worker = Thread(
+                    target=_stop_owner, daemon=True, name="mark-owner-stop",
+                )
+                worker.start()
+            except (RuntimeError, OSError):
                 print(
-                    "mark-api-launch: owner shutdown deadline exceeded; "
+                    "mark-api-launch: owner shutdown worker unavailable; "
                     "retain recovery fences",
                     file=sys.stderr,
                 )
                 exit_code = 2
             else:
-                exit_code = outcomes[0]
+                # SIGTERM consumed some of the global budget during startup.
+                # The final close worker receives only the remaining duration.
+                worker.join(
+                    max(0.0, shutdown_deadline - monotonic())
+                    if shutdown_deadline is not None
+                    else _SHUTDOWN_OWNER_BUDGET_SECONDS
+                )
+                if worker.is_alive() or not outcomes:
+                    print(
+                        "mark-api-launch: owner shutdown deadline exceeded; "
+                        "retain recovery fences",
+                        file=sys.stderr,
+                    )
+                    exit_code = 2
+                else:
+                    exit_code = outcomes[0]
         return exit_code
 
     finally:
