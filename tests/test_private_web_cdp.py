@@ -176,6 +176,16 @@ def page_with_results(*values):
 
 class CdpPrivateWebPageTests(unittest.TestCase):
 
+    # Existing class-level tests intentionally inject synthetic CDP sockets and
+    # responses; bypass admission only for these in-memory unit test cases.
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        synthetic = patch("mark_api.private_web_cdp._require_private_web_cdp_authority")
+        synthetic.start()
+        cls.addClassCleanup(synthetic.stop)
+
+
     def test_open_create_form_uses_exact_labels_and_browser_input_only(self) -> None:
         ready_form = {
             "state": "ready",

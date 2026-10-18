@@ -38,6 +38,11 @@ class UrllibHttpTransport:
         self._timeout_seconds = timeout_seconds
 
     def get(self, url: str, *, headers: dict[str, str]) -> HttpResponse:
+        # No real owner-management Web transport without external platform
+        # permission. Tests must inject their own synthetic HttpTransport.
+        raise TransportFailure(
+            "private management HTTP transport not authorized; use mark-api-offline"
+        )
         request = Request(url, headers=headers, method="GET")
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
