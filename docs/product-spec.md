@@ -1,10 +1,24 @@
 # Produktspezifikation
 
-Stand: 05.10.2026
+Stand: 18.10.2026 (Lieferziel aktualisiert; technischer Stand nur revisionsgebunden)
 
-Status: **MVP-Kern technisch vorhanden; Product Launcher bündelt Initial-Sync, expliziten lokalen Reaction-E-Mail-Import, Dashboard, Same-Origin Write UX und Default-on Write Composition; Email-only Classification ist integriert; Gesamtprodukt, Freshness/Recovery und finale E2E-Abnahme noch nicht abgeschlossen**
+Status: **Gesamtprodukt noch nicht abgenommen.** Wesentliche Core-, Analytics-, Dashboard- und Write-Komponenten sind implementiert, aber auf Main `8ea011d562ab41f6c7d49e38781b81fbe76d356c` blockiert der Private-Web-Produktstarter noch pauschal. Integrations-, Recovery- und installierte Ende-zu-Ende-Nachweise müssen auf dem tatsächlichen späteren Liefercommit erneuert werden.
 
 Quelle: `docs/requirements-source-2026-09-23.md`
+
+## 0. Lieferziel und nachprüfbare Endabnahme (Kundenauftrag 18.10.2026)
+
+Der Auftraggeber erwartet ein **vollständig benutzbares Produkt**, nicht nur eine lokale Offline-Auswertung und nicht nur isoliert getestete Bibliotheksbausteine. Eine allgemeine „Plattformfreigabe“ wird gemäß D-028 nicht als pauschaler **technischer** Fertigstellungsblocker gewertet. Die praktische Einsetzbarkeit eines konkreten Zugriffs muss davon getrennt berücksichtigt werden; Berechtigungen, die für eine bestimmte Schnittstelle tatsächlich erforderlich sind, werden nicht erfunden.
+
+Die Abnahme muss an einer frischen Installation aus dem **exakten Liefercommit** folgende zusammenhängenden Pfade nachweisen:
+
+- **Start und Bestand:** dokumentierte Einrichtung, vorhandene SQLite-Datenbank und sichere Erstinitialisierung; benutzbarer Product Launcher, authentifizierte eigene Inventarbeobachtung, erneuter kontrollierter Sync und sichtbarer Aktualitäts-/Fehlerzustand; kein stilles Ersetzen einer verlorenen Datenbank.
+- **Verwaltung:** aus dem Dashboard heraus nutzerseitig ausgelöste Create-/Media-, Titel-/Beschreibungs-, Pause-/Aktivierungs- und Delete-Operationen über die bestehende Write API. Positiv-, Ablehnungs-, unklarer Ausführungs- und Wiederanlauffall müssen jeweils korrekt bedienbar sein. Eine reine Adapter-/Mock-Existenz genügt nicht.
+- **Auswertung:** eigene Anzeigen und belegte Kennzahlen, Reaktionen/Interessenten, lokale E-Mail-Importe, Labels, Gruppen, Grafiken und Top-Listen samt Zeit-/Quellenprovenienz. Die offene fachliche Zielmetrik wird vom Anwender ausdrücklich ausgewählt; ohne Auswahl wird keine objektive „beste Lösung“ behauptet.
+- **Betrieb und Wiederherstellung:** reproduzierbarer normaler Start/Stop, Shutdown, SQLite-Backup/Restore, konservative Reconciliation von unklaren Writes, verständliche Status- und Fehleranzeigen. Tests umfassen Prozessunterbrechung, Datenbankausfall und verlorene HTTP-Antworten entsprechend dem jeweiligen realen Risiko.
+- **Belege:** installierter Paket-/CLI-/Browser-Smoke, vollständige Regressionssuite, aktuelle CI, Sicherheitsprüfungen der tatsächlich geänderten Pfade sowie ein End-to-End-Abnahmeprotokoll für die geprüfte Revision. Automatisierte Tests lösen keine unbeabsichtigten realen Anzeigenaktionen aus; eine spätere bewusste reale Kundenabnahme ist davon getrennt.
+
+Die vorhandenen technischen Authentifizierungs-, Owner-/ID-, CSRF-/Origin-, Capability-, Idempotenz-, Confirmation-, Media- und Recovery-Schutzfunktionen sind Teil des **voll funktionsfähigen** Produkts und werden nicht zur Abkürzung der Fertigstellung abgeschaltet. Ein pauschales Freigabe-NO-GO ersetzt umgekehrt keinen konkreten Produktfehler. Unbelegte Aussagen über Plattformrechte, Testerfolg oder Produktionsreife sind kein Abnahmekriterium.
 
 ## 1. Ziel
 
