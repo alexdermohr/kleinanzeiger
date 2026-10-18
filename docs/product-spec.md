@@ -1,16 +1,31 @@
 # Produktspezifikation
 
-Stand: 05.10.2026
+Stand: 18.10.2026 (Lieferziel aktualisiert; technischer Stand nur revisionsgebunden)
 
-Status: **MVP-Kern technisch vorhanden; Product Launcher bündelt Initial-Sync, expliziten lokalen Reaction-E-Mail-Import, Dashboard, Same-Origin Write UX und Default-on Write Composition; Email-only Classification ist integriert; Gesamtprodukt, Freshness/Recovery und finale E2E-Abnahme noch nicht abgeschlossen**
+Status: **Gesamtprodukt noch nicht abgenommen.** Wesentliche Core-, Analytics-, Dashboard- und Write-Komponenten sind implementiert, aber auf Main `8ea011d562ab41f6c7d49e38781b81fbe76d356c` blockiert der Private-Web-Produktstarter noch pauschal. Integrations-, Recovery- und installierte Ende-zu-Ende-Nachweise müssen auf dem tatsächlichen späteren Liefercommit erneuert werden.
 
 Quelle: `docs/requirements-source-2026-09-23.md`
+
+## 0. Lieferziel und nachprüfbare Endabnahme (Kundenauftrag 18.10.2026)
+
+Der Auftraggeber erwartet ein **vollständig benutzbares Produkt**, nicht nur eine lokale Offline-Auswertung und nicht nur isoliert getestete Bibliotheksbausteine. Eine allgemeine „Plattformfreigabe“ wird gemäß D-028 nicht als pauschaler **technischer** Fertigstellungsblocker gewertet. Die praktische Einsetzbarkeit eines konkreten Zugriffs muss davon getrennt berücksichtigt werden; Berechtigungen, die für eine bestimmte Schnittstelle tatsächlich erforderlich sind, werden nicht erfunden.
+
+Die Abnahme muss an einer frischen Installation aus dem **exakten Liefercommit** folgende zusammenhängenden Pfade nachweisen:
+
+- **Start und Bestand:** dokumentierte Einrichtung, vorhandene SQLite-Datenbank und sichere Erstinitialisierung; benutzbarer Product Launcher, authentifizierte eigene Inventarbeobachtung, erneuter kontrollierter Sync und sichtbarer Aktualitäts-/Fehlerzustand; kein stilles Ersetzen einer verlorenen Datenbank.
+- **Verwaltung:** aus dem Dashboard heraus nutzerseitig ausgelöste Create-/Media-, Titel-/Beschreibungs-, Pause-/Aktivierungs- und Delete-Operationen über die bestehende Write API. Positiv-, Ablehnungs-, unklarer Ausführungs- und Wiederanlauffall müssen jeweils korrekt bedienbar sein. Eine reine Adapter-/Mock-Existenz genügt nicht.
+- **Auswertung:** eigene Anzeigen und belegte Kennzahlen, Reaktionen/Interessenten, lokale E-Mail-Importe, Labels, Gruppen, Grafiken und Top-Listen samt Zeit-/Quellenprovenienz. Die offene fachliche Zielmetrik wird vom Anwender ausdrücklich ausgewählt; ohne Auswahl wird keine objektive „beste Lösung“ behauptet.
+- **Text- und Bildgenerierung:** Die ursprünglich gewünschten, aus Nutzerprompts erzeugten Titel, Beschreibungstexte und Bilder sind Bestandteil der **finalen Vollprodukt-Abnahme**, nicht bloß eines optionalen Ideenpools. Ergebnisse müssen im installierten Produkt erzeugt, angezeigt, ausgewählt beziehungsweise bearbeitet und bei Bildern an die vorhandene Anzeigen-/Media-Kette übergeben werden können. Der Dienst-/Modell-Ausfall ist bedienbar zu behandeln; aus Generierung allein folgt keine Veröffentlichung ohne Nutzeraktion. Die frühere Depriorisierung aus D-005 gilt nur für den bisherigen MVP-Zwischenschritt.
+- **Betrieb und Wiederherstellung:** reproduzierbarer normaler Start/Stop, Shutdown, SQLite-Backup/Restore, konservative Reconciliation von unklaren Writes, verständliche Status- und Fehleranzeigen. Tests umfassen Prozessunterbrechung, Datenbankausfall und verlorene HTTP-Antworten entsprechend dem jeweiligen realen Risiko.
+- **Belege:** installierter Paket-/CLI-/Browser-Smoke, vollständige Regressionssuite, aktuelle CI, Sicherheitsprüfungen der tatsächlich geänderten Pfade sowie ein End-to-End-Abnahmeprotokoll für die geprüfte Revision. Automatisierte Tests lösen keine unbeabsichtigten realen Anzeigenaktionen aus; eine spätere bewusste reale Kundenabnahme ist davon getrennt.
+
+Die vorhandenen technischen Authentifizierungs-, Owner-/ID-, CSRF-/Origin-, Capability-, Idempotenz-, Confirmation-, Media- und Recovery-Schutzfunktionen sind Teil des **voll funktionsfähigen** Produkts und werden nicht zur Abkürzung der Fertigstellung abgeschaltet. Ein pauschales Freigabe-NO-GO ersetzt umgekehrt keinen konkreten Produktfehler. Unbelegte Aussagen über Plattformrechte, Testerfolg oder Produktionsreife sind kein Abnahmekriterium.
 
 ## 1. Ziel
 
 Für Marks Kleinanzeigen-Account soll eine Lösung entstehen, die Anzeigen verwaltet und Leistungsdaten in einem Dashboard auswertet. Aus den gesammelten Daten sollen Vergleiche, Ranglisten und Optimierungsvorschläge entstehen.
 
-Die ursprünglich genannten Wünsche nach externer Titel-/Beschreibungsgenerierung und Bildgenerierung bleiben dokumentiert, sind nach Projektentscheidung vom 24.09.2026 jedoch **nicht MVP-priorisiert**. Der MVP konzentriert sich auf Anzeigenverwaltung, Synchronisation, Messaging und messbare Leistungsdaten.
+Die ursprünglich genannten Wünsche nach externer Titel-/Beschreibungsgenerierung und Bildgenerierung bleiben dokumentiert, sind nach Projektentscheidung vom 24.09.2026 jedoch **nicht MVP-priorisiert**. Der MVP konzentriert sich auf Anzeigenverwaltung, Synchronisation, Messaging und messbare Leistungsdaten. Für die **finale Auslieferung** gehören die ursprünglich bestätigten Generierungsfunktionen gemäß D-028 wieder zum vollständigen Lieferumfang; ihr aktueller Implementierungs- und Integrationsstatus bleibt offen.
 
 ## 2. Belegter Funktionsumfang
 
@@ -47,7 +62,7 @@ Diese ursprünglich bestätigte Anforderung ist **kein MVP-Schwerpunkt**. Der vo
 
 Die Daten-/Analytics-Surface des Dashboards ist read-only und stellt Anzeigen-, Reaktions- und Analytics-Daten dar; Grafiken und Ranglisten verwenden ausschließlich explizit angeforderte Rohmetriken. Der standalone Einstieg `mark-api-dashboard` bleibt vollständig GET-only/read-only. Im normalen Product Launcher ergänzt dieselbe sichtbare Oberfläche eine getrennt abgesicherte Write UX, die ausschließlich an die bestehende lokale Write API delegiert.
 
-Der installierte Einstieg `mark-api-launch` bildet den kohärenten Produktstart für eine bereits laufende, bereits authentifizierte lokale Chrome-/Chromium-Sitzung über loopback-CDP. Er führt genau einen frischen Owner-Inventory-Read aus und persistiert bestätigte aktuelle Anzeigen sowie `ABSENT`-Transitions für historisch bekannte, nun fehlende Anzeigen. Optional importiert er danach einen vom Nutzer ausdrücklich über `--email FILE` angegebenen lokalen Batch von Kleinanzeigen-Nachrichtenkopien mit der bestehenden idempotenten E-Mail-Importlogik in denselben Store. Erst nach erfolgreichem Initial-Read und einem gegebenenfalls angeforderten erfolgreichen Reaction-Import wird zuerst die bestehende loopback-only Mark Write API gestartet und anschließend das Dashboard an deren tatsächliche Loopback-Adresse gebunden. Der Launcher erzeugt dafür pro Prozess einen neuen lokalen Write-API-Bearer sowie einen getrennten Dashboard-Write-Token. Letzterer wird ausschließlich als URL-Fragment der lokalen Dashboard-URL übergeben, vom Browser in `sessionStorage` übernommen und unmittelbar aus der sichtbaren URL entfernt; der Backend-Bearer wird nicht an Browser-JavaScript exponiert.
+Die implementierte, auf dem geprüften Main-Stand `8ea011d` **noch nicht ausführbare** Komposition von `mark-api-launch` ist für den kohärenten Produktstart ausgelegt für eine bereits laufende, bereits authentifizierte lokale Chrome-/Chromium-Sitzung über loopback-CDP. Er führt genau einen frischen Owner-Inventory-Read aus und persistiert bestätigte aktuelle Anzeigen sowie `ABSENT`-Transitions für historisch bekannte, nun fehlende Anzeigen. Optional importiert er danach einen vom Nutzer ausdrücklich über `--email FILE` angegebenen lokalen Batch von Kleinanzeigen-Nachrichtenkopien mit der bestehenden idempotenten E-Mail-Importlogik in denselben Store. Erst nach erfolgreichem Initial-Read und einem gegebenenfalls angeforderten erfolgreichen Reaction-Import wird zuerst die bestehende loopback-only Mark Write API gestartet und anschließend das Dashboard an deren tatsächliche Loopback-Adresse gebunden. Der Launcher erzeugt dafür pro Prozess einen neuen lokalen Write-API-Bearer sowie einen getrennten Dashboard-Write-Token. Letzterer wird ausschließlich als URL-Fragment der lokalen Dashboard-URL übergeben, vom Browser in `sessionStorage` übernommen und unmittelbar aus der sichtbaren URL entfernt; der Backend-Bearer wird nicht an Browser-JavaScript exponiert.
 
 Die Product-Launcher Write UX unterstützt die bereits implementierten Create-, Media-, Content-, State- und Delete-Surfaces. Ihre Same-Origin-Proxy-Schicht ist strikt route-/header-/body-allowlistet, verlangt den per-process Dashboard-Token, einen passenden `Origin` und einen CSRF-Marker und öffnet kein CORS. Sie implementiert keine eigene Plattform-Write-Semantik: Capability, persistente Write-API-Idempotenz, Ownership, Confirmation, TOCTOU, Post-Readback, Media-Persistenzevidenz und `platform_retry_authorized=false` bleiben ausschließlich beim vorhandenen Write-API-/Core-Pfad. Zusätzlich persistiert der Dashboard-Proxy vor jeder Plattformweiterleitung den normalisierten UI-Request und dessen Idempotency-Key als lokalen Pending-Fence in derselben SQLite-Datei. Bei unbekanntem Transportausgang wird nicht automatisch erneut gesendet; ein zweiter Tab oder neuer Key für dieselbe Ressource wird blockiert, und eine manuelle Wiederholung verwendet exakt denselben gespeicherten Request/Key. Nach Tab- oder Dashboard-Neustart kann die UI die Pending-Records mit dem aktuellen per-process UI-Token wieder lesen; Persistenzfehler bleiben fail-closed. Ein Pending-Fence wird erst durch einen separaten lokalen Browser-ACK für exakt Scope und Idempotency-Key geräumt, nachdem die UI einen gebundenen terminalen Backend-Response oder sicheren Clientfehler tatsächlich verarbeitet hat; bei verlorenem Response oder ACK bleibt der ursprüngliche Request gebunden. Partielles lokales Media-Staging verwirft bereits bekannte Refs über eine capability-gebundene idempotente Discard-Primitive; sie ist keine Plattformoperation. Verlorene Antworten nach bereits erfolgreichem lokalem Stage können keinen dauerhaften Handle-Leak erzeugen: ungenutzte Handles laufen nach 15 Minuten ab und werden vor dem nächsten Stage/Resolve lazy aus dem lokalen Kontingent entfernt. Ein zusätzlicher `--enable-writes`-Schalter existiert weiterhin nicht. Ein fehlgeschlagener oder unklarer Initial-Read oder ein fehlerhafter ausdrücklich angeforderter Mail-Batch bricht den Start vor beiden HTTP-Surfaces ab. Mailbox-Suche, Messaging-Gateway-Reads und periodische Aktualisierung bleiben außerhalb dieses Slices.
 
@@ -108,6 +123,8 @@ Frühere offene Punkte zu Verwaltungsscope, Integrationsarchitektur, technischen
 
 ## 5. Technische Gates und Betriebsgrenzen
 
+**Stand auf Main `8ea011d`:** Die folgenden Launcher-/Write-Gate-Verträge (insbesondere Punkte 1, 7 und 9) beschreiben den implementierten technischen Aufbau, **nicht** einen derzeit erreichbaren Product-Launcher. `_require_private_web_authorization()` blockiert den normalen Start und den programmatischen Builder vor deren Ausführung. Der bestehende Offline-Modus bleibt separat nutzbar. Eine spätere Freischaltung setzt frische Tests und technische Abnahme voraus.
+
 Der aktuelle Core und die Runtime-Surfaces erzwingen insbesondere:
 
 1. Die generischen Core-/Runtime-Surfaces bleiben fail-safe default-off. Der normale Produktstart `mark-api-launch` öffnet die bestehenden Capability-, API-, Core- und Media-Gates dagegen ausdrücklich und automatisch für seine lokale, loopback-only Write-Komposition; es gibt keinen zusätzlichen Write-Opt-in im Produktpfad.
@@ -125,9 +142,9 @@ Der aktuelle Core und die Runtime-Surfaces erzwingen insbesondere:
 
 Die maßgeblichen Architektur- und Sicherheitsentscheidungen sind in D-006 bis D-027 dokumentiert. Ein implementierter technischer Pfad ist keine automatische Freigabe für reale Plattformwrites außerhalb einer vom Nutzer ausgelösten Produktoperation.
 
-## 6. Aktueller MVP-Stand
+## 6. Vorhandene MVP-Bausteine (noch keine vollständige Produktabnahme)
 
-Der technische MVP umfasst inzwischen:
+Die folgende Liste bezeichnet implementierte Verträge/Komponenten und historisch getestete Einzelpfade. Insbesondere die Launcher-/Default-on-Elemente 10 bis 12, 14 und 16 sind auf Main `8ea011d` wegen des vorgeschalteten pauschalen Startup-Abbruchs **nicht als Endnutzerpfad ausführbar**. Aus ihrer Existenz folgt daher weder vollständige installierte Nutzbarkeit noch eine neue Plattformberechtigung:
 
 1. Synchronisation und read-only Besitzer-/Bestandsdaten,
 2. ID-gebundenes Content-Update,
@@ -152,8 +169,8 @@ Reale sichtbare Testanzeigen, Testnachrichten oder zyklische Plattformwrites wer
 
 ## 7. Nächste Produktphase
 
-Der Product Launcher schließt jetzt den kohärenten Startpfad aus Initial-Sync, read-only Daten-/Analytics-Dashboard, Same-Origin Write UX und default-on Write-Komposition. Die bestehenden Authentizitäts-, Ownership-, Confirmation-, TOCTOU-, Readback- und No-Blind-Retry-Sicherheiten bleiben erhalten; D-024 härtet zusätzlich die persistente Idempotenz über Prozessabbruch und Neustart.
+Die bislang implementierte Launcher-Komposition soll den kohärenten Startpfad aus Initial-Sync, read-only Daten-/Analytics-Dashboard, Same-Origin Write UX und default-on Write-Komposition schließen; auf Main `8ea011d` verhindert das pauschale Admission-Gate ihre Ausführung. Der Endnutzerpfad muss nach der gezielten Korrektur erneut installiert und Ende-zu-Ende getestet werden. Die bestehenden Authentizitäts-, Ownership-, Confirmation-, TOCTOU-, Readback- und No-Blind-Retry-Sicherheiten bleiben erhalten; D-024 härtet zusätzlich die persistente Idempotenz über Prozessabbruch und Neustart.
 
-Die interne Auth-/Idempotency-Härtung, der explizite lokale Reaction-Data-Startup-Pfad, Email-only Classification und Dashboard Write UX sind jetzt Bestandteil des Produktpfads. Als nächster eigener Produktslice folgt Freshness/Time; danach Recovery UX, SQLite Lifecycle, Shutdown, Packaging, Full E2E und finaler Produktaudit.
+Die interne Auth-/Idempotency-Härtung, der explizite lokale Reaction-Data-Startup-Pfad, Email-only Classification und Dashboard Write UX sind implementierte Bausteine. Ihre Integration in einen tatsächlich startbaren und vollständig geprüften Produktpfad sowie wiederholbarer Sync/Freshness, Recovery UX, SQLite Lifecycle, Shutdown, Packaging, Full E2E und der finale Produktaudit bleiben konkrete Lieferarbeiten.
 
 Die beiden fachlichen Analytics-Entscheidungen bleiben weiterhin offen: `reaction_metric` für „wie viele geschrieben haben“ und `objective_metric` beziehungsweise eine ausdrücklich definierte Zielfunktion für „beste Lösung“. Ohne diese Festlegungen darf keine objective-gebundene Empfehlung als fachlich gewollt behauptet werden.

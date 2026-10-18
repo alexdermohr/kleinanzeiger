@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import hmac
 import http.client
 import json
 import math
 import re
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,6 +34,39 @@ from .query import (
     summary_to_dict,
 )
 from .storage import SnapshotStore
+
+
+_ANALYTICS_CSV_RANKING_COLUMNS = (
+    "ad_id", "metric", "value", "title", "present", "lifecycle_state",
+    "metric_observed_at", "metric_source", "metric_last_known",
+)
+_ANALYTICS_CSV_GROUP_COLUMNS = (
+    "dimension", "metric", "label", "sample_size", "metric_sum", "metric_mean",
+)
+
+
+def _csv_safe_cell(value: object) -> object:
+    """Prevent spreadsheet formulas from executing in untrusted strings."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        unspaced = value.lstrip()
+        if unspaced.startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")):
+            return "'" + value
+    return value
+
+
+def _analytics_csv_bytes(
+    columns: tuple[str, ...],
+    rows: Iterable[tuple[object, ...]],
+) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow(columns)
+    for row in rows:
+        writer.writerow([_csv_safe_cell(value) for value in row])
+    # UTF-8 BOM also makes German labels readable in spreadsheet imports.
+    return b"\xef\xbb\xbf" + output.getvalue().encode("utf-8")
 
 
 _MAX_PROXY_JSON_BODY_BYTES = 16 * 1024
@@ -201,6 +237,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <p id="analytics-status" class="note" role="status" aria-live="polite"></p>
 
       <h3>Gruppen</h3>
+      <p><a id="groups-csv" href="#" hidden>Gruppen als CSV exportieren</a></p>
       <div id="groups-chart" class="chart" role="list" aria-label="Gruppenvergleich nach Mittelwert" hidden></div>
       <div class="table-wrap">
         <table>
@@ -219,6 +256,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <p class="note">Stichprobengröße 1 ist nur ein Datenwert, keine Qualitätsaussage.</p>
 
       <h3>Anzeigenranking</h3>
+      <p><a id="ranking-csv" href="#" hidden>Ranking als CSV exportieren</a></p>
       <p class="note">Jeder Ranking-Wert besitzt seine eigene Beobachtungszeit und Quelle. Reaktions- und E-Mail-Werte stammen aus getrennten Datengrundlagen; Summen sind keine aktuelle Plattformbestätigung.</p>
       <div id="ranking-chart" class="chart" role="list" aria-label="Anzeigenvergleich nach ausgewählter Metrik" hidden></div>
       <div class="table-wrap">
@@ -1710,6 +1748,10 @@ async function loadAnalytics() {
   const metric = byId("metric-select").value;
   const dimension = byId("dimension-select").value;
   const status = byId("analytics-status");
+  const groupsCsv = byId("groups-csv");
+  const rankingCsv = byId("ranking-csv");
+  groupsCsv.hidden = true;
+  rankingCsv.hidden = true;
 
   // A new selection must never display the previous selection's values.
   renderGroups([]);
@@ -1730,6 +1772,11 @@ async function loadAnalytics() {
     if (generation !== analyticsRequestGeneration) return;
     renderGroups(groups);
     renderRanking(ranking);
+    const params = `dimension=${encodeURIComponent(dimension)}&metric=${encodeURIComponent(metric)}`;
+    groupsCsv.href = `/api/analytics/groups.csv?${params}`;
+    rankingCsv.href = `/api/analytics/ads.csv?metric=${encodeURIComponent(metric)}`;
+    groupsCsv.hidden = false;
+    rankingCsv.hidden = false;
     status.textContent = "";
   } catch (error) {
     // An older rejection must not overwrite a newer selection's status.
@@ -1741,6 +1788,8 @@ async function loadAnalytics() {
 async function load() {
   const status = byId("status");
   status.textContent = "Lade lokale Daten …";
+  byId("groups-csv").hidden = true;
+  byId("ranking-csv").hidden = true;
   try {
     const [summary, ads, metricsPayload, dimensionsPayload, contract, dashboardConfig] = await Promise.all([
       getJson("/api/summary"),
@@ -1910,6 +1959,30 @@ def _handler_factory(
         server_version = "mark-api-readonly/0.1"
         sys_version = ""
 
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            # Loopback bind alone does not stop DNS-rebound foreign Host
+            # requests. Validate the actual listener authority before any
+            # read route or optional same-origin Write API proxy.
+            listener_host, listener_port = self.server.server_address
+            canonical = _dashboard_http_origin(
+                "127.0.0.1", int(listener_port),
+            ).removeprefix("http://")
+            allowed_hosts = {canonical, f"127.0.0.1:{int(listener_port)}"}
+            get_all = getattr(self.headers, "get_all", None)
+            hosts = get_all("Host") if callable(get_all) else ()
+            if (
+                str(listener_host) != "127.0.0.1"
+                or hosts is None
+                or len(hosts) != 1
+                or hosts[0] not in allowed_hosts
+            ):
+                self.close_connection = True
+                self.send_error(421, "Misdirected Request")
+                return False
+            return True
+
         def log_message(self, format: str, *args: object) -> None:
             return
 
@@ -1921,6 +1994,7 @@ def _handler_factory(
             *,
             allow: str | None = None,
             idempotency_replayed: bool = False,
+            download_filename: str | None = None,
         ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -1938,6 +2012,9 @@ def _handler_factory(
                 self.send_header("Allow", allow)
             if idempotency_replayed:
                 self.send_header("Idempotency-Replayed", "true")
+            if download_filename is not None:
+                # Names are built from enumerated, validated metric/dimension keys.
+                self.send_header("Content-Disposition", f'attachment; filename="{download_filename}"')
             self.end_headers()
             self.wfile.write(body)
 
@@ -2423,6 +2500,29 @@ def _handler_factory(
                     {"dimensions": list(ANALYTICS_DIMENSIONS)},
                 )
                 return
+            if path == "/api/analytics/ads.csv":
+                metric = _single_query_value(target.query, "metric")
+                if metric not in ANALYTICS_METRICS:
+                    self._invalid_metric()
+                    return
+                rows = []
+                for item in analytics.rank_ads(metric):
+                    evidence = item.metric_evidence
+                    rows.append((
+                        item.ad_id, metric, item.value, item.title,
+                        "" if item.present is None else str(item.present).lower(),
+                        item.lifecycle_state.value if item.lifecycle_state is not None else "",
+                        evidence.observed_at.isoformat() if evidence is not None else "",
+                        evidence.source if evidence is not None else "",
+                        "" if evidence is None or evidence.last_known is None
+                        else str(evidence.last_known).lower(),
+                    ))
+                self._send(
+                    200, _analytics_csv_bytes(_ANALYTICS_CSV_RANKING_COLUMNS, rows),
+                    "text/csv; charset=utf-8",
+                    download_filename=f"mark-analytics-{metric}.csv",
+                )
+                return
             if path == "/api/analytics/ads":
                 metric = _single_query_value(target.query, "metric")
                 if metric not in ANALYTICS_METRICS:
@@ -2434,6 +2534,26 @@ def _handler_factory(
                         ad_metric_ranking_to_dict(item)
                         for item in analytics.rank_ads(metric)
                     ],
+                )
+                return
+            if path == "/api/analytics/groups.csv":
+                dimension = _single_query_value(target.query, "dimension")
+                if dimension not in ANALYTICS_DIMENSIONS:
+                    self._invalid_dimension()
+                    return
+                metric = _single_query_value(target.query, "metric")
+                if metric not in ANALYTICS_METRICS:
+                    self._invalid_metric()
+                    return
+                rows = [
+                    (dimension, metric, item.label, item.sample_size,
+                     item.metric_sum, item.metric_mean)
+                    for item in analytics.group_rankings(dimension, metric)
+                ]
+                self._send(
+                    200, _analytics_csv_bytes(_ANALYTICS_CSV_GROUP_COLUMNS, rows),
+                    "text/csv; charset=utf-8",
+                    download_filename=f"mark-groups-{dimension}-{metric}.csv",
                 )
                 return
             if path == "/api/analytics/groups":
