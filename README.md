@@ -9,6 +9,14 @@ automatisierte Private-Web-/CDP-Zugriffe einschließlich standardmäßig
 aktivierter Write-Komposition. Ohne gesondert nachgewiesene Berechtigung
 ist dieser Pfad **nicht zur Nutzung freigegeben**; ein eingeloggter Browser
 oder technische Idempotenz-/Recovery-Gates sind keine Plattformberechtigung.
+**Der bisherige normale mark-api-launch und der programmatische
+build_product_launcher() verweigern nun jeden Private-Web-Start bereits vor
+SQLite-Initialisierung, Browser/CDP und Write-API.** Browseranmeldung,
+CLI-Parameter oder Umgebungsvariablen erteilen keine Berechtigung.
+Die früheren Lifecycle-Tests verwenden nur synthetische Runtimes und
+eine ausdrücklich gemockte Berechtigungsgrenze. Der zulässige lokale
+Produktstart ist mark-api-offline. Ein künftiger offizieller API-Transport
+muss eigenständig nachgewiesenes Konto-Entitlement und Scopes besitzen.
 Siehe [Release-Blocker #111](https://github.com/alexdermohr/mark-api/issues/111)
 und [Kleinanzeigen-Nutzungsbedingungen, § 5](https://themen.kleinanzeigen.de/nutzungsbedingungen/).
 
