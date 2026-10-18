@@ -435,6 +435,18 @@ class DeletePage:
 
 
 class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
+
+    # This class tests synthetic internal composition, not platform admission.
+    # Product code remains fail-closed unless a test explicitly patches this gate.
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        synthetic_only = patch(
+            "mark_api.private_web_runtime._require_private_web_runtime_authority"
+        )
+        synthetic_only.start()
+        cls.addClassCleanup(synthetic_only.stop)
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.image = Path(self.tmp.name) / "photo.jpg"
@@ -1919,6 +1931,18 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
 
 
 class PrivateWebContentRuntimeTests(unittest.TestCase):
+
+    # This class tests synthetic internal composition, not platform admission.
+    # Product code remains fail-closed unless a test explicitly patches this gate.
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        synthetic_only = patch(
+            "mark_api.private_web_runtime._require_private_web_runtime_authority"
+        )
+        synthetic_only.start()
+        cls.addClassCleanup(synthetic_only.stop)
+
     def test_create_writer_uses_fresh_page_per_call_and_closes_each_page(self) -> None:
         owner = OwnerReader(ReadResult.success_empty(()))
         events: list[tuple] = []
@@ -2667,6 +2691,18 @@ class PrivateWebContentRuntimeTests(unittest.TestCase):
 
 
 class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
+
+    # This class tests synthetic internal composition, not platform admission.
+    # Product code remains fail-closed unless a test explicitly patches this gate.
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        synthetic_only = patch(
+            "mark_api.private_web_runtime._require_private_web_runtime_authority"
+        )
+        synthetic_only.start()
+        cls.addClassCleanup(synthetic_only.stop)
+
     TOKEN = "fake-runtime-token"
 
     @staticmethod
