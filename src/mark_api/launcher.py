@@ -37,6 +37,20 @@ class ProductLauncherError(RuntimeError):
     """The user-facing product launcher could not start or stop safely."""
 
 
+def _require_private_web_authorization() -> None:
+    """No independently approved private-Web/CDP platform authority exists.
+
+    Logged-in Chrome, CDP, token, environment setting and test credentials
+    are never proof of contractual Kleinanzeigen automation permission.
+    A future official ProSellers transport needs a separate verified account
+    entitlement, scope and credential admission. It cannot grant this path.
+    """
+    raise ProductLauncherError(
+        "Private-Web/CDP platform automation is not authorized. "
+        "Use mark-api-offline with explicitly supplied local EML/exports."
+    )
+
+
 class _InventoryRuntime(Protocol):
     def read_inventory(self) -> ReadResult[tuple[AdSnapshot, ...]]:
         ...
@@ -344,7 +358,12 @@ def build_product_launcher(
     Authentication and browser lifecycle remain caller-owned. This launcher
     consumes only an already-running loopback CDP endpoint. Product writes are
     composed by default through the existing authenticated/idempotent Write API.
+
+    This historical candidate is not authorized for normal product runtime.
     """
+
+    # Deny before SQLite, CDP, IPC, runtime and Write token side effects.
+    _require_private_web_authorization()
 
     if not isinstance(db_path, Path):
         raise TypeError("db_path must be pathlib.Path")
@@ -597,9 +616,9 @@ def build_product_launcher(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Start Mark from an already-authenticated local Chrome/CDP session, "
-            "perform one fresh owner-inventory sync, and serve the dashboard "
-            "plus default-on loopback Write API."
+            "Historical Private-Web/CDP launcher: currently unavailable "
+            "(no verified platform permission). For local EML and a "
+            "read-only dashboard use mark-api-offline."
         ),
     )
     parser.add_argument(
@@ -673,6 +692,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    try:
+        # CLI admission precedes any injected/mocked product builder.
+        _require_private_web_authorization()
+    except ProductLauncherError as exc:
+        print(f"mark-api-launch: {exc}", file=sys.stderr)
+        return 2
     contract = AnalyticsContract(
         reaction_metric=args.reaction_metric,
         objective_metric=args.objective_metric,

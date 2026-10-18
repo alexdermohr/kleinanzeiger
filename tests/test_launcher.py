@@ -156,6 +156,13 @@ class ProductLauncherTests(unittest.TestCase):
     DASHBOARD_TOKEN = "fake-dashboard-write-token-0001"
 
     def setUp(self) -> None:
+        # Historical lifecycle tests use synthetic runtimes only. They mock
+        # the admission check without authorizing real CDP or platform writes.
+        admission_patch = patch(
+            "mark_api.launcher._require_private_web_authorization",
+        )
+        admission_patch.start()
+        self.addCleanup(admission_patch.stop)
         self.write_runtime = WriteRuntime()
         write_patch = patch(
             "mark_api.launcher.build_private_web_write_api_runtime",
