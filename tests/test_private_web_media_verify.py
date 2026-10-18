@@ -363,6 +363,30 @@ class PrivateWebPublicMediaPersistenceVerifierTests(unittest.TestCase):
             return _Fetched(url, "image/jpeg", b"remote-second")
         raise AssertionError(f"unexpected URL {url}")
 
+    def test_real_default_transport_admission_denial_is_terminal(self) -> None:
+        timer = _FakeMonotonic()
+        fetched = 0
+
+        def fetch(url: str, timeout: float, maximum: int) -> _Fetched:
+            nonlocal fetched
+            fetched += 1
+            return _default_fetch(url, timeout, maximum)
+
+        verifier = PrivateWebPublicMediaPersistenceVerifier(
+            fetch=fetch,
+            signature_loader=self._signature_loader,
+            clock=lambda: NOW,
+            monotonic=timer,
+            sleep=timer.sleep,
+        )
+        result = verifier.verify_media(
+            AD_ID, self.sources, timeout_seconds=10.0
+        )
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(result.error, "private_web_media_not_authorized")
+        self.assertEqual(fetched, 1)
+        self.assertEqual(timer.value, 0.0)
+
     def test_exact_gallery_match_confirms_persistence(self) -> None:
         verifier = PrivateWebPublicMediaPersistenceVerifier(
             fetch=self._exact_fetch,
