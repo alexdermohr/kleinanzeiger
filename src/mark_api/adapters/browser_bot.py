@@ -229,7 +229,8 @@ class BrowserBotAdapter:
         runner: CommandRunner | None = None,
     ) -> None:
         self._runtime = runtime
-        self._runner = runner or SubprocessRunner()
+        # Do not execute caller-owned runner.__bool__ at construction.
+        self._runner = runner if runner is not None else SubprocessRunner()
 
     def _bot_argv(self, command: str, ad_id: str) -> tuple[str, ...]:
         return (

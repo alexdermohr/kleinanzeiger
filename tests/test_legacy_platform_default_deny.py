@@ -11,6 +11,10 @@ from mark_api.adapters._legacy_admission import LegacyPlatformAdmissionDenied
 from mark_api.adapters.browser_bot import BrowserBotAdapter, BrowserBotRuntime, ProcessResult
 from mark_api.adapters.monkrel import MonkrelMobileApiAdapter
 from mark_api.adapters.monkrel_http import MonkrelPrivateHttpContentClient
+from mark_api.adapters.management import (
+    MANAGEMENT_URL, HttpResponse, ManagementReadAdapter,
+    TransportFailure, UrllibHttpTransport,
+)
 from mark_api.adapters.monkrel_runtime import MonkrelPrivateHttpRuntimeClient
 from mark_api.domain import LifecycleState
 from mark_api.results import ReadStatus
@@ -102,6 +106,86 @@ class LegacyPlatformDefaultDenyTests(unittest.TestCase):
         with self.assertRaises(LegacyPlatformAdmissionDenied):
             adapter.update_ad("1234567890", title="synthetic")
         self.assertEqual(upstream.calls, [])
+
+    def test_raw_management_http_denied_before_urlopen(self):
+        with (
+            patch("mark_api.adapters.management.urlopen",
+                  side_effect=AssertionError("unapproved management HTTP")) as urlopen,
+            patch.dict(os.environ, {
+                "MARK_PRIVATE_WEB_APPROVED": "true",
+                "MARK_PROSELLERS_API_ENTITLEMENT_CONFIRMED": "true",
+            }),
+        ):
+            with self.assertRaisesRegex(TransportFailure, "not authorized"):
+                UrllibHttpTransport().get(
+                    MANAGEMENT_URL, headers={"Cookie": "synthetic only"}
+                )
+            urlopen.assert_not_called()
+
+    def test_management_adapter_rejects_before_cookie_provider_and_fake_http(self):
+        seen = []
+        def cookie_provider():
+            seen.append("cookie_provider")
+            raise AssertionError("unauthorized CDP cookie read")
+        class SyntheticTransport:
+            def get(self, url, *, headers):
+                seen.append("transport")
+                return HttpResponse(200, b'{"ads":[],"paging":{"last":1}}')
+
+        adapter = ManagementReadAdapter(
+            cookie_provider=cookie_provider,
+            transport=SyntheticTransport(),
+        )
+        with patch.dict(os.environ, {
+            "MARK_PRIVATE_WEB_APPROVED": "true",
+            "MARK_PLATFORM_WRITES_ENABLED": "true",
+            "MARK_PROSELLERS_API_ENTITLEMENT_CONFIRMED": "true",
+        }):
+            for read in (
+                adapter.read_ads,
+                lambda: adapter.read_ad("1234567890"),
+                lambda: adapter._read_page(cookies="synthetic", page=1),
+            ):
+                with self.subTest(entry=read):
+                    result=read()
+                    self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+                    self.assertEqual(result.error, "legacy_platform_not_authorized")
+        self.assertEqual(seen, [])
+
+    def test_construction_never_truth_tests_injected_management_transport(self):
+        class HostileTransport:
+            def __init__(self):
+                self.calls = []
+            def __bool__(self):
+                self.calls.append("bool")
+                raise AssertionError("unauthorized transport truth-test")
+            def get(self, url, *, headers):
+                self.calls.append("HTTP")
+                raise AssertionError("unauthorized HTTP")
+        transport = HostileTransport()
+        reader = ManagementReadAdapter(
+            cookie_provider=lambda: "synthetic", transport=transport,
+        )
+        self.assertIs(reader._transport, transport)
+        self.assertEqual(reader.read_ads().status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(transport.calls, [])
+
+    def test_construction_never_truth_tests_external_browser_bot_runner(self):
+        class HostileRunner(_Runner):
+            def __bool__(self):
+                self.calls.append("bool")
+                raise AssertionError("unauthorized browser-bot runner truth-test")
+        runner = HostileRunner()
+        runtime = BrowserBotRuntime(
+            python_executable=Path(sys.executable),
+            bot_checkout=Path("/tmp"),
+            config_path=Path("/tmp/mark-synthetic-unused.yaml"),
+        )
+        bot = BrowserBotAdapter(runtime, runner=runner)
+        self.assertIs(bot._runner, runner)
+        with self.assertRaises(LegacyPlatformAdmissionDenied):
+            bot.sync("1234567890")
+        self.assertEqual(runner.calls, [])
 
     def test_direct_monkrel_runtime_wrapper_denies_before_upstream(self):
         upstream = _Upstream()

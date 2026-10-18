@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch as _management_gate_patch
+
 import json
 import unittest
 from dataclasses import replace
@@ -204,6 +206,15 @@ def independent_content_success(content: SmokeContent) -> ReadResult[AdSnapshot]
 
 
 class MonkrelPrivateHttpContentSmokeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests exercise only in-memory synthetic adapters, not live
+        # private Kleinanzeigen inventory. No production admission override.
+        admitted = _management_gate_patch(
+            "mark_api.adapters._legacy_admission.require_legacy_platform_authority"
+        )
+        admitted.start()
+        self.addCleanup(admitted.stop)
+
     def test_prewrite_rejects_reader_without_concrete_lifecycle(self):
         owner = FakeOwnerReader([BASELINE_INVARIANT])
         independent = FakeIndependentReader(

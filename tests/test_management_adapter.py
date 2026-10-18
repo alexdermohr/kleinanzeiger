@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch as _management_gate_patch
+
 import json
 import unittest
 from datetime import datetime, timezone
@@ -40,6 +42,15 @@ def response(status: int, payload: object) -> HttpResponse:
 
 
 class ManagementReadAdapterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests exercise only in-memory synthetic adapters, not live
+        # private Kleinanzeigen inventory. No production admission override.
+        admitted = _management_gate_patch(
+            "mark_api.adapters._legacy_admission.require_legacy_platform_authority"
+        )
+        admitted.start()
+        self.addCleanup(admitted.stop)
+
     def adapter(self, transport: FakeTransport, cookies: str | None = "session=ok"):
         return ManagementReadAdapter(
             cookie_provider=lambda: cookies,
