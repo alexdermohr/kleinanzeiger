@@ -568,9 +568,14 @@ class PrivateWebPublicMediaPersistenceVerifierTests(unittest.TestCase):
             if listing_calls == 1:
                 timer.sleep(0.10)
                 return _Fetched(url, "text/html", listing_html(IMAGE_A))
-            with patch(
-                "mark_api.private_web_media_verify.build_opener",
-                return_value=_BudgetTimeoutOpener(),
+            with (
+                patch(
+                    "mark_api.private_web_media_verify.build_opener",
+                    return_value=_BudgetTimeoutOpener(),
+                ),
+                patch(
+                    "mark_api.private_web_media_verify._require_private_web_public_media_transport_authority"
+                ),
             ):
                 return _default_fetch(url, timeout, maximum)
 
@@ -610,9 +615,14 @@ class PrivateWebPublicMediaPersistenceVerifierTests(unittest.TestCase):
             if listing_calls == 1:
                 timer.sleep(0.10)
                 return _Fetched(url, "text/html", listing_html(IMAGE_A))
-            with patch(
-                "mark_api.private_web_media_verify.build_opener",
-                return_value=_TransportFailureOpener(),
+            with (
+                patch(
+                    "mark_api.private_web_media_verify.build_opener",
+                    return_value=_TransportFailureOpener(),
+                ),
+                patch(
+                    "mark_api.private_web_media_verify._require_private_web_public_media_transport_authority"
+                ),
             ):
                 return _default_fetch(url, timeout, maximum)
 
