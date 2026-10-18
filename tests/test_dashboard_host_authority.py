@@ -1,0 +1,143 @@
+"""Adversarial, exclusively loopback Host-authority tests for Mark dashboard.
+
+No browser, public platform traffic, live accounts or platform writes are used.
+"""
+from __future__ import annotations
+
+import http.client
+import json
+import tempfile
+import threading
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from mark_api.dashboard import create_server
+from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.storage import SnapshotStore
+
+
+class DashboardHostAuthorityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="mark-dashboard-host-")
+        self.addCleanup(self.temp.cleanup)
+        db = Path(self.temp.name) / "mark.sqlite"
+        store = SnapshotStore(db)
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="1234567890",
+            observed_at=datetime(2026, 10, 17, tzinfo=timezone.utc),
+            source="synthetic-offline",
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
+        self.server = create_server(store, port=0)
+        self.worker = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.worker.start()
+        # LIFO test cleanups: shutdown -> close -> join; do not wait on a
+        # still-serving worker, and never leave a listener after the case.
+        self.addCleanup(self.worker.join, 5)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        host, self.port = self.server.server_address
+        self.assertEqual(host, "127.0.0.1")
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        hosts: tuple[str, ...],
+    ) -> tuple[int, bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        try:
+            connection.putrequest(method, path, skip_host=True)
+            for host in hosts:
+                connection.putheader("Host", host)
+            if method in ("POST", "PATCH", "PUT"):
+                connection.putheader("Content-Length", "0")
+            connection.endheaders()
+            response = connection.getresponse()
+            return response.status, response.read()
+        finally:
+            connection.close()
+
+    def test_only_exact_local_authority_can_read_existing_summary(self) -> None:
+        status, body = self.request(
+            "GET", "/api/summary", (f"127.0.0.1:{self.port}",),
+        )
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["tracked_ads"], 1)
+
+        status, body = self.request(
+            "GET", "/healthz", (f"127.0.0.1:{self.port}",),
+        )
+        self.assertEqual((status, json.loads(body)), (200, {"status": "ok"}))
+
+    def test_foreign_host_cannot_read_summary_or_dashboard_assets(self) -> None:
+        # A hostile website can resolve its own domain to loopback. Its Host
+        # remains hostile even if the TCP destination is 127.0.0.1.
+        hostile = (
+            f"attacker-controlled.example:{self.port}",
+            f"127.0.0.1.attacker.example:{self.port}",
+            f"localhost.attacker.example:{self.port}",
+            f"127.0.0.1:{self.port + 1}",
+            "127.0.0.1",
+            f"127.0.0.1:{self.port},attacker.example",
+            f"[::1]:{self.port}",
+        )
+        for value in hostile:
+            for path in ("/api/summary", "/", "/dashboard.js"):
+                with self.subTest(host=value, path=path):
+                    status, body = self.request("GET", path, (value,))
+                    self.assertEqual(status, 421)
+                    self.assertNotIn(b"tracked_ads", body)
+                    self.assertNotIn(b"1234567890", body)
+
+    def test_missing_or_duplicate_host_is_rejected_before_routing(self) -> None:
+        legitimate = f"127.0.0.1:{self.port}"
+        for values in (
+            (),
+            (legitimate, legitimate),
+            (legitimate, f"attacker.example:{self.port}"),
+            (f"attacker.example:{self.port}", legitimate),
+        ):
+            with self.subTest(hosts=values):
+                status, body = self.request("GET", "/api/summary", values)
+                self.assertEqual(status, 421)
+                self.assertNotIn(b"1234567890", body)
+
+    def test_default_http_port_accepts_portless_literal_loopback_host(self) -> None:
+        # HTTP clients omit :80 on the wire. Exercise the handler authority
+        # contract without binding a privileged host port or changing services.
+        from unittest.mock import patch
+
+        with patch.object(self.server, "server_address", ("127.0.0.1", 80)):
+            for allowed in ("127.0.0.1", "127.0.0.1:80"):
+                with self.subTest(host=allowed):
+                    status, body = self.request("GET", "/healthz", (allowed,))
+                    self.assertEqual(status, 200)
+                    self.assertEqual(json.loads(body), {"status": "ok"})
+            for rejected in ("127.0.0.1:81", "attacker.example", "localhost"):
+                with self.subTest(host=rejected):
+                    status, body = self.request("GET", "/api/summary", (rejected,))
+                    self.assertEqual(status, 421)
+                    self.assertNotIn(b"1234567890", body)
+
+    def test_invalid_host_precedes_http_method_or_write_proxy_handling(self) -> None:
+        foreign = (f"attacker-controlled.example:{self.port}",)
+        for method in ("HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+            with self.subTest(method=method):
+                status, _ = self.request(method, "/api/write/delete", foreign)
+                self.assertEqual(status, 421)
+
+        # Existing read-only semantics are unchanged for the authorized Host.
+        expected = (("HEAD", 405), ("POST", 405), ("OPTIONS", 405))
+        for method, status_expected in expected:
+            with self.subTest(local_method=method):
+                status, _ = self.request(
+                    method, "/api/write/delete", (f"127.0.0.1:{self.port}",),
+                )
+                self.assertEqual(status, status_expected)
+
+
+if __name__ == "__main__":
+    unittest.main()
