@@ -2126,7 +2126,8 @@ def blocked_build(**_kwargs):
  ready.write_text("ready")
  time.sleep(6)
  raise RuntimeError("synthetic blocked startup may not finish")
-with patch("mark_api.launcher.build_product_launcher",side_effect=blocked_build),patch(
+with patch("mark_api.launcher._require_private_web_authorization", create=True),patch(
+ "mark_api.launcher.build_product_launcher",side_effect=blocked_build),patch(
  "mark_api.launcher._SHUTDOWN_OWNER_BUDGET_SECONDS",0.2,
 ):
  raise SystemExit(main(["--db",str(db),"--cdp-port","9222"]))
@@ -2697,6 +2698,7 @@ class Launcher:
         threading.Event().wait(8)
 
 with (
+    patch("mark_api.launcher._require_private_web_authorization", create=True),
     patch("mark_api.launcher.build_product_launcher", return_value=Launcher()),
     patch("mark_api.launcher._SHUTDOWN_OWNER_BUDGET_SECONDS", 0.2),
 ):
