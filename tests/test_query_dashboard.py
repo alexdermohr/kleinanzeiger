@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import io
 import json
 import sqlite3
@@ -1400,6 +1401,104 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
         self.assertEqual(contract["reaction_metric"], "unique_buyer_count")
         self.assertEqual(contract["objective_metric"], "inbound_message_count")
 
+    def test_csv_rankings_match_json_evidence_and_download_contract(self) -> None:
+        status, headers, data = self.get("/api/analytics/ads.csv?metric=views")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/csv; charset=utf-8")
+        self.assertEqual(
+            headers["Content-Disposition"],
+            'attachment; filename="mark-analytics-views.csv"',
+        )
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(data[:3], bytes((239, 187, 191)))
+        rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+        original = json.loads(self.get("/api/analytics/ads?metric=views")[2])
+        self.assertEqual(
+            [(row["ad_id"], int(row["value"])) for row in rows],
+            [(row["ad_id"], row["value"]) for row in original],
+        )
+        self.assertEqual(
+            rows[0]["metric_observed_at"],
+            original[0]["metric_evidence"]["observed_at"],
+        )
+        self.assertEqual(
+            rows[0]["metric_source"],
+            original[0]["metric_evidence"]["source"],
+        )
+        self.assertEqual(rows[0]["metric_last_known"], "true")
+        self.assertEqual(rows[0]["present"], "false")
+        self.assertEqual(rows[0]["lifecycle_state"], "absent")
+
+    def test_csv_groups_require_explicit_dimension_and_metric(self) -> None:
+        status, headers, data = self.get(
+            "/api/analytics/groups.csv?dimension=city&metric=views"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            headers["Content-Disposition"],
+            'attachment; filename="mark-groups-city-views.csv"',
+        )
+        rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+        self.assertEqual(rows, [{
+            "dimension": "city", "metric": "views", "label": "Berlin",
+            "sample_size": "2", "metric_sum": "19", "metric_mean": "9.5",
+        }])
+        for path, kind in (
+            ("/api/analytics/ads.csv", "invalid_metric"),
+            ("/api/analytics/ads.csv?metric=__proto__", "invalid_metric"),
+            ("/api/analytics/ads.csv?metric=views&metric=watch_count", "invalid_metric"),
+            ("/api/analytics/groups.csv?metric=views", "invalid_dimension"),
+            ("/api/analytics/groups.csv?dimension=city", "invalid_metric"),
+            ("/api/analytics/groups.csv?dimension=unknown&metric=views", "invalid_dimension"),
+        ):
+            with self.subTest(path=path), self.assertRaises(HTTPError) as caught:
+                urlopen(self.base + path, timeout=2)
+            self.assertEqual(caught.exception.code, 400)
+            self.assertEqual(json.loads(caught.exception.read())["error"], kind)
+
+    def test_csv_dangerous_cells_are_inert_without_changing_stored_values(self) -> None:
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="9999", observed_at=T1, source="+unsafe-origin",
+            lifecycle_state=LifecycleState.ACTIVE, title="=SUM(1,2)", views=33,
+        ))
+        _, _, data = self.get("/api/analytics/ads.csv?metric=views")
+        rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+        exported = next(row for row in rows if row["ad_id"] == "9999")
+        self.assertEqual(exported["title"], "'=SUM(1,2)")
+        self.assertEqual(exported["metric_source"], "'+unsafe-origin")
+        source = json.loads(self.get("/api/analytics/ads?metric=views")[2])
+        raw = next(row for row in source if row["ad_id"] == "9999")
+        self.assertEqual(raw["title"], "=SUM(1,2)")
+        self.assertEqual(raw["metric_evidence"]["source"], "+unsafe-origin")
+
+    def test_csv_exports_fail_closed_when_database_is_lost(self) -> None:
+        self.store.path.unlink()
+        for path in (
+            "/api/analytics/ads.csv?metric=views",
+            "/api/analytics/groups.csv?dimension=city&metric=views",
+        ):
+            with self.subTest(path=path), self.assertRaises(HTTPError) as caught:
+                urlopen(self.base + path, timeout=2)
+            self.assertEqual(caught.exception.code, 503)
+            self.assertEqual(
+                json.loads(caught.exception.read()),
+                {"error": "database_unavailable"},
+            )
+        self.assertFalse(self.store.path.exists())
+
+    def test_csv_download_links_are_tied_to_loaded_metric_selection(self) -> None:
+        html = self.get("/")[2].decode("utf-8")
+        script = self.get("/dashboard.js")[2].decode("utf-8")
+        self.assertIn('id="groups-csv" href="#" hidden', html)
+        self.assertIn('id="ranking-csv" href="#" hidden', html)
+        self.assertIn('groupsCsv.hidden = true;', script)
+        self.assertIn('rankingCsv.hidden = true;', script)
+        self.assertIn('groupsCsv.hidden = false;', script)
+        self.assertIn('rankingCsv.hidden = false;', script)
+        self.assertIn('/api/analytics/ads.csv?metric=', script)
+        self.assertIn('/api/analytics/groups.csv?', script)
+
     def test_analytics_contract_and_rankings_endpoints(self) -> None:
         _, _, metrics_body = self.get("/api/analytics/metrics")
         _, _, dimensions_body = self.get("/api/analytics/dimensions")
@@ -1906,7 +2005,7 @@ class Element {
 }
 const elements = new Map(
   ["metric-select", "dimension-select", "analytics-status",
-   "groups-body", "groups-empty", "groups-chart",
+   "groups-csv", "ranking-csv", "groups-body", "groups-empty", "groups-chart",
    "ranking-body", "ranking-empty", "ranking-chart"].map((id) => [id, new Element("div")]),
 );
 globalThis.document = {
@@ -1945,6 +2044,10 @@ const visibleRanking = () => el("ranking-body").children[0]?.children[2]?.textCo
   await first;
   assert.equal(visibleRanking(), "123");
   assert.equal(el("groups-body").children.length, 1);
+  assert.equal(el("groups-csv").hidden, false);
+  assert.equal(el("ranking-csv").hidden, false);
+  assert.equal(el("groups-csv").href, "/api/analytics/groups.csv?dimension=city&metric=views");
+  assert.equal(el("ranking-csv").href, "/api/analytics/ads.csv?metric=views");
   assert.equal(el("analytics-status").textContent, "");
 
   // A failed watch-count selection cannot leave views mislabeled as watches.
@@ -1960,6 +2063,8 @@ const visibleRanking = () => el("ranking-body").children[0]?.children[2]?.textCo
   answer(2, group(4)); fail(3);
   await failing;
   assert.match(el("analytics-status").textContent, /503 Service Unavailable/);
+  assert.equal(el("groups-csv").hidden, true);
+  assert.equal(el("ranking-csv").hidden, true);
   assert.equal(el("ranking-body").children.length, 0);
   assert.equal(el("groups-body").children.length, 0);
 
