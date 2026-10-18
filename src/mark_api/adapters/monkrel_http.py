@@ -214,6 +214,9 @@ class MonkrelPrivateHttpContentClient:
         title: str | None = None,
         description: str | None = None,
     ) -> None:
+        # Do not even consult caller-provided retry policy before entitlement.
+        # An upstream property can perform work while appearing to be metadata.
+        _legacy_admission.require_legacy_platform_authority()
         target_id = _required_text(ad_id, "ad_id")
         if title is not None and not isinstance(title, str):
             raise TypeError("title must be a string or None")

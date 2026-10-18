@@ -90,6 +90,19 @@ class LegacyPlatformDefaultDenyTests(unittest.TestCase):
             adapter.update_ad("1234567890", title="synthetic")
         self.assertEqual(upstream.calls, [])
 
+    def test_private_http_write_denies_before_upstream_property_access(self):
+        class SideEffectingPolicy(_Upstream):
+            @property
+            def max_retries(self):
+                self.calls.append("max_retries_property")
+                raise AssertionError("unauthorized policy property read")
+
+        upstream = SideEffectingPolicy()
+        adapter = MonkrelPrivateHttpContentClient(upstream)
+        with self.assertRaises(LegacyPlatformAdmissionDenied):
+            adapter.update_ad("1234567890", title="synthetic")
+        self.assertEqual(upstream.calls, [])
+
     def test_direct_monkrel_runtime_wrapper_denies_before_upstream(self):
         upstream = _Upstream()
         wrapper = MonkrelPrivateHttpRuntimeClient(
