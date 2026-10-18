@@ -178,6 +178,18 @@ def run_private_web_runtime_smoke(
     ):
         raise ValueError("timeout_seconds must be positive")
 
+    # The bundled PrivateWeb adapter reads Kleinanzeigen through an
+    # authenticated browser/CDP session. Authentication to a browser is not
+    # independent permission to automate platform access. There is currently
+    # no independently attested official entitlement provider for this path.
+    # Refuse the real default before opening CDP, creating SQLite or HTTP.
+    # Explicit synthetic test factories remain injectable for regression tests.
+    if runtime_factory is build_private_web_inventory_runtime:
+        raise RuntimeError(
+            "Private-Web/CDP smoke disabled: independent platform permission "
+            "is not established; use mark-api-offline for local data"
+        )
+
     runtime = runtime_factory(
         cdp_port=cdp_port,
         timeout_seconds=float(timeout_seconds),
@@ -585,10 +597,9 @@ def run_private_web_runtime_smoke(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a read-only PrivateWeb runtime smoke against an existing "
-            "user-authenticated loopback CDP browser. The smoke persists the "
-            "owner inventory only to an ephemeral SQLite database and exposes "
-            "only the loopback read-only dashboard during the run."
+            "Legacy PrivateWeb/CDP inventory smoke is not authorized for "
+            "live platform access without independent platform permission. "
+            "The real adapter is disabled; use mark-api-offline for local data."
         ),
     )
     parser.add_argument(
