@@ -2,23 +2,31 @@
 
 Öffentliche Projektdokumentation für die mit Mark besprochene Kleinanzeigen-Agent-/API-Integration.
 
-## Freigabestatus und Offline-Modus (17.10.2026)
+## Produktstart und Offline-Modus (18.10.2026)
 
-**Vollprodukt: NO-GO.** Der bisherige Einstieg `mark-api-launch` verwendet
-automatisierte Private-Web-/CDP-Zugriffe einschließlich standardmäßig
-aktivierter Write-Komposition. Ohne gesondert nachgewiesene Berechtigung
-ist dieser Pfad **nicht zur Nutzung freigegeben**; ein eingeloggter Browser
-oder technische Idempotenz-/Recovery-Gates sind keine Plattformberechtigung.
-**Der bisherige normale mark-api-launch und der programmatische
-build_product_launcher() verweigern nun jeden Private-Web-Start bereits vor
-SQLite-Initialisierung, Browser/CDP und Write-API.** Browseranmeldung,
-CLI-Parameter oder Umgebungsvariablen erteilen keine Berechtigung.
-Die früheren Lifecycle-Tests verwenden nur synthetische Runtimes und
-eine ausdrücklich gemockte Berechtigungsgrenze. Der zulässige lokale
-Produktstart ist mark-api-offline. Ein künftiger offizieller API-Transport
-muss eigenständig nachgewiesenes Konto-Entitlement und Scopes besitzen.
-Siehe [Release-Blocker #111](https://github.com/alexdermohr/mark-api/issues/111)
-und [Kleinanzeigen-Nutzungsbedingungen, § 5](https://themen.kleinanzeigen.de/nutzungsbedingungen/).
+**Technischer Produktstart:** `mark-api-launch` verbindet sich mit einer
+bereits vom Nutzer authentifizierten Chrome-/Chromium-Sitzung über lokales
+Loopback-CDP. Der pauschale, bedingungslos abbrechende
+`_require_private_web_authorization()`-Pfad ist nicht mehr Bestandteil
+dieser Produktkomposition. Das Programm startet selbst keinen Browser,
+automatisiert weder Login noch MFA/CAPTCHA und beschränkt alle lokalen
+HTTP-Oberflächen auf Loopback. Der initiale Besitzerinventar-Read muss
+erfolgreich abgeschlossen sein, bevor Dashboard und Write API starten.
+
+Die bestehende Dashboard-Write-UX unterstützt ausdrücklich ausgelöste
+Create-/Media-, Inhalts-, Status- und Delete-Aktionen. Dabei gelten weiter
+die konkreten technischen Authentifizierungs-, Owner-/ID-, Same-Origin-,
+Idempotenz-, Confirmation-, One-Shot- und Recovery-Regeln. Ein unklarer
+Plattformausgang berechtigt zu keinem blinden erneuten Schreibversuch.
+Für diesen Branch sind nur synthetische/regressionsbasierte Prüfungen
+vorgesehen; die gesamte Kundenlieferung einschließlich Host-Recovery,
+installierter E2E- und Bedienabnahme bleibt gesondert zu verifizieren.
+
+Ein installierter und funktionsfähiger Transport ist kein Nachweis einer
+konkreten Plattformberechtigung. Die Voraussetzungen des eingesetzten
+Kontos und die geltenden Nutzungsbedingungen sind vom Betreiber getrennt
+zu prüfen; diese Frage ist kein Ersatz für technische Produktfunktionen.
+Siehe [Issue #111](https://github.com/alexdermohr/mark-api/issues/111).
 
 Der neue **rein lokale** Einstieg `mark-api-offline` verwendet ausschließlich
 explizit übergebene lokale RFC822-/EML-Dateien und die bestehende
@@ -43,14 +51,14 @@ automatische Synchronisation oder bestätigte Eigentümerdaten. Der
 Offline-Einstieg gibt weder die technische A6-/Recovery-Abnahme noch
 einen späteren autorisierten offiziellen API-Betrieb frei.
 
-Die nachstehenden historischen Private-Web-/Launcher-Beschreibungen
-dokumentieren Implementierungen, **keine Nutzungsfreigabe**.
+Die nachstehenden Private-Web-/Launcher-Beschreibungen dokumentieren
+technische Verträge, nicht die schon abgeschlossene Gesamtprodukt-Abnahme.
 
 ## Status
 
 **Core, Dashboard und Analytics implementiert / PrivateWebWriter + Runtime-Smoke real belegt / Product Launcher mit Default-on Write Composition, lokalem Reaction-Import und Same-Origin Dashboard Write UX implementiert / Write-API-Auth-/Idempotency-Runtime crash-sicher gehärtet** — Stand: 05.10.2026.
 
-Mark hat nach dem Telefonat die gewünschte Funktionalität schriftlich konkretisiert. Der MVP-Fokus liegt auf Anzeigenverwaltung, Synchronisation, Verkäufermetriken, Inbox/Interessenten, Dashboard und datenbasierter Auswertung. Externe Text-/Bildgenerierung war ursprünglich Teil des Wunsches, ist seit 24.09.2026 aber nicht mehr MVP-priorisiert.
+Mark hat nach dem Telefonat die gewünschte Funktionalität schriftlich konkretisiert. Der MVP-Fokus liegt auf Anzeigenverwaltung, Synchronisation, Verkäufermetriken, Inbox/Interessenten, Dashboard und datenbasierter Auswertung. Prompt-gestützte Text- und Bildgenerierung bleibt Bestandteil des ursprünglichen Kundenwunsches und ist nach D-028 Teil des **finalen** Vollproduktumfangs; sie ist in diesem Produktzweig noch nicht als Endnutzerfunktion implementiert.
 
 ## Technisch belegt
 
