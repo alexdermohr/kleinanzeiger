@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -27,8 +28,15 @@ class DirectTransportAdmissionTests(unittest.TestCase):
             connect.assert_not_called()
 
     def test_default_private_management_http_blocked_before_urlopen(self):
-        with patch("mark_api.adapters.management.urlopen",
-                   side_effect=AssertionError("HTTP network must not begin")) as network:
+        with (
+            patch("mark_api.adapters.management.urlopen",
+                  side_effect=AssertionError("HTTP network must not begin")) as network,
+            patch.dict(os.environ, {
+                "MARK_PRIVATE_WEB_APPROVED": "true",
+                "MARK_PLATFORM_WRITES_ENABLED": "true",
+                "MARK_PROSELLERS_API_ENTITLEMENT_CONFIRMED": "true",
+            }),
+        ):
             with self.assertRaisesRegex(TransportFailure, "not authorized"):
                 UrllibHttpTransport().get(
                     MANAGEMENT_URL, headers={"Cookie": "synthetic-only"})
