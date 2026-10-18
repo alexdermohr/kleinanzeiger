@@ -11,9 +11,11 @@ import tempfile
 import threading
 import unittest
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from unittest.mock import patch
 
-from mark_api.dashboard import create_server
+from mark_api.dashboard import DashboardWriteProxy, create_server
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.storage import SnapshotStore
 
@@ -24,6 +26,7 @@ class DashboardHostAuthorityTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         db = Path(self.temp.name) / "mark.sqlite"
         store = SnapshotStore(db)
+        self.store = store
         store.append_ad_snapshot(AdSnapshot(
             ad_id="1234567890",
             observed_at=datetime(2026, 10, 17, tzinfo=timezone.utc),
@@ -138,6 +141,80 @@ class DashboardHostAuthorityTests(unittest.TestCase):
                     method, "/api/write/delete", (f"127.0.0.1:{self.port}",),
                 )
                 self.assertEqual(status, status_expected)
+
+    def test_parser_without_current_headers_rejects_even_valid_host(self) -> None:
+        # Force an otherwise successful base parser that produced no headers.
+        # A stale self.headers from an earlier request must not grant access.
+        def legacy_without_headers(handler: BaseHTTPRequestHandler) -> bool:
+            handler.command = "GET"
+            handler.path = "/api/summary"
+            handler.request_version = "HTTP/1.1"
+            handler.requestline = "GET /api/summary HTTP/1.1"
+            return True
+
+        with patch.object(
+            BaseHTTPRequestHandler, "parse_request", legacy_without_headers,
+        ):
+            status, body = self.request(
+                "GET", "/api/summary", (f"127.0.0.1:{self.port}",),
+            )
+        self.assertEqual(status, 421)
+        self.assertNotIn(b"tracked_ads", body)
+        self.assertNotIn(b"1234567890", body)
+
+    def test_localhost_alias_is_intentionally_not_numeric_authority(self) -> None:
+        # The product launcher publishes http://127.0.0.1:<port>/;
+        # using localhost would not match the dashboard Write Origin fence.
+        for host in ("localhost", f"localhost:{self.port}"):
+            with self.subTest(host=host):
+                status, body = self.request(
+                    "GET", "/api/summary", (host,),
+                )
+                self.assertEqual(status, 421)
+                self.assertNotIn(b"1234567890", body)
+
+    def test_host_guard_does_not_replace_write_origin_and_token_barriers(self) -> None:
+        ui_token = "synthetic-dashboard-csrf-token-123"
+        backend = DashboardWriteProxy(
+            host="127.0.0.1",
+            port=9,  # No backend: forbidden Origin must reject before connect.
+            bearer_token="synthetic-backend-bearer-12345",
+            ui_token=ui_token,
+        )
+        server = create_server(self.store, port=0, write_proxy=backend)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            host, port = server.server_address
+            self.assertEqual(host, "127.0.0.1")
+            connection = http.client.HTTPConnection(host, port, timeout=3)
+            try:
+                connection.putrequest(
+                    "POST", "/api/write/ads/1234567890/pause", skip_host=True,
+                )
+                connection.putheader("Host", f"127.0.0.1:{port}")
+                connection.putheader("Origin", "http://attacker.example")
+                connection.putheader("X-Mark-Dashboard-Write", "1")
+                connection.putheader("X-Mark-Dashboard-Token", ui_token)
+                connection.putheader("Idempotency-Key", "synthetic-csrf-1")
+                connection.putheader("Content-Length", "0")
+                connection.endheaders()
+                response = connection.getresponse()
+                status, data = response.status, response.read()
+            finally:
+                connection.close()
+            self.assertEqual(status, 403)
+            self.assertEqual(
+                json.loads(data), {
+                    "error": "write_session_required",
+                    "platform_retry_authorized": False,
+                },
+            )
+            self.assertEqual(self.store.dashboard_pending_writes(), ())
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=3)
 
     def test_http_09_two_token_request_fails_closed_without_host(self) -> None:
         # Some Python versions parse legacy HTTP/0.9 into a different

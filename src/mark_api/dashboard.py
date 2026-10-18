@@ -1960,6 +1960,9 @@ def _handler_factory(
         sys_version = ""
 
         def parse_request(self) -> bool:
+            # A new request must never inherit the preceding request's Host,
+            # including for malformed or legacy two-token request lines.
+            self.headers = None
             if not super().parse_request():
                 return False
             # Loopback bind alone does not stop DNS-rebound foreign Host
@@ -1970,7 +1973,11 @@ def _handler_factory(
                 "127.0.0.1", int(listener_port),
             ).removeprefix("http://")
             allowed_hosts = {canonical, f"127.0.0.1:{int(listener_port)}"}
-            get_all = getattr(self.headers, "get_all", None)
+            # Some parser versions may omit self.headers on HTTP/0.9 paths.
+            # No current-request headers means no authority, never an error
+            # or re-use of a prior request's allowlisted Host.
+            parsed_headers = getattr(self, "headers", None)
+            get_all = getattr(parsed_headers, "get_all", None)
             hosts = get_all("Host") if callable(get_all) else ()
             if (
                 str(listener_host) != "127.0.0.1"
