@@ -87,6 +87,7 @@ class LauncherShutdownRacesTests(unittest.TestCase):
         try:
             with (
                 patch.object(launcher_module, "FenceWitnessClient", return_value=witness),
+                patch.object(launcher_module, "_require_private_web_authorization", create=True),
                 patch.object(launcher_module, "build_product_launcher", return_value=runtime),
                 patch("sys.stdout", io.StringIO()),
                 patch("sys.stderr", io.StringIO()),
@@ -135,6 +136,7 @@ class LauncherShutdownRacesTests(unittest.TestCase):
         with (
             patch.object(launcher_module, "Thread", side_effect=thread_factory),
             patch.object(launcher_module, "FenceWitnessClient", return_value=witness),
+            patch.object(launcher_module, "_require_private_web_authorization", create=True),
             patch.object(launcher_module, "build_product_launcher", return_value=runtime),
             patch("sys.stdout", io.StringIO()),
             patch("sys.stderr", stderr),
