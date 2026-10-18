@@ -21,6 +21,18 @@ class _OwnerReader:
 
 
 class PrivateWebWriteApiRuntimeBuilderConfirmationTests(unittest.TestCase):
+
+    # This class tests synthetic internal composition, not platform admission.
+    # Product code remains fail-closed unless a test explicitly patches this gate.
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        synthetic_only = patch(
+            "mark_api.private_web_runtime._require_private_web_runtime_authority"
+        )
+        synthetic_only.start()
+        cls.addClassCleanup(synthetic_only.stop)
+
     TOKEN = "fake-runtime-token"
 
     def test_builder_accepts_caller_supplied_confirmation_runtime(self) -> None:
