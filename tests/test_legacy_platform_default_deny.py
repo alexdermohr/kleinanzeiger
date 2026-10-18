@@ -16,6 +16,7 @@ from mark_api.adapters.management import (
     TransportFailure, UrllibHttpTransport,
 )
 from mark_api.adapters.monkrel_runtime import MonkrelPrivateHttpRuntimeClient
+from mark_api.private_web_runtime import _NoRedirectManagementTransport
 from mark_api.domain import LifecycleState
 from mark_api.results import ReadStatus
 
@@ -151,6 +152,24 @@ class LegacyPlatformDefaultDenyTests(unittest.TestCase):
                     self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
                     self.assertEqual(result.error, "legacy_platform_not_authorized")
         self.assertEqual(seen, [])
+
+    def test_no_redirect_relay_get_denies_before_injected_http_opener(self):
+        # The internal no-redirect class is directly importable and must not
+        # be an independent platform transport escape hatch.
+        transport = _NoRedirectManagementTransport(timeout_seconds=0.1)
+        with (
+            patch.object(transport, "_open",
+                         side_effect=AssertionError("unauthorized relay HTTP")) as opener,
+            patch.dict(os.environ, {
+                "MARK_PRIVATE_WEB_APPROVED": "true",
+                "MARK_PROSELLERS_API_ENTITLEMENT_CONFIRMED": "true",
+            }),
+        ):
+            with self.assertRaisesRegex(TransportFailure, "not authorized"):
+                transport.get(
+                    MANAGEMENT_URL, headers={"Cookie": "synthetic-only"},
+                )
+            opener.assert_not_called()
 
     def test_construction_never_truth_tests_injected_management_transport(self):
         class HostileTransport:
