@@ -131,6 +131,14 @@ class _RejectManagementRedirectHandler(HTTPRedirectHandler):
         return None
 
 
+def _require_private_management_relay_authority() -> None:
+    # An authenticated browser and a caller-supplied flag are not entitlement.
+    # Real Private-Web reads remain unavailable in Local/Private mode.
+    raise TransportFailure(
+        "private management relay HTTP transport not authorized; use mark-api-offline"
+    )
+
+
 class _NoRedirectManagementTransport:
     """HTTP transport that never forwards browser cookies through redirects."""
 
@@ -142,6 +150,7 @@ class _NoRedirectManagementTransport:
         ).open
 
     def get(self, url: str, *, headers: dict[str, str]) -> HttpResponse:
+        _require_private_management_relay_authority()
         request = Request(url, headers=headers, method="GET")
         try:
             with self._open(request, timeout=self._timeout_seconds) as response:

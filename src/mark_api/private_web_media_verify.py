@@ -257,7 +257,16 @@ def _parse_listing_gallery(body: bytes, ad_id: str) -> tuple[str, ...]:
     return urls
 
 
+def _require_private_web_public_media_transport_authority() -> None:
+    # Public listing/media fetches remain platform automation even without a
+    # logged-in account. No environment flag can grant external permission.
+    raise OSError(
+        "private Web public media transport not authorized; use mark-api-offline"
+    )
+
+
 def _default_fetch(url: str, timeout_seconds: float, max_bytes: int) -> _Fetched:
+    _require_private_web_public_media_transport_authority()
     if timeout_seconds <= 0:
         raise TimeoutError("fetch timeout exhausted")
     request = Request(
