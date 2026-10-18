@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import _legacy_admission
+
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 from xml.sax.saxutils import quoteattr
@@ -187,6 +189,7 @@ class MonkrelPrivateHttpContentClient:
         return fallback
 
     def _owner_ad(self, target_id: str) -> tuple[str, Mapping[str, Any]]:
+        _legacy_admission.require_legacy_platform_authority()
         uid = _required_text(self._client.user_id, "user_id")
         response = self._client._request(
             "GET",

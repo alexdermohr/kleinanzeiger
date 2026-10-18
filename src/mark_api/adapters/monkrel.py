@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import _legacy_admission
+
 import hashlib
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -193,6 +195,13 @@ class MonkrelMobileApiAdapter:
         )
 
     def read_ads(self) -> ReadResult[tuple[AdSnapshot, ...]]:
+        try:
+            _legacy_admission.require_legacy_platform_authority()
+        except _legacy_admission.LegacyPlatformAdmissionDenied:
+            return ReadResult.failure(
+                ReadStatus.TRANSPORT_ERROR,
+                error="legacy_platform_not_authorized",
+            )
         observed_at = self._clock()
         snapshots: list[AdSnapshot] = []
         seen_ids: set[str] = set()
@@ -250,6 +259,7 @@ class MonkrelMobileApiAdapter:
         return ReadResult.success_empty()
 
     def set_state(self, ad_id: str, state: LifecycleState) -> None:
+        _legacy_admission.require_legacy_platform_authority()
         if state is LifecycleState.ACTIVE:
             self._client.activate_ad(ad_id)
             return
@@ -259,6 +269,7 @@ class MonkrelMobileApiAdapter:
         raise ValueError("monkrel writer supports only ACTIVE or PAUSED")
 
     def delete_ad(self, ad_id: str) -> None:
+        _legacy_admission.require_legacy_platform_authority()
         self._client.delete_ad(ad_id)
 
     def update_content(
@@ -268,6 +279,7 @@ class MonkrelMobileApiAdapter:
         title: str | None = None,
         description: str | None = None,
     ) -> None:
+        _legacy_admission.require_legacy_platform_authority()
         target_id = _required_id(ad_id, "ad_id")
         updates = _validated_content_updates(
             title=title,
@@ -279,6 +291,13 @@ class MonkrelMobileApiAdapter:
         update_ad(target_id, **updates)
 
     def _all_conversations(self) -> ReadResult[tuple[Any, ...]]:
+        try:
+            _legacy_admission.require_legacy_platform_authority()
+        except _legacy_admission.LegacyPlatformAdmissionDenied:
+            return ReadResult.failure(
+                ReadStatus.TRANSPORT_ERROR,
+                error="legacy_platform_not_authorized",
+            )
         conversations: list[Any] = []
         seen_ids: set[str] = set()
 

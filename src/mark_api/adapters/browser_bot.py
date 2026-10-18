@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import _legacy_admission
+
 import json
 import os
 import signal
@@ -250,6 +252,7 @@ class BrowserBotAdapter:
         input_text: str | None = None,
         cwd: Path | None = None,
     ) -> None:
+        _legacy_admission.require_legacy_platform_authority()
         try:
             result = self._runner.run(
                 argv,

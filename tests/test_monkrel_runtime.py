@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch as _legacy_gate_patch
+
 import unittest
 from datetime import datetime, timezone
 
@@ -78,6 +80,13 @@ class FakeWriteClient:
 
 
 class MonkrelPrivateHttpRuntimeClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        synthetic = _legacy_gate_patch(
+            "mark_api.adapters._legacy_admission.require_legacy_platform_authority"
+        )
+        synthetic.start()
+        self.addCleanup(synthetic.stop)
+
     def test_explicit_surface_delegates_exact_mobile_operations(self):
         upstream = FakeUpstream()
         updater = FakeContentUpdater()
