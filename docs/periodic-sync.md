@@ -37,10 +37,18 @@ Catch-up-Schleife.
 Vor jedem Browserkontakt wird ein eigener persistenter in_progress-Eintrag
 im vorhandenen SQLite-sync_attempts-Journal eröffnet. Erfolgreiche
 Bestandsbeobachtungen und success_empty/success_nonempty einschließlich
-ABSENT-Übergänge werden atomar gemeinsam geschrieben. Fehlerhafte oder
-unauthentifizierte Reads überschreiben weder vorher bestätigte Snapshots
-noch den letzten tatsächlich erfolgreichen Abgleich. Bei UNAUTHENTICATED
-endet der Polling-Prozess statt unaufhörlicher Login-Abfragen.
+ABSENT-Übergänge werden atomar gemeinsam geschrieben. Ein bereits als
+ABSENT dokumentiertes Inserat erhält bei nachfolgenden leeren Bestandsreads
+keine weiteren identischen ABSENT-Zeilen; erst eine erneute Beobachtung als
+vorhanden erlaubt wieder einen zukünftigen ABSENT-Übergang.
+Fehlerhafte oder unauthentifizierte Reads überschreiben weder vorher
+bestätigte Snapshots noch den letzten tatsächlich erfolgreichen Abgleich.
+**Jede fehlgeschlagene Inventur beendet den Polling-Prozess mit Fehlercode.**
+Das umfasst Transportfehler: Ein Login-Redirect kann von der darunterliegenden
+CDP-Komponente statt als UNAUTHENTICATED auch als TRANSPORT_ERROR erscheinen.
+Aus Sicherheitsgründen startet der Scheduler in diesem unklaren Zustand keine
+neuen automatischen Managementabfragen. Nach Prüfung ist ein expliziter
+Neustart notwendig, auch nach einem bloß temporären Netzwerkfehler.
 
 SIGINT und SIGTERM beenden die Planung weiterer Zyklen. Ein bereits
 begonnener Browser-Read darf keine falsche Erfolgsaussage erzeugen.

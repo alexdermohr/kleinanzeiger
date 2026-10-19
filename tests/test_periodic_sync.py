@@ -99,6 +99,32 @@ class PeriodicReadTests(unittest.TestCase):
         self.assertEqual(history[-1].lifecycle_state, LifecycleState.ABSENT)
         self.assertTrue(empty.closed)
 
+    def test_absent_transition_is_not_appended_on_each_empty_poll(self):
+        self.controller(lambda **_: Runtime(
+            ReadResult.success_nonempty((snapshot(),))
+        )).run_once()
+        empty = self.controller(lambda **_: Runtime(ReadResult.success_empty(())))
+        empty.run_once()
+        recorded = self.store.ad_history("1234567890")
+        self.assertEqual(len(recorded), 2)
+        self.assertIs(recorded[-1].lifecycle_state, LifecycleState.ABSENT)
+        for _ in range(4):
+            empty.run_once()
+        self.assertEqual(self.store.ad_history("1234567890"), recorded)
+        self.assertEqual(self.store.latest_sync_attempt().outcome, "success_empty")
+        self.assertEqual(self.store.tracked_ad_ids(), ("1234567890",))
+        # A returned ad is present again and its next disappearance creates
+        # exactly one new ABSENT transition.
+        self.controller(lambda **_: Runtime(
+            ReadResult.success_nonempty((snapshot(),))
+        )).run_once()
+        empty.run_once()
+        self.assertEqual(len(self.store.ad_history("1234567890")), 4)
+        self.assertIs(
+            self.store.ad_history("1234567890")[-1].lifecycle_state,
+            LifecycleState.ABSENT,
+        )
+
     def test_http_auth_and_network_failures_keep_old_observations(self):
         self.controller(lambda **_: Runtime(
             ReadResult.success_nonempty((snapshot(),))
@@ -201,16 +227,33 @@ class PeriodicReadTests(unittest.TestCase):
         self.assertIsNone(self.store.latest_sync_attempt())
         self.assertEqual(sync.run_loop(), 0)
 
-    def test_unauthenticated_polling_halts_without_repeated_requests(self):
-        calls = []
-        sync = self.controller(
-            lambda **kw: calls.append(kw) or Runtime(
-                ReadResult.failure(ReadStatus.UNAUTHENTICATED, http_status=403)
-            )
-        )
-        self.assertEqual(sync.run_loop(immediate=True), 0)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(self.store.latest_sync_attempt().error_kind, "unauthenticated")
+    def test_any_failed_poll_halts_without_login_redirect_retries(self):
+        # The real CDP reader can classify a login redirect as transport error.
+        # Neither classification may cause automated login-page probes.
+        for status in (ReadStatus.UNAUTHENTICATED, ReadStatus.TRANSPORT_ERROR):
+            with self.subTest(status=status):
+                calls = []
+                sync = self.controller(
+                    lambda **kw: calls.append(kw) or Runtime(
+                        ReadResult.failure(status, http_status=403)
+                    )
+                )
+                with self.assertRaisesRegex(PeriodicSyncError, "polling stopped"):
+                    sync.run_loop(immediate=True)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(self.store.latest_sync_attempt().error_kind, status.value)
+
+    def test_poll_failure_is_not_a_successful_cli_exit(self):
+        # Simulate a failed authenticated read without ever building a browser.
+        with (
+            patch("mark_api.periodic_sync.PeriodicOwnerSync") as factory,
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            factory.return_value.run_loop.side_effect = PeriodicSyncError("internal")
+            self.assertEqual(main([
+                "--db", str(self.path), "--cdp-port", "19610", "--immediate",
+            ]), 2)
+        self.assertIn("periodic read halted", err.getvalue())
 
     def test_invalid_period_and_port_fail_before_network_or_journal(self):
         runtime = Runtime(ReadResult.success_empty(()))

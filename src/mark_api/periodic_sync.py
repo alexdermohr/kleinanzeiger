@@ -16,7 +16,7 @@ from pathlib import Path
 from threading import Event, Lock
 from typing import Protocol
 
-from .domain import AdSnapshot
+from .domain import AdSnapshot, LifecycleState
 from .private_web_runtime import build_private_web_inventory_runtime
 from .results import ReadResult, ReadStatus
 from .storage import SnapshotStore
@@ -137,7 +137,17 @@ class PeriodicOwnerSync:
         try:
             # Snapshot existing owner IDs before any network access.
             try:
-                tracked = self._store.tracked_ad_ids()
+                # Historical IDs remain useful for analytics, but only
+                # transitions from a present/unknown latest state to ABSENT
+                # should produce an ABSENT snapshot. Otherwise every poll
+                # appends a duplicate ABSENT row for each old deleted ad.
+                tracked = tuple(
+                    ad_id for ad_id in self._store.tracked_ad_ids()
+                    if (
+                        (latest := self._store.latest_ad_snapshot(ad_id)) is not None
+                        and latest.lifecycle_state is not LifecycleState.ABSENT
+                    )
+                )
                 attempt = self._store.begin_sync_attempt(
                     source=_SOURCE, started_at=self._now(),
                 )
@@ -188,9 +198,12 @@ class PeriodicOwnerSync:
             self._cycle_lock.release()
 
     def run_loop(self, *, immediate: bool = False) -> int:
-        """Return successful cycle count; unauthenticated responses halt polling.
+        """Return successful cycle count; ANY failed read halts polling.
 
-        No catch-up storm, no automatic platform write and no blind retry.
+        A login redirect currently may be classified as TRANSPORT_ERROR rather
+        than UNAUTHENTICATED by the lower-level CDP adapter. Never retry an
+        ambiguous login/transport state periodically; require an explicit new
+        process start after operator investigation. No catch-up storm.
         """
         if not isinstance(immediate, bool):
             raise TypeError("immediate must be bool")
@@ -204,10 +217,12 @@ class PeriodicOwnerSync:
             result = self.run_once()
             if result.is_success:
                 success_count += 1
-            elif result.status is ReadStatus.UNAUTHENTICATED:
-                # Reauthentication is user-controlled. A fresh explicit
-                # session start is required; never spam an expired login.
-                break
+            else:
+                # Unexpected login redirects can surface as transport errors;
+                # don't continuously re-open the protected management page.
+                # Nonzero CLI exit also ensures process monitors don't record
+                # a clean polling shutdown after failed observations.
+                raise PeriodicSyncError("inventory read unavailable; polling stopped")
             due = False
         return success_count
 
