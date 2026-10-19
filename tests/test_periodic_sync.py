@@ -227,6 +227,20 @@ class PeriodicReadTests(unittest.TestCase):
         self.assertIsNone(self.store.latest_sync_attempt())
         self.assertEqual(sync.run_loop(), 0)
 
+    def test_signal_racing_the_next_cycle_is_a_normal_shutdown(self):
+        calls = []
+        sync = self.controller(lambda **_: calls.append(1) or Runtime(
+            ReadResult.success_empty(())
+        ))
+        original = sync.run_once
+        def stop_at_cycle_boundary():
+            sync.stop_event.set()
+            return original()
+        sync.run_once = stop_at_cycle_boundary
+        self.assertEqual(sync.run_loop(immediate=True), 0)
+        self.assertEqual(calls, [])
+        self.assertIsNone(self.store.latest_sync_attempt())
+
     def test_any_failed_poll_halts_without_login_redirect_retries(self):
         # The real CDP reader can classify a login redirect as transport error.
         # Neither classification may cause automated login-page probes.

@@ -31,6 +31,10 @@ class PeriodicSyncError(RuntimeError):
     """Bounded public error; no credentials, browser output, or raw provider data."""
 
 
+class PeriodicSyncStopped(PeriodicSyncError):
+    """A requested stop was observed before a new read began."""
+
+
 class InventoryRuntime(Protocol):
     def read_inventory(self) -> ReadResult[tuple[AdSnapshot, ...]]: ...
     def close(self) -> None: ...
@@ -131,7 +135,7 @@ class PeriodicOwnerSync:
 
     def run_once(self) -> ReadResult[tuple[AdSnapshot, ...]]:
         if self._stop.is_set():
-            raise PeriodicSyncError("sync is stopped")
+            raise PeriodicSyncStopped("sync is stopped")
         if not self._cycle_lock.acquire(blocking=False):
             raise PeriodicSyncError("inventory read already in progress")
         try:
@@ -214,7 +218,12 @@ class PeriodicOwnerSync:
                 break
             if self._stop.is_set():
                 break
-            result = self.run_once()
+            try:
+                result = self.run_once()
+            except PeriodicSyncStopped:
+                # SIGTERM may win the race between the scheduler's stop
+                # check and run_once's own check. It isn't a failed read.
+                break
             if result.is_success:
                 success_count += 1
             else:

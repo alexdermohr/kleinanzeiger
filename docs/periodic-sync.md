@@ -50,8 +50,10 @@ Aus Sicherheitsgründen startet der Scheduler in diesem unklaren Zustand keine
 neuen automatischen Managementabfragen. Nach Prüfung ist ein expliziter
 Neustart notwendig, auch nach einem bloß temporären Netzwerkfehler.
 
-SIGINT und SIGTERM beenden die Planung weiterer Zyklen. Ein bereits
-begonnener Browser-Read darf keine falsche Erfolgsaussage erzeugen.
+SIGINT und SIGTERM beenden die Planung weiterer Zyklen. Auch wenn das
+Stoppsignal erst zwischen zwei Zykluschecks eingeht, endet der Prozess
+regulär ohne neuen Browserzugriff und ohne irreführenden Fehlercode.
+Ein bereits begonnener Browser-Read darf keine falsche Erfolgsaussage erzeugen.
 Ein Prozessabbruch bzw. SIGKILL kann in_progress hinterlassen: Der Ausgang
 bleibt dann ungeklärt. Ein unklarer SQLite-Commit wird niemals durch einen
 blinden Retry oder einen erfundenen Erfolgsstatus kaschiert; der bestehende
