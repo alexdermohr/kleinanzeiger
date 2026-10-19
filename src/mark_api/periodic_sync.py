@@ -221,7 +221,8 @@ class PeriodicOwnerSync:
             reader: InventoryRuntime | None = None
             try:
                 if self._stopping():
-                    self._mark_failed(attempt, error_kind="stopped_before_runtime")
+                    if not self._mark_failed(attempt, error_kind="stopped_before_runtime"):
+                        raise PeriodicSyncError("local sync cancellation settlement failed")
                     raise PeriodicSyncStopped("sync is stopped before browser")
                 try:
                     reader = self._runtime_factory(
@@ -231,7 +232,8 @@ class PeriodicOwnerSync:
                     self._mark_failed(attempt, error_kind="runtime_unavailable")
                     raise PeriodicSyncError("browser inventory runtime unavailable") from None
                 if self._stopping():
-                    self._mark_failed(attempt, error_kind="stopped_before_read")
+                    if not self._mark_failed(attempt, error_kind="stopped_before_read"):
+                        raise PeriodicSyncError("local sync cancellation settlement failed")
                     raise PeriodicSyncStopped("sync is stopped before read")
                 try:
                     result = reader.read_inventory()

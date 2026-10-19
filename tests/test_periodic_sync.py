@@ -452,6 +452,34 @@ class PeriodicReadTests(unittest.TestCase):
         self.assertEqual(attempt.outcome, "failed")
         self.assertEqual(attempt.error_kind, "stopped_before_read")
 
+    def test_failed_cancel_settlement_is_not_clean_shutdown(self):
+        for stop_point in ("before_runtime", "before_read"):
+            with self.subTest(stop_point=stop_point):
+                runtime = Runtime(ReadResult.success_empty(()))
+                if stop_point == "before_runtime":
+                    original = self.store.begin_sync_attempt
+                    def begin_and_stop(**kwargs):
+                        attempt = original(**kwargs)
+                        sync.request_stop_from_signal()
+                        return attempt
+                    sync = self.controller(lambda **_: runtime)
+                    setup = patch.object(self.store, "begin_sync_attempt", side_effect=begin_and_stop)
+                else:
+                    def build_and_stop(**_):
+                        sync.request_stop_from_signal()
+                        return runtime
+                    sync = self.controller(build_and_stop)
+                    setup = contextlib.nullcontext()
+                with (
+                    setup,
+                    patch.object(self.store, "fail_sync_attempt", side_effect=sqlite3.OperationalError("PRIVATE_PATH")),
+                ):
+                    with self.assertRaisesRegex(PeriodicSyncError, "settlement failed") as caught:
+                        sync.run_loop(immediate=True)
+                self.assertNotIn("PRIVATE_PATH", str(caught.exception))
+                self.assertEqual(runtime.read_count, 0)
+                self.assertEqual(self.store.latest_sync_attempt().outcome, "in_progress")
+
     def test_signal_request_does_not_take_event_condition_lock(self):
         # Run in a subprocess because a regression to Event.set() inside the
         # lock would deadlock. Timeout protects the test suite itself.
