@@ -6,6 +6,8 @@ import http.client
 import io
 import json
 import os
+import sys
+from types import SimpleNamespace
 import struct
 import tempfile
 import threading
@@ -166,6 +168,17 @@ class GenerationHttpTests(unittest.TestCase):
             )[0], 429)
         self.assertEqual(self.generator.text_calls, ["Ein Fahrrad"] * 2)
 
+    def test_real_multiline_and_tab_prompt_reaches_provider_once(self):
+        prompt = "Ein eigenes Fahrrad\nMit echten Maßen\tund Rechnung"
+        with server_context(self.access) as (port, _):
+            code, _, response = http_call(
+                port, "POST", "/api/dashboard/generate",
+                body(prompt=prompt), headers(port),
+            )
+            self.assertEqual(code, 200, response)
+            self.assertEqual(json.loads(response)["status"], "draft")
+        self.assertEqual(self.generator.text_calls, [prompt])
+
     def test_text_image_output_is_draft_only_without_platform_mutation(self):
         with server_context(self.access) as (port, _):
             code, response_headers, page = http_call(port, "GET", "/")
@@ -277,7 +290,10 @@ class GenerationHttpTests(unittest.TestCase):
                             "--db", str(missing), "--enable-generation",
                         ])
             self.assertFalse(missing.exists())
-            with patch.dict(os.environ, {"OPENAI_API_KEY": "synthetic-only"}):
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": "synthetic-only"}),
+                patch.dict(sys.modules, {"openai": SimpleNamespace(OpenAI=object)}),
+            ):
                 with server_context(None) as (port, db):
                     class DummyServer:
                         server_address = ("127.0.0.1", port)
@@ -295,6 +311,25 @@ class GenerationHttpTests(unittest.TestCase):
                         ]), 0)
                     self.assertIn("#generation_token=", captured.getvalue())
                     self.assertNotIn("synthetic-only", captured.getvalue())
+
+    def test_missing_openai_extra_fails_before_db_bootstrap_and_http_bind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "new.sqlite"
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": "synthetic-only"}),
+                patch.dict(sys.modules, {"openai": None}),
+                patch("mark_api.dashboard.create_server") as builder,
+                contextlib.redirect_stderr(io.StringIO()) as error,
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    dashboard_main([
+                        "--db", str(missing), "--init-db", "--enable-generation",
+                    ])
+            self.assertEqual(caught.exception.code, 2)
+            self.assertFalse(missing.exists())
+            builder.assert_not_called()
+            self.assertIn("mark-api[generation]", error.getvalue())
+            self.assertNotIn("synthetic-only", error.getvalue())
 
     def test_access_rejects_unsafe_token_and_budget(self):
         for token in ("short", "bad\nstring", "a" * 513, "ä" * 32):

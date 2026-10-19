@@ -3055,7 +3055,7 @@ def _handler_factory(
                 if (
                     not isinstance(prompt, str)
                     or not 1 <= len(prompt.strip()) <= 4000
-                    or any(ord(ch) < 32 and ch not in "\\n\\t" for ch in prompt)
+                    or any(ord(ch) < 32 and ch not in "\n\t" for ch in prompt)
                     or any(0xD800 <= ord(ch) <= 0xDFFF for ch in prompt)
                 ):
                     raise ValueError("invalid_prompt")
@@ -3191,8 +3191,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Explicitly initialize a new SQLite store; omit on normal starts.",
     )
     args = parser.parse_args(argv)
-    if args.enable_generation and not os.environ.get("OPENAI_API_KEY"):
-        parser.error("--enable-generation requires OPENAI_API_KEY in the local process environment")
+    if args.enable_generation:
+        if not os.environ.get("OPENAI_API_KEY"):
+            parser.error("--enable-generation requires OPENAI_API_KEY in the local process environment")
+        # Check optional dependency before SQLite, token generation or bind.
+        # Import alone never contacts the provider or spends request budget.
+        try:
+            from openai import OpenAI as _GenerationSdkClient
+        except Exception:
+            parser.error("--enable-generation requires installed mark-api[generation]")
+        if not callable(_GenerationSdkClient):
+            parser.error("--enable-generation requires a functional OpenAI SDK")
 
     try:
         store = SnapshotStore(args.db, create_if_missing=args.init_db)
