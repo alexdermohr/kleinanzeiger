@@ -141,29 +141,36 @@ class PeriodicOwnerSync:
         return True
 
     def _tracked_present_ids(self) -> tuple[str, ...]:
-        # Query each current ad state in a SINGLE indexed/windowed database
-        # scan instead of opening a connection and sorting all historical rows
-        # separately for every tracked ID on every poll. Uses the existing
-        # validated SQLite schema and the store's non-creating URI. The
-        # connection is explicitly closed even on Python 3.13.
+        # Store permits timezone-aware timestamps with different offsets.
+        # SQLite's lexical ordering of their original ISO strings is NOT a
+        # chronological ordering; SQLite julianday/strftime also lose
+        # microsecond precision. Stream all observations through ONE
+        # non-creating, read-only SQLite connection, retaining just one
+        # (UTC instant, row ID, state) per ad. Exact datetime comparisons
+        # match SnapshotStore.ad_history's timeline ordering, without one
+        # separate connection/history sort per ad. Memory is O(unique ads).
+        newest: dict[str, tuple[datetime, int, str]] = {}
         with closing(self._store._connect()) as connection:
             connection.execute("PRAGMA query_only=ON")
-            rows = connection.execute(
-                """
-                WITH latest AS (
-                    SELECT ad_id, lifecycle_state,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY ad_id ORDER BY observed_at DESC, id DESC
-                        ) AS row_rank
-                    FROM ad_snapshots
-                )
-                SELECT ad_id FROM latest
-                WHERE row_rank = 1 AND lifecycle_state <> ?
-                ORDER BY ad_id ASC
-                """,
-                (LifecycleState.ABSENT.value,),
-            ).fetchall()
-        return tuple(str(row["ad_id"]) for row in rows)
+            cursor = connection.execute(
+                "SELECT id, ad_id, observed_at, lifecycle_state FROM ad_snapshots"
+            )
+            for row in cursor:
+                observed = datetime.fromisoformat(str(row["observed_at"]))
+                if observed.tzinfo is None or observed.utcoffset() is None:
+                    raise ValueError("invalid stored observation timezone")
+                instant = observed.astimezone(timezone.utc)
+                ad_id = str(row["ad_id"])
+                ordinal = int(row["id"])
+                former = newest.get(ad_id)
+                if former is None or (instant, ordinal) > (former[0], former[1]):
+                    newest[ad_id] = (instant, ordinal, str(row["lifecycle_state"]))
+        return tuple(
+            sorted(
+                ad_id for ad_id, (_, _, state) in newest.items()
+                if state != LifecycleState.ABSENT.value
+            )
+        )
 
     def run_once(self) -> ReadResult[tuple[AdSnapshot, ...]]:
         if self._stop.is_set():

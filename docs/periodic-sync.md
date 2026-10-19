@@ -40,9 +40,12 @@ Bestandsbeobachtungen und success_empty/success_nonempty einschließlich
 ABSENT-Übergänge werden atomar gemeinsam geschrieben. Ein bereits als
 ABSENT dokumentiertes Inserat erhält bei nachfolgenden leeren Bestandsreads
 keine weiteren identischen ABSENT-Zeilen; die neuesten Zustände werden
-mit **einer** gruppierten SQLite-Abfrage ermittelt, nicht durch einen
-wachsenden historischen Python-Scan für jede Anzeigennummer. Erst eine
-erneute Beobachtung als vorhanden erlaubt wieder einen zukünftigen
+mit **einem** read-only SQLite-Stream ermittelt, dessen letzte Zustände
+anhand echter UTC-Zeitpunkte (einschließlich Mikrosekunden) und Eintrags-IDs
+verglichen werden. Unterschiedliche Zeitzonen-Offsets dürfen eine
+ABSENT-/ACTIVE-Reihenfolge nicht verfälschen. Es gibt weder einen neuen
+SQLite-Verbindungsaufbau noch einen vollständigen History-Sort pro Anzeige.
+Erst eine erneute Beobachtung als vorhanden erlaubt einen späteren
 ABSENT-Übergang.
 Fehlerhafte oder unauthentifizierte Reads überschreiben weder vorher
 bestätigte Snapshots noch den letzten tatsächlich erfolgreichen Abgleich.

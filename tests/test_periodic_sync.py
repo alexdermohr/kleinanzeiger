@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 import io
 import sqlite3
 import tempfile
@@ -142,6 +143,62 @@ class PeriodicReadTests(unittest.TestCase):
         self.assertIs(result.status, ReadStatus.SUCCESS_EMPTY)
         self.assertEqual(self.store.latest_sync_attempt().snapshot_count, 0)
         self.assertEqual(len(self.store.tracked_ad_ids()), 40)
+
+    def test_latest_state_uses_instant_not_lexical_iso_for_offset_timestamps(self):
+        # The lexical '14:30+05:00' predates 10:00Z in real time, even
+        # though its wall clock hour and ISO string sort later.
+        self.store.append_ad_snapshot(replace(
+            snapshot(),
+            observed_at=datetime(
+                2026, 10, 19, 14, 30, tzinfo=timezone(timedelta(hours=5))
+            ),
+            lifecycle_state=LifecycleState.ABSENT,
+        ))
+        self.store.append_ad_snapshot(replace(
+            snapshot(),
+            observed_at=datetime(2026, 10, 19, 10, tzinfo=timezone.utc),
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
+        sync = self.controller(lambda **_: Runtime(ReadResult.success_empty(())))
+        sync.run_once()
+        history = self.store.ad_history("1234567890")
+        self.assertEqual(len(history), 3)
+        self.assertEqual(history[-1].lifecycle_state, LifecycleState.ABSENT)
+        sync.run_once()
+        self.assertEqual(len(self.store.ad_history("1234567890")), 3)
+
+    def test_later_absent_instant_avoids_duplicate_despite_earlier_local_hour(self):
+        # Real time says 09:30Z ABSENT is later than 14:00+05 (09:00Z)
+        # ACTIVE; lexical ISO sorting claims the opposite.
+        self.store.append_ad_snapshot(replace(
+            snapshot(),
+            observed_at=datetime(
+                2026, 10, 19, 14, tzinfo=timezone(timedelta(hours=5))
+            ),
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
+        self.store.append_ad_snapshot(replace(
+            snapshot(),
+            observed_at=datetime(2026, 10, 19, 9, 30, tzinfo=timezone.utc),
+            lifecycle_state=LifecycleState.ABSENT,
+        ))
+        self.controller(lambda **_: Runtime(ReadResult.success_empty(()))).run_once()
+        self.assertEqual(len(self.store.ad_history("1234567890")), 2)
+        self.assertEqual(self.store.latest_sync_attempt().outcome, "success_empty")
+
+    def test_same_second_microseconds_respected_for_latest_owner_state(self):
+        self.store.append_ad_snapshot(replace(
+            snapshot(),
+            observed_at=datetime(2026, 10, 19, 10, 0, 0, 201, timezone.utc),
+            lifecycle_state=LifecycleState.ABSENT,
+        ))
+        self.store.append_ad_snapshot(replace(
+            snapshot(),
+            observed_at=datetime(2026, 10, 19, 10, 0, 0, 202, timezone.utc),
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
+        self.controller(lambda **_: Runtime(ReadResult.success_empty(()))).run_once()
+        self.assertEqual(len(self.store.ad_history("1234567890")), 3)
 
     def test_failure_settlement_sqlite_loss_preserves_bounded_error_and_unknown_outcome(self):
         # A storage failure after the attempt starts can prevent its failure
