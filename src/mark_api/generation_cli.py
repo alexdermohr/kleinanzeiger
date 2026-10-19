@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -38,7 +40,7 @@ def _parser() -> argparse.ArgumentParser:
         if mode == "image":
             sub.add_argument(
                 "--output", type=Path, required=True,
-                help="Create a new private PNG file; existing files are never overwritten.",
+                help="Reserve and write a PNG in a private user-owned directory; no existing file is overwritten.",
             )
     return parser
 
@@ -75,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             # Exclusive file reservation precedes the paid provider request.
             # Neither a missing parent nor an occupied path can incur a charge.
+            output_path = Path(os.path.abspath(args.output))
             with reserve_generated_image(args.output) as save_image:
                 reserved_image = True
                 data = generator.generate_image(prompt, model=args.model)
@@ -82,7 +85,10 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 json.dumps(
                     {"status": "draft", "published": False,
-                     "image_path": str(args.output), "format": "png"},
+                     "image_path": str(output_path), "format": "png",
+                     "image_sha256": hashlib.sha256(data).hexdigest(),
+                     "path_binding": "verified_at_write_only",
+                     "persistent_path_guarantee": False},
                     ensure_ascii=False,
                 )
             )

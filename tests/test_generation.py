@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -204,7 +205,12 @@ class GenerationTests(unittest.TestCase):
                 self.assertEqual(main(["image", "--prompt", "Fahrrad",
                                        "--output", str(target)]), 0)
             self.assertEqual(target.read_bytes(), valid_png())
-            self.assertFalse(json.loads(output.getvalue())["published"])
+            result = json.loads(output.getvalue())
+            self.assertFalse(result["published"])
+            self.assertEqual(result["path_binding"], "verified_at_write_only")
+            self.assertIs(result["persistent_path_guarantee"], False)
+            self.assertEqual(result["image_sha256"], hashlib.sha256(valid_png()).hexdigest())
+            self.assertEqual(result["image_path"], str(target))
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
 
     def test_cli_existing_output_file_is_not_replaced_or_billed(self):
@@ -237,6 +243,91 @@ class GenerationTests(unittest.TestCase):
             self.assertIn("image destination is unavailable", error.getvalue())
             self.assertEqual(self.images.calls, [])
             self.assertFalse(target.exists())
+
+    def test_cli_rejects_group_or_world_writable_parent_before_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "shared"
+            shared.mkdir()
+            shared.chmod(0o777)
+            target = shared / "image.png"
+            with (
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stderr", io.StringIO()) as error,
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            self.assertEqual(code, 2)
+            self.assertIn("must be private and user-owned", error.getvalue())
+            self.assertEqual(self.images.calls, [])
+            self.assertFalse(target.exists())
+
+    def test_cli_rejects_parent_symlink_before_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            alias = Path(tmp) / "dir_alias"
+            alias.symlink_to(tmp, target_is_directory=True)
+            target = alias / "image.png"
+            with (
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stderr", io.StringIO()) as error,
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            self.assertEqual(code, 2)
+            self.assertIn("must not be a symlink", error.getvalue())
+            self.assertEqual(self.images.calls, [])
+            self.assertFalse(target.exists())
+
+    def test_cli_rejects_parent_traversal_before_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "nested" / ".." / "image.png"
+            with (
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stderr", io.StringIO()) as error,
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            self.assertEqual(code, 2)
+            self.assertIn("parent traversal", error.getvalue())
+            self.assertEqual(self.images.calls, [])
+            self.assertFalse((Path(tmp) / "image.png").exists())
+
+    def test_cli_same_uid_path_swap_has_no_stability_claim_and_has_image_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "image.png"
+            original_lstat = Path.lstat
+            swapped = False
+
+            def swap_after_check(path, *args, **kwargs):
+                nonlocal swapped
+                observed = original_lstat(path, *args, **kwargs)
+                if path == target and observed.st_size > 0 and not swapped:
+                    swapped = True
+                    target.unlink()
+                    target.write_bytes(b"same-uid-replacement")
+                return observed
+
+            with (
+                patch("mark_api.generation.Path.lstat", autospec=True,
+                      side_effect=swap_after_check),
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stdout", io.StringIO()) as output,
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            # A same-UID process can replace a pathname after any check.
+            # The CLI must never claim persistent name-to-inode stability.
+            self.assertEqual(code, 0)
+            self.assertTrue(swapped)
+            report = json.loads(output.getvalue())
+            self.assertIs(report["persistent_path_guarantee"], False)
+            self.assertEqual(report["path_binding"], "verified_at_write_only")
+            self.assertEqual(report["image_sha256"], hashlib.sha256(valid_png()).hexdigest())
+            self.assertNotEqual(hashlib.sha256(target.read_bytes()).hexdigest(),
+                                report["image_sha256"])
 
     def test_cli_reserves_private_destination_before_provider_is_called(self):
         with tempfile.TemporaryDirectory() as tmp:

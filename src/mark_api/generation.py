@@ -10,6 +10,7 @@ import binascii
 import json
 import os
 import struct
+import stat
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -279,17 +280,56 @@ def _validate_png_payload(data: bytes) -> None:
         raise GenerationError("image provider returned invalid PNG row filter")
 
 
+def _require_private_image_parent(output: Path) -> None:
+    """Reject paths that another UID can replace after the final check.
+
+    A stored pathname is not an immutable handle. Even with a retained file
+    descriptor we can promise only that *our inode* was fully written; the
+    caller must trust other processes running with the same filesystem UID.
+    """
+    try:
+        lexical_parent = Path(os.path.abspath(output)).parent
+        parent = lexical_parent.resolve(strict=True)
+        if parent != lexical_parent:
+            raise GenerationError("image destination parent must not be a symlink")
+        parent_stat = parent.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_uid != os.geteuid()
+            or parent_stat.st_mode & 0o022
+        ):
+            raise GenerationError("image destination parent must be private and user-owned")
+        for ancestor in parent.parents:
+            info = ancestor.stat(follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                raise GenerationError("image destination ancestry is unsafe")
+            if info.st_mode & 0o022 and not (
+                info.st_uid == 0 and info.st_mode & stat.S_ISVTX
+            ):
+                raise GenerationError("image destination ancestry is unsafe")
+    except GenerationError:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        raise GenerationError("image destination is unavailable") from None
+
+
 @contextmanager
 def reserve_generated_image(output: Path) -> Iterator[Callable[[bytes], None]]:
     """Reserve the final private file *before* a potentially billable request.
 
-    Hold the exclusive descriptor until validation and fsync complete. On
-    failure, retain an empty private reservation marker for manual removal:
-    there is no atomic compare-inode-and-unlink syscall. Checking the inode
-    before unlink would otherwise race with an attacker replacing the path.
+    Hold the descriptor through fsync; only admit a user-owned, non-shared
+    directory so another UID cannot swap the path after its identity check.
+    A process using the same filesystem UID can still replace the name; no
+    persistent pathname guarantee is possible against that actor. On failure,
+    retain an empty private marker for manual removal: there is no atomic
+    compare-inode-and-unlink syscall.
     """
     if not isinstance(output, Path):
         raise GenerationError("invalid image destination or data")
+    if ".." in output.parts:
+        raise GenerationError("image destination contains parent traversal")
+    output = Path(os.path.abspath(output))
+    _require_private_image_parent(output)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
