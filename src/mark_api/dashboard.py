@@ -7,13 +7,16 @@ import hmac
 import http.client
 import json
 import math
+import os
 import re
+import secrets
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from threading import Lock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .analytics import (
     ANALYTICS_DIMENSIONS,
@@ -34,6 +37,10 @@ from .query import (
     summary_to_dict,
 )
 from .storage import SnapshotStore
+from .generation import (
+    AdvertisementDraft, AdvertisementGenerator, GenerationError,
+    _validate_png_payload,
+)
 
 
 _ANALYTICS_CSV_RANKING_COLUMNS = (
@@ -128,6 +135,71 @@ class DashboardWriteProxy:
             raise ValueError("dashboard write proxy timeout must be positive")
 
 
+
+class DashboardGenerationBusy(RuntimeError):
+    """Only one potentially billable provider call may run at a time."""
+
+
+class DashboardGenerationLimit(RuntimeError):
+    """The explicit per-process generation spending limit was reached."""
+
+
+class DashboardGenerationAccess:
+    """Independent session token and hard limit for on-demand provider calls.
+
+    No provider is constructed at startup. Failed/unknown provider calls count
+    against the limit and are never retried automatically. This surface has
+    no platform write authority, no cookies, and no URL forwarding.
+    """
+
+    def __init__(
+        self,
+        *,
+        ui_token: str,
+        generator_factory: Callable[[], AdvertisementGenerator] = AdvertisementGenerator,
+        max_requests: int = 10,
+    ) -> None:
+        if (
+            not isinstance(ui_token, str) or not 16 <= len(ui_token) <= 512
+            or any(not 0x21 <= ord(char) <= 0x7E for char in ui_token)
+        ):
+            raise ValueError("invalid generation UI token")
+        if not callable(generator_factory):
+            raise TypeError("generator_factory must be callable")
+        if (
+            isinstance(max_requests, bool)
+            or not isinstance(max_requests, int)
+            or not 1 <= max_requests <= 100
+        ):
+            raise ValueError("invalid generation request limit")
+        self._token = ui_token
+        self._factory = generator_factory
+        self._max_requests = max_requests
+        self._used = 0
+        self._lock = Lock()
+
+    @property
+    def ui_token(self) -> str:
+        return self._token
+
+    def generate(self, mode: str, prompt: str) -> object:
+        if not self._lock.acquire(blocking=False):
+            raise DashboardGenerationBusy("generation already in progress")
+        try:
+            if self._used >= self._max_requests:
+                raise DashboardGenerationLimit("generation session budget reached")
+            # Consume a slot BEFORE any billable or ambiguous provider call.
+            self._used += 1
+            generator = self._factory()
+            if mode == "text":
+                return generator.generate_text(prompt)
+            if mode == "image":
+                return generator.generate_image(prompt)
+            raise GenerationError("invalid generation kind")
+        finally:
+            self._lock.release()
+
+
 _DASHBOARD_HTML = """<!doctype html>
 <html lang="de">
 <head>
@@ -212,6 +284,36 @@ _DASHBOARD_HTML = """<!doctype html>
             <button id="manage-delete" data-write-control class="danger" type="button">Löschen</button>
           </div>
         </form>
+      </div>
+    </section>
+
+    <section id="generation-panel" class="panel" hidden>
+      <h2>Anzeige entwerfen – Text und Bild</h2>
+      <p class="muted">Diese Funktion erzeugt nur einen ungeprüften Entwurf. Eine Veröffentlichung erfolgt niemals automatisch. Für KI-Bilder und Texte können beim externen Anbieter Kosten entstehen; der Prompt wird an ihn übertragen.</p>
+      <p id="generation-session-note" class="note" hidden>Die Generierung muss für diese Sitzung mit <code>--enable-generation</code> aktiviert und das Dashboard über die vom Launcher ausgegebene URL geöffnet werden.</p>
+      <label>Artikelangaben oder Bildidee
+        <textarea id="generation-prompt" maxlength="4000" placeholder="Nur die tatsächlich bekannten Angaben zum Artikel eingeben. Keine privaten Daten."></textarea>
+      </label>
+      <label>
+        <input id="generation-consent" type="checkbox">
+        Ich bestätige für genau die nächste Anfrage, dass der Prompt an einen externen KI-Anbieter übertragen wird und dadurch Kosten entstehen können.
+      </label>
+      <div class="write-actions">
+        <button id="generation-text" type="button">Textentwurf erzeugen</button>
+        <button id="generation-image" type="button">Bildentwurf erzeugen</button>
+      </div>
+      <p id="generation-status" class="note" role="status" aria-live="polite"></p>
+      <div id="generation-text-preview" hidden>
+        <h3>Textvorschlag (nicht veröffentlicht)</h3>
+        <label>Vorgeschlagener Titel <input id="generation-draft-title" type="text" readonly></label>
+        <label>Vorgeschlagene Beschreibung <textarea id="generation-draft-description" readonly></textarea></label>
+        <button id="generation-apply-text" type="button" disabled>In neue Anzeige übernehmen (ohne Veröffentlichung)</button>
+      </div>
+      <div id="generation-image-preview" hidden>
+        <h3>Bildvorschlag (nicht veröffentlicht)</h3>
+        <p class="note">KI-Bilder sind keine nachgewiesenen Produktfotos. Übereinstimmung mit dem tatsächlichen Artikel vor jeder Verwendung prüfen.</p>
+        <img id="generation-draft-image" alt="KI-generierter Bildentwurf, noch nicht veröffentlicht" style="max-width: 100%; max-height: 360px;" hidden>
+        <p><button id="generation-apply-image" type="button" disabled>Als neues Anzeigenbild übernehmen (ohne Veröffentlichung)</button></p>
       </div>
     </section>
 
@@ -512,9 +614,16 @@ const byId = (id) => document.getElementById(id);
 
 const display = (value) => value === null || value === undefined ? "—" : String(value);
 const WRITE_TOKEN_STORAGE_KEY = "mark-dashboard-write-token";
+const GENERATION_TOKEN_STORAGE_KEY = "mark-dashboard-generation-token";
 const pendingWrites = new Map();
 let writeUiAvailable = false;
 let writeToken = null;
+let generationToken = null;
+let generationUiAvailable = false;
+let generationBusy = false;
+let generationImageBlob = null;
+let generationImagePreviewUrl = null;
+let generationTextDraft = null;
 let pendingRecoveryBlocked = false;
 let createInFlight = false;
 let latestAdsById = new Map();
@@ -540,6 +649,29 @@ function consumeWriteToken() {
       writeToken = window.sessionStorage.getItem(WRITE_TOKEN_STORAGE_KEY);
     } catch (_error) {
       writeToken = null;
+    }
+  }
+  const genCandidate = hashParams.get("generation_token");
+  if (
+    genCandidate
+    && genCandidate.length >= 16
+    && genCandidate.length <= 512
+    && Array.from(genCandidate).every((char) => {
+      const code = char.charCodeAt(0);
+      return code >= 33 && code <= 126;
+    })
+  ) {
+    generationToken = genCandidate;
+    try {
+      window.sessionStorage.setItem(GENERATION_TOKEN_STORAGE_KEY, genCandidate);
+    } catch (_error) {
+      // Per-process token remains only in this tab.
+    }
+  } else {
+    try {
+      generationToken = window.sessionStorage.getItem(GENERATION_TOKEN_STORAGE_KEY);
+    } catch (_error) {
+      generationToken = null;
     }
   }
   if (window.location.hash) {
@@ -1785,6 +1917,161 @@ async function loadAnalytics() {
   }
 }
 
+
+function generationUiReady() {
+  return (
+    generationUiAvailable
+    && typeof generationToken === "string"
+    && generationToken.length >= 16
+  );
+}
+
+function renderGenerationAvailability() {
+  byId("generation-panel").hidden = !generationUiAvailable;
+  byId("generation-session-note").hidden = generationUiReady();
+  const canGenerate = generationUiReady() && !generationBusy;
+  byId("generation-text").disabled = !canGenerate;
+  byId("generation-image").disabled = !canGenerate;
+  byId("generation-consent").disabled = generationBusy;
+  const canApply = writeUiReady() && !createInFlight;
+  byId("generation-apply-text").disabled = !canApply || generationTextDraft === null;
+  byId("generation-apply-image").disabled = !canApply || generationImageBlob === null;
+}
+
+async function requestGeneration(mode) {
+  if (!generationUiReady() || generationBusy) return;
+  const status = byId("generation-status");
+  const prompt = byId("generation-prompt").value.trim();
+  if (!prompt || prompt.length > 4000) {
+    status.textContent = "Artikelangaben/Bildidee (1–4000 Zeichen) eingeben.";
+    return;
+  }
+  if (!byId("generation-consent").checked) {
+    status.textContent = "Für jede kostenpflichtige Anfrage die Übertragung und mögliche Kosten gesondert bestätigen.";
+    return;
+  }
+  // Consent is single-use, never reused after an unknown provider outcome.
+  byId("generation-consent").checked = false;
+  generationBusy = true;
+  renderGenerationAvailability();
+  status.textContent = "Erzeuge unveröffentlichten Entwurf …";
+  try {
+    const response = await fetch("/api/dashboard/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mark-Generation": "1",
+        "X-Mark-Generation-Token": generationToken,
+      },
+      body: JSON.stringify({
+        mode,
+        prompt,
+        acknowledge_provider_cost: true,
+      }),
+      credentials: "omit",
+      mode: "same-origin",
+      redirect: "error",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      let errorCode = "generation_request_failed";
+      try {
+        const errorResult = await response.json();
+        if (typeof errorResult.error === "string") errorCode = errorResult.error;
+      } catch (_error) {
+        // Never read or display a provider error/secret body.
+      }
+      throw new Error(errorCode + " (HTTP " + response.status + ")");
+    }
+    if (mode === "text") {
+      const draft = await response.json();
+      if (
+        draft.status !== "draft" || draft.published !== false
+        || typeof draft.title !== "string"
+        || typeof draft.description !== "string"
+        || draft.title.length > 65 || draft.description.length > 4000
+      ) {
+        throw new Error("Ungültige lokale Textentwurf-Antwort.");
+      }
+      generationTextDraft = {title: draft.title, description: draft.description};
+      byId("generation-draft-title").value = draft.title;
+      byId("generation-draft-description").value = draft.description;
+      byId("generation-text-preview").hidden = false;
+      status.textContent = "Textentwurf bereit. Vor Übernahme Fakten überprüfen.";
+    } else if (mode === "image") {
+      if (response.headers.get("Content-Type")?.split(";")[0] !== "image/png") {
+        throw new Error("Lokaler Bildentwurf ist kein PNG.");
+      }
+      const payload = await response.blob();
+      if (!payload.size || payload.size > 18000000) {
+        throw new Error("Lokaler Bildentwurf überschreitet die Größenbegrenzung.");
+      }
+      const newUrl = URL.createObjectURL(payload);
+      const oldUrl = generationImagePreviewUrl;
+      generationImageBlob = payload;
+      generationImagePreviewUrl = newUrl;
+      byId("generation-draft-image").src = newUrl;
+      byId("generation-draft-image").hidden = false;
+      byId("generation-image-preview").hidden = false;
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      status.textContent = "Bildentwurf bereit. Er ist kein geprüfter Produktfoto-Nachweis.";
+    }
+  } catch (error) {
+    // An uncertain provider outcome is NEVER retried automatically.
+    status.textContent = "Generierung fehlgeschlagen oder unklar: " + error.message
+      + ". Kein automatischer Neuversuch.";
+  } finally {
+    generationBusy = false;
+    renderGenerationAvailability();
+  }
+}
+
+function applyGenerationTextToCreate() {
+  if (!writeUiReady() || !generationTextDraft || createInFlight) return;
+  const title = byId("create-title");
+  const description = byId("create-description");
+  if ((title.value || description.value)
+      && !window.confirm("Bestehenden Titel und Beschreibung im lokalen Formular durch den geprüften Entwurf ersetzen?")) {
+    return;
+  }
+  title.value = generationTextDraft.title;
+  description.value = generationTextDraft.description;
+  byId("generation-status").textContent =
+    "Entwurf lokal übernommen. Prüfen, Kategorie und Preis ergänzen und Veröffentlichung separat auslösen.";
+}
+
+function applyGenerationImageToCreate() {
+  if (!writeUiReady() || !generationImageBlob || createInFlight) return;
+  const files = byId("create-media");
+  const previous = Array.from(files.files ?? []);
+  if (previous.length >= 10 || generationImageBlob.size > 25000000) {
+    byId("generation-status").textContent = "Maximal 10 Bilder und geltende Größenlimits beachten.";
+    return;
+  }
+  try {
+    if (typeof DataTransfer !== "function" || typeof File !== "function") {
+      throw new Error("Dieser Browser unterstützt die lokale Bildübernahme nicht.");
+    }
+    const selected = new DataTransfer();
+    for (const file of previous) selected.items.add(file);
+    selected.items.add(
+      new File([generationImageBlob], "mark-ki-entwurf.png", {type: "image/png"}),
+    );
+    files.files = selected.files;
+    byId("generation-status").textContent =
+      "Bild lokal in die Dateiauswahl übernommen, nicht hochgeladen/veröffentlicht.";
+  } catch (error) {
+    byId("generation-status").textContent =
+      "Bildübernahme fehlgeschlagen: " + error.message;
+  }
+}
+
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("pagehide", () => {
+    if (generationImagePreviewUrl) URL.revokeObjectURL(generationImagePreviewUrl);
+  });
+}
+
 async function load() {
   const status = byId("status");
   status.textContent = "Lade lokale Daten …";
@@ -1809,8 +2096,10 @@ async function load() {
     byId("replies").textContent =
       `${summary.replies_total_known} / ${summary.replies_observed_ads} Ads`;
     writeUiAvailable = dashboardConfig.write_ui_available === true;
+    generationUiAvailable = dashboardConfig.generation_ui_available === true;
     await refreshPendingWrites();
     renderWriteAvailability();
+    renderGenerationAvailability();
     renderAds(ads);
     renderSyncStatus(summary.sync_status);
     renderAnalyticsContract(contract);
@@ -1852,6 +2141,10 @@ byId("manage-activate").addEventListener(
   () => runAdAction("activate", "POST", "/activate"),
 );
 byId("manage-delete").addEventListener("click", deleteManagedAd);
+byId("generation-text").addEventListener("click", () => requestGeneration("text"));
+byId("generation-image").addEventListener("click", () => requestGeneration("image"));
+byId("generation-apply-text").addEventListener("click", applyGenerationTextToCreate);
+byId("generation-apply-image").addEventListener("click", applyGenerationImageToCreate);
 consumeWriteToken();
 load();
 """
@@ -1954,6 +2247,7 @@ def _handler_factory(
     query: MarkQueryService,
     analytics: AnalyticsService,
     write_proxy: DashboardWriteProxy | None,
+    generation_access: DashboardGenerationAccess | None,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "mark-api-readonly/0.1"
@@ -2012,7 +2306,7 @@ def _handler_factory(
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; connect-src 'self'; "
-                "script-src 'self'; style-src 'self'; img-src 'none'; "
+                "script-src 'self'; style-src 'self'; img-src 'self' blob:; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
             )
             if allow is not None:
@@ -2421,7 +2715,13 @@ def _handler_factory(
             if path == "/api/dashboard/config":
                 self._send_json(
                     200,
-                    {"write_ui_available": write_proxy is not None},
+                    {
+                        "write_ui_available": write_proxy is not None,
+                        **(
+                            {"generation_ui_available": True}
+                            if generation_access is not None else {}
+                        ),
+                    },
                 )
                 return
             if path == "/api/dashboard/pending-writes":
@@ -2701,7 +3001,96 @@ def _handler_factory(
                 },
             )
 
+        def _generation_session_authorized(self) -> bool:
+            if generation_access is None:
+                return False
+            marker = self.headers.get_all("X-Mark-Generation") or []
+            tokens = self.headers.get_all("X-Mark-Generation-Token") or []
+            origins = self.headers.get_all("Origin") or []
+            fetch_sites = self.headers.get_all("Sec-Fetch-Site") or []
+            host, port = self.server.server_address
+            expected_origin = _dashboard_http_origin(str(host), int(port))
+            return (
+                len(marker) == 1
+                and marker[0] == "1"
+                and len(tokens) == 1
+                and hmac.compare_digest(tokens[0], generation_access.ui_token)
+                and len(origins) == 1
+                and hmac.compare_digest(origins[0], expected_origin)
+                and self.headers.get("Authorization") is None
+                and (
+                    not fetch_sites
+                    or len(fetch_sites) == 1 and fetch_sites[0] == "same-origin"
+                )
+            )
+
+        def _generate_draft(self) -> None:
+            # This is NOT a Write API route. Never forward a provider or
+            # generated-media request to the platform or media staging API.
+            target = urlsplit(self.path)
+            if (
+                target.path != "/api/dashboard/generate"
+                or target.query or target.fragment
+                or generation_access is None
+            ):
+                self._send_json(404, {"error": "not_found"})
+                return
+            if not self._generation_session_authorized():
+                self._send_json(403, {"error": "generation_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error": "generation_idempotency_not_supported"})
+                return
+            try:
+                raw, _ = self._read_proxy_body("local_json")
+                request = json.loads(raw.decode("utf-8"))
+                if (
+                    not isinstance(request, dict)
+                    or set(request) != {"mode", "prompt", "acknowledge_provider_cost"}
+                    or request["mode"] not in ("text", "image")
+                    or request["acknowledge_provider_cost"] is not True
+                ):
+                    raise ValueError("invalid_request")
+                prompt = request["prompt"]
+                if (
+                    not isinstance(prompt, str)
+                    or not 1 <= len(prompt.strip()) <= 4000
+                    or any(ord(ch) < 32 and ch not in "\\n\\t" for ch in prompt)
+                    or any(0xD800 <= ord(ch) <= 0xDFFF for ch in prompt)
+                ):
+                    raise ValueError("invalid_prompt")
+            except (UnicodeError, json.JSONDecodeError, ValueError, TimeoutError, OSError):
+                self._send_json(400, {"error": "invalid_generation_request"})
+                return
+            try:
+                result = generation_access.generate(request["mode"], prompt)
+            except DashboardGenerationBusy:
+                self._send_json(409, {"error": "generation_in_progress"})
+                return
+            except DashboardGenerationLimit:
+                self._send_json(429, {"error": "generation_session_budget_exhausted"})
+                return
+            except Exception:
+                # No prompts, credentials, upstream errors or stack details.
+                self._send_json(502, {"error": "generation_failed_no_automatic_retry"})
+                return
+            if request["mode"] == "text":
+                if not isinstance(result, AdvertisementDraft):
+                    self._send_json(502, {"error": "generation_invalid_output"})
+                    return
+                self._send_json(200, result.as_dict())
+            else:
+                try:
+                    _validate_png_payload(result)
+                except GenerationError:
+                    self._send_json(502, {"error": "generation_invalid_output"})
+                    return
+                self._send(200, result, "image/png")
+
         def do_POST(self) -> None:
+            if urlsplit(self.path).path == "/api/dashboard/generate":
+                self._generate_draft()
+                return
             if urlsplit(self.path).path == "/api/dashboard/pending-writes/ack":
                 self._ack_dashboard_pending_write()
                 return
@@ -2736,6 +3125,7 @@ def create_server(
     port: int = 8765,
     analytics_contract: AnalyticsContract | None = None,
     write_proxy: DashboardWriteProxy | None = None,
+    generation_access: DashboardGenerationAccess | None = None,
 ) -> LoopbackDashboardServer:
     if host != "127.0.0.1":
         raise ValueError("dashboard must bind to 127.0.0.1")
@@ -2746,17 +3136,19 @@ def create_server(
     ):
         raise ValueError("port must be an integer between 0 and 65535")
 
+    if generation_access is not None and not isinstance(generation_access, DashboardGenerationAccess):
+        raise TypeError("generation_access must be DashboardGenerationAccess or None")
     query = MarkQueryService(store)
     analytics = AnalyticsService(store, contract=analytics_contract)
     return LoopbackDashboardServer(
         (host, port),
-        _handler_factory(store, query, analytics, write_proxy),
+        _handler_factory(store, query, analytics, write_proxy, generation_access),
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Serve the local read-only mark-api dashboard.",
+        description="Serve the local read-only dashboard with optional explicit draft generation.",
     )
     parser.add_argument(
         "--db",
@@ -2769,6 +3161,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=8765,
         help="Loopback port (default: 8765).",
+    )
+    parser.add_argument(
+        "--enable-generation",
+        action="store_true",
+        help="Explicitly unlock locally authenticated, individually consented, billable text/image draft generation; defaults off.",
     )
     parser.add_argument(
         "--reaction-metric",
@@ -2794,6 +3191,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Explicitly initialize a new SQLite store; omit on normal starts.",
     )
     args = parser.parse_args(argv)
+    if args.enable_generation and not os.environ.get("OPENAI_API_KEY"):
+        parser.error("--enable-generation requires OPENAI_API_KEY in the local process environment")
 
     try:
         store = SnapshotStore(args.db, create_if_missing=args.init_db)
@@ -2803,11 +3202,23 @@ def main(argv: list[str] | None = None) -> int:
         reaction_metric=args.reaction_metric,
         objective_metric=args.objective_metric,
     )
+    generation_access = (
+        DashboardGenerationAccess(ui_token=secrets.token_urlsafe(32))
+        if args.enable_generation else None
+    )
     server = create_server(
         store,
         port=args.port,
         analytics_contract=contract,
+        generation_access=generation_access,
     )
+    if generation_access is not None:
+        host, port = server.server_address
+        print(
+            f"Mark dashboard: http://{host}:{port}/"
+            f"#generation_token={quote(generation_access.ui_token, safe='')}",
+            flush=True,
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

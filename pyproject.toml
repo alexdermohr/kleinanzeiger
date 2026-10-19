@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 private-web = ["websocket-client>=1.8,<2", "Pillow>=10.4,<13"]
+generation = ["openai>=2.11,<3"]
 
 [project.scripts]
 mark-api-dashboard = "mark_api.dashboard:main"
@@ -20,6 +21,7 @@ mark-api-import-mail = "mark_api.email_import_cli:main"
 mark-api-local-smoke = "mark_api.local_smoke:main"
 mark-api-launch = "mark_api.launcher:main"
 mark-api-migrate-legacy = "mark_api.legacy_migration:main"
+mark-api-generate = "mark_api.generation_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
