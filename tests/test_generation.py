@@ -261,7 +261,7 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), valid_png())
             self.assertEqual(len(self.images.calls), 1)
 
-    def test_cli_provider_failure_cleans_only_reserved_output(self):
+    def test_cli_provider_failure_retains_only_empty_private_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "generated.png"
             self.images.error = RuntimeError("secret provider error")
@@ -269,13 +269,19 @@ class GenerationTests(unittest.TestCase):
                 patch("mark_api.generation_cli.AdvertisementGenerator",
                       return_value=self.generator),
                 patch("sys.stderr", io.StringIO()) as error,
+                patch.object(Path, "unlink", side_effect=AssertionError(
+                    "failure cleanup must never unlink an arbitrary pathname"
+                )),
             ):
                 code = main(["image", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
-            self.assertFalse(target.exists())
+            self.assertTrue(target.is_file())
+            self.assertEqual(target.stat().st_size, 0)
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
             self.assertEqual(len(self.images.calls), 1)
             self.assertNotIn("secret", error.getvalue())
+            self.assertIn("inspect it before manual cleanup", error.getvalue())
 
     def test_cli_replaced_destination_is_never_unlinked_or_reported_saved(self):
         with tempfile.TemporaryDirectory() as tmp:

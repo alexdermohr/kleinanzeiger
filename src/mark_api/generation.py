@@ -283,9 +283,10 @@ def _validate_png_payload(data: bytes) -> None:
 def reserve_generated_image(output: Path) -> Iterator[Callable[[bytes], None]]:
     """Reserve the final private file *before* a potentially billable request.
 
-    Hold the exclusive descriptor until validation and fsync complete. If the
-    provider fails, clean up only our own inode; never unlink a replacement
-    placed at the same pathname by another process.
+    Hold the exclusive descriptor until validation and fsync complete. On
+    failure, retain an empty private reservation marker for manual removal:
+    there is no atomic compare-inode-and-unlink syscall. Checking the inode
+    before unlink would otherwise race with an attacker replacing the path.
     """
     if not isinstance(output, Path):
         raise GenerationError("invalid image destination or data")
@@ -335,16 +336,15 @@ def reserve_generated_image(output: Path) -> Iterator[Callable[[bytes], None]]:
     try:
         yield save
     finally:
-        os.close(descriptor)
         if not saved:
+            # Truncate the still-open *own* inode; never unlink by name. Even
+            # lstat followed by unlink is unsafe against a path-swap race.
             try:
-                current = output.lstat()
-                if (current.st_dev, current.st_ino) == (
-                    identity.st_dev, identity.st_ino
-                ):
-                    output.unlink()
+                os.ftruncate(descriptor, 0)
+                os.fsync(descriptor)
             except OSError:
                 pass
+        os.close(descriptor)
 
 
 def save_generated_image(data: bytes, output: Path) -> None:

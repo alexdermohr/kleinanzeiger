@@ -65,6 +65,7 @@ def _prompt(args: argparse.Namespace) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    reserved_image = False
     try:
         prompt = _prompt(args)
         generator = AdvertisementGenerator()
@@ -75,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             # Exclusive file reservation precedes the paid provider request.
             # Neither a missing parent nor an occupied path can incur a charge.
             with reserve_generated_image(args.output) as save_image:
+                reserved_image = True
                 data = generator.generate_image(prompt, model=args.model)
                 save_image(data)
             print(
@@ -86,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
             )
     except GenerationError as exc:
         print(f"mark-api-generate: {exc}", file=sys.stderr)
+        if reserved_image:
+            print(
+                "mark-api-generate: output may contain an incomplete private "
+                "reservation; inspect it before manual cleanup",
+                file=sys.stderr,
+            )
         return 2
     return 0
 
