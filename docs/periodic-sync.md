@@ -39,8 +39,11 @@ im vorhandenen SQLite-sync_attempts-Journal eröffnet. Erfolgreiche
 Bestandsbeobachtungen und success_empty/success_nonempty einschließlich
 ABSENT-Übergänge werden atomar gemeinsam geschrieben. Ein bereits als
 ABSENT dokumentiertes Inserat erhält bei nachfolgenden leeren Bestandsreads
-keine weiteren identischen ABSENT-Zeilen; erst eine erneute Beobachtung als
-vorhanden erlaubt wieder einen zukünftigen ABSENT-Übergang.
+keine weiteren identischen ABSENT-Zeilen; die neuesten Zustände werden
+mit **einer** gruppierten SQLite-Abfrage ermittelt, nicht durch einen
+wachsenden historischen Python-Scan für jede Anzeigennummer. Erst eine
+erneute Beobachtung als vorhanden erlaubt wieder einen zukünftigen
+ABSENT-Übergang.
 Fehlerhafte oder unauthentifizierte Reads überschreiben weder vorher
 bestätigte Snapshots noch den letzten tatsächlich erfolgreichen Abgleich.
 **Jede fehlgeschlagene Inventur beendet den Polling-Prozess mit Fehlercode.**
@@ -57,7 +60,10 @@ Ein bereits begonnener Browser-Read darf keine falsche Erfolgsaussage erzeugen.
 Ein Prozessabbruch bzw. SIGKILL kann in_progress hinterlassen: Der Ausgang
 bleibt dann ungeklärt. Ein unklarer SQLite-Commit wird niemals durch einen
 blinden Retry oder einen erfundenen Erfolgsstatus kaschiert; der bestehende
-CAS beim Versuchabschluss entscheidet unabhängig.
+CAS beim Versuchabschluss entscheidet unabhängig. Wenn auch der Versuch,
+eine Fehlerklasse zu speichern, wegen ausgefallener SQLite scheitert,
+erscheint nach außen ausschließlich der begrenzte Fehler samt Exit-Code 2;
+der angefangene Versuch bleibt dokumentiert als in_progress/ungeklärt.
 
 Das Modul stellt weder Plattform-POST-/PATCH-/DELETE-Operationen noch
 eine Write API bereit, verlangt keinen generischen Freigabe-Boolean

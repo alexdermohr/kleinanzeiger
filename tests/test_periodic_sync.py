@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -124,6 +125,43 @@ class PeriodicReadTests(unittest.TestCase):
             self.store.ad_history("1234567890")[-1].lifecycle_state,
             LifecycleState.ABSENT,
         )
+
+    def test_current_state_scanned_once_not_one_history_query_per_ad(self):
+        # Historical rows grow with every cycle; the scheduler should never
+        # call the per-ad history/sort API for every tracked ID.
+        for i in range(40):
+            self.store.append_ad_snapshot(snapshot(str(1000000000 + i)))
+        with patch.object(
+            self.store, "latest_ad_snapshot",
+            side_effect=AssertionError("per-ad history API used"),
+        ):
+            controller = self.controller(
+                lambda **_: Runtime(ReadResult.success_empty(()))
+            )
+            result = controller.run_once()
+        self.assertIs(result.status, ReadStatus.SUCCESS_EMPTY)
+        self.assertEqual(self.store.latest_sync_attempt().snapshot_count, 0)
+        self.assertEqual(len(self.store.tracked_ad_ids()), 40)
+
+    def test_failure_settlement_sqlite_loss_preserves_bounded_error_and_unknown_outcome(self):
+        # A storage failure after the attempt starts can prevent its failure
+        # CAS too. A raw sqlite exception must never replace the safe error,
+        # and an in_progress attempt must not be reclassified as success.
+        sync = self.controller(lambda **_: Runtime(ReadResult.success_empty(())))
+        with (
+            patch.object(
+                self.store, "append_inventory_result",
+                side_effect=sqlite3.OperationalError("SECRET_DATABASE_PATH"),
+            ),
+            patch.object(
+                self.store, "fail_sync_attempt",
+                side_effect=sqlite3.OperationalError("SECRET_DATABASE_PATH"),
+            ),
+        ):
+            with self.assertRaisesRegex(PeriodicSyncError, "persistence failed") as cm:
+                sync.run_once()
+        self.assertNotIn("SECRET_DATABASE_PATH", str(cm.exception))
+        self.assertEqual(self.store.latest_sync_attempt().outcome, "in_progress")
 
     def test_http_auth_and_network_failures_keep_old_observations(self):
         self.controller(lambda **_: Runtime(

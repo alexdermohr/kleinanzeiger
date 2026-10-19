@@ -11,6 +11,7 @@ import math
 import signal
 import sys
 from collections.abc import Callable
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock
@@ -125,13 +126,44 @@ class PeriodicOwnerSync:
             and len({item.ad_id for item in entries}) == len(entries)
         )
 
-    def _mark_failed(self, attempt: int, *, error_kind: str) -> None:
+    def _mark_failed(self, attempt: int, *, error_kind: str) -> bool:
         # CAS fails on an already committed attempt, rather than rewriting a
-        # successful outcome after an ambiguous SQLite transaction.
-        self._store.fail_sync_attempt(
-            attempt, source=_SOURCE, completed_at=self._now(),
-            error_kind=error_kind,
-        )
+        # successful outcome after an ambiguous SQLite transaction. If SQLite
+        # itself is unavailable, retain the original bounded operational
+        # error; the attempt remains in_progress/unknown, NEVER success.
+        try:
+            self._store.fail_sync_attempt(
+                attempt, source=_SOURCE, completed_at=self._now(),
+                error_kind=error_kind,
+            )
+        except Exception:
+            return False
+        return True
+
+    def _tracked_present_ids(self) -> tuple[str, ...]:
+        # Query each current ad state in a SINGLE indexed/windowed database
+        # scan instead of opening a connection and sorting all historical rows
+        # separately for every tracked ID on every poll. Uses the existing
+        # validated SQLite schema and the store's non-creating URI. The
+        # connection is explicitly closed even on Python 3.13.
+        with closing(self._store._connect()) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            rows = connection.execute(
+                """
+                WITH latest AS (
+                    SELECT ad_id, lifecycle_state,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY ad_id ORDER BY observed_at DESC, id DESC
+                        ) AS row_rank
+                    FROM ad_snapshots
+                )
+                SELECT ad_id FROM latest
+                WHERE row_rank = 1 AND lifecycle_state <> ?
+                ORDER BY ad_id ASC
+                """,
+                (LifecycleState.ABSENT.value,),
+            ).fetchall()
+        return tuple(str(row["ad_id"]) for row in rows)
 
     def run_once(self) -> ReadResult[tuple[AdSnapshot, ...]]:
         if self._stop.is_set():
@@ -141,17 +173,10 @@ class PeriodicOwnerSync:
         try:
             # Snapshot existing owner IDs before any network access.
             try:
-                # Historical IDs remain useful for analytics, but only
-                # transitions from a present/unknown latest state to ABSENT
-                # should produce an ABSENT snapshot. Otherwise every poll
-                # appends a duplicate ABSENT row for each old deleted ad.
-                tracked = tuple(
-                    ad_id for ad_id in self._store.tracked_ad_ids()
-                    if (
-                        (latest := self._store.latest_ad_snapshot(ad_id)) is not None
-                        and latest.lifecycle_state is not LifecycleState.ABSENT
-                    )
-                )
+                # Track only ads whose LATEST state is not ABSENT. Historical
+                # IDs remain in storage for analytics without duplicate
+                # ABSENT rows on every subsequent successful poll.
+                tracked = self._tracked_present_ids()
                 attempt = self._store.begin_sync_attempt(
                     source=_SOURCE, started_at=self._now(),
                 )
