@@ -14,6 +14,7 @@ from .private_web_cdp import (
     PrivateWebCdpWriteNotAttemptedError,
     _CREATE_FORM_PATH,
     _POST_SUBMIT_PATH,
+    _require_private_web_cdp_authority,
 )
 from .private_web_media import (
     PrivateWebCreateMediaSnapshot,
@@ -47,6 +48,12 @@ class CdpPrivateWebMediaPage(CdpPrivateWebPage):
         self._media_file_object_id = None
         client = self._client_instance
         if object_id is None or client is None:
+            return
+        # Releasing a remote CDP object is a browser effect. Keep local
+        # cleanup possible without permission, but never call the client.
+        try:
+            _require_private_web_cdp_authority()
+        except PrivateWebCdpError:
             return
         try:
             client.call("Runtime.releaseObject", {"objectId": object_id})

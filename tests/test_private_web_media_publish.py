@@ -396,6 +396,21 @@ class PrivateWebCreateMediaWriterTests(unittest.TestCase):
 
 
 class CdpPrivateWebMediaPublishTests(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        # Only synthetic in-memory CDP tests bypass platform admission.
+        fake_only = patch("mark_api.private_web_cdp._require_private_web_cdp_authority")
+        fake_only.start()
+        cls.addClassCleanup(fake_only.stop)
+        # Media module imports the independent releaseObject admission gate.
+        media_fake_only = patch(
+            "mark_api.private_web_cdp_media._require_private_web_cdp_authority"
+        )
+        media_fake_only.start()
+        cls.addClassCleanup(media_fake_only.stop)
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
