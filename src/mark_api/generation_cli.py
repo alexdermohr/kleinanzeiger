@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from .generation import AdvertisementGenerator, GenerationError, save_generated_image
+from .generation import AdvertisementGenerator, GenerationError, reserve_generated_image
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -67,16 +67,16 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         prompt = _prompt(args)
-        if args.mode == "image":
-            if args.output.exists() or args.output.is_symlink():
-                raise GenerationError("image destination already exists")
         generator = AdvertisementGenerator()
         if args.mode == "text":
             result = generator.generate_text(prompt, model=args.model)
             print(json.dumps(result.as_dict(), ensure_ascii=False))
         else:
-            data = generator.generate_image(prompt, model=args.model)
-            save_generated_image(data, args.output)
+            # Exclusive file reservation precedes the paid provider request.
+            # Neither a missing parent nor an occupied path can incur a charge.
+            with reserve_generated_image(args.output) as save_image:
+                data = generator.generate_image(prompt, model=args.model)
+                save_image(data)
             print(
                 json.dumps(
                     {"status": "draft", "published": False,

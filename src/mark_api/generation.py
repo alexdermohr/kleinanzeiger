@@ -11,8 +11,10 @@ import json
 import os
 import struct
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable, Iterator
 from typing import Any
 
 _MAX_PROMPT_CHARS = 4000
@@ -277,11 +279,16 @@ def _validate_png_payload(data: bytes) -> None:
         raise GenerationError("image provider returned invalid PNG row filter")
 
 
-def save_generated_image(data: bytes, output: Path) -> None:
-    """Create a local draft image securely without clobbering any file."""
-    if not isinstance(output, Path) or not isinstance(data, bytes):
+@contextmanager
+def reserve_generated_image(output: Path) -> Iterator[Callable[[bytes], None]]:
+    """Reserve the final private file *before* a potentially billable request.
+
+    Hold the exclusive descriptor until validation and fsync complete. If the
+    provider fails, clean up only our own inode; never unlink a replacement
+    placed at the same pathname by another process.
+    """
+    if not isinstance(output, Path):
         raise GenerationError("invalid image destination or data")
-    _validate_png_payload(data)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -291,19 +298,59 @@ def save_generated_image(data: bytes, output: Path) -> None:
         raise GenerationError("image destination already exists") from None
     except OSError:
         raise GenerationError("image destination is unavailable") from None
-    identity = os.fstat(descriptor)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except Exception:
+        identity = os.fstat(descriptor)
+    except OSError:
+        os.close(descriptor)
+        raise GenerationError("image destination is unavailable") from None
+
+    saved = False
+    attempted = False
+
+    def save(data: bytes) -> None:
+        nonlocal attempted, saved
+        if attempted:
+            raise GenerationError("image destination already used")
+        attempted = True
+        _validate_png_payload(data)
+        try:
+            # A dup shares the same open file description, not a pathname.
+            # Never reopen the target after the paid provider call.
+            with os.fdopen(os.dup(descriptor), "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            raise GenerationError("image write failed") from None
         try:
             current = output.lstat()
-            if (current.st_dev, current.st_ino) == (
-                identity.st_dev, identity.st_ino
-            ):
-                output.unlink()
         except OSError:
-            pass
-        raise GenerationError("image write failed") from None
+            raise GenerationError("image destination changed") from None
+        if (current.st_dev, current.st_ino) != (
+            identity.st_dev, identity.st_ino
+        ):
+            raise GenerationError("image destination changed")
+        saved = True
+
+    try:
+        yield save
+    finally:
+        os.close(descriptor)
+        if not saved:
+            try:
+                current = output.lstat()
+                if (current.st_dev, current.st_ino) == (
+                    identity.st_dev, identity.st_ino
+                ):
+                    output.unlink()
+            except OSError:
+                pass
+
+
+def save_generated_image(data: bytes, output: Path) -> None:
+    """Create a local draft image securely without clobbering any file."""
+    if not isinstance(output, Path) or not isinstance(data, bytes):
+        raise GenerationError("invalid image destination or data")
+    _validate_png_payload(data)
+    with reserve_generated_image(output) as save:
+        save(data)

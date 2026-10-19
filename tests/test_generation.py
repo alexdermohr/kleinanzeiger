@@ -223,6 +223,87 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"original")
             self.assertEqual(self.images.calls, [])
 
+    def test_cli_missing_output_parent_rejects_before_paid_provider_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "missing" / "image.png"
+            with (
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stderr", io.StringIO()) as error,
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            self.assertEqual(code, 2)
+            self.assertIn("image destination is unavailable", error.getvalue())
+            self.assertEqual(self.images.calls, [])
+            self.assertFalse(target.exists())
+
+    def test_cli_reserves_private_destination_before_provider_is_called(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "generated.png"
+            original = self.images.generate
+
+            def inspect_reservation(**kwargs):
+                self.assertTrue(target.is_file())
+                self.assertEqual(target.stat().st_size, 0)
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+                return original(**kwargs)
+
+            with (
+                patch.object(self.images, "generate", side_effect=inspect_reservation),
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stdout", io.StringIO()),
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            self.assertEqual(code, 0)
+            self.assertEqual(target.read_bytes(), valid_png())
+            self.assertEqual(len(self.images.calls), 1)
+
+    def test_cli_provider_failure_cleans_only_reserved_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "generated.png"
+            self.images.error = RuntimeError("secret provider error")
+            with (
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stderr", io.StringIO()) as error,
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            self.assertEqual(code, 2)
+            self.assertFalse(target.exists())
+            self.assertEqual(len(self.images.calls), 1)
+            self.assertNotIn("secret", error.getvalue())
+
+    def test_cli_replaced_destination_is_never_unlinked_or_reported_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "generated.png"
+            original = self.images.generate
+
+            def replace_reserved_path(**kwargs):
+                result = original(**kwargs)
+                self.assertTrue(target.exists())
+                target.unlink()
+                target.write_bytes(b"foreign replacement")
+                return result
+
+            with (
+                patch.object(self.images, "generate", side_effect=replace_reserved_path),
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stderr", io.StringIO()) as error,
+                patch("sys.stdout", io.StringIO()) as output,
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            self.assertEqual(code, 2)
+            self.assertIn("destination changed", error.getvalue())
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(target.read_bytes(), b"foreign replacement")
+            self.assertEqual(len(self.images.calls), 1)
+
     def test_cli_prompt_file_utf8_is_explicit_and_size_bounded(self):
         with tempfile.TemporaryDirectory() as tmp:
             prompt_path = Path(tmp) / "input.txt"
