@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch as _legacy_gate_patch
+
 import unittest
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -73,6 +75,13 @@ class FakeClient:
 
 
 class MonkrelMobileApiAdapterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        synthetic = _legacy_gate_patch(
+            "mark_api.adapters._legacy_admission.require_legacy_platform_authority"
+        )
+        synthetic.start()
+        self.addCleanup(synthetic.stop)
+
     def adapter(self, client: FakeClient) -> MonkrelMobileApiAdapter:
         return MonkrelMobileApiAdapter(client, clock=lambda: NOW)
 

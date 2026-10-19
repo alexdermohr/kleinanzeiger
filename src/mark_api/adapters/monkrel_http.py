@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import _legacy_admission
+
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 from xml.sax.saxutils import quoteattr
@@ -187,6 +189,7 @@ class MonkrelPrivateHttpContentClient:
         return fallback
 
     def _owner_ad(self, target_id: str) -> tuple[str, Mapping[str, Any]]:
+        _legacy_admission.require_legacy_platform_authority()
         uid = _required_text(self._client.user_id, "user_id")
         response = self._client._request(
             "GET",
@@ -211,6 +214,9 @@ class MonkrelPrivateHttpContentClient:
         title: str | None = None,
         description: str | None = None,
     ) -> None:
+        # Do not even consult caller-provided retry policy before entitlement.
+        # An upstream property can perform work while appearing to be metadata.
+        _legacy_admission.require_legacy_platform_authority()
         target_id = _required_text(ad_id, "ad_id")
         if title is not None and not isinstance(title, str):
             raise TypeError("title must be a string or None")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch as _legacy_gate_patch
+
 import json
 import signal
 import subprocess
@@ -61,6 +63,11 @@ class RaisingRunner:
 
 class BrowserBotAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
+        synthetic = _legacy_gate_patch(
+            "mark_api.adapters._legacy_admission.require_legacy_platform_authority"
+        )
+        synthetic.start()
+        self.addCleanup(synthetic.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
