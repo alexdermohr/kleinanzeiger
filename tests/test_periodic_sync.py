@@ -1,0 +1,250 @@
+"""Synthetic read-only polling tests; never contact a browser or marketplace."""
+from __future__ import annotations
+
+import contextlib
+import io
+import tempfile
+import threading
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.periodic_sync import PeriodicOwnerSync, PeriodicSyncError, main
+from mark_api.results import ReadResult, ReadStatus
+from mark_api.storage import SnapshotStore
+
+
+_NOW = datetime(2026, 10, 19, 10, tzinfo=timezone.utc)
+
+
+def snapshot(ad_id: str = "1234567890") -> AdSnapshot:
+    return AdSnapshot(
+        ad_id=ad_id,
+        observed_at=_NOW,
+        source="synthetic-owner",
+        title="Eigene Vase",
+        lifecycle_state=LifecycleState.ACTIVE,
+        views=4,
+    )
+
+
+class Runtime:
+    def __init__(self, response, *, failure=None, close_failure=False):
+        self.response = response
+        self.failure = failure
+        self.close_failure = close_failure
+        self.read_count = 0
+        self.closed = False
+
+    def read_inventory(self):
+        self.read_count += 1
+        if self.failure is not None:
+            raise self.failure
+        return self.response
+
+    def close(self):
+        self.closed = True
+        if self.close_failure:
+            raise RuntimeError("private browser close failure")
+
+
+class PeriodicReadTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "snapshots.sqlite"
+        self.store = SnapshotStore(self.path, create_if_missing=True)
+
+    def controller(self, factory, **kwargs):
+        parameters = {
+            "store": self.store,
+            "cdp_port": 19610,
+            "interval_seconds": 60,
+            "clock": lambda: _NOW,
+            "runtime_factory": factory,
+        }
+        parameters.update(kwargs)
+        return PeriodicOwnerSync(**parameters)
+
+    def test_successful_refresh_persists_snapshot_and_journal_atomically(self):
+        owner = Runtime(ReadResult.success_nonempty((snapshot(),)))
+        observed = []
+        sync = self.controller(
+            lambda **kwargs: observed.append(kwargs) or owner,
+        )
+        result = sync.run_once()
+        self.assertIs(result.status, ReadStatus.SUCCESS_NONEMPTY)
+        self.assertEqual(owner.read_count, 1)
+        self.assertTrue(owner.closed)
+        self.assertEqual(observed, [{"cdp_port": 19610, "timeout_seconds": 5.0}])
+        self.assertEqual(self.store.tracked_ad_ids(), ("1234567890",))
+        attempt = self.store.latest_sync_attempt()
+        self.assertIsNotNone(attempt)
+        self.assertEqual(attempt.source, "private-web-periodic-readonly")
+        self.assertEqual(attempt.outcome, "success_nonempty")
+        self.assertEqual(attempt.snapshot_count, 1)
+
+    def test_successful_empty_inventory_marks_previously_owned_ads_absent(self):
+        self.controller(lambda **_: Runtime(
+            ReadResult.success_nonempty((snapshot(),))
+        )).run_once()
+        empty = Runtime(ReadResult.success_empty(()))
+        self.controller(lambda **_: empty).run_once()
+        latest = self.store.latest_sync_attempt()
+        self.assertEqual(latest.outcome, "success_empty")
+        self.assertEqual(latest.snapshot_count, 0)
+        history = self.store.ad_history("1234567890")
+        self.assertEqual(history[-1].lifecycle_state, LifecycleState.ABSENT)
+        self.assertTrue(empty.closed)
+
+    def test_http_auth_and_network_failures_keep_old_observations(self):
+        self.controller(lambda **_: Runtime(
+            ReadResult.success_nonempty((snapshot(),))
+        )).run_once()
+        prior = self.store.ad_history("1234567890")
+        for status in (ReadStatus.UNAUTHENTICATED, ReadStatus.TRANSPORT_ERROR):
+            with self.subTest(status=status):
+                failure = Runtime(ReadResult.failure(status, error="synthetic"))
+                result = self.controller(lambda **_: failure).run_once()
+                self.assertIs(result.status, status)
+                self.assertEqual(self.store.ad_history("1234567890"), prior)
+                self.assertEqual(self.store.latest_sync_attempt().outcome, "failed")
+                self.assertTrue(failure.closed)
+        self.assertEqual(
+            self.store.last_successful_sync_attempt().outcome,
+            "success_nonempty",
+        )
+
+    def test_runtime_failure_and_reader_exception_are_durably_journaled(self):
+        def fail_start(**_kwargs):
+            raise RuntimeError("SECRET_BROWSER_HEADER")
+
+        with self.assertRaisesRegex(PeriodicSyncError, "runtime unavailable"):
+            self.controller(fail_start).run_once()
+        self.assertEqual(self.store.latest_sync_attempt().error_kind, "runtime_unavailable")
+        failure = Runtime(None, failure=RuntimeError("PRIVATE_COOKIE_VALUE"))
+        with self.assertRaisesRegex(PeriodicSyncError, "read failed") as caught:
+            self.controller(lambda **_: failure).run_once()
+        self.assertNotIn("PRIVATE_COOKIE_VALUE", str(caught.exception))
+        self.assertTrue(failure.closed)
+        self.assertEqual(self.store.latest_sync_attempt().error_kind, "reader_exception")
+
+    def test_unexpected_owner_result_is_rejected_before_snapshot_change(self):
+        runtime = Runtime({"not": "ReadResult"})
+        with self.assertRaisesRegex(PeriodicSyncError, "result invalid"):
+            self.controller(lambda **_: runtime).run_once()
+        self.assertEqual(self.store.tracked_ad_ids(), ())
+        self.assertEqual(self.store.latest_sync_attempt().error_kind, "invalid_inventory")
+        self.assertTrue(runtime.closed)
+
+    def test_lazy_or_mutable_inventory_is_rejected_without_consumption(self):
+        consumed = []
+        def lazy():
+            consumed.append("ran")
+            yield snapshot()
+        for items in ([snapshot()], lazy()):
+            with self.subTest(kind=type(items).__name__):
+                reader = Runtime(ReadResult.success_nonempty(items))
+                with self.assertRaisesRegex(PeriodicSyncError, "result invalid"):
+                    self.controller(lambda **_: reader).run_once()
+                self.assertEqual(self.store.latest_sync_attempt().error_kind, "invalid_inventory")
+                self.assertEqual(self.store.tracked_ad_ids(), ())
+                self.assertTrue(reader.closed)
+        self.assertEqual(consumed, [])
+
+    def test_close_error_does_not_downgrade_already_committed_success(self):
+        runtime = Runtime(ReadResult.success_nonempty((snapshot(),)), close_failure=True)
+        with self.assertRaisesRegex(PeriodicSyncError, "close failed"):
+            self.controller(lambda **_: runtime).run_once()
+        self.assertEqual(self.store.latest_sync_attempt().outcome, "success_nonempty")
+        self.assertEqual(self.store.tracked_ad_ids(), ("1234567890",))
+
+    def test_concurrent_reads_are_denied_and_never_start_second_cycle(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class PausedRuntime(Runtime):
+            def read_inventory(self):
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("synthetic blocked read")
+                return super().read_inventory()
+
+        runtime = PausedRuntime(ReadResult.success_empty(()))
+        calls = []
+        sync = self.controller(lambda **kw: calls.append(kw) or runtime)
+        outcomes = []
+        worker = threading.Thread(target=lambda: outcomes.append(sync.run_once()))
+        worker.start()
+        self.assertTrue(entered.wait(2))
+        try:
+            with self.assertRaisesRegex(PeriodicSyncError, "already in progress"):
+                sync.run_once()
+        finally:
+            release.set()
+            worker.join(4)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(self.store.latest_sync_attempt().outcome, "success_empty")
+
+    def test_stop_signal_prevents_new_cycle(self):
+        event = threading.Event()
+        event.set()
+        runtime = Runtime(ReadResult.success_empty(()))
+        sync = self.controller(lambda **_: runtime, stop_event=event)
+        with self.assertRaisesRegex(PeriodicSyncError, "stopped"):
+            sync.run_once()
+        self.assertEqual(runtime.read_count, 0)
+        self.assertIsNone(self.store.latest_sync_attempt())
+        self.assertEqual(sync.run_loop(), 0)
+
+    def test_unauthenticated_polling_halts_without_repeated_requests(self):
+        calls = []
+        sync = self.controller(
+            lambda **kw: calls.append(kw) or Runtime(
+                ReadResult.failure(ReadStatus.UNAUTHENTICATED, http_status=403)
+            )
+        )
+        self.assertEqual(sync.run_loop(immediate=True), 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.store.latest_sync_attempt().error_kind, "unauthenticated")
+
+    def test_invalid_period_and_port_fail_before_network_or_journal(self):
+        runtime = Runtime(ReadResult.success_empty(()))
+        for interval in (0, 59.9, float("nan"), float("inf"), 86401, True):
+            with self.subTest(interval=interval), self.assertRaises(ValueError):
+                self.controller(lambda **_: runtime, interval_seconds=interval)
+        for port in (0, 65536, -1, True, "9222"):
+            with self.subTest(port=port), self.assertRaises(ValueError):
+                PeriodicOwnerSync(store=self.store, cdp_port=port)
+        self.assertEqual(runtime.read_count, 0)
+        self.assertIsNone(self.store.latest_sync_attempt())
+
+    def test_cli_missing_database_aborts_before_runtime_creation(self):
+        missing = Path(self.temp.name) / "absent.sqlite"
+        with contextlib.redirect_stderr(io.StringIO()) as output:
+            code = main(["--db", str(missing), "--cdp-port", "19610", "--once"])
+        self.assertEqual(code, 2)
+        self.assertFalse(missing.exists())
+        self.assertIn("invalid or unavailable", output.getvalue())
+
+    def test_cli_once_uses_default_readonly_builder_without_any_write_api(self):
+        with (
+            patch("mark_api.periodic_sync.build_private_web_inventory_runtime"),
+            patch("mark_api.periodic_sync.PeriodicOwnerSync") as sync_factory,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            mock_sync = sync_factory.return_value
+            mock_sync.run_once.return_value = ReadResult.success_empty(())
+            self.assertEqual(main([
+                "--db", str(self.path), "--cdp-port", "19610", "--once",
+            ]), 0)
+        self.assertEqual(mock_sync.run_once.call_count, 1)
+        self.assertIn("owner inventory recorded", output.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
