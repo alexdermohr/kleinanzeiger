@@ -59,6 +59,13 @@ class PrivateWebCdpWriteNotAttemptedError(
     """CDP failed before browser input could reach the platform."""
 
 
+def _require_private_web_cdp_authority() -> None:
+    # This legacy Private-Web transport is never admitted by a caller flag or
+    # an existing browser login. Only a separate official API integration may
+    # act with independently verified account-scoped platform permissions.
+    raise PrivateWebCdpError("not_authorized")
+
+
 class _CdpClient(Protocol):
     def call(
         self,
@@ -126,6 +133,7 @@ class _LoopbackCdpClient:
         websocket_factory: Callable[..., Any] | None = None,
         tcp_socket_factory: Callable[..., Any] = socket.create_connection,
     ) -> None:
+        _require_private_web_cdp_authority()
         self._endpoint, self._port = _validated_loopback_endpoint(endpoint)
         self._timeout_seconds = timeout_seconds
         self._opener = opener or _proxy_free_loopback_opener()
