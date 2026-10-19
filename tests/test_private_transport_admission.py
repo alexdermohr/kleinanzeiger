@@ -27,6 +27,31 @@ class DirectTransportAdmissionTests(unittest.TestCase):
                         page._client()
             connect.assert_not_called()
 
+    def test_injected_and_cached_cdp_clients_denied_before_effect(self):
+        # A caller-supplied CDP factory must never be treated as entitlement.
+        for page_cls in (CdpCookieProvider, CdpPrivateWebPage, CdpPrivateWebMediaPage):
+            with self.subTest(factory=page_cls.__name__):
+                factory_calls = []
+
+                def injected_factory():
+                    factory_calls.append("unexpected")
+                    raise AssertionError("injected CDP client must never run")
+
+                page = page_cls.from_port(9222, client_factory=injected_factory)
+                with patch.dict(os.environ, {
+                    "MARK_PRIVATE_WEB_APPROVED": "true",
+                    "MARK_PLATFORM_WRITES_ENABLED": "true",
+                }):
+                    with self.assertRaises(PrivateWebCdpError) as denied:
+                        page._client()
+                    self.assertEqual(denied.exception.stage, "not_authorized")
+                    self.assertEqual(factory_calls, [])
+                    # Admission applies to already cached client instances too.
+                    page._client_instance = object()
+                    with self.assertRaises(PrivateWebCdpError) as cached_denied:
+                        page._client()
+                    self.assertEqual(cached_denied.exception.stage, "not_authorized")
+
     def test_default_private_management_http_blocked_before_urlopen(self):
         with (
             patch("mark_api.adapters.management.urlopen",

@@ -289,6 +289,9 @@ class CdpCookieProvider:
         return cls(f"http://127.0.0.1:{port}", **kwargs)
 
     def _client(self) -> _CdpClient:
+        # Direct imports and injected or cached CDP clients require admission
+        # before the factory or any browser/network effect is possible.
+        _require_private_web_cdp_authority()
         if self._client_instance is None:
             try:
                 self._client_instance = self._client_factory()
@@ -393,6 +396,9 @@ class CdpPrivateWebPage:
         return cls(f"http://127.0.0.1:{port}", **kwargs)
 
     def _client(self) -> _CdpClient:
+        # Direct imports and injected or cached CDP clients require admission
+        # before the factory or any browser/network effect is possible.
+        _require_private_web_cdp_authority()
         if self._client_instance is None:
             try:
                 self._client_instance = self._client_factory()
