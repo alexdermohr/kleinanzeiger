@@ -134,7 +134,7 @@ class AdvertisementGenerator:
             raise GenerationError("text provider returned invalid output")
         try:
             data = json.loads(output)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             raise GenerationError("text provider returned invalid JSON") from None
         if not isinstance(data, dict) or set(data) != {"title", "description"}:
             raise GenerationError("text provider returned unexpected fields")

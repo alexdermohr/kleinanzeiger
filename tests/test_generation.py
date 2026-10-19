@@ -122,6 +122,24 @@ class GenerationTests(unittest.TestCase):
                     self.generator.generate_text("Ein Artikel")
         self.assertEqual(len(self.responses.calls), len(cases))
 
+    def test_deeply_nested_provider_json_is_cli_error_without_retry(self):
+        # The malformed provider response must never leak json.loads RecursionError.
+        self.responses.output_text = "[" * 4000 + "0" + "]" * 4000
+        with (
+            patch("mark_api.generation.json.loads",
+                  side_effect=RecursionError("deep JSON")),
+            patch("mark_api.generation_cli.AdvertisementGenerator",
+                  return_value=self.generator),
+            patch("sys.stderr", io.StringIO()) as error,
+            patch("sys.stdout", io.StringIO()) as output,
+        ):
+            code = main(["text", "--prompt", "Ein Artikel"])
+        self.assertEqual(code, 2)
+        self.assertIn("text provider returned invalid JSON", error.getvalue())
+        self.assertNotIn("Traceback", error.getvalue())
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(len(self.responses.calls), 1)
+
     def test_lone_surrogate_provider_output_fails_as_generation_error(self):
         for field in ("title", "description"):
             with self.subTest(field=field):

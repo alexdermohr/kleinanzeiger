@@ -14,13 +14,23 @@ python -m pip install '.[generation]'
 export OPENAI_API_KEY='...'
 ```
 
-`mark-api-dashboard` bleibt ohne besondere Option GET-only/read-only. Nur
-`--enable-generation` schaltet den separaten, auf 127.0.0.1 gebundenen
-Generierungsendpunkt für **diesen** Dashboard-Prozess frei:
+`python -m mark_api` und `mark-api-offline` sind die sicheren
+Produktstarts für Local/Private. Sie bleiben standardmäßig
+plattformfrei und benötigen keinen KI-Schlüssel. Für bewusst angeforderte
+Entwürfe schaltet `--enable-generation` die separate lokale
+Generierungsfunktion frei:
 
 ```bash
+python -m mark_api --db /pfad/zur/bestehenden-mark.sqlite --enable-generation
+# Alternativ der eigene Standalone-Einstieg:
 mark-api-dashboard --db /pfad/zur/bestehenden-mark.sqlite --enable-generation
 ```
+
+Auch mit aktivierter Generierung bleiben im Offline-Launcher sämtliche
+Kleinanzeigen-Reads, CDP-Verbindungen und Plattformwrites deaktiviert.
+Ein fehlender Schlüssel oder SDK-Zusatz verhindert den Start ohne
+stillschweigende Datenbankinitialisierung. Die ausdrückliche Aktivierung
+allein löst noch **keinen** Provider-Aufruf aus.
 
 Die CLI gibt die Dashboard-Adresse mit einem zufälligen, pro Prozess neu
 erzeugten `#generation_token=...`-URL-Fragment aus. Dieser Token ist
@@ -89,8 +99,8 @@ Synthetische Fake-Provider- und echte Loopback-HTTP-Tests prüfen
 Positiv-/Negativfälle ohne echte OpenAI- oder Kleinanzeigen-Anfragen.
 Ein installierter Endnutzer-Test mit tatsächlich berechtigtem
 Providerkonto und einem vom Benutzer geprüften Entwurf ist für die
-endgültige Abnahme separat notwendig. Die Integration von
-`--enable-generation` in den normalen PrivateWeb-Produktlauncher
-wird nach der eigenständig überprüften Launcher-Sicherheitskorrektur
-(PR #127) gesondert integriert. Periodischer Sync und unabhängige
+endgültige Abnahme separat notwendig. Die Generierung ist unabhängig vom PrivateWeb-Produktlauncher bereits
+über den Offline-Produktstart erreichbar. Eine mögliche weitere
+Integration in den PrivateWeb-Launcher darf erst nach der eigenständig
+überprüften Sicherheitskorrektur (PR #127) erfolgen. Periodischer Sync und unabhängige
 A6-Recovery bleiben eigenständige Lieferlücken.

@@ -12,12 +12,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from email import policy
 from email.message import EmailMessage
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 import mark_api.offline_launcher as offline
-from mark_api.dashboard import create_server as real_create_server
+from mark_api.dashboard import DashboardGenerationAccess, create_server as real_create_server
 from mark_api.storage import SnapshotStore
 
 
@@ -209,6 +210,103 @@ class OfflineLauncherTests(unittest.TestCase):
         )
         self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
         self.assertEqual(child.stdout.strip(), "[]")
+
+
+    def test_generation_opt_in_requires_key_before_database_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "new.sqlite"
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": ""}),
+                patch.object(offline, "create_server") as factory,
+                redirect_stderr(io.StringIO()) as error,
+                self.assertRaises(SystemExit) as exc,
+            ):
+                offline.main(["--db", str(db), "--init-db", "--enable-generation"])
+            self.assertEqual(exc.exception.code, 2)
+            self.assertFalse(db.exists())
+            factory.assert_not_called()
+            self.assertIn("OPENAI_API_KEY", error.getvalue())
+
+    def test_generation_opt_in_requires_sdk_before_database_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "new.sqlite"
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": "never-log-this"}),
+                patch.dict(sys.modules, {"openai": None}),
+                patch.object(offline, "create_server") as factory,
+                redirect_stderr(io.StringIO()) as error,
+                self.assertRaises(SystemExit) as exc,
+            ):
+                offline.main(["--db", str(db), "--init-db", "--enable-generation"])
+            self.assertEqual(exc.exception.code, 2)
+            self.assertFalse(db.exists())
+            factory.assert_not_called()
+            self.assertIn("mark-api[generation]", error.getvalue())
+            self.assertNotIn("never-log-this", error.getvalue())
+
+    def test_generation_opt_in_reuses_offline_dashboard_without_write_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "new.sqlite"
+            captured = {}
+
+            def factory(store, *, port, analytics_contract, generation_access):
+                self.assertEqual(port, 0)
+                self.assertIsNone(analytics_contract.objective_metric)
+                self.assertIsInstance(generation_access, DashboardGenerationAccess)
+                captured["access"] = generation_access
+                return ImmediateServer()
+
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": "synthetic-key"}),
+                patch.dict(sys.modules, {"openai": SimpleNamespace(OpenAI=object)}),
+                patch.object(offline, "create_server", side_effect=factory),
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(offline.main([
+                    "--db", str(db), "--init-db", "--port", "0",
+                    "--enable-generation",
+                ]), 0)
+            self.assertTrue(db.exists())
+            text = output.getvalue()
+            self.assertIn(
+                "#generation_token=" + captured["access"].ui_token, text,
+            )
+            self.assertIn("Platform sync and writes: disabled", text)
+            self.assertNotIn("synthetic-key", text)
+
+    def test_generation_off_by_default_in_real_offline_dashboard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mark.sqlite"
+            store = SnapshotStore(db)
+            server = real_create_server(store, port=0)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            host, port = server.server_address
+            opener = build_opener(ProxyHandler({}))
+            try:
+                with opener.open(
+                    Request(f"http://{host}:{port}/api/dashboard/config"), timeout=5
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    payload = json.loads(response.read())
+                    self.assertFalse(payload["write_ui_available"])
+                    self.assertNotIn("generation_ui_available", payload)
+                with self.assertRaises(HTTPError) as error:
+                    opener.open(
+                        Request(
+                            f"http://{host}:{port}/api/dashboard/generate",
+                            data=b"{}",
+                            method="POST",
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(error.exception.code, 404)
+                error.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=6)
+            self.assertFalse(worker.is_alive())
 
 
 if __name__ == "__main__":
