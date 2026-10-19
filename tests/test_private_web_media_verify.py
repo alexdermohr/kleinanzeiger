@@ -18,6 +18,7 @@ from mark_api.private_web_media_verify import (
     _ImageSignature,
     _NoRedirectHandler,
     _default_fetch,
+    _verify_media_in_isolated_process,
     _has_exact_matching,
     _parse_listing_gallery,
     _read_local_source,
@@ -305,6 +306,18 @@ class PrivateWebMediaVerifierIdentityTests(unittest.TestCase):
 
 class PrivateWebPublicMediaPersistenceVerifierTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Synthetic cases use in-memory fetches; real denial tests do not.
+        if self._testMethodName not in {
+            "test_real_default_transport_admission_denial_is_terminal",
+            "test_default_verifier_denies_before_blocked_local_read_or_worker",
+            "test_injected_fetch_denied_before_any_side_effect",
+            "test_direct_media_helpers_and_worker_gateway_denied",
+        }:
+            synthetic_only = patch(
+                "mark_api.private_web_media_verify._require_private_web_public_media_transport_authority"
+            )
+            synthetic_only.start()
+            self.addCleanup(synthetic_only.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.first = Path(self.tmp.name) / "first.jpg"
@@ -384,8 +397,60 @@ class PrivateWebPublicMediaPersistenceVerifierTests(unittest.TestCase):
         )
         self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
         self.assertEqual(result.error, "private_web_media_not_authorized")
-        self.assertEqual(fetched, 1)
+        self.assertEqual(fetched, 0)
         self.assertEqual(timer.value, 0.0)
+
+    def test_injected_fetch_denied_before_any_side_effect(self) -> None:
+        events = []
+
+        class TruthinessTrap:
+            def __bool__(self):
+                events.append("truthiness")
+                raise AssertionError("injected fetch truthiness evaluated")
+
+            def __call__(self, _url, _timeout, _maximum):
+                events.append("fetch")
+                raise AssertionError("injected fetch called without admission")
+
+        verifier = PrivateWebPublicMediaPersistenceVerifier(
+            fetch=TruthinessTrap(),
+            signature_loader=self._signature_loader,
+            clock=lambda: NOW,
+            monotonic=_FakeMonotonic(),
+        )
+        self.assertEqual(events, [])
+        result = verifier.verify_media(AD_ID, self.sources, timeout_seconds=2.0)
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(result.error, "private_web_media_not_authorized")
+        self.assertEqual(events, [])
+
+    def test_direct_media_helpers_and_worker_gateway_denied(self) -> None:
+        calls = []
+
+        def fake_fetch(_url, _timeout, _maximum):
+            calls.append("unexpected")
+            raise AssertionError("fetch called without admission")
+
+        verifier = PrivateWebPublicMediaPersistenceVerifier(
+            fetch=fake_fetch,
+            signature_loader=self._signature_loader,
+        )
+        with self.assertRaisesRegex(OSError, "not authorized"):
+            verifier._listing(AD_ID, deadline=time.monotonic() + 10.0)
+        with self.assertRaisesRegex(OSError, "not authorized"):
+            verifier._observed_signatures((IMAGE_A,), deadline=time.monotonic() + 10.0)
+        self.assertEqual(calls, [])
+
+        with patch(
+            "mark_api.private_web_media_verify.multiprocessing.get_context",
+            side_effect=AssertionError("no process may be spawned"),
+        ) as context:
+            result = _verify_media_in_isolated_process(
+                AD_ID, self.sources, timeout_seconds=1.0
+            )
+            context.assert_not_called()
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(result.error, "private_web_media_not_authorized")
 
     def test_exact_gallery_match_confirms_persistence(self) -> None:
         verifier = PrivateWebPublicMediaPersistenceVerifier(
@@ -862,23 +927,28 @@ class PrivateWebPublicMediaPersistenceVerifierTests(unittest.TestCase):
         )
         self.assertEqual(result.status, ReadStatus.PARSE_ERROR)
 
-    def test_default_verifier_bounds_blocked_local_read_with_worker_timeout(self) -> None:
+    def test_default_verifier_denies_before_blocked_local_read_or_worker(self) -> None:
         if not hasattr(os, "mkfifo"):
             self.skipTest("FIFO is unavailable on this platform")
         fifo = Path(self.tmp.name) / "blocked.jpg"
         os.mkfifo(fifo)
         verifier = PrivateWebPublicMediaPersistenceVerifier()
 
-        started = time.monotonic()
-        result = verifier.verify_media(
-            AD_ID,
-            (PrivateWebMediaSource(str(fifo)),),
-            timeout_seconds=0.2,
-        )
-        elapsed = time.monotonic() - started
+        with patch(
+            "mark_api.private_web_media_verify._verify_media_in_isolated_process",
+            side_effect=AssertionError("worker must not run before admission"),
+        ) as spawn:
+            started = time.monotonic()
+            result = verifier.verify_media(
+                AD_ID,
+                (PrivateWebMediaSource(str(fifo)),),
+                timeout_seconds=0.2,
+            )
+            elapsed = time.monotonic() - started
+            spawn.assert_not_called()
 
         self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
-        self.assertEqual(result.error, "private_web_media_verify_timeout")
+        self.assertEqual(result.error, "private_web_media_not_authorized")
         self.assertLess(elapsed, 1.5)
 
     def test_invalid_contract_inputs_fail_before_network(self) -> None:

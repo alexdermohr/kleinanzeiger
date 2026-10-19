@@ -490,9 +490,10 @@ class PrivateWebPublicMediaPersistenceVerifier:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self._fetch = fetch or _default_fetch
-        self._signature_loader = signature_loader or _pillow_signature
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        # Never evaluate user-supplied callables' __bool__ before admission.
+        self._fetch = fetch if fetch is not None else _default_fetch
+        self._signature_loader = signature_loader if signature_loader is not None else _pillow_signature
+        self._clock = clock if clock is not None else (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._sleep = sleep
         self._use_isolated_default = (
@@ -515,6 +516,8 @@ class PrivateWebPublicMediaPersistenceVerifier:
         *,
         deadline: float,
     ) -> tuple[str, ...]:
+        # Directly callable listing wrapper must not invoke injected fetches.
+        _require_private_web_public_media_transport_authority()
         response = self._fetch(
             f"{_LISTING_ORIGIN}/s-anzeige/{ad_id}",
             self._remaining(deadline),
@@ -532,6 +535,7 @@ class PrivateWebPublicMediaPersistenceVerifier:
         *,
         deadline: float,
     ) -> tuple[_ImageSignature, ...]:
+        _require_private_web_public_media_transport_authority()
         signatures: list[_ImageSignature] = []
         for url in urls:
             response = self._fetch(
@@ -553,6 +557,14 @@ class PrivateWebPublicMediaPersistenceVerifier:
         *,
         timeout_seconds: float,
     ) -> ReadResult[PrivateWebMediaPersistenceSnapshot]:
+        # Caller-provided fetch functions cannot grant external authority.
+        try:
+            _require_private_web_public_media_transport_authority()
+        except _PrivateWebMediaAdmissionDenied:
+            return ReadResult.failure(
+                ReadStatus.TRANSPORT_ERROR,
+                error="private_web_media_not_authorized",
+            )
         if self._use_isolated_default:
             return _verify_media_in_isolated_process(
                 ad_id,
@@ -572,6 +584,14 @@ class PrivateWebPublicMediaPersistenceVerifier:
         *,
         timeout_seconds: float,
     ) -> ReadResult[PrivateWebMediaPersistenceSnapshot]:
+        # _verify_media_inline is independently callable: fail closed too.
+        try:
+            _require_private_web_public_media_transport_authority()
+        except _PrivateWebMediaAdmissionDenied:
+            return ReadResult.failure(
+                ReadStatus.TRANSPORT_ERROR,
+                error="private_web_media_not_authorized",
+            )
         try:
             target_ad_id = _validate_ad_id(ad_id)
         except (TypeError, ValueError):
@@ -860,6 +880,15 @@ def _verify_media_in_isolated_process(
     *,
     timeout_seconds: float,
 ) -> ReadResult[PrivateWebMediaPersistenceSnapshot]:
+    # This directly importable worker gateway also needs independent denial.
+    # A synthetic caller cannot induce process creation or inspect local media.
+    try:
+        _require_private_web_public_media_transport_authority()
+    except _PrivateWebMediaAdmissionDenied:
+        return ReadResult.failure(
+            ReadStatus.TRANSPORT_ERROR,
+            error="private_web_media_not_authorized",
+        )
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))

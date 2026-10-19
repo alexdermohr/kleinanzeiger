@@ -52,6 +52,29 @@ class DirectTransportAdmissionTests(unittest.TestCase):
                         page._client()
                     self.assertEqual(cached_denied.exception.stage, "not_authorized")
 
+    def test_injected_factory_truthiness_is_never_called(self):
+        # A callable with a side-effectful __bool__ is untrusted too.
+        for page_cls in (CdpCookieProvider, CdpPrivateWebPage, CdpPrivateWebMediaPage):
+            with self.subTest(factory=page_cls.__name__):
+                events = []
+
+                class TruthinessTrap:
+                    def __bool__(self):
+                        events.append("truthiness_called")
+                        raise AssertionError("factory truthiness ran before admission")
+
+                    def __call__(self):
+                        events.append("factory_called")
+                        raise AssertionError("factory ran before admission")
+
+                with patch.dict(os.environ, {"MARK_PRIVATE_WEB_APPROVED": "true"}):
+                    page = page_cls.from_port(9222, client_factory=TruthinessTrap())
+                    self.assertEqual(events, [])
+                    with self.assertRaises(PrivateWebCdpError) as denied:
+                        page._client()
+                    self.assertEqual(denied.exception.stage, "not_authorized")
+                    self.assertEqual(events, [])
+
     def test_default_private_management_http_blocked_before_urlopen(self):
         with (
             patch("mark_api.adapters.management.urlopen",

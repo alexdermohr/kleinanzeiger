@@ -270,7 +270,8 @@ class CdpCookieProvider:
         self._target_url = (
             f"{self._expected_origin}/m-meine-anzeigen-verwalten.json"
         )
-        self._client_factory = client_factory or (
+        # Do not evaluate client_factory.__bool__ before the admission gate.
+        self._client_factory = client_factory if client_factory is not None else (
             lambda: _LoopbackCdpClient(
                 self._endpoint,
                 timeout_seconds=self._timeout_seconds,
@@ -362,7 +363,8 @@ class CdpPrivateWebPage:
         ):
             raise ValueError("timeout_seconds must be finite and in (0, 30]")
         self._timeout_seconds = float(timeout_seconds)
-        self._client_factory = client_factory or (
+        # Do not evaluate client_factory.__bool__ before the admission gate.
+        self._client_factory = client_factory if client_factory is not None else (
             lambda: _LoopbackCdpClient(
                 self._endpoint,
                 timeout_seconds=self._timeout_seconds,
