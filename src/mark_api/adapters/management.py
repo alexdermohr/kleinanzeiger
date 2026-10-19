@@ -33,11 +33,20 @@ class HttpTransport(Protocol):
         """Perform one GET and return the response without interpreting JSON."""
 
 
+def _require_private_management_transport_authority() -> None:
+    # Real Private-Web owner reads lack independent account-scoped entitlement.
+    # This is not unlockable by an environment flag or an existing browser login.
+    raise TransportFailure(
+        "private management HTTP transport not authorized; use mark-api-offline"
+    )
+
+
 class UrllibHttpTransport:
     def __init__(self, *, timeout_seconds: float = 15.0) -> None:
         self._timeout_seconds = timeout_seconds
 
     def get(self, url: str, *, headers: dict[str, str]) -> HttpResponse:
+        _require_private_management_transport_authority()
         request = Request(url, headers=headers, method="GET")
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
