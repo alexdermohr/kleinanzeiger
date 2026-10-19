@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import json
+import signal
+import threading
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from mark_api.private_web_inventory_cdp import CdpManagementInventoryReader
+from mark_api.private_web_inventory_cdp import (
+    CdpManagementInventoryReader, PrivateWebInventoryReadCancelled,
+    PrivateWebInventoryReadSetupError,
+)
 from mark_api.private_web_runtime import build_private_web_inventory_runtime
 from mark_api.results import ReadResult, ReadStatus
 
@@ -17,8 +22,20 @@ class FakeClient:
         self.origin, self.path = origin, path
         self.calls = []
         self.closed = False
+        self._send_guard = None
+
+    def bind_cancellable_reads(self, *, stop_requested, send_guard):
+        self._send_guard = send_guard
 
     def call(self, method, params=None):
+        if self._send_guard is not None:
+            # This fake has no async receive path. The real CDP client masks
+            # only its outbound websocket.send, not its response wait.
+            with self._send_guard():
+                return self._synthetic_send(method, params)
+        return self._synthetic_send(method, params)
+
+    def _synthetic_send(self, method, params=None):
         params = dict(params or {})
         self.calls.append((method, params))
         if method == "Page.navigate":
@@ -147,6 +164,82 @@ class BrowserInventoryTests(unittest.TestCase):
         for port in (0, -1, 65536, True, "19610"):
             with self.subTest(port=port), self.assertRaises(ValueError):
                 CdpManagementInventoryReader(cdp_port=port)
+
+    def test_real_sigterm_during_last_admission_predicate_never_starts_cdp(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("Linux/POSIX signal mask required")
+        client = FakeClient([payload([])])
+        stopped = []
+        original = signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
+        try:
+            calls = []
+            def probe():
+                calls.append(1)
+                # The first check precedes the loopback client connection.
+                # The second occurs WITH signals masked before the first
+                # command's actual outbound send. Queue a real SIGTERM there.
+                if len(calls) == 2:
+                    signal.raise_signal(signal.SIGTERM)
+                    return False
+                return bool(stopped)
+            with self.assertRaises(PrivateWebInventoryReadCancelled):
+                self.reader(client).read_ads(stop_requested=probe)
+        finally:
+            signal.signal(signal.SIGTERM, original)
+        self.assertEqual(stopped, [True])
+        self.assertEqual(client.calls, [])
+
+    def test_real_sigterm_inside_first_cdp_command_prevents_next_navigation(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("Linux/POSIX signal mask required")
+        stopped = []
+        class StopAfterFirstCall(FakeClient):
+            def _synthetic_send(self, method, params=None):
+                response = super()._synthetic_send(method, params)
+                if len(self.calls) == 1:
+                    signal.raise_signal(signal.SIGTERM)
+                    self_outer.assertEqual(stopped, [])
+                return response
+        self_outer = self
+        client = StopAfterFirstCall([payload([])])
+        original = signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
+        try:
+            with self.assertRaises(PrivateWebInventoryReadCancelled):
+                self.reader(client).read_ads(
+                    stop_requested=lambda: bool(stopped),
+                )
+        finally:
+            signal.signal(signal.SIGTERM, original)
+        self.assertEqual(stopped, [True])
+        self.assertEqual([method for method, _ in client.calls], ["Runtime.evaluate"])
+        self.assertTrue(client.closed)
+
+    def test_cancellable_browser_transport_denies_non_main_thread(self):
+        client = FakeClient([payload([])])
+        failures = []
+        worker = threading.Thread(
+            target=lambda: self._capture_cancellation(failures, self.reader(client)),
+        )
+        worker.start()
+        worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [PrivateWebInventoryReadSetupError])
+        self.assertEqual(client.calls, [])
+
+    @staticmethod
+    def _capture_cancellation(failures, reader):
+        try:
+            reader.read_ads(stop_requested=lambda: False)
+        except Exception as exc:
+            failures.append(type(exc))
+
+    def test_missing_signal_mask_is_setup_failure_not_cancellation(self):
+        client = FakeClient([payload([])])
+        with patch("mark_api.private_web_inventory_cdp.signal.pthread_sigmask", None):
+            with self.assertRaises(PrivateWebInventoryReadSetupError):
+                self.reader(client).read_ads(stop_requested=lambda: False)
+        self.assertEqual(client.calls, [])
+        self.assertTrue(client.closed)
 
     def test_production_builder_composes_browser_reader_not_denied_legacy_http(self):
         client = FakeClient([payload([{"id": "1234567890", "state": "active"}])])

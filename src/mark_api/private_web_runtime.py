@@ -51,7 +51,9 @@ from .private_web import (
     PrivateWebWriteNotAttemptedError,
 )
 from .results import ReadResult, ReadStatus
-from .private_web_inventory_cdp import CdpManagementInventoryReader
+from .private_web_inventory_cdp import (
+    CdpManagementInventoryReader, PrivateWebInventoryReadCancelled,
+)
 from .private_web_cdp import (
     CdpCookieProvider,
     CdpPrivateWebOwnerReader,
@@ -786,10 +788,6 @@ class PrivateWebMediaCreateService:
                     pass
 
 
-class PrivateWebInventoryReadCancelled(RuntimeError):
-    """An owner inventory read was cancelled before entering its transport."""
-
-
 class PrivateWebInventoryRuntime:
     """Read-only owner-inventory runtime for an existing authenticated CDP worker."""
 
@@ -811,14 +809,16 @@ class PrivateWebInventoryRuntime:
         self, *, stop_requested: Callable[[], bool] | None = None,
     ) -> ReadResult[tuple[AdSnapshot, ...]]:
         self._ensure_open()
-        # The earlier caller-side stop check cannot cover the gap before
-        # the runtime method starts. Recheck on entry before owner read/CDP.
-        if stop_requested is not None:
-            if not callable(stop_requested):
-                raise TypeError("stop_requested must be callable")
-            if stop_requested():
+        if stop_requested is None:
+            return self._owner_reader.read_ads()
+        # Never fall back to a legacy/fake owner reader that could navigate
+        # after the last stop check. Only the real owner CDP adapter implements
+        # signal-masked admission at every transport operation.
+        if not isinstance(self._owner_reader, CdpManagementInventoryReader):
+            if callable(stop_requested) and stop_requested():
                 raise PrivateWebInventoryReadCancelled("inventory read cancelled")
-        return self._owner_reader.read_ads()
+            raise PrivateWebRuntimeSetupError("signal-safe inventory transport unavailable")
+        return self._owner_reader.read_ads(stop_requested=stop_requested)
 
     def close(self) -> None:
         if self._closed:

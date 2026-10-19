@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import math
 import secrets
+import signal
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from threading import Lock
+from threading import Lock, current_thread, main_thread
 from typing import Any
 from urllib.parse import urlencode
 
@@ -23,7 +25,8 @@ from .adapters.management import (
 )
 from .domain import AdSnapshot
 from .private_web_cdp import (
-    PrivateWebCdpError, _CdpClient, _LoopbackCdpClient,
+    PrivateWebCdpError, PrivateWebCdpReadCancelled,
+    PrivateWebCdpReadSetupError, _CdpClient, _LoopbackCdpClient,
 )
 from .results import ReadResult, ReadStatus
 
@@ -32,6 +35,42 @@ _ORIGIN = "https://www.kleinanzeigen.de"
 _MANAGER_PATH = "/m-meine-anzeigen.html"
 _MANAGEMENT_JSON_PATH = "/m-meine-anzeigen-verwalten.json"
 _MAX_PAGE_BYTES = 2 * 1024 * 1024
+_STOP_SIGNALS = frozenset((signal.SIGTERM, signal.SIGINT))
+
+
+class PrivateWebInventoryReadCancelled(RuntimeError):
+    """No new CDP inventory transport may be admitted after a stop."""
+
+
+class PrivateWebInventoryReadSetupError(RuntimeError):
+    """Signal-safe CDP admission could not be established."""
+
+
+@contextmanager
+def _cancellable_transport_entry(stop_requested: Callable[[], bool] | None):
+    """Atomically gate one outbound CDP send without masking the response wait.
+
+    The signal mask covers only the cancellation predicate and socket.send.
+    CDP response waits stay interruptible; the original mask is always restored.
+    Unsupported platforms/threads fail closed as setup failures, not shutdowns.
+    """
+    if stop_requested is None:
+        yield
+        return
+    if not callable(stop_requested):
+        raise TypeError("stop_requested must be callable")
+    if current_thread() is not main_thread() or not callable(getattr(signal, "pthread_sigmask", None)):
+        raise PrivateWebCdpReadSetupError("signal-safe transport unavailable")
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
+    try:
+        # Check queued signals as well as an already-run Python handler.
+        # No handler for these signals can run in this main-thread window
+        # in the synchronous periodic CLI. This is the read admission point.
+        if stop_requested() or (_STOP_SIGNALS & signal.sigpending()):
+            raise PrivateWebCdpReadCancelled("inventory transport cancelled")
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 class CdpManagementInventoryReader:
@@ -204,7 +243,9 @@ class CdpManagementInventoryReader:
             return ReadResult.failure(ReadStatus.PARSE_ERROR, error="root_not_object")
         return ReadResult.success_nonempty(value)
 
-    def read_ads(self) -> ReadResult[tuple[AdSnapshot, ...]]:
+    def read_ads(
+        self, *, stop_requested: Callable[[], bool] | None = None,
+    ) -> ReadResult[tuple[AdSnapshot, ...]]:
         with self._lock:
             if self._closed:
                 return ReadResult.failure(
@@ -212,7 +253,24 @@ class CdpManagementInventoryReader:
                 )
             client: _CdpClient | None = None
             try:
+                if stop_requested is not None:
+                    if not callable(stop_requested):
+                        raise PrivateWebInventoryReadSetupError("invalid stop callback")
+                    if stop_requested():
+                        raise PrivateWebInventoryReadCancelled("inventory transport cancelled")
+                # CDP target discovery is loopback only. The real platform
+                # operation begins when a guarded CDP command is sent.
                 client = self._client_factory()
+                if stop_requested is not None:
+                    binder = getattr(client, "bind_cancellable_reads", None)
+                    if not callable(binder):
+                        raise PrivateWebInventoryReadSetupError(
+                            "signal-safe client binding unavailable"
+                        )
+                    binder(
+                        stop_requested=stop_requested,
+                        send_guard=lambda: _cancellable_transport_entry(stop_requested),
+                    )
                 self._open_management(client)
                 first = self._page(client, 1)
                 if not first.is_success:
@@ -261,6 +319,12 @@ class CdpManagementInventoryReader:
                 if not snapshots:
                     return ReadResult.success_empty(())
                 return ReadResult.success_nonempty(tuple(snapshots))
+            except (PrivateWebInventoryReadCancelled, PrivateWebInventoryReadSetupError):
+                raise
+            except PrivateWebCdpReadCancelled:
+                raise PrivateWebInventoryReadCancelled("inventory transport cancelled") from None
+            except PrivateWebCdpReadSetupError:
+                raise PrivateWebInventoryReadSetupError("signal-safe CDP setup failed") from None
             except Exception:
                 return ReadResult.failure(
                     ReadStatus.TRANSPORT_ERROR, error="cdp_inventory_failed",

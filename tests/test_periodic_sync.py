@@ -485,6 +485,52 @@ class PeriodicReadTests(unittest.TestCase):
                 self.assertEqual(runtime.read_count, 0)
                 self.assertEqual(self.store.latest_sync_attempt().outcome, "in_progress")
 
+    def test_real_sigterm_during_cdp_call_aborts_without_next_navigation(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("Linux/POSIX signal mask required")
+        from mark_api.private_web_runtime import build_private_web_inventory_runtime
+        calls = []
+        class FakeCdp:
+            def __init__(self):
+                self.closed = False
+                self.send_guard = None
+            def bind_cancellable_reads(self, *, stop_requested, send_guard):
+                self.send_guard = send_guard
+            def call(self, method, params=None):
+                if self.send_guard is None:
+                    raise AssertionError("signal-safe send guard was not installed")
+                with self.send_guard():
+                    calls.append(method)
+                    if len(calls) == 1:
+                        signal.raise_signal(signal.SIGTERM)
+                        return {"result": {"value": True}}
+                    raise AssertionError("no CDP call allowed after SIGTERM")
+            def close(self):
+                self.closed = True
+        cdp = FakeCdp()
+        sync = self.controller(
+            lambda **kw: build_private_web_inventory_runtime(**kw),
+        )
+        original = signal.signal(
+            signal.SIGTERM,
+            lambda *_: sync.request_stop_from_signal(),
+        )
+        try:
+            with (
+                patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+                patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient", return_value=cdp),
+            ):
+                with self.assertRaises(PeriodicSyncStopped):
+                    sync.run_once()
+        finally:
+            signal.signal(signal.SIGTERM, original)
+        self.assertEqual(calls, ["Runtime.evaluate"])
+        self.assertTrue(cdp.closed)
+        self.assertTrue(sync._stopping())
+        attempt = self.store.latest_sync_attempt()
+        self.assertEqual(attempt.outcome, "failed")
+        self.assertEqual(attempt.error_kind, "stopped_before_read")
+
     def test_stop_after_outer_check_before_runtime_entry_prevents_browser_read(self):
         # A signal after PeriodicOwnerSync's last check but immediately
         # before the real runtime read must not start a browser operation.
@@ -526,6 +572,25 @@ class PeriodicReadTests(unittest.TestCase):
         owner_reader.read_ads.assert_not_called()
         self.assertNotIn("PRIVATE_PATH", str(caught.exception))
         self.assertEqual(self.store.latest_sync_attempt().outcome, "in_progress")
+
+    def test_cancellation_setup_failure_is_not_a_clean_shutdown(self):
+        # A platform/thread lacking the required atomic CDP admission may
+        # not look like a SIGTERM-requested graceful stop with exit status 0.
+        from mark_api.private_web_inventory_cdp import PrivateWebInventoryReadSetupError
+        class UnavailableRuntime:
+            def __init__(self):
+                self.closed = False
+            def read_inventory(self, *, stop_requested=None):
+                raise PrivateWebInventoryReadSetupError("signal-safe transport unavailable")
+            def close(self):
+                self.closed = True
+        runtime = UnavailableRuntime()
+        sync = self.controller(lambda **_: runtime)
+        with self.assertRaisesRegex(PeriodicSyncError, "browser inventory read failed"):
+            sync.run_loop(immediate=True)
+        self.assertTrue(runtime.closed)
+        self.assertEqual(self.store.latest_sync_attempt().outcome, "failed")
+        self.assertEqual(self.store.latest_sync_attempt().error_kind, "reader_exception")
 
     def test_runtime_without_cancellation_entry_fails_closed(self):
         class LegacyRuntime:

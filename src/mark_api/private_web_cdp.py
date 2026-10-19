@@ -52,6 +52,14 @@ class PrivateWebCdpError(RuntimeError):
         super().__init__(f"private web cdp failed at {stage}")
 
 
+class PrivateWebCdpReadCancelled(RuntimeError):
+    """An inventory CDP read was cancelled before another command."""
+
+
+class PrivateWebCdpReadSetupError(RuntimeError):
+    """No safe cancellation admission is available for this inventory read."""
+
+
 class PrivateWebCdpWriteNotAttemptedError(
     PrivateWebCdpError,
     WriteNotAttemptedError,
@@ -132,6 +140,10 @@ class _LoopbackCdpClient:
         self._websocket_factory = websocket_factory
         self._tcp_socket_factory = tcp_socket_factory
         self._next_id = 0
+        # Optional owner-inventory cancellation only: normal CDP clients
+        # retain unchanged transport semantics and no new permissions.
+        self._read_stop_check = None
+        self._read_send_guard = None
         self._socket = self._connect()
 
     def _connect(self):
@@ -199,11 +211,26 @@ class _LoopbackCdpClient:
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.
             raise PrivateWebCdpError("connect") from None
 
+    def bind_cancellable_reads(
+        self, *, stop_requested: Callable[[], bool],
+        send_guard: Callable[[], Any],
+    ) -> None:
+        if (
+            self._next_id != 0 or getattr(self, "_read_stop_check", None) is not None
+            or not callable(stop_requested) or not callable(send_guard)
+        ):
+            raise PrivateWebCdpReadSetupError("invalid cancellable CDP binding")
+        self._read_stop_check = stop_requested
+        self._read_send_guard = send_guard
+
     def call(
         self,
         method: str,
         params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
+        stop_requested = getattr(self, "_read_stop_check", None)
+        if stop_requested is not None and stop_requested():
+            raise PrivateWebCdpReadCancelled("inventory read cancelled")
         self._next_id += 1
         message_id = self._next_id
         request: dict[str, object] = {
@@ -213,10 +240,18 @@ class _LoopbackCdpClient:
         if params:
             request["params"] = params
         try:
-            self._socket.send(
-                json.dumps(request, separators=(",", ":"), ensure_ascii=False)
-            )
+            serialized = json.dumps(request, separators=(",", ":"), ensure_ascii=False)
+            send_guard = getattr(self, "_read_send_guard", None)
+            if send_guard is None:
+                self._socket.send(serialized)
+            else:
+                # Signals may only be masked across the outbound CDP send,
+                # NEVER the websocket receive loop or awaited page result.
+                with send_guard():
+                    self._socket.send(serialized)
             while True:
+                if stop_requested is not None and stop_requested():
+                    raise PrivateWebCdpReadCancelled("inventory read cancelled")
                 response = json.loads(self._socket.recv())
                 if response.get("id") != message_id:
                     continue
@@ -226,6 +261,8 @@ class _LoopbackCdpClient:
                 if not isinstance(result, dict):
                     raise ValueError("cdp returned an invalid result")
                 return result
+        except (PrivateWebCdpReadCancelled, PrivateWebCdpReadSetupError):
+            raise
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.
             raise PrivateWebCdpError("call") from None
 

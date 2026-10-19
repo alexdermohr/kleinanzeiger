@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import unittest
@@ -25,11 +26,13 @@ from mark_api.private_web_cdp import (
     CdpPrivateWebOwnerReader,
     CdpPrivateWebPage,
     PrivateWebCdpError,
+    PrivateWebCdpReadCancelled,
     PrivateWebCdpWriteNotAttemptedError,
     _LoopbackCdpClient,
     _proxy_free_loopback_opener,
     _validated_loopback_endpoint,
 )
+from mark_api.private_web_inventory_cdp import _cancellable_transport_entry
 from mark_api.results import ReadResult, ReadStatus
 
 
@@ -1644,6 +1647,69 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         self.assertEqual([message["id"] for message in socket.sent], [1, 2])
         client.close()
         self.assertTrue(socket.closed)
+
+    def test_cancellable_cdp_send_defers_term_only_during_socket_send(self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal mask required")
+        stopped = []
+        class Socket:
+            def __init__(self):
+                self.sent = 0
+                self.received = 0
+            def send(self, message):
+                self.sent += 1
+                signal.raise_signal(signal.SIGTERM)
+                self_outer.assertEqual(stopped, [])
+            def recv(self):
+                self.received += 1
+                raise AssertionError("no recv after signal")
+        self_outer = self
+        socket = Socket()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        predicate = lambda: bool(stopped)
+        client.bind_cancellable_reads(
+            stop_requested=predicate,
+            send_guard=lambda: _cancellable_transport_entry(predicate),
+        )
+        original = signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
+        try:
+            with self.assertRaises(PrivateWebCdpReadCancelled):
+                client.call("Runtime.evaluate")
+        finally:
+            signal.signal(signal.SIGTERM, original)
+        self.assertEqual(stopped, [True])
+        self.assertEqual(socket.sent, 1)
+        self.assertEqual(socket.received, 0)
+
+    def test_default_sigint_interrupts_unbounded_cdp_recv_after_one_frame(self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal mask required")
+        class EventFlood:
+            def __init__(self):
+                self.receives = 0
+            def send(self, message):
+                pass
+            def recv(self):
+                self.receives += 1
+                signal.raise_signal(signal.SIGINT)
+                return json.dumps({"method": "Page.event"})
+        socket = EventFlood()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        client.bind_cancellable_reads(
+            stop_requested=lambda: False,
+            send_guard=lambda: _cancellable_transport_entry(lambda: False),
+        )
+        original = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                client.call("Runtime.evaluate")
+        finally:
+            signal.signal(signal.SIGINT, original)
+        self.assertEqual(socket.receives, 1)
 
     def test_loopback_client_closes_direct_socket_on_websocket_failure(self) -> None:
         good_target = {
