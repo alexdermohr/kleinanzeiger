@@ -48,8 +48,80 @@ class ProductStartupTests(unittest.TestCase):
         self.assertEqual(builder.call_args.kwargs["db_path"], db)
         self.assertEqual(builder.call_args.kwargs["cdp_port"], 9222)
         self.assertFalse(builder.call_args.kwargs["initialize_db"])
+        self.assertFalse(builder.call_args.kwargs["enable_writes"])
         self.assertEqual((launcher.served, launcher.closed), (1, 1))
         self.assertIn("Startup sync: 0 current ad(s)", output.getvalue())
+        self.assertIn("Mark platform writes: disabled", output.getvalue())
+        self.assertNotIn("Mark write API:", output.getvalue())
+        self.assertNotIn(launcher.write_bearer_token, output.getvalue())
+
+    def test_cli_write_activation_requires_explicit_flag_and_never_prints_backend_bearer(self):
+        launcher = FakeLauncher()
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("mark_api.launcher.build_product_launcher", return_value=launcher)
+                as builder,
+                patch("sys.stdout", io.StringIO()) as output,
+            ):
+                code = main(["--db", str(Path(tmp) / "state.sqlite"),
+                             "--cdp-port", "9222", "--enable-writes"])
+        self.assertEqual(code, 0)
+        self.assertTrue(builder.call_args.kwargs["enable_writes"])
+        self.assertIn("Mark write API:", output.getvalue())
+        self.assertNotIn(launcher.write_bearer_token, output.getvalue())
+        self.assertNotIn("Mark write bearer token", output.getvalue())
+
+    def test_programmatic_default_disables_capabilities_and_dashboard_proxy(self):
+        from mark_api.results import ReadResult
+        from mark_api.storage import SnapshotStore
+
+        class Owner:
+            def read_inventory(self):
+                return ReadResult.success_empty(())
+            def close(self):
+                return None
+
+        class WriteRuntime:
+            server_address = ("127.0.0.1", 18766)
+            def start(self):
+                return self.server_address
+            def close(self):
+                return None
+
+        class Server:
+            server_address = ("127.0.0.1", 18765)
+            def server_close(self):
+                return None
+
+        observed = {}
+        def make_write(**kwargs):
+            observed["write"] = kwargs
+            return WriteRuntime()
+        def make_dashboard(_store, **kwargs):
+            observed["dashboard"] = kwargs
+            return Server()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            with patch("mark_api.launcher.build_private_web_write_api_runtime",
+                       side_effect=AssertionError("use injected write only")):
+                launcher = build_product_launcher(
+                    db_path=db, cdp_port=9222, initialize_db=True,
+                    runtime_factory=lambda **_kwargs: Owner(),
+                    write_runtime_factory=make_write,
+                    dashboard_factory=make_dashboard,
+                )
+            try:
+                self.assertFalse(launcher.writes_enabled)
+                self.assertEqual(launcher.dashboard_url, "http://127.0.0.1:18765/")
+                self.assertIsNone(observed["dashboard"]["write_proxy"])
+                self.assertFalse(observed["write"]["core_writes_enabled"])
+                self.assertFalse(observed["write"]["media_writes_enabled"])
+                self.assertFalse(observed["write"]["access"].writes_enabled)
+                self.assertEqual(observed["write"]["access"].capabilities, frozenset())
+            finally:
+                launcher.close()
+            self.assertTrue(SnapshotStore(db).is_ready())
 
     def test_cli_preserves_bounded_builder_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -96,6 +168,7 @@ class ProductStartupTests(unittest.TestCase):
         help_text = output.getvalue().replace("\n", " ")
         self.assertIn("already-authenticated local Chrome/CDP", help_text)
         self.assertIn("--cdp-port", help_text)
+        self.assertIn("--enable-writes", help_text)
         self.assertNotIn("currently unavailable", help_text)
 
     def test_real_module_with_missing_db_fails_before_platform_runtime(self):

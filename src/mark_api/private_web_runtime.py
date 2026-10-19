@@ -51,6 +51,7 @@ from .private_web import (
     PrivateWebWriteNotAttemptedError,
 )
 from .results import ReadResult, ReadStatus
+from .private_web_inventory_cdp import CdpManagementInventoryReader
 from .private_web_cdp import (
     CdpCookieProvider,
     CdpPrivateWebOwnerReader,
@@ -1638,31 +1639,19 @@ def _build_private_web_owner_reader(
     timeout_seconds: float,
     management_source: str,
     clock: Callable[[], datetime] | None,
-) -> tuple[AdsReader, _RuntimeCookieProvider]:
-    cookie_delegate = CdpCookieProvider.from_port(
-        cdp_port,
-        timeout_seconds=timeout_seconds,
-    )
-    cookie_provider = _RuntimeCookieProvider(cookie_delegate)
-
-    management_kwargs = {
-        "cookie_provider": cookie_provider,
-        # Browser-authenticated cookies are deliberately coupled to the fixed
-        # Kleinanzeigen management endpoint. The production runtime exposes no
-        # endpoint or transport override that could receive that Cookie header.
-        "endpoint": MANAGEMENT_URL,
+) -> tuple[AdsReader, CdpManagementInventoryReader]:
+    # Never export CDP cookies to the unconditionally denied legacy HTTP
+    # transport. The fixed-origin browser reader is a separate, read-only
+    # product transport with no write capability or arbitrary URL input.
+    kwargs: dict[str, object] = {
+        "cdp_port": cdp_port,
+        "timeout_seconds": timeout_seconds,
         "source": management_source,
-        "transport": _NoRedirectManagementTransport(timeout_seconds=timeout_seconds),
     }
     if clock is not None:
-        management_kwargs["clock"] = clock
-
-    try:
-        management_reader = ManagementReadAdapter(**management_kwargs)
-    except Exception:
-        cookie_provider.close()
-        raise
-    return management_reader, cookie_provider
+        kwargs["clock"] = clock
+    owner_reader = CdpManagementInventoryReader(**kwargs)
+    return owner_reader, owner_reader
 
 
 def build_private_web_media_create_runtime(
