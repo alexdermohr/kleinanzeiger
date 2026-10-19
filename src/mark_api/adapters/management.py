@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import _legacy_admission
+
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +40,12 @@ class UrllibHttpTransport:
         self._timeout_seconds = timeout_seconds
 
     def get(self, url: str, *, headers: dict[str, str]) -> HttpResponse:
+        # The default real urllib transport is an independently callable
+        # platform entrypoint; deny before Request or urlopen.
+        try:
+            _legacy_admission.require_legacy_platform_authority()
+        except _legacy_admission.LegacyPlatformAdmissionDenied as exc:
+            raise TransportFailure(str(exc)) from None
         request = Request(url, headers=headers, method="GET")
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
@@ -106,7 +114,8 @@ class ManagementReadAdapter:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._cookie_provider = cookie_provider
-        self._transport = transport or UrllibHttpTransport()
+        # Never evaluate caller-owned transport.__bool__ before admission.
+        self._transport = transport if transport is not None else UrllibHttpTransport()
         self._endpoint = endpoint
         self._source = source
         self._clock = clock
@@ -129,6 +138,15 @@ class ManagementReadAdapter:
         cookies: str,
         page: int,
     ) -> ReadResult[dict[str, Any]]:
+        # _read_page is directly importable/callable: injected transports
+        # cannot skip independent account-scoped platform admission.
+        try:
+            _legacy_admission.require_legacy_platform_authority()
+        except _legacy_admission.LegacyPlatformAdmissionDenied:
+            return ReadResult.failure(
+                ReadStatus.TRANSPORT_ERROR,
+                error="legacy_platform_not_authorized",
+            )
         url = f"{self._endpoint}?{urlencode({'sort': 'DEFAULT', 'pageNum': page})}"
         try:
             response = self._transport.get(url, headers=self._headers(cookies))
@@ -225,6 +243,15 @@ class ManagementReadAdapter:
         )
 
     def read_ads(self) -> ReadResult[tuple[AdSnapshot, ...]]:
+        # Cookie providers may themselves access CDP or remote sessions.
+        # Reject before even invoking the injected provider.
+        try:
+            _legacy_admission.require_legacy_platform_authority()
+        except _legacy_admission.LegacyPlatformAdmissionDenied:
+            return ReadResult.failure(
+                ReadStatus.TRANSPORT_ERROR,
+                error="legacy_platform_not_authorized",
+            )
         try:
             cookies = self._cookie_provider()
         except Exception as exc:  # noqa: BLE001 - secret provider boundary.

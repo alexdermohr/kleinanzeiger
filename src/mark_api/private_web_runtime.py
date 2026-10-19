@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .application import MarkService
+from .adapters import _legacy_admission
 from .adapters.management import (
     DEFAULT_SOURCE as MANAGEMENT_SOURCE,
     MANAGEMENT_URL,
@@ -142,6 +143,12 @@ class _NoRedirectManagementTransport:
         ).open
 
     def get(self, url: str, *, headers: dict[str, str]) -> HttpResponse:
+        # Directly importable no-redirect relay must not bypass entitlement.
+        # Deny before request construction or calling the injected opener.
+        try:
+            _legacy_admission.require_legacy_platform_authority()
+        except _legacy_admission.LegacyPlatformAdmissionDenied as exc:
+            raise TransportFailure(str(exc)) from None
         request = Request(url, headers=headers, method="GET")
         try:
             with self._open(request, timeout=self._timeout_seconds) as response:
