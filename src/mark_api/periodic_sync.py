@@ -19,7 +19,10 @@ from time import monotonic
 from typing import Protocol
 
 from .domain import AdSnapshot, LifecycleState
-from .private_web_runtime import build_private_web_inventory_runtime
+from .private_web_runtime import (
+    PrivateWebInventoryReadCancelled,
+    build_private_web_inventory_runtime,
+)
 from .results import ReadResult, ReadStatus
 from .storage import SnapshotStore
 
@@ -39,7 +42,9 @@ class PeriodicSyncStopped(PeriodicSyncError):
 
 
 class InventoryRuntime(Protocol):
-    def read_inventory(self) -> ReadResult[tuple[AdSnapshot, ...]]: ...
+    def read_inventory(
+        self, *, stop_requested: Callable[[], bool] | None = None,
+    ) -> ReadResult[tuple[AdSnapshot, ...]]: ...
     def close(self) -> None: ...
 
 
@@ -236,7 +241,14 @@ class PeriodicOwnerSync:
                         raise PeriodicSyncError("local sync cancellation settlement failed")
                     raise PeriodicSyncStopped("sync is stopped before read")
                 try:
-                    result = reader.read_inventory()
+                    # This callback is checked INSIDE the runtime boundary:
+                    # a signal between our last check and method entry must
+                    # not initiate a new browser inventory read.
+                    result = reader.read_inventory(stop_requested=self._stopping)
+                except PrivateWebInventoryReadCancelled:
+                    if not self._mark_failed(attempt, error_kind="stopped_before_read"):
+                        raise PeriodicSyncError("local sync cancellation settlement failed") from None
+                    raise PeriodicSyncStopped("sync is stopped before read") from None
                 except Exception:
                     self._mark_failed(attempt, error_kind="reader_exception")
                     raise PeriodicSyncError("browser inventory read failed") from None

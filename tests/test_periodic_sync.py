@@ -14,11 +14,14 @@ import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.periodic_sync import (
     PeriodicOwnerSync, PeriodicSyncError, PeriodicSyncStopped, main,
+)
+from mark_api.private_web_runtime import (
+    PrivateWebInventoryReadCancelled, PrivateWebInventoryRuntime,
 )
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
@@ -46,7 +49,9 @@ class Runtime:
         self.read_count = 0
         self.closed = False
 
-    def read_inventory(self):
+    def read_inventory(self, *, stop_requested=None):
+        if stop_requested is not None and stop_requested():
+            raise PrivateWebInventoryReadCancelled("inventory read cancelled")
         self.read_count += 1
         if self.failure is not None:
             raise self.failure
@@ -293,11 +298,11 @@ class PeriodicReadTests(unittest.TestCase):
         release = threading.Event()
 
         class PausedRuntime(Runtime):
-            def read_inventory(self):
+            def read_inventory(self, *, stop_requested=None):
                 entered.set()
                 if not release.wait(3):
                     raise TimeoutError("synthetic blocked read")
-                return super().read_inventory()
+                return super().read_inventory(stop_requested=stop_requested)
 
         runtime = PausedRuntime(ReadResult.success_empty(()))
         calls = []
@@ -479,6 +484,65 @@ class PeriodicReadTests(unittest.TestCase):
                 self.assertNotIn("PRIVATE_PATH", str(caught.exception))
                 self.assertEqual(runtime.read_count, 0)
                 self.assertEqual(self.store.latest_sync_attempt().outcome, "in_progress")
+
+    def test_stop_after_outer_check_before_runtime_entry_prevents_browser_read(self):
+        # A signal after PeriodicOwnerSync's last check but immediately
+        # before the real runtime read must not start a browser operation.
+        owner_reader = Mock()
+        owner_reader.read_ads.return_value = ReadResult.success_empty(())
+        closed = []
+        class SignalAtEntry(PrivateWebInventoryRuntime):
+            def read_inventory(self, *, stop_requested=None):
+                sync.request_stop_from_signal()
+                return super().read_inventory(stop_requested=stop_requested)
+        runtime = SignalAtEntry(
+            owner_reader=owner_reader, close_runtime=lambda: closed.append(True),
+        )
+        sync = self.controller(lambda **_: runtime)
+        with self.assertRaises(PeriodicSyncStopped):
+            sync.run_once()
+        owner_reader.read_ads.assert_not_called()
+        self.assertEqual(closed, [True])
+        attempt = self.store.latest_sync_attempt()
+        self.assertEqual(attempt.outcome, "failed")
+        self.assertEqual(attempt.error_kind, "stopped_before_read")
+
+    def test_cancelled_runtime_settlement_failure_is_not_clean_shutdown(self):
+        owner_reader = Mock()
+        class SignalAtEntry(PrivateWebInventoryRuntime):
+            def read_inventory(self, *, stop_requested=None):
+                sync.request_stop_from_signal()
+                return super().read_inventory(stop_requested=stop_requested)
+        runtime = SignalAtEntry(owner_reader=owner_reader, close_runtime=lambda: None)
+        sync = self.controller(lambda **_: runtime)
+        with patch.object(
+            self.store, "fail_sync_attempt",
+            side_effect=sqlite3.OperationalError("PRIVATE_PATH"),
+        ):
+            with self.assertRaisesRegex(
+                PeriodicSyncError, "cancellation settlement failed",
+            ) as caught:
+                sync.run_loop(immediate=True)
+        owner_reader.read_ads.assert_not_called()
+        self.assertNotIn("PRIVATE_PATH", str(caught.exception))
+        self.assertEqual(self.store.latest_sync_attempt().outcome, "in_progress")
+
+    def test_runtime_without_cancellation_entry_fails_closed(self):
+        class LegacyRuntime:
+            def __init__(self):
+                self.read_count = 0
+                self.closed = False
+            def read_inventory(self):
+                self.read_count += 1
+                return ReadResult.success_empty(())
+            def close(self):
+                self.closed = True
+        runtime = LegacyRuntime()
+        with self.assertRaisesRegex(PeriodicSyncError, "browser inventory read failed"):
+            self.controller(lambda **_: runtime).run_once()
+        self.assertEqual(runtime.read_count, 0)
+        self.assertTrue(runtime.closed)
+        self.assertEqual(self.store.latest_sync_attempt().error_kind, "reader_exception")
 
     def test_signal_request_does_not_take_event_condition_lock(self):
         # Run in a subprocess because a regression to Event.set() inside the

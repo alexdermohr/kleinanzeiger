@@ -786,6 +786,10 @@ class PrivateWebMediaCreateService:
                     pass
 
 
+class PrivateWebInventoryReadCancelled(RuntimeError):
+    """An owner inventory read was cancelled before entering its transport."""
+
+
 class PrivateWebInventoryRuntime:
     """Read-only owner-inventory runtime for an existing authenticated CDP worker."""
 
@@ -803,8 +807,17 @@ class PrivateWebInventoryRuntime:
         if self._closed:
             raise PrivateWebRuntimeClosedError("private Web runtime is closed")
 
-    def read_inventory(self) -> ReadResult[tuple[AdSnapshot, ...]]:
+    def read_inventory(
+        self, *, stop_requested: Callable[[], bool] | None = None,
+    ) -> ReadResult[tuple[AdSnapshot, ...]]:
         self._ensure_open()
+        # The earlier caller-side stop check cannot cover the gap before
+        # the runtime method starts. Recheck on entry before owner read/CDP.
+        if stop_requested is not None:
+            if not callable(stop_requested):
+                raise TypeError("stop_requested must be callable")
+            if stop_requested():
+                raise PrivateWebInventoryReadCancelled("inventory read cancelled")
         return self._owner_reader.read_ads()
 
     def close(self) -> None:
