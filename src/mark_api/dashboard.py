@@ -1959,6 +1959,30 @@ def _handler_factory(
         server_version = "mark-api-readonly/0.1"
         sys_version = ""
 
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            # Loopback bind alone does not stop DNS-rebound foreign Host
+            # requests. Validate the actual listener authority before any
+            # read route or optional same-origin Write API proxy.
+            listener_host, listener_port = self.server.server_address
+            canonical = _dashboard_http_origin(
+                "127.0.0.1", int(listener_port),
+            ).removeprefix("http://")
+            allowed_hosts = {canonical, f"127.0.0.1:{int(listener_port)}"}
+            get_all = getattr(self.headers, "get_all", None)
+            hosts = get_all("Host") if callable(get_all) else ()
+            if (
+                str(listener_host) != "127.0.0.1"
+                or hosts is None
+                or len(hosts) != 1
+                or hosts[0] not in allowed_hosts
+            ):
+                self.close_connection = True
+                self.send_error(421, "Misdirected Request")
+                return False
+            return True
+
         def log_message(self, format: str, *args: object) -> None:
             return
 
