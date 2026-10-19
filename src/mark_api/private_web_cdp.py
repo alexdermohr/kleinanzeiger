@@ -143,6 +143,8 @@ class _LoopbackCdpClient:
         self._socket = self._connect()
 
     def _connect(self):
+        # Direct callers must not bypass constructor admission via __new__.
+        _require_private_web_cdp_authority()
         try:
             discovery_url = f"{self._endpoint}/json/list"
             with self._opener(
@@ -212,6 +214,8 @@ class _LoopbackCdpClient:
         method: str,
         params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
+        # Even a caller-supplied cached socket cannot send unadmitted CDP data.
+        _require_private_web_cdp_authority()
         self._next_id += 1
         message_id = self._next_id
         request: dict[str, object] = {
@@ -427,6 +431,8 @@ class CdpPrivateWebPage:
         client: _CdpClient,
         expression: str,
     ) -> object:
+        # This directly callable static helper can receive an injected client.
+        _require_private_web_cdp_authority()
         result = client.call(
             "Runtime.evaluate",
             {
@@ -2014,6 +2020,8 @@ class CdpPrivateWebPage:
         x: float,
         y: float,
     ) -> None:
+        # Reject before either mouse event, even with a caller-supplied client.
+        _require_private_web_cdp_authority()
         client.call(
             "Input.dispatchMouseEvent",
             {

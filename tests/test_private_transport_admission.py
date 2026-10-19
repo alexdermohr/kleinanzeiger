@@ -75,6 +75,64 @@ class DirectTransportAdmissionTests(unittest.TestCase):
                     self.assertEqual(denied.exception.stage, "not_authorized")
                     self.assertEqual(events, [])
 
+    def test_direct_cdp_effect_helpers_deny_injected_clients(self):
+        calls = []
+
+        class InjectedClient:
+            def call(self, method, params=None):
+                calls.append((method, params))
+                raise AssertionError("browser effect before platform admission")
+
+        client = InjectedClient()
+        with self.assertRaises(PrivateWebCdpError) as evaluated:
+            CdpPrivateWebPage._runtime_value(client, "globalThis.location.href")
+        self.assertEqual(evaluated.exception.stage, "not_authorized")
+        with self.assertRaises(PrivateWebCdpError) as clicked:
+            CdpPrivateWebPage._dispatch_browser_click(client, x=10.0, y=15.0)
+        self.assertEqual(clicked.exception.stage, "not_authorized")
+        self.assertEqual(calls, [])
+
+    def test_direct_lowlevel_cdp_effects_deny_bypassed_constructor(self):
+        events = []
+
+        class FakeSocket:
+            def send(self, _data):
+                events.append("socket_send")
+                raise AssertionError("socket send without authorization")
+
+            def recv(self):
+                events.append("socket_recv")
+                raise AssertionError("socket recv without authorization")
+
+        client = object.__new__(_LoopbackCdpClient)
+        client._socket = FakeSocket()
+        client._next_id = 0
+        with self.assertRaises(PrivateWebCdpError) as sent:
+            client.call("Page.navigate", {"url": "https://example.invalid/"})
+        self.assertEqual(sent.exception.stage, "not_authorized")
+        self.assertEqual(client._next_id, 0)
+
+        # _connect is also directly accessible without calling __init__.
+        with self.assertRaises(PrivateWebCdpError) as connected:
+            client._connect()
+        self.assertEqual(connected.exception.stage, "not_authorized")
+        self.assertEqual(events, [])
+
+    def test_cached_media_handle_release_skips_direct_cdp_effect(self):
+        calls = []
+
+        class InjectedClient:
+            def call(self, method, params=None):
+                calls.append((method, params))
+                raise AssertionError("releaseObject before platform admission")
+
+        page = CdpPrivateWebMediaPage.from_port(9222)
+        page._media_file_object_id = "synthetic-object-handle"
+        page._client_instance = InjectedClient()
+        page._release_media_handle()
+        self.assertIsNone(page._media_file_object_id)
+        self.assertEqual(calls, [])
+
     def test_default_private_management_http_blocked_before_urlopen(self):
         with (
             patch("mark_api.adapters.management.urlopen",
