@@ -59,6 +59,13 @@ class PrivateWebCdpWriteNotAttemptedError(
     """CDP failed before browser input could reach the platform."""
 
 
+def _require_private_web_cdp_authority() -> None:
+    # This legacy Private-Web transport is never admitted by a caller flag or
+    # an existing browser login. Only a separate official API integration may
+    # act with independently verified account-scoped platform permissions.
+    raise PrivateWebCdpError("not_authorized")
+
+
 class _CdpClient(Protocol):
     def call(
         self,
@@ -126,6 +133,7 @@ class _LoopbackCdpClient:
         websocket_factory: Callable[..., Any] | None = None,
         tcp_socket_factory: Callable[..., Any] = socket.create_connection,
     ) -> None:
+        _require_private_web_cdp_authority()
         self._endpoint, self._port = _validated_loopback_endpoint(endpoint)
         self._timeout_seconds = timeout_seconds
         self._opener = opener or _proxy_free_loopback_opener()
@@ -135,6 +143,8 @@ class _LoopbackCdpClient:
         self._socket = self._connect()
 
     def _connect(self):
+        # Direct callers must not bypass constructor admission via __new__.
+        _require_private_web_cdp_authority()
         try:
             discovery_url = f"{self._endpoint}/json/list"
             with self._opener(
@@ -204,6 +214,8 @@ class _LoopbackCdpClient:
         method: str,
         params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
+        # Even a caller-supplied cached socket cannot send unadmitted CDP data.
+        _require_private_web_cdp_authority()
         self._next_id += 1
         message_id = self._next_id
         request: dict[str, object] = {
@@ -262,7 +274,8 @@ class CdpCookieProvider:
         self._target_url = (
             f"{self._expected_origin}/m-meine-anzeigen-verwalten.json"
         )
-        self._client_factory = client_factory or (
+        # Do not evaluate client_factory.__bool__ before the admission gate.
+        self._client_factory = client_factory if client_factory is not None else (
             lambda: _LoopbackCdpClient(
                 self._endpoint,
                 timeout_seconds=self._timeout_seconds,
@@ -281,6 +294,9 @@ class CdpCookieProvider:
         return cls(f"http://127.0.0.1:{port}", **kwargs)
 
     def _client(self) -> _CdpClient:
+        # Direct imports and injected or cached CDP clients require admission
+        # before the factory or any browser/network effect is possible.
+        _require_private_web_cdp_authority()
         if self._client_instance is None:
             try:
                 self._client_instance = self._client_factory()
@@ -351,7 +367,8 @@ class CdpPrivateWebPage:
         ):
             raise ValueError("timeout_seconds must be finite and in (0, 30]")
         self._timeout_seconds = float(timeout_seconds)
-        self._client_factory = client_factory or (
+        # Do not evaluate client_factory.__bool__ before the admission gate.
+        self._client_factory = client_factory if client_factory is not None else (
             lambda: _LoopbackCdpClient(
                 self._endpoint,
                 timeout_seconds=self._timeout_seconds,
@@ -385,6 +402,9 @@ class CdpPrivateWebPage:
         return cls(f"http://127.0.0.1:{port}", **kwargs)
 
     def _client(self) -> _CdpClient:
+        # Direct imports and injected or cached CDP clients require admission
+        # before the factory or any browser/network effect is possible.
+        _require_private_web_cdp_authority()
         if self._client_instance is None:
             try:
                 self._client_instance = self._client_factory()
@@ -411,6 +431,8 @@ class CdpPrivateWebPage:
         client: _CdpClient,
         expression: str,
     ) -> object:
+        # This directly callable static helper can receive an injected client.
+        _require_private_web_cdp_authority()
         result = client.call(
             "Runtime.evaluate",
             {
@@ -1998,6 +2020,8 @@ class CdpPrivateWebPage:
         x: float,
         y: float,
     ) -> None:
+        # Reject before either mouse event, even with a caller-supplied client.
+        _require_private_web_cdp_authority()
         client.call(
             "Input.dispatchMouseEvent",
             {
