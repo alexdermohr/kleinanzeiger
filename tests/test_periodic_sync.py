@@ -4,7 +4,11 @@ from __future__ import annotations
 import contextlib
 from dataclasses import replace
 import io
+import os
+import signal
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -13,7 +17,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mark_api.domain import AdSnapshot, LifecycleState
-from mark_api.periodic_sync import PeriodicOwnerSync, PeriodicSyncError, main
+from mark_api.periodic_sync import (
+    PeriodicOwnerSync, PeriodicSyncError, PeriodicSyncStopped, main,
+)
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
 
@@ -396,6 +402,124 @@ class PeriodicReadTests(unittest.TestCase):
             ]), 0)
         self.assertEqual(mock_sync.run_once.call_count, 1)
         self.assertIn("owner inventory recorded", output.getvalue())
+
+
+    def test_signal_stop_during_history_scan_prevents_journal_and_browser(self):
+        calls = []
+        sync = self.controller(lambda **_: calls.append(1) or Runtime(
+            ReadResult.success_empty(())
+        ))
+        def scan_and_stop():
+            sync.request_stop_from_signal()
+            return ()
+        with patch.object(sync, "_tracked_present_ids", side_effect=scan_and_stop):
+            with self.assertRaises(PeriodicSyncStopped):
+                sync.run_once()
+        self.assertEqual(calls, [])
+        self.assertIsNone(self.store.latest_sync_attempt())
+
+    def test_signal_stop_during_sqlite_begin_records_failed_no_browser_attempt(self):
+        calls = []
+        sync = self.controller(lambda **_: calls.append(1) or Runtime(
+            ReadResult.success_empty(())
+        ))
+        original = self.store.begin_sync_attempt
+
+        def begin_and_stop(**kwargs):
+            attempt = original(**kwargs)
+            sync.request_stop_from_signal()
+            return attempt
+
+        with patch.object(self.store, "begin_sync_attempt", side_effect=begin_and_stop):
+            with self.assertRaises(PeriodicSyncStopped):
+                sync.run_once()
+        self.assertEqual(calls, [])
+        last = self.store.latest_sync_attempt()
+        self.assertEqual(last.outcome, "failed")
+        self.assertEqual(last.error_kind, "stopped_before_runtime")
+
+    def test_signal_stop_after_runtime_creation_skips_read_and_closes_runtime(self):
+        runtime = Runtime(ReadResult.success_empty(()))
+        def construct(**_):
+            sync.request_stop_from_signal()
+            return runtime
+        sync = self.controller(construct)
+        with self.assertRaises(PeriodicSyncStopped):
+            sync.run_once()
+        self.assertEqual(runtime.read_count, 0)
+        self.assertTrue(runtime.closed)
+        attempt = self.store.latest_sync_attempt()
+        self.assertEqual(attempt.outcome, "failed")
+        self.assertEqual(attempt.error_kind, "stopped_before_read")
+
+    def test_signal_request_does_not_take_event_condition_lock(self):
+        # Run in a subprocess because a regression to Event.set() inside the
+        # lock would deadlock. Timeout protects the test suite itself.
+        script = """
+import signal, tempfile
+from pathlib import Path
+from mark_api.periodic_sync import PeriodicOwnerSync
+from mark_api.storage import SnapshotStore
+with tempfile.TemporaryDirectory() as tmp:
+    store = SnapshotStore(Path(tmp) / "db.sqlite", create_if_missing=True)
+    sync = PeriodicOwnerSync(store=store, cdp_port=9222, interval_seconds=60)
+    old = signal.signal(signal.SIGTERM,
+                        lambda _signal, _frame: sync.request_stop_from_signal())
+    try:
+        with sync.stop_event._cond:
+            signal.raise_signal(signal.SIGTERM)
+        assert sync.run_loop() == 0
+        assert store.latest_sync_attempt() is None
+    finally:
+        signal.signal(signal.SIGTERM, old)
+print("SIGTERM under Event condition lock returned safely")
+"""
+        repo = Path(__file__).resolve().parents[1]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(repo / "src")
+        child = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repo, env=env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+        self.assertIn("returned safely", child.stdout)
+
+    def test_signal_stop_wakes_scheduler_with_bounded_wait(self):
+        sync = self.controller(lambda **_: (_ for _ in ()).throw(
+            AssertionError("no browser permitted")
+        ))
+        observed = []
+        def stop_on_first_wait(timeout):
+            observed.append(timeout)
+            sync.request_stop_from_signal()
+            return False
+        with patch.object(sync.stop_event, "wait", side_effect=stop_on_first_wait):
+            self.assertEqual(sync.run_loop(), 0)
+        self.assertEqual(len(observed), 1)
+        self.assertGreater(observed[0], 0)
+        self.assertLessEqual(observed[0], 0.25)
+        self.assertIsNone(self.store.latest_sync_attempt())
+
+    def test_cli_signal_handler_uses_flag_not_locking_event_set(self):
+        with (
+            patch("mark_api.periodic_sync.PeriodicOwnerSync") as builder,
+            patch("mark_api.periodic_sync.signal.signal") as install,
+        ):
+            sync = builder.return_value
+            installed = {}
+            def remember(sig, handler):
+                if callable(handler):
+                    installed[sig] = handler
+            install.side_effect = remember
+            def run_and_signal(**_kwargs):
+                installed[signal.SIGTERM](signal.SIGTERM, None)
+                return 0
+            sync.run_loop.side_effect = run_and_signal
+            self.assertEqual(main([
+                "--db", str(self.path), "--cdp-port", "19610",
+            ]), 0)
+            sync.request_stop_from_signal.assert_called_once_with()
+            sync.stop_event.set.assert_not_called()
 
 
 if __name__ == "__main__":

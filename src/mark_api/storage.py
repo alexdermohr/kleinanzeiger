@@ -27,7 +27,7 @@ _SYNC_SCHEMA_VERSION = 1
 _SYNC_ERROR_KINDS = frozenset({
     "unauthenticated", "http_error", "transport_error", "parse_error",
     "reader_exception", "runtime_unavailable", "invalid_inventory",
-    "persistence_error",
+    "persistence_error", "stopped_before_runtime", "stopped_before_read",
 })
 
 

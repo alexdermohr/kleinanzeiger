@@ -15,6 +15,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock
+from time import monotonic
 from typing import Protocol
 
 from .domain import AdSnapshot, LifecycleState
@@ -26,6 +27,7 @@ from .storage import SnapshotStore
 _SOURCE = "private-web-periodic-readonly"
 _MIN_INTERVAL_SECONDS = 60.0
 _MAX_INTERVAL_SECONDS = 24.0 * 60.0 * 60.0
+_SIGNAL_STOP_POLL_SECONDS = 0.25
 
 
 class PeriodicSyncError(RuntimeError):
@@ -91,7 +93,29 @@ class PeriodicOwnerSync:
         self._runtime_factory = runtime_factory
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._stop = stop_event or Event()
+        # A Python signal may run while Event.wait() holds the condition lock.
+        # Signal handlers must not call Event.set(), which takes that lock.
+        self._signal_stop_requested = False
         self._cycle_lock = Lock()
+
+    def request_stop_from_signal(self) -> None:
+        """Signal-handler-safe flag store; no Event/SQLite/browser locks."""
+        self._signal_stop_requested = True
+
+    def _stopping(self) -> bool:
+        return self._signal_stop_requested or self._stop.is_set()
+
+    def _wait_for_interval_or_stop(self) -> bool:
+        # Bounded Event.wait permits prompt signal-only cancellation without
+        # calling Event.set from the handler. The deadline preserves the full
+        # configured interval and avoids a catch-up poll after early wakes.
+        deadline = monotonic() + self._interval
+        while not self._stopping():
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            self._stop.wait(min(remaining, _SIGNAL_STOP_POLL_SECONDS))
+        return self._stopping()
 
     @property
     def stop_event(self) -> Event:
@@ -173,7 +197,7 @@ class PeriodicOwnerSync:
         )
 
     def run_once(self) -> ReadResult[tuple[AdSnapshot, ...]]:
-        if self._stop.is_set():
+        if self._stopping():
             raise PeriodicSyncStopped("sync is stopped")
         if not self._cycle_lock.acquire(blocking=False):
             raise PeriodicSyncError("inventory read already in progress")
@@ -184,14 +208,21 @@ class PeriodicOwnerSync:
                 # IDs remain in storage for analytics without duplicate
                 # ABSENT rows on every subsequent successful poll.
                 tracked = self._tracked_present_ids()
+                if self._stopping():
+                    raise PeriodicSyncStopped("sync is stopped before journal")
                 attempt = self._store.begin_sync_attempt(
                     source=_SOURCE, started_at=self._now(),
                 )
+            except PeriodicSyncStopped:
+                raise
             except Exception:
                 raise PeriodicSyncError("local sync journal unavailable") from None
 
             reader: InventoryRuntime | None = None
             try:
+                if self._stopping():
+                    self._mark_failed(attempt, error_kind="stopped_before_runtime")
+                    raise PeriodicSyncStopped("sync is stopped before browser")
                 try:
                     reader = self._runtime_factory(
                         cdp_port=self._cdp_port, timeout_seconds=self._timeout,
@@ -199,6 +230,9 @@ class PeriodicOwnerSync:
                 except Exception:
                     self._mark_failed(attempt, error_kind="runtime_unavailable")
                     raise PeriodicSyncError("browser inventory runtime unavailable") from None
+                if self._stopping():
+                    self._mark_failed(attempt, error_kind="stopped_before_read")
+                    raise PeriodicSyncStopped("sync is stopped before read")
                 try:
                     result = reader.read_inventory()
                 except Exception:
@@ -245,10 +279,10 @@ class PeriodicOwnerSync:
             raise TypeError("immediate must be bool")
         success_count = 0
         due = immediate
-        while not self._stop.is_set():
-            if not due and self._stop.wait(self._interval):
+        while not self._stopping():
+            if not due and self._wait_for_interval_or_stop():
                 break
-            if self._stop.is_set():
+            if self._stopping():
                 break
             try:
                 result = self.run_once()
@@ -319,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
             old_handlers[sig] = signal.getsignal(sig)
-            signal.signal(sig, lambda _signal, _frame: synchronizer.stop_event.set())
+            signal.signal(sig, lambda _signal, _frame: synchronizer.request_stop_from_signal())
         # SIGTERM cancels future cycles; any active read completes or leaves
         # durable in_progress evidence if the process is forcibly killed.
         synchronizer.run_loop(immediate=args.immediate)
