@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import _legacy_admission
+
 from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
@@ -76,6 +78,7 @@ class MonkrelPrivateHttpRuntimeClient:
         sort_type: str | None = None,
         q: str | None = None,
     ) -> list:
+        _legacy_admission.require_legacy_platform_authority()
         return self._upstream.my_ads(
             page=page,
             size=size,
@@ -84,18 +87,23 @@ class MonkrelPrivateHttpRuntimeClient:
         )
 
     def pause_ad(self, ad_id: str) -> None:
+        _legacy_admission.require_legacy_platform_authority()
         self._upstream.pause_ad(ad_id)
 
     def activate_ad(self, ad_id: str) -> None:
+        _legacy_admission.require_legacy_platform_authority()
         self._upstream.activate_ad(ad_id)
 
     def delete_ad(self, ad_id: str) -> None:
+        _legacy_admission.require_legacy_platform_authority()
         self._upstream.delete_ad(ad_id)
 
     def conversations(self, page: int = 0, size: int = 100) -> list:
+        _legacy_admission.require_legacy_platform_authority()
         return self._upstream.conversations(page=page, size=size)
 
     def messages(self, conversation_id: str) -> list:
+        _legacy_admission.require_legacy_platform_authority()
         return self._upstream.messages(conversation_id)
 
     def update_ad(
@@ -105,6 +113,7 @@ class MonkrelPrivateHttpRuntimeClient:
         title: str | None = None,
         description: str | None = None,
     ) -> None:
+        _legacy_admission.require_legacy_platform_authority()
         self._content_updater.update_ad(
             ad_id,
             title=title,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch as _legacy_gate_patch
+
 import unittest
 
 from mark_api.adapters.monkrel_http import MonkrelPrivateHttpContentClient
@@ -91,6 +93,13 @@ def owner_payload(*, shipping_options=(), buy_now=False):
 
 
 class MonkrelPrivateHttpContentClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        synthetic = _legacy_gate_patch(
+            "mark_api.adapters._legacy_admission.require_legacy_platform_authority"
+        )
+        synthetic.start()
+        self.addCleanup(synthetic.stop)
+
     def test_title_update_rebuilds_current_ad_and_puts_exact_owner_id(self):
         client = FakeRawClient(owner_payload())
         writer = MonkrelPrivateHttpContentClient(client)
