@@ -3014,8 +3014,10 @@ def _handler_factory(
                 len(marker) == 1
                 and marker[0] == "1"
                 and len(tokens) == 1
+                and tokens[0].isascii()
                 and hmac.compare_digest(tokens[0], generation_access.ui_token)
                 and len(origins) == 1
+                and origins[0].isascii()
                 and hmac.compare_digest(origins[0], expected_origin)
                 and self.headers.get("Authorization") is None
                 and (

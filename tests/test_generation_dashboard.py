@@ -149,6 +149,26 @@ class GenerationHttpTests(unittest.TestCase):
             )[0], 421)
         self.assertEqual(self.generator.text_calls, [])
 
+    def test_non_ascii_token_or_origin_is_rejected_without_provider_call(self):
+        # BaseHTTPRequestHandler decodes HTTP header bytes as latin-1.
+        # hmac.compare_digest(str, str) raises TypeError for non-ASCII.
+        with server_context(self.access) as (port, _):
+            for changed in (
+                {"X-Mark-Generation-Token": "s" * 31 + "\xff"},
+                {"Origin": f"http://127.0.0.1:{port}/\xff"},
+            ):
+                with self.subTest(changed=changed):
+                    code, _, response = http_call(
+                        port, "POST", "/api/dashboard/generate",
+                        body(), {**headers(port), **changed},
+                    )
+                    self.assertEqual(code, 403)
+                    self.assertEqual(
+                        json.loads(response), {"error": "generation_session_required"},
+                    )
+        self.assertEqual(self.generator.text_calls, [])
+        self.assertEqual(self.generator.image_calls, [])
+
     def test_single_request_cost_consent_and_budget(self):
         with server_context(self.access) as (port, _):
             for invalid in (body(consent=False), body(prompt=" "), body(mode="delete"),
