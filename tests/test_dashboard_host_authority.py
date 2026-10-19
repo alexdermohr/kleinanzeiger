@@ -162,6 +162,55 @@ class DashboardHostAuthorityTests(unittest.TestCase):
         self.assertNotIn(b"tracked_ads", body)
         self.assertNotIn(b"1234567890", body)
 
+    def test_prior_valid_host_never_survives_headerless_parse_on_same_connection(self) -> None:
+        # First request plants valid Host in the live handler. The second
+        # synthetic legacy parser path succeeds without assigning headers.
+        # Without the production self.headers reset it wrongly reuses Host.
+        actual_parse = BaseHTTPRequestHandler.parse_request
+        handlers: list[int] = []
+
+        def first_real_then_headerless(handler: BaseHTTPRequestHandler) -> bool:
+            handlers.append(id(handler))
+            if len(handlers) == 1:
+                return actual_parse(handler)
+            handler.command = "GET"
+            handler.path = "/api/summary"
+            handler.request_version = "HTTP/1.1"
+            handler.requestline = "GET /api/summary HTTP/1.1"
+            return True
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        try:
+            # HTTP/1.1 response framing retains one TCP socket and handler.
+            with (
+                patch.object(self.server.RequestHandlerClass, "protocol_version", "HTTP/1.1"),
+                patch.object(
+                    BaseHTTPRequestHandler, "parse_request",
+                    first_real_then_headerless,
+                ),
+            ):
+                connection.putrequest("GET", "/api/summary", skip_host=True)
+                connection.putheader("Host", f"127.0.0.1:{self.port}")
+                connection.endheaders()
+                first = connection.getresponse()
+                self.assertEqual(first.status, 200)
+                self.assertEqual(json.loads(first.read())["tracked_ads"], 1)
+                self.assertIsNotNone(connection.sock)
+
+                # Deliberately omit Host; the patched parent keeps the former
+                # header object instead of creating a current-request one.
+                connection.putrequest("GET", "/api/summary", skip_host=True)
+                connection.endheaders()
+                second = connection.getresponse()
+                body = second.read()
+                self.assertEqual(second.status, 421)
+                self.assertNotIn(b"tracked_ads", body)
+                self.assertNotIn(b"1234567890", body)
+                self.assertEqual(len(handlers), 2)
+                self.assertEqual(handlers[0], handlers[1])
+        finally:
+            connection.close()
+
     def test_localhost_alias_is_intentionally_not_numeric_authority(self) -> None:
         # The product launcher publishes http://127.0.0.1:<port>/;
         # using localhost would not match the dashboard Write Origin fence.
