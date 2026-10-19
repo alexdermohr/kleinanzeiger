@@ -262,6 +262,41 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual(self.images.calls, [])
             self.assertFalse(target.exists())
 
+    def test_cli_rejects_foreign_owned_0755_ancestor_before_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            foreign = Path(tmp) / "foreign"
+            foreign.mkdir(mode=0o755)
+            owned = foreign / "owned"
+            owned.mkdir(mode=0o700)
+            target = owned / "image.png"
+            actual_stat = Path.stat
+            observed_foreign = []
+
+            def foreign_owner(path, *args, **kwargs):
+                result = actual_stat(path, *args, **kwargs)
+                if path == foreign:
+                    observed_foreign.append(True)
+                    return SimpleNamespace(
+                        st_mode=result.st_mode,
+                        st_uid=os.geteuid() + 20000,
+                    )
+                return result
+
+            with (
+                patch("mark_api.generation.Path.stat", autospec=True,
+                      side_effect=foreign_owner),
+                patch("mark_api.generation_cli.AdvertisementGenerator",
+                      return_value=self.generator),
+                patch("sys.stderr", io.StringIO()) as error,
+            ):
+                code = main(["image", "--prompt", "Fahrrad",
+                             "--output", str(target)])
+            self.assertEqual(code, 2)
+            self.assertTrue(observed_foreign)
+            self.assertIn("ancestry is unsafe", error.getvalue())
+            self.assertEqual(self.images.calls, [])
+            self.assertFalse(target.exists())
+
     def test_cli_rejects_parent_symlink_before_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
             alias = Path(tmp) / "dir_alias"

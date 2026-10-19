@@ -301,7 +301,12 @@ def _require_private_image_parent(output: Path) -> None:
             raise GenerationError("image destination parent must be private and user-owned")
         for ancestor in parent.parents:
             info = ancestor.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(info.st_mode):
+            # A foreign owner can chmod a seemingly safe 0755 ancestor
+            # and then swap its descendants between validation and os.open.
+            # Trust only this process's UID and system-owned ancestors.
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (
+                os.geteuid(), 0,
+            ):
                 raise GenerationError("image destination ancestry is unsafe")
             if info.st_mode & 0o022 and not (
                 info.st_uid == 0 and info.st_mode & stat.S_ISVTX
