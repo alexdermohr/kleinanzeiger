@@ -363,17 +363,36 @@ class PeriodicReadTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(self.store.latest_sync_attempt().error_kind, status.value)
 
-    def test_poll_failure_is_not_a_successful_cli_exit(self):
-        # Simulate a failed authenticated read without ever building a browser.
-        with (
-            patch("mark_api.periodic_sync.PeriodicOwnerSync") as factory,
-            contextlib.redirect_stderr(io.StringIO()) as err,
+    def test_default_library_runtime_denies_private_cdp(self):
+        # A caller cannot grant permission simply by leaving the runtime
+        # factory unspecified or possessing an authenticated CDP browser.
+        with self.assertRaisesRegex(
+            PeriodicSyncError, "verified official platform entitlement"
         ):
-            factory.return_value.run_loop.side_effect = PeriodicSyncError("internal")
-            self.assertEqual(main([
-                "--db", str(self.path), "--cdp-port", "19610", "--immediate",
-            ]), 2)
-        self.assertIn("periodic read halted", err.getvalue())
+            PeriodicOwnerSync(store=self.store, cdp_port=19610)
+        self.assertIsNone(self.store.latest_sync_attempt())
+
+    def test_public_cli_denies_before_database_or_browser_access(self):
+        for args in (
+            ["--once"],
+            ["--immediate"],
+            ["--interval-seconds", "60"],
+        ):
+            with (
+                self.subTest(args=args),
+                patch("mark_api.periodic_sync.SnapshotStore") as store,
+                patch("mark_api.periodic_sync.PeriodicOwnerSync") as factory,
+                patch("mark_api.periodic_sync.build_private_web_inventory_runtime") as cdp,
+                contextlib.redirect_stderr(io.StringIO()) as errors,
+            ):
+                self.assertEqual(main([
+                    "--db", str(self.path), "--cdp-port", "19610", *args
+                ]), 2)
+                self.assertIn("automatic Kleinanzeigen/CDP reads are disabled", errors.getvalue())
+                self.assertIn("verified official platform entitlement", errors.getvalue())
+                store.assert_not_called()
+                factory.assert_not_called()
+                cdp.assert_not_called()
 
     def test_invalid_period_and_port_fail_before_network_or_journal(self):
         runtime = Runtime(ReadResult.success_empty(()))
@@ -386,28 +405,24 @@ class PeriodicReadTests(unittest.TestCase):
         self.assertEqual(runtime.read_count, 0)
         self.assertIsNone(self.store.latest_sync_attempt())
 
-    def test_cli_missing_database_aborts_before_runtime_creation(self):
+    def test_cli_missing_database_is_not_created_when_denied(self):
         missing = Path(self.temp.name) / "absent.sqlite"
-        with contextlib.redirect_stderr(io.StringIO()) as output:
-            code = main(["--db", str(missing), "--cdp-port", "19610", "--once"])
-        self.assertEqual(code, 2)
-        self.assertFalse(missing.exists())
-        self.assertIn("invalid or unavailable", output.getvalue())
-
-    def test_cli_once_uses_default_readonly_builder_without_any_write_api(self):
-        with (
-            patch("mark_api.periodic_sync.build_private_web_inventory_runtime"),
-            patch("mark_api.periodic_sync.PeriodicOwnerSync") as sync_factory,
-            contextlib.redirect_stdout(io.StringIO()) as output,
-        ):
-            mock_sync = sync_factory.return_value
-            mock_sync.run_once.return_value = ReadResult.success_empty(())
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
             self.assertEqual(main([
-                "--db", str(self.path), "--cdp-port", "19610", "--once",
-            ]), 0)
-        self.assertEqual(mock_sync.run_once.call_count, 1)
-        self.assertIn("owner inventory recorded", output.getvalue())
+                "--db", str(missing), "--cdp-port", "19610", "--once"
+            ]), 2)
+        self.assertFalse(missing.exists())
+        self.assertIn("reads are disabled", errors.getvalue())
 
+    def test_cli_does_not_accept_forgeable_entitlement_flag(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                main([
+                    "--db", str(self.path), "--cdp-port", "19610",
+                    "--allow-platform-reads", "--once",
+                ])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIsNone(self.store.latest_sync_attempt())
 
     def test_signal_stop_during_history_scan_prevents_journal_and_browser(self):
         calls = []
@@ -619,7 +634,10 @@ from mark_api.periodic_sync import PeriodicOwnerSync
 from mark_api.storage import SnapshotStore
 with tempfile.TemporaryDirectory() as tmp:
     store = SnapshotStore(Path(tmp) / "db.sqlite", create_if_missing=True)
-    sync = PeriodicOwnerSync(store=store, cdp_port=9222, interval_seconds=60)
+    sync = PeriodicOwnerSync(
+        store=store, cdp_port=9222, interval_seconds=60,
+        runtime_factory=lambda **_: (_ for _ in ()).throw(AssertionError("no browser allowed")),
+    )
     old = signal.signal(signal.SIGTERM,
                         lambda _signal, _frame: sync.request_stop_from_signal())
     try:
@@ -657,26 +675,22 @@ print("SIGTERM under Event condition lock returned safely")
         self.assertLessEqual(observed[0], 0.25)
         self.assertIsNone(self.store.latest_sync_attempt())
 
-    def test_cli_signal_handler_uses_flag_not_locking_event_set(self):
+    def test_denied_public_cli_does_not_install_signal_handlers(self):
+        # Signal handling remains covered by synthetic run_once / run_loop
+        # tests, but no public CDP CLI may initialize a session or handler.
         with (
+            patch("signal.signal") as install,
             patch("mark_api.periodic_sync.PeriodicOwnerSync") as builder,
-            patch("mark_api.periodic_sync.signal.signal") as install,
+            patch("mark_api.periodic_sync.SnapshotStore") as storage,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
-            sync = builder.return_value
-            installed = {}
-            def remember(sig, handler):
-                if callable(handler):
-                    installed[sig] = handler
-            install.side_effect = remember
-            def run_and_signal(**_kwargs):
-                installed[signal.SIGTERM](signal.SIGTERM, None)
-                return 0
-            sync.run_loop.side_effect = run_and_signal
             self.assertEqual(main([
                 "--db", str(self.path), "--cdp-port", "19610",
-            ]), 0)
-            sync.request_stop_from_signal.assert_called_once_with()
-            sync.stop_event.set.assert_not_called()
+            ]), 2)
+            self.assertIn("reads are disabled", errors.getvalue())
+            install.assert_not_called()
+            builder.assert_not_called()
+            storage.assert_not_called()
 
 
 if __name__ == "__main__":

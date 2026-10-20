@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import signal
 import sys
 from collections.abc import Callable
 from contextlib import closing
@@ -89,6 +88,13 @@ class PeriodicOwnerSync:
             raise ValueError("timeout_seconds must be finite and in (0, 30]")
         if not callable(runtime_factory) or (clock is not None and not callable(clock)):
             raise TypeError("runtime_factory and clock must be callable")
+        # No official transport or account entitlement is composed. An
+        # authenticated private Chrome session is NOT a platform read license.
+        # Injected synthetic runtimes are reserved for offline tests.
+        if runtime_factory is build_private_web_inventory_runtime:
+            raise PeriodicSyncError(
+                "automatic Kleinanzeigen/CDP reads require verified official platform entitlement"
+            )
         if stop_event is not None and not isinstance(stop_event, Event):
             raise TypeError("stop_event must be Event")
         self._store = store
@@ -319,9 +325,9 @@ class PeriodicOwnerSync:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Explicit read-only periodic owner inventory from the already-"
-            "authenticated loopback Chrome CDP. Run only with no concurrent "
-            "writer using the same browser session."
+            "Synthetically tested periodic owner inventory journal. "
+            "Automated private Kleinanzeigen/CDP reads are disabled until "
+            "an independently verified official entitlement and transport exist."
         ),
     )
     parser.add_argument("--db", type=Path, required=True)
@@ -339,45 +345,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.once and args.immediate:
         parser.error("--once and --immediate are mutually exclusive")
-    try:
-        # Never create a new SQLite database in a syncing process.
-        store = SnapshotStore(args.db, create_if_missing=False)
-        store.tracked_ad_ids()
-        synchronizer = PeriodicOwnerSync(
-            store=store,
-            cdp_port=args.cdp_port,
-            interval_seconds=args.interval_seconds,
-            timeout_seconds=args.timeout_seconds,
-        )
-    except Exception:
-        print("mark-api-sync: invalid or unavailable local configuration", file=sys.stderr)
-        return 2
-    if args.once:
-        try:
-            result = synchronizer.run_once()
-        except PeriodicSyncError:
-            print("mark-api-sync: inventory cycle failed", file=sys.stderr)
-            return 2
-        if not result.is_success:
-            print("mark-api-sync: inventory unavailable; old data preserved", file=sys.stderr)
-            return 2
-        print("mark-api-sync: owner inventory recorded")
-        return 0
-    old_handlers: dict[int, object] = {}
-    try:
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            old_handlers[sig] = signal.getsignal(sig)
-            signal.signal(sig, lambda _signal, _frame: synchronizer.request_stop_from_signal())
-        # SIGTERM cancels future cycles; any active read completes or leaves
-        # durable in_progress evidence if the process is forcibly killed.
-        synchronizer.run_loop(immediate=args.immediate)
-    except Exception:
-        print("mark-api-sync: periodic read halted; inspect SQLite sync journal", file=sys.stderr)
-        return 2
-    finally:
-        for sig, handler in old_handlers.items():
-            signal.signal(sig, handler)
-    return 0
+    # No official entitlement-bound Kleinanzeigen transport is installed.
+    # Fail closed before opening SQLite or connecting to any Chrome/CDP,
+    # including --once and --immediate; do not offer a forgeable flag.
+    print(
+        "mark-api-sync: automatic Kleinanzeigen/CDP reads are disabled; "
+        "verified official platform entitlement and an approved transport "
+        "are required. Import user-provided exports or EML offline instead.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":
