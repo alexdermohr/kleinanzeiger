@@ -305,6 +305,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <p id="generation-status" class="note" role="status" aria-live="polite"></p>
       <div id="generation-text-preview" hidden>
         <h3>Textvorschlag (nicht veröffentlicht)</h3>
+        <p id="generation-text-prompt" class="note"></p>
         <label>Vorgeschlagener Titel <input id="generation-draft-title" type="text" readonly></label>
         <label>Vorgeschlagene Beschreibung <textarea id="generation-draft-description" readonly></textarea></label>
         <button id="generation-apply-text" type="button" disabled>In neue Anzeige übernehmen (ohne Veröffentlichung)</button>
@@ -312,6 +313,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <div id="generation-image-preview" hidden>
         <h3>Bildvorschlag (nicht veröffentlicht)</h3>
         <p class="note">KI-Bilder sind keine nachgewiesenen Produktfotos. Übereinstimmung mit dem tatsächlichen Artikel vor jeder Verwendung prüfen.</p>
+        <p id="generation-image-prompt" class="note"></p>
         <img id="generation-draft-image" alt="KI-generierter Bildentwurf, noch nicht veröffentlicht" style="max-width: 100%; max-height: 360px;" hidden>
         <p><button id="generation-apply-image" type="button" disabled>Als neues Anzeigenbild übernehmen (ohne Veröffentlichung)</button></p>
       </div>
@@ -622,6 +624,7 @@ let generationToken = null;
 let generationUiAvailable = false;
 let generationBusy = false;
 let generationImageBlob = null;
+let generationImageSourcePrompt = null;
 let generationImagePreviewUrl = null;
 let generationTextDraft = null;
 let pendingRecoveryBlocked = false;
@@ -1935,9 +1938,10 @@ function renderGenerationAvailability() {
   byId("generation-consent").disabled = generationBusy;
   // Never display a draft next to a prompt edited during a pending request.
   byId("generation-prompt").disabled = generationBusy;
-  const canApply = writeUiReady() && !createInFlight;
-  byId("generation-apply-text").disabled = !canApply || generationTextDraft === null;
-  byId("generation-apply-image").disabled = !canApply || generationImageBlob === null;
+  const canApply = writeUiReady() && !createInFlight && !generationBusy;
+  const prompt = byId("generation-prompt").value.trim();
+  byId("generation-apply-text").disabled = !canApply || generationTextDraft?.sourcePrompt !== prompt;
+  byId("generation-apply-image").disabled = !canApply || !generationImageBlob || generationImageSourcePrompt !== prompt;
 }
 
 function clearSelectedGenerationDraft(mode) {
@@ -1945,11 +1949,14 @@ function clearSelectedGenerationDraft(mode) {
   // the prior result for that mode inapplicable to the current prompt.
   if (mode === "text") {
     generationTextDraft = null;
+    byId("generation-text-prompt").textContent = "";
     byId("generation-draft-title").value = "";
     byId("generation-draft-description").value = "";
     byId("generation-text-preview").hidden = true;
   } else if (mode === "image") {
     generationImageBlob = null;
+    generationImageSourcePrompt = null;
+    byId("generation-image-prompt").textContent = "";
     if (generationImagePreviewUrl) {
       URL.revokeObjectURL(generationImagePreviewUrl);
       generationImagePreviewUrl = null;
@@ -1961,13 +1968,23 @@ function clearSelectedGenerationDraft(mode) {
   }
 }
 
+function onGenerationPromptChange() {
+  // The shared prompt determines the provenance of both cached drafts.
+  // Neither a title nor an image may survive changing its source text.
+  clearSelectedGenerationDraft("text");
+  clearSelectedGenerationDraft("image");
+  renderGenerationAvailability();
+}
+
 async function requestGeneration(mode) {
   if (!generationUiReady() || generationBusy) return;
   if (mode !== "text" && mode !== "image") return;
+  const prompt = byId("generation-prompt").value.trim();
+  if (generationTextDraft && generationTextDraft.sourcePrompt !== prompt) clearSelectedGenerationDraft("text");
+  if (generationImageBlob && generationImageSourcePrompt !== prompt) clearSelectedGenerationDraft("image");
   clearSelectedGenerationDraft(mode);
   renderGenerationAvailability();
   const status = byId("generation-status");
-  const prompt = byId("generation-prompt").value.trim();
   if (!prompt || prompt.length > 4000) {
     status.textContent = "Artikelangaben/Bildidee (1–4000 Zeichen) eingeben.";
     return;
@@ -2022,7 +2039,8 @@ async function requestGeneration(mode) {
       if (byId("generation-prompt").value.trim() !== prompt) {
         throw new Error("Prompt während der Anfrage geändert; Ergebnis verworfen.");
       }
-      generationTextDraft = {title: draft.title, description: draft.description};
+      generationTextDraft = {title: draft.title, description: draft.description, sourcePrompt: prompt};
+      byId("generation-text-prompt").textContent = "Erstellt aus Prompt: " + prompt;
       byId("generation-draft-title").value = draft.title;
       byId("generation-draft-description").value = draft.description;
       byId("generation-text-preview").hidden = false;
@@ -2041,6 +2059,8 @@ async function requestGeneration(mode) {
       const newUrl = URL.createObjectURL(payload);
       const oldUrl = generationImagePreviewUrl;
       generationImageBlob = payload;
+      generationImageSourcePrompt = prompt;
+      byId("generation-image-prompt").textContent = "Erstellt aus Prompt: " + prompt;
       generationImagePreviewUrl = newUrl;
       byId("generation-draft-image").src = newUrl;
       byId("generation-draft-image").hidden = false;
@@ -2060,6 +2080,10 @@ async function requestGeneration(mode) {
 
 function applyGenerationTextToCreate() {
   if (!writeUiReady() || !generationTextDraft || createInFlight) return;
+  if (generationTextDraft.sourcePrompt !== byId("generation-prompt").value.trim()) {
+    byId("generation-status").textContent = "Textentwurf gehört zu anderem Prompt; bitte neu generieren.";
+    return;
+  }
   const title = byId("create-title");
   const description = byId("create-description");
   if ((title.value || description.value)
@@ -2074,6 +2098,10 @@ function applyGenerationTextToCreate() {
 
 function applyGenerationImageToCreate() {
   if (!writeUiReady() || !generationImageBlob || createInFlight) return;
+  if (generationImageSourcePrompt !== byId("generation-prompt").value.trim()) {
+    byId("generation-status").textContent = "Bildentwurf gehört zu anderem Prompt; bitte neu generieren.";
+    return;
+  }
   const files = byId("create-media");
   const previous = Array.from(files.files ?? []);
   if (previous.length >= 10 || generationImageBlob.size > 25000000) {
@@ -2173,6 +2201,7 @@ byId("manage-activate").addEventListener(
   () => runAdAction("activate", "POST", "/activate"),
 );
 byId("manage-delete").addEventListener("click", deleteManagedAd);
+byId("generation-prompt").addEventListener("input", onGenerationPromptChange);
 byId("generation-text").addEventListener("click", () => requestGeneration("text"));
 byId("generation-image").addEventListener("click", () => requestGeneration("image"));
 byId("generation-apply-text").addEventListener("click", applyGenerationTextToCreate);
@@ -3093,7 +3122,7 @@ def _handler_factory(
                     or any(0xD800 <= ord(ch) <= 0xDFFF for ch in prompt)
                 ):
                     raise ValueError("invalid_prompt")
-            except (UnicodeError, json.JSONDecodeError, ValueError, TimeoutError, OSError):
+            except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError, TimeoutError, OSError):
                 self._send_json(400, {"error": "invalid_generation_request"})
                 return
             try:

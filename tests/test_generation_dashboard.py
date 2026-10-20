@@ -255,6 +255,25 @@ class GenerationHttpTests(unittest.TestCase):
             )[0], 429)
         self.assertEqual(len(self.generator.text_calls), 1)
 
+    def test_deep_json_is_rejected_before_provider_and_does_not_spend_budget(self):
+        # HTTP route must fail closed on json.loads RecursionError, not close the
+        # connection with an uncaught handler exception after session auth.
+        deeply_nested_json = b"[" * 1500 + b"0" + b"]" * 1500
+        with server_context(self.access) as (port, _):
+            code, _, data = http_call(
+                port, "POST", "/api/dashboard/generate",
+                deeply_nested_json, headers(port),
+            )
+            self.assertEqual(code, 400)
+            self.assertEqual(json.loads(data), {"error": "invalid_generation_request"})
+            self.assertEqual(self.generator.text_calls, [])
+            code, _, data = http_call(
+                port, "POST", "/api/dashboard/generate", body(), headers(port),
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(data)["status"], "draft")
+        self.assertEqual(self.generator.text_calls, ["Ein Fahrrad"])
+
     def test_content_size_type_and_idempotency_key_rejected_without_provider(self):
         with server_context(self.access) as (port, _):
             h = headers(port)
@@ -370,7 +389,7 @@ class GenerationBrowserStateTests(unittest.TestCase):
         if shutil.which("node") is None:
             self.skipTest("Node.js required for real browser-JavaScript state test")
         start = _DASHBOARD_JS.index("function generationUiReady() {")
-        end = _DASHBOARD_JS.index("function applyGenerationTextToCreate() {")
+        end = _DASHBOARD_JS.index('if (typeof window !== "undefined" && typeof window.addEventListener === "function")')
         handlers = _DASHBOARD_JS[start:end]
         script = r"""
 const assert = require("node:assert/strict");
@@ -381,7 +400,8 @@ const ids = [
   "generation-apply-image", "generation-status", "generation-prompt",
   "generation-draft-title", "generation-draft-description",
   "generation-text-preview", "generation-draft-image",
-  "generation-image-preview",
+  "generation-image-preview", "generation-text-prompt", "generation-image-prompt",
+  "create-title", "create-description",
 ];
 const dom = Object.create(null);
 for (const id of ids) {
@@ -400,6 +420,7 @@ globalThis.generationToken = "s".repeat(32);
 globalThis.generationBusy = false;
 globalThis.generationTextDraft = null;
 globalThis.generationImageBlob = null;
+globalThis.generationImageSourcePrompt = null;
 globalThis.generationImagePreviewUrl = null;
 globalThis.createInFlight = false;
 globalThis.writeUiReady = () => true;
@@ -408,7 +429,9 @@ globalThis.URL = {
   createObjectURL: () => "blob:test-image-1",
   revokeObjectURL: (value) => revoked.push(value),
 };
-const {requestGeneration} = new Function(source + "\nreturn {requestGeneration};")();
+globalThis.window = {confirm: () => false};
+const {requestGeneration, onGenerationPromptChange, applyGenerationTextToCreate, applyGenerationImageToCreate} =
+  new Function(source + "\nreturn {requestGeneration, onGenerationPromptChange, applyGenerationTextToCreate, applyGenerationImageToCreate};")();
 let response;
 let networkCalls = 0;
 globalThis.fetch = async (url, options) => {
@@ -508,6 +531,75 @@ const imageOk = {
   assert.equal(dom["generation-prompt"].disabled, false);
   assert.deepEqual(revoked, ["blob:test-image-1"]);
   assert.match(dom["generation-status"].textContent, /verworfen/);
+
+  // A programmatic prompt change without an input event may not permit a
+  // stale draft to be applied, even when the DOM button is still enabled.
+  const textPrompt = "Artikel A";
+  const imagePrompt = "Illustration B";
+  dom["generation-prompt"].value = textPrompt;
+  dom["generation-consent"].checked = true;
+  globalThis.fetch = async () => textOk;
+  await requestGeneration("text");
+  assert.equal(generationTextDraft.sourcePrompt, textPrompt);
+  assert.match(dom["generation-text-prompt"].textContent, /Artikel A/);
+  dom["generation-prompt"].value = imagePrompt;
+  applyGenerationTextToCreate();
+  assert.equal(dom["create-title"].value, "");
+  assert.match(dom["generation-status"].textContent, /anderem Prompt/);
+
+  // A new request for a different prompt invalidates the opposite-mode
+  // draft, not merely the mode selected by the user.
+  dom["generation-consent"].checked = true;
+  globalThis.fetch = async () => imageOk;
+  await requestGeneration("image");
+  assert.equal(generationTextDraft, null);
+  assert.equal(dom["generation-text-preview"].hidden, true);
+  assert.equal(dom["generation-text-prompt"].textContent, "");
+  assert.equal(dom["generation-apply-text"].disabled, true);
+  assert.equal(generationImageSourcePrompt, imagePrompt);
+  assert.match(dom["generation-image-prompt"].textContent, /Illustration B/);
+
+  dom["create-media"] = {files: []};
+  dom["generation-prompt"].value = "Prompt C";
+  applyGenerationImageToCreate();
+  assert.equal(dom["create-media"].files.length, 0);
+  assert.match(dom["generation-status"].textContent, /anderem Prompt/);
+
+  // Matching prompt allows explicit local image attachment without uploading.
+  dom["generation-prompt"].value = imagePrompt;
+  globalThis.File = class {
+    constructor(parts, name, options) { this.name = name; this.type = options.type; this.size = parts[0].size; }
+  };
+  globalThis.DataTransfer = class {
+    constructor() {
+      this.files = [];
+      this.items = {add: (value) => this.files.push(value)};
+    }
+  };
+  applyGenerationImageToCreate();
+  assert.equal(dom["create-media"].files.length, 1);
+  assert.equal(dom["create-media"].files[0].name, "mark-ki-entwurf.png");
+
+  // Real user input invalidates both caches, clears source labels and revokes
+  // the previous blob URL (even if a previous generation succeeded).
+  dom["generation-prompt"].value = "Artikel D";
+  onGenerationPromptChange();
+  assert.equal(generationTextDraft, null);
+  assert.equal(generationImageBlob, null);
+  assert.equal(generationImageSourcePrompt, null);
+  assert.equal(generationImagePreviewUrl, null);
+  assert.equal(dom["generation-image-prompt"].textContent, "");
+  assert.equal(dom["generation-image-preview"].hidden, true);
+  assert.equal(dom["generation-apply-image"].disabled, true);
+  assert.deepEqual(revoked, ["blob:test-image-1", "blob:test-image-1"]);
+
+  dom["generation-consent"].checked = true;
+  globalThis.fetch = async () => textOk;
+  await requestGeneration("text");
+  assert.equal(generationTextDraft.sourcePrompt, "Artikel D");
+  applyGenerationTextToCreate();
+  assert.equal(dom["create-title"].value, "Früherer Titel");
+  assert.equal(dom["create-description"].value, "Frühere Beschreibung");
   console.log("JS_DRAFT_RESET_PASS");
 })().catch((err) => { console.error(err); process.exitCode = 1; });
 """
