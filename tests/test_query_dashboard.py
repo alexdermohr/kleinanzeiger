@@ -988,6 +988,113 @@ class MarkQueryServiceTests(SeededStoreMixin, unittest.TestCase):
             self.assertEqual(opened.call_count, 1)
             self.assertEqual(tuple(store.ad_histories()), ())
 
+    def test_keyset_history_pages_do_not_use_sqlite_temp_sort(self) -> None:
+        store = self.make_store()
+        connection = store._connect()
+        try:
+            plan = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT id, ad_id, observed_at "
+                "FROM ad_snapshots "
+                "WHERE id <= ? AND (ad_id, observed_at, id) > (?, ?, ?) "
+                "ORDER BY ad_id ASC, observed_at ASC, id ASC LIMIT ?",
+                (100, "1", T0.isoformat(), 0, 256),
+            ).fetchall()
+        finally:
+            connection.close()
+        details = " ".join(str(row["detail"]) for row in plan)
+        self.assertIn("idx_ad_snapshots_ad_id_observed", details)
+        self.assertNotIn("USE TEMP B-TREE", details)
+
+    def test_paused_stream_never_blocks_concurrent_writer_commit(self) -> None:
+        # Reproduces Codex P2 on rollback-journal SQLite. The previous live
+        # cursor kept a shared lock across generator yields and blocked the
+        # writer's committed snapshot (even though the reader was idle).
+        store = self.make_store()
+        connection = store._connect()
+        try:
+            mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(mode, "delete")
+        stream = store.ad_histories()
+        first_id, _history = next(stream)
+        self.assertEqual(first_id, "1")
+        errors: list[Exception] = []
+        finished = threading.Event()
+
+        def write_observation() -> None:
+            try:
+                store.append_ad_snapshot(AdSnapshot(
+                    ad_id="writer-unblocked", observed_at=T1,
+                    source="synthetic-concurrent", lifecycle_state=LifecycleState.ACTIVE,
+                ))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=write_observation, daemon=True)
+        try:
+            worker.start()
+            self.assertTrue(
+                finished.wait(timeout=2),
+                "read cursor held shared SQLite lock across generator yield",
+            )
+            self.assertEqual(errors, [])
+        finally:
+            stream.close()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertIn("writer-unblocked", store.tracked_ad_ids())
+
+    def test_paged_projection_excludes_new_rows_after_high_water(self) -> None:
+        store = self.make_store()
+        # More than one fetch page, including a history crossing the
+        # 256-row boundary. No temp sort and no O(all histories) buffering.
+        connection = store._connect()
+        try:
+            with connection:
+                connection.executemany(
+                    "INSERT INTO ad_snapshots "
+                    "(ad_id, observed_at, source, lifecycle_state, views) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [
+                        ("1", T0.isoformat(), "synthetic-backdated",
+                         LifecycleState.ACTIVE.value, index)
+                        for index in range(300)
+                    ],
+                )
+        finally:
+            connection.close()
+        before_two = store.ad_history("2")
+        stream = store.ad_histories()
+        try:
+            first_id, first_history = next(stream)
+            self.assertEqual(first_id, "1")
+            self.assertEqual(
+                first_history,
+                store.ad_history("1"),
+                "group split across pages lost rows or timestamp ties",
+            )
+            # This writer succeeds while the generator is deliberately idle.
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="z-new-after-reader", observed_at=T1,
+                source="synthetic-concurrent", lifecycle_state=LifecycleState.ACTIVE,
+            ))
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="2", observed_at=T1 + timedelta(seconds=1),
+                source="newer-than-high-water", lifecycle_state=LifecycleState.ABSENT,
+            ))
+            rest = dict(stream)
+        finally:
+            stream.close()
+        self.assertNotIn("z-new-after-reader", rest)
+        self.assertEqual(rest["2"], before_two)
+        self.assertEqual(
+            MarkQueryService(store).latest_ads()[-1].ad_id,
+            "z-new-after-reader",
+        )
+
     def test_metric_evidence_preserves_original_timestamp_source_and_zero(self) -> None:
         store = self.make_store()
         payloads = {

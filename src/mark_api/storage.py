@@ -5,7 +5,6 @@ import os
 import sqlite3
 from contextlib import AbstractContextManager, closing
 from dataclasses import asdict, dataclass
-from itertools import groupby
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
@@ -25,6 +24,7 @@ from .domain import (
 from .results import ReadResult, ReadStatus
 
 _SYNC_SCHEMA_VERSION = 1
+_AD_HISTORY_PAGE_ROWS = 256  # Close read connection before projection.
 _SYNC_ERROR_KINDS = frozenset({
     "unauthenticated", "http_error", "transport_error", "parse_error",
     "reader_exception", "runtime_unavailable", "invalid_inventory",
@@ -1978,29 +1978,82 @@ class SnapshotStore:
         return self._decode_ad_history(rows)
 
     def ad_histories(self) -> Iterator[tuple[str, tuple[AdSnapshot, ...]]]:
-        """Stream one ad history at a time from a single SQLite read snapshot.
+        """Page a high-water-mark snapshot without holding reader locks on yield.
 
-        ORDER BY ad_id uses the existing ad_id-leading index and preserves
-        tracked_ad_ids() membership/order (both read ad_snapshots). Snapshot
-        timestamps still require Python instant-ordering within each group.
-        Keep only one ad's raw rows/history in memory, not the entire table.
-        A consumer stopping early must close this generator to release the
-        database handle and its consistent read snapshot.
+        IDs are AUTOINCREMENT and snapshots append-only: the captured maximum
+        ID excludes later inserts from every page. Each page is fully fetched
+        and its connection CLOSED before CPU-heavy decoding or yielding.
+        Unlike a live SELECT iterator, this cannot hold a rollback-journal
+        shared lock while a slow dashboard request blocks concurrent writes.
+
+        Keyset pagination uses the existing (ad_id, observed_at, id) index
+        without temp sorting. The largest single history plus one fixed page
+        bounds memory; actual UTC instants are sorted within every group.
+        Arbitrary external updates/deletes are outside the append-only model.
         """
+        high_water_id: int | None = None
+        last_key: tuple[str, str, int] | None = None
+        pending_ad_id: str | None = None
+        pending_rows: list[sqlite3.Row] = []
+        while True:
+            with closing(self._connect()) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                if high_water_id is None:
+                    maximum = connection.execute(
+                        "SELECT MAX(id) AS max_id FROM ad_snapshots"
+                    ).fetchone()
+                    if maximum is None or maximum["max_id"] is None:
+                        return
+                    high_water_id = int(maximum["max_id"])
+                if last_key is None:
+                    page = connection.execute(
+                        """
+                        SELECT id, ad_id, observed_at, source, lifecycle_state,
+                               title, description, views, watch_count,
+                               reply_count, metric_source
+                        FROM ad_snapshots
+                        WHERE id <= ?
+                        ORDER BY ad_id ASC, observed_at ASC, id ASC
+                        LIMIT ?
+                        """,
+                        (high_water_id, _AD_HISTORY_PAGE_ROWS),
+                    ).fetchall()
+                else:
+                    page = connection.execute(
+                        """
+                        SELECT id, ad_id, observed_at, source, lifecycle_state,
+                               title, description, views, watch_count,
+                               reply_count, metric_source
+                        FROM ad_snapshots
+                        WHERE id <= ?
+                          AND (ad_id, observed_at, id) > (?, ?, ?)
+                        ORDER BY ad_id ASC, observed_at ASC, id ASC
+                        LIMIT ?
+                        """,
+                        (high_water_id, *last_key, _AD_HISTORY_PAGE_ROWS),
+                    ).fetchall()
 
-        with closing(self._connect()) as connection:
-            cursor = connection.execute(
-                """
-                SELECT id, ad_id, observed_at, source, lifecycle_state, title,
-                       description, views, watch_count, reply_count, metric_source
-                FROM ad_snapshots
-                ORDER BY ad_id ASC
-                """
+            # Every yield below runs AFTER SQLite has released the read lock.
+            if not page:
+                break
+            for row in page:
+                ad_id = str(row["ad_id"])
+                if pending_ad_id is None:
+                    pending_ad_id = ad_id
+                elif ad_id != pending_ad_id:
+                    yield pending_ad_id, self._decode_ad_history(pending_rows)
+                    pending_rows = []
+                    pending_ad_id = ad_id
+                pending_rows.append(row)
+            tail = page[-1]
+            last_key = (
+                str(tail["ad_id"]), str(tail["observed_at"]), int(tail["id"])
             )
-            for ad_id, group in groupby(
-                cursor, key=lambda row: str(row["ad_id"])
-            ):
-                yield ad_id, self._decode_ad_history(group)
+            if len(page) < _AD_HISTORY_PAGE_ROWS:
+                break
+
+        if pending_ad_id is not None:
+            yield pending_ad_id, self._decode_ad_history(pending_rows)
 
     def latest_ad_snapshot(self, ad_id: str) -> AdSnapshot | None:
         history = self.ad_history(ad_id)
