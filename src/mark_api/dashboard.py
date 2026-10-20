@@ -1938,8 +1938,32 @@ function renderGenerationAvailability() {
   byId("generation-apply-image").disabled = !canApply || generationImageBlob === null;
 }
 
+function clearSelectedGenerationDraft(mode) {
+  // A new request (including failed validation or provider failure) makes
+  // the prior result for that mode inapplicable to the current prompt.
+  if (mode === "text") {
+    generationTextDraft = null;
+    byId("generation-draft-title").value = "";
+    byId("generation-draft-description").value = "";
+    byId("generation-text-preview").hidden = true;
+  } else if (mode === "image") {
+    generationImageBlob = null;
+    if (generationImagePreviewUrl) {
+      URL.revokeObjectURL(generationImagePreviewUrl);
+      generationImagePreviewUrl = null;
+    }
+    const preview = byId("generation-draft-image");
+    preview.removeAttribute("src");
+    preview.hidden = true;
+    byId("generation-image-preview").hidden = true;
+  }
+}
+
 async function requestGeneration(mode) {
   if (!generationUiReady() || generationBusy) return;
+  if (mode !== "text" && mode !== "image") return;
+  clearSelectedGenerationDraft(mode);
+  renderGenerationAvailability();
   const status = byId("generation-status");
   const prompt = byId("generation-prompt").value.trim();
   if (!prompt || prompt.length > 4000) {

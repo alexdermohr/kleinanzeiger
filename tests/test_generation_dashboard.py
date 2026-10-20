@@ -360,5 +360,128 @@ class GenerationHttpTests(unittest.TestCase):
                 DashboardGenerationAccess(ui_token="s" * 32, max_requests=count)
 
 
+class GenerationBrowserStateTests(unittest.TestCase):
+    def test_retry_invalidates_stale_text_and_image_drafts_in_real_javascript(self):
+        """Run the shipped browser handlers without network or platform calls."""
+        import shutil
+        import subprocess
+        from mark_api.dashboard import _DASHBOARD_JS
+
+        if shutil.which("node") is None:
+            self.skipTest("Node.js required for real browser-JavaScript state test")
+        start = _DASHBOARD_JS.index("function generationUiReady() {")
+        end = _DASHBOARD_JS.index("function applyGenerationTextToCreate() {")
+        handlers = _DASHBOARD_JS[start:end]
+        script = r"""
+const assert = require("node:assert/strict");
+const source = JSON.parse(process.argv[1]);
+const ids = [
+  "generation-panel", "generation-session-note", "generation-text",
+  "generation-image", "generation-consent", "generation-apply-text",
+  "generation-apply-image", "generation-status", "generation-prompt",
+  "generation-draft-title", "generation-draft-description",
+  "generation-text-preview", "generation-draft-image",
+  "generation-image-preview",
+];
+const dom = Object.create(null);
+for (const id of ids) {
+  dom[id] = {
+    hidden: true, disabled: false, checked: false, value: "",
+    textContent: "", src: "",
+    removeAttribute(key) { if (key === "src") this.src = ""; },
+  };
+}
+globalThis.byId = (id) => {
+  if (!dom[id]) throw Error("unexpected browser element " + id);
+  return dom[id];
+};
+globalThis.generationUiAvailable = true;
+globalThis.generationToken = "s".repeat(32);
+globalThis.generationBusy = false;
+globalThis.generationTextDraft = null;
+globalThis.generationImageBlob = null;
+globalThis.generationImagePreviewUrl = null;
+globalThis.createInFlight = false;
+globalThis.writeUiReady = () => true;
+const revoked = [];
+globalThis.URL = {
+  createObjectURL: () => "blob:test-image-1",
+  revokeObjectURL: (value) => revoked.push(value),
+};
+const {requestGeneration} = new Function(source + "\nreturn {requestGeneration};")();
+let response;
+let networkCalls = 0;
+globalThis.fetch = async (url, options) => {
+  networkCalls++;
+  assert.equal(url, "/api/dashboard/generate");
+  assert.equal(options.method, "POST");
+  assert.equal(options.credentials, "omit");
+  return response;
+};
+const textOk = {
+  ok: true, status: 200,
+  json: async () => ({
+    status: "draft", published: false, title: "Früherer Titel",
+    description: "Frühere Beschreibung",
+  }),
+};
+const imageOk = {
+  ok: true, status: 200, headers: {get: () => "image/png"},
+  blob: async () => new Blob(["image"], {type: "image/png"}),
+};
+(async () => {
+  dom["generation-prompt"].value = "Alter Prompt";
+  dom["generation-consent"].checked = true;
+  response = textOk;
+  await requestGeneration("text");
+  assert.equal(generationTextDraft.title, "Früherer Titel");
+  assert.equal(dom["generation-apply-text"].disabled, false);
+  assert.equal(dom["generation-text-preview"].hidden, false);
+
+  dom["generation-prompt"].value = "Neuer Prompt";
+  dom["generation-consent"].checked = true;
+  response = {ok: false, status: 502, json: async () => ({error: "provider_failed"})};
+  await requestGeneration("text");
+  assert.equal(generationTextDraft, null);
+  assert.equal(dom["generation-draft-title"].value, "");
+  assert.equal(dom["generation-draft-description"].value, "");
+  assert.equal(dom["generation-text-preview"].hidden, true);
+  assert.equal(dom["generation-apply-text"].disabled, true);
+  assert.match(dom["generation-status"].textContent, /fehlgeschlagen/);
+
+  dom["generation-prompt"].value = "Bildidee";
+  dom["generation-consent"].checked = true;
+  response = imageOk;
+  await requestGeneration("image");
+  assert.equal(generationImageBlob.size, 5);
+  assert.equal(dom["generation-apply-image"].disabled, false);
+  assert.equal(dom["generation-image-preview"].hidden, false);
+  assert.equal(dom["generation-draft-image"].src, "blob:test-image-1");
+
+  const before = networkCalls;
+  dom["generation-prompt"].value = "";
+  dom["generation-consent"].checked = true;
+  await requestGeneration("image");
+  assert.equal(networkCalls, before);
+  assert.equal(generationImageBlob, null);
+  assert.equal(generationImagePreviewUrl, null);
+  assert.deepEqual(revoked, ["blob:test-image-1"]);
+  assert.equal(dom["generation-draft-image"].src, "");
+  assert.equal(dom["generation-image-preview"].hidden, true);
+  assert.equal(dom["generation-apply-image"].disabled, true);
+  assert.match(dom["generation-status"].textContent, /eingeben/);
+  console.log("JS_DRAFT_RESET_PASS");
+})().catch((err) => { console.error(err); process.exitCode = 1; });
+"""
+        completed = subprocess.run(
+            ["node", "-e", script, json.dumps(handlers)],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        self.assertEqual(
+            completed.returncode, 0, completed.stdout + completed.stderr,
+        )
+        self.assertIn("JS_DRAFT_RESET_PASS", completed.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
