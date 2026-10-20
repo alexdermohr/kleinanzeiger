@@ -34,8 +34,8 @@ def _parser() -> argparse.ArgumentParser:
         )
         sub.add_argument(
             "--model",
-            default="gpt-5-mini" if mode == "text" else "gpt-image-1",
-            help="Provider model (default: gpt-5-mini or gpt-image-1).",
+            default="gpt-5-mini" if mode == "text" else "gpt-image-2.5-flare",
+            help="Provider model (default: gpt-5-mini or gpt-image-2.5-flare).",
         )
         if mode == "image":
             sub.add_argument(

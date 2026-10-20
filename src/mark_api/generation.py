@@ -169,7 +169,7 @@ class AdvertisementGenerator:
         return AdvertisementDraft(title=title, description=description)
 
     def generate_image(
-        self, prompt: str, *, model: str = "gpt-image-1"
+        self, prompt: str, *, model: str = "gpt-image-2.5-flare"
     ) -> bytes:
         clean_prompt = _validated_prompt(prompt)
         clean_model = _validated_model(model)

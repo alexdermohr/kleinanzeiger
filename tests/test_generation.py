@@ -166,6 +166,7 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.images.calls[0]["size"], "1024x1024")
         self.assertEqual(self.images.calls[0]["n"], 1)
         self.assertEqual(self.images.calls[0]["output_format"], "png")
+        self.assertEqual(self.images.calls[0]["model"], "gpt-image-2.5-flare")
         self.assertNotIn("response_format", self.images.calls[0])
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "generated.png"
@@ -240,6 +241,7 @@ class GenerationTests(unittest.TestCase):
                 self.assertEqual(main(["image", "--prompt", "Fahrrad",
                                        "--output", str(target)]), 0)
             self.assertEqual(target.read_bytes(), valid_png())
+            self.assertEqual(self.images.calls[-1]["model"], "gpt-image-2.5-flare")
             result = json.loads(output.getvalue())
             self.assertFalse(result["published"])
             self.assertEqual(result["path_binding"], "verified_at_write_only")
