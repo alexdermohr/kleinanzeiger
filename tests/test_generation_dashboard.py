@@ -181,12 +181,12 @@ class GenerationHttpTests(unittest.TestCase):
         image_model = inspect.signature(
             AdvertisementGenerator.generate_image
         ).parameters["model"].default
-        self.assertEqual(text_model, "gpt-5-mini")
+        self.assertEqual(text_model, "gpt-5.6-terra")
         self.assertEqual(image_model, "gpt-image-2.5-flare")
         for value in (
             b'id="generation-pricing-note"',
             text_model.encode(), image_model.encode(),
-            b"0.25 USD", b"2.00 USD", b"5.00 USD", b"30.00 USD",
+            b"2.00 USD", b"12.00 USD", b"5.00 USD", b"30.00 USD",
             b"developers.openai.com/api/docs/pricing",
         ):
             with self.subTest(value=value):

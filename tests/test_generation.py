@@ -84,7 +84,7 @@ class GenerationTests(unittest.TestCase):
 
     def test_text_draft_requires_user_request_and_retains_data(self):
         draft = self.generator.generate_text(
-            "Gebrauchtes Fahrrad, frisch gewartet.", model="gpt-5-mini"
+            "Gebrauchtes Fahrrad, frisch gewartet."
         )
         self.assertEqual(draft.title, "Gut erhaltenes Fahrrad")
         self.assertIn("Angaben", draft.description)
@@ -93,6 +93,7 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(len(self.responses.calls), 1)
         self.assertEqual(self.responses.calls[0]["input"],
                          "Gebrauchtes Fahrrad, frisch gewartet.")
+        self.assertEqual(self.responses.calls[0]["model"], "gpt-5.6-terra")
         self.assertIn("keine Tatsachen", self.responses.calls[0]["instructions"])
         fmt = self.responses.calls[0]["text"]["format"]
         self.assertEqual(fmt["type"], "json_schema")
@@ -202,7 +203,7 @@ class GenerationTests(unittest.TestCase):
 
     def test_invalid_provider_model_rejected_without_call(self):
         for model in (
-            "bad/model", "dall-e-2", "dall-e-3", "gpt-5-mini",
+            "bad/model", "dall-e-2", "dall-e-3", "gpt-5.6-terra",
             "gpt-image-9", "unknown-image-provider",
         ):
             with self.subTest(model=model):
@@ -239,7 +240,7 @@ class GenerationTests(unittest.TestCase):
                         self.assertIn("acknowledge-provider-cost", notice)
                         self.assertIn("developers.openai.com/api/docs/pricing", notice)
                         self.assertIn(
-                            "gpt-5-mini" if mode == "text" else "gpt-image-2.5-flare",
+                            "gpt-5.6-terra" if mode == "text" else "gpt-image-2.5-flare",
                             notice,
                         )
                         self.assertEqual(output.getvalue(), "")
@@ -253,7 +254,7 @@ class GenerationTests(unittest.TestCase):
             def generate_text(self, prompt, *, model):
                 # This assertion runs *inside* the provider call, not after it.
                 self_notice = notice.getvalue()
-                if "0.25 USD" not in self_notice or "gpt-5-mini" not in self_notice:
+                if "2.00 USD" not in self_notice or "gpt-5.6-terra" not in self_notice:
                     raise AssertionError("model price not disclosed before provider")
                 observed.append(("provider", model))
                 return AdvertisementDraft("Fahrrad", "Gebraucht")
@@ -267,11 +268,11 @@ class GenerationTests(unittest.TestCase):
                 main(["text", "--prompt", "Fahrrad",
                       "--acknowledge-provider-cost"]), 0,
             )
-            self.assertIn("0.25 USD", notice.getvalue())
             self.assertIn("2.00 USD", notice.getvalue())
-            self.assertIn("gpt-5-mini", notice.getvalue())
+            self.assertIn("12.00 USD", notice.getvalue())
+            self.assertIn("gpt-5.6-terra", notice.getvalue())
             self.assertEqual(json.loads(output.getvalue())["status"], "draft")
-        self.assertEqual(observed, [("provider", "gpt-5-mini")])
+        self.assertEqual(observed, [("provider", "gpt-5.6-terra")])
         with (
             patch("mark_api.generation_cli.AdvertisementGenerator",
                   side_effect=AssertionError("cost acknowledgement must not persist")),
@@ -294,6 +295,21 @@ class GenerationTests(unittest.TestCase):
         self.assertIn("custom-text-model", notice.getvalue())
         self.assertIn("Kein verifizierter Modelltarif", notice.getvalue())
         self.assertEqual(self.responses.calls[-1]["model"], "custom-text-model")
+
+    def test_cli_legacy_text_override_does_not_show_deprecated_default_rate(self):
+        # The old model can only be requested explicitly; its current tariff
+        # is not inferred from the new default, and the per-call flag remains mandatory.
+        with (
+            patch("mark_api.generation_cli.AdvertisementGenerator",
+                  return_value=self.generator),
+            patch("sys.stdout", io.StringIO()),
+            patch("sys.stderr", io.StringIO()) as notice,
+        ):
+            self.assertEqual(main(["text", "--prompt", "Fahrrad",
+                                   "--model", "gpt-5-mini",
+                                   "--acknowledge-provider-cost"]), 0)
+        self.assertIn("Kein verifizierter Modelltarif", notice.getvalue())
+        self.assertEqual(self.responses.calls[-1]["model"], "gpt-5-mini")
 
     def test_cli_text_outputs_valid_draft_json_without_extra_provider(self):
         with (

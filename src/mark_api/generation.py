@@ -128,7 +128,7 @@ class AdvertisementGenerator:
         return self._client
 
     def generate_text(
-        self, prompt: str, *, model: str = "gpt-5-mini"
+        self, prompt: str, *, model: str = "gpt-5.6-terra"
     ) -> AdvertisementDraft:
         clean_prompt = _validated_prompt(prompt)
         clean_model = _validated_model(model)

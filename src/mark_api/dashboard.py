@@ -291,7 +291,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <h2>Anzeige entwerfen – Text und Bild</h2>
       <p class="muted">Diese Funktion erzeugt nur einen ungeprüften Entwurf. Eine Veröffentlichung erfolgt niemals automatisch. Für KI-Bilder und Texte können beim externen Anbieter Kosten entstehen; der Prompt wird an ihn übertragen.</p>
       <p id="generation-pricing-note" class="note">Kostenbasis für das jeweils ausgewählte Verfahren (OpenAI-Standardtarife, Stand 20.10.2026):
-        <strong>Textentwurf:</strong> Modell <code>gpt-5-mini</code>, 0.25 USD je 1 Mio Text-Eingabetokens und 2.00 USD je 1 Mio Text-Ausgabetokens.
+        <strong>Textentwurf:</strong> Modell <code>gpt-5.6-terra</code>, 2.00 USD je 1 Mio Text-Eingabetokens und 12.00 USD je 1 Mio Text-Ausgabetokens.
         <strong>Bildentwurf:</strong> Modell <code>gpt-image-2.5-flare</code>, 5.00 USD je 1 Mio Text-Eingabetokens und 30.00 USD je 1 Mio Bild-Ausgabetokens.
         Die tatsächlichen Kosten hängen vom Tokenverbrauch, Modell und ggf. weiteren Bild-/Cache-Eingaben ab; kein fixer Bildpreis und keine garantierte Kostenobergrenze.
         Tarife können sich ändern. Offizielle OpenAI-Preisliste zum Nachprüfen (Adresse kopieren): <code>developers.openai.com/api/docs/pricing</code>, bevor die einzelne Anfrage bestätigt wird.</p>

@@ -19,10 +19,10 @@ _PROVIDER_PRICING_URL = "https://developers.openai.com/api/docs/pricing"
 
 def _provider_cost_notice(mode: str, model: str) -> str:
     """Display the selected model and nonbinding pricing before any SDK call."""
-    if mode == "text" and model == "gpt-5-mini":
+    if mode == "text" and model == "gpt-5.6-terra":
         rates = (
-            "Standard-Listenpreis vom 20.10.2026: 0.25 USD je 1 Mio "
-            "Text-Eingabetokens und 2.00 USD je 1 Mio Text-Ausgabetokens."
+            "Standard-Listenpreis vom 20.10.2026: 2.00 USD je 1 Mio "
+            "Text-Eingabetokens und 12.00 USD je 1 Mio Text-Ausgabetokens."
         )
     elif mode == "image" and model == "gpt-image-2.5-flare":
         rates = (
@@ -68,8 +68,8 @@ def _parser() -> argparse.ArgumentParser:
         )
         sub.add_argument(
             "--model",
-            default="gpt-5-mini" if mode == "text" else "gpt-image-2.5-flare",
-            help="Provider model (default: gpt-5-mini or gpt-image-2.5-flare).",
+            default="gpt-5.6-terra" if mode == "text" else "gpt-image-2.5-flare",
+            help="Provider model (default: gpt-5.6-terra or gpt-image-2.5-flare).",
         )
         sub.add_argument(
             "--acknowledge-provider-cost", action="store_true",
