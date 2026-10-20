@@ -23,6 +23,21 @@ _MAX_TEXT_CHARS = 12000
 _MAX_IMAGE_B64_CHARS = 26_000_000
 _MAX_IMAGE_BYTES = 18_000_000
 _IMAGE_SIZE = (1024, 1024)
+# GPT Image models return base64 inline; legacy URL-returning image models do not.
+# Only admit documented GPT Image IDs before making a billable provider call.
+# response_format="b64_json" is deprecated and unsupported on GPT Image models.
+_SUPPORTED_INLINE_PNG_IMAGE_MODELS = frozenset({
+    "gpt-image-1",
+    "gpt-image-1-mini",
+    "gpt-image-1.5",
+    "gpt-image-2",
+    "gpt-image-2-2026-04-21",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2.5-sunburst-2026-09-08",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-flare-2026-09-08",
+    "chatgpt-image-latest",
+})
 _TEXT_INSTRUCTIONS = (
     "Erstelle einen deutschen Kleinanzeigen-Entwurf aus den vom Nutzer "
     "gegebenen Fakten. Antworte ausschließlich als JSON-Objekt mit genau "
@@ -158,12 +173,18 @@ class AdvertisementGenerator:
     ) -> bytes:
         clean_prompt = _validated_prompt(prompt)
         clean_model = _validated_model(model)
+        if clean_model not in _SUPPORTED_INLINE_PNG_IMAGE_MODELS:
+            raise GenerationError(
+                "image model cannot guarantee an inline PNG; "
+                "select a supported GPT image model"
+            )
         try:
             result = self._provider().images.generate(
                 model=clean_model,
                 prompt=clean_prompt,
                 n=1,
                 size="1024x1024",
+                output_format="png",
             )
         except GenerationError:
             raise

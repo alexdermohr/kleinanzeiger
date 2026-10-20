@@ -165,6 +165,8 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(len(self.images.calls), 1)
         self.assertEqual(self.images.calls[0]["size"], "1024x1024")
         self.assertEqual(self.images.calls[0]["n"], 1)
+        self.assertEqual(self.images.calls[0]["output_format"], "png")
+        self.assertNotIn("response_format", self.images.calls[0])
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "generated.png"
             save_generated_image(png, target)
@@ -197,9 +199,24 @@ class GenerationTests(unittest.TestCase):
                 _client()
 
     def test_invalid_provider_model_rejected_without_call(self):
-        with self.assertRaises(GenerationError):
-            self.generator.generate_image("Photo", model="bad/model")
-        self.assertEqual(self.images.calls, [])
+        for model in (
+            "bad/model", "dall-e-2", "dall-e-3", "gpt-5-mini",
+            "gpt-image-9", "unknown-image-provider",
+        ):
+            with self.subTest(model=model):
+                with self.assertRaisesRegex(
+                    GenerationError, "model|unsupported characters",
+                ):
+                    self.generator.generate_image("Photo", model=model)
+                self.assertEqual(self.images.calls, [])
+        # The other documented GPT Image variant still returns inline PNG.
+        self.assertEqual(
+            self.generator.generate_image("Photo", model="gpt-image-1-mini"),
+            valid_png(),
+        )
+        self.assertEqual(len(self.images.calls), 1)
+        self.assertEqual(self.images.calls[0]["model"], "gpt-image-1-mini")
+        self.assertEqual(self.images.calls[0]["output_format"], "png")
 
     def test_cli_text_outputs_valid_draft_json_without_extra_provider(self):
         with (
