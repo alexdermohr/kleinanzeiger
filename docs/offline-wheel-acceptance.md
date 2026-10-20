@@ -15,9 +15,26 @@ python -m pip wheel --no-deps --wheel-dir /tmp/mark-wheels .
 
 Den tatsächlich erzeugten Wheelnamen in MARK_WHEEL_PATH einsetzen:
 
+Nur unter Linux mit `sudo`, `unshare`, `ip` und `runuser` ausführen.
+`unshare --net` legt einen separaten Netzwerkraum ohne ausgehende
+Netzwerkschnittstellen an; ausschließlich `lo` wird aktiviert. Der
+Python-Test wird anschließend mit normalen Nutzerrechten gestartet.
+Ohne diese Isolation **schlägt der Test absichtlich fehl**:
+
 ```sh
-MARK_WHEEL_PATH=/tmp/mark-wheels/mark_api-0.1.0-py3-none-any.whl python -m unittest discover -s tests -p test_offline_wheel_acceptance.py -v
+wheel=/tmp/mark-wheels/mark_api-0.1.0-py3-none-any.whl
+runner_user="$(id -un)"
+python_bin="$(command -v python)"
+sudo -n unshare --net -- bash -c '
+  set -euo pipefail
+  ip link set lo up
+  exec runuser -u "$1" -- env "MARK_WHEEL_PATH=$2" "$3" -m unittest discover -s tests -p test_offline_wheel_acceptance.py -v
+' bash "$runner_user" "$wheel" "$python_bin"
 ```
+
+Der Test prüft zusätzlich per Kernel-Netzwerkschnittstellenliste, dass nur
+\`lo\` erreichbar ist. Proxy- und Token-Umgebungsbereinigung ist lediglich
+eine zweite Schutzschicht und ersetzt die Netzwerknamespace nicht.
 
 Die eigenständige GitHub-Actions-Pipeline `offline-wheel-acceptance.yml`
 führt dieselbe Prüfung nach dem Wheel-Build aus.

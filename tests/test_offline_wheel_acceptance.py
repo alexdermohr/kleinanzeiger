@@ -13,6 +13,7 @@ import json
 import os
 import re
 import selectors
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -25,6 +26,23 @@ from email.message import EmailMessage
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
+
+
+def _require_loopback_only_network_namespace() -> None:
+    """Fail closed unless the Linux kernel exposes only the loopback NIC.
+
+    CI must invoke the entire test using a fresh network namespace with only
+    'lo' enabled. Environment variables, missing API keys and proxy removal
+    are not an outbound-network isolation boundary.
+    """
+    if sys.platform != "linux":
+        raise AssertionError("installed offline wheel requires Linux network namespace")
+    interfaces = {name for _, name in socket.if_nameindex()}
+    if interfaces != {"lo"}:
+        raise AssertionError(
+            "offline wheel test must run in a loopback-only Linux network "
+            f"namespace; visible interfaces: {sorted(interfaces)}"
+        )
 
 
 def _private_environment(home: Path) -> dict[str, str]:
@@ -154,6 +172,7 @@ def _request(address: str, path: str, *, method: str = "GET", data=None):
 @unittest.skipUnless(os.environ.get("MARK_WHEEL_PATH"), "set MARK_WHEEL_PATH for installed-wheel E2E")
 class InstalledOfflineWheelAcceptance(unittest.TestCase):
     def test_exact_installed_wheel_without_checkout_imports_or_platform_calls(self):
+        _require_loopback_only_network_namespace()
         wheel = Path(os.environ["MARK_WHEEL_PATH"])
         self.assertTrue(wheel.is_absolute(), "wheel must be an absolute path")
         self.assertTrue(wheel.is_file(), "wheel must exist before acceptance")
@@ -282,6 +301,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "local_eml_events": 2, "sqlite_quick_check": "ok",
             "loopback_http": True, "csv": True, "denied_writes": True,
             "restart_deduplication": True,
+            "network_isolation": "linux-netns-loopback-only",
         }, sort_keys=True))
 
 
