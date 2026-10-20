@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
@@ -890,6 +891,56 @@ class MarkQueryServiceTests(SeededStoreMixin, unittest.TestCase):
         self.assertEqual(deleted.views, 15)
         self.assertEqual(deleted.watch_count, 0)
         self.assertEqual(deleted.reply_count, 1)
+
+    def test_latest_ads_reads_all_history_in_one_connection(self) -> None:
+        store = self.make_store()
+        # The old path opened one connection for tracked_ad_ids and another
+        # for every tracked ad. A single consistent read must replace it.
+        with patch.object(store, "_connect", wraps=store._connect) as opened:
+            views = MarkQueryService(store).latest_ads()
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual([item.ad_id for item in views], ["1", "2"])
+        self.assertEqual(views[0].views, 15)
+        self.assertFalse(views[0].present)
+
+    def test_batched_history_preserves_timezone_and_insertion_ties(self) -> None:
+        store = self.make_store()
+        # Insert out-of-order status and same-instant, differently offset facts.
+        # Equal instants must break ties by SQLite insertion ID, not ISO text.
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="7", observed_at=T1, source="fresh-metric",
+            lifecycle_state=LifecycleState.ACTIVE, views=0, watch_count=8,
+        ))
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="7", observed_at=T0, source="late-arrival",
+            lifecycle_state=LifecycleState.PAUSED, views=900,
+        ))
+        same_instant = T1.astimezone(timezone(timedelta(hours=2)))
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="7", observed_at=same_instant, source="new-status",
+            lifecycle_state=LifecycleState.ABSENT,
+        ))
+        histories = store.ad_histories()
+        self.assertEqual([ad_id for ad_id, _ in histories], ["1", "2", "7"])
+        self.assertEqual(
+            histories,
+            tuple((ad_id, store.ad_history(ad_id)) for ad_id, _ in histories),
+        )
+        item = {view.ad_id: view for view in MarkQueryService(store).latest_ads()}["7"]
+        self.assertEqual(item.lifecycle_state, LifecycleState.ABSENT)
+        self.assertEqual(item.observed_at, same_instant)
+        self.assertEqual(item.views, 0)
+        self.assertEqual(item.watch_count, 8)
+        self.assertEqual(item.metric_evidence["views"].source, "fresh-metric")
+        self.assertTrue(item.metric_evidence["views"].last_known)
+
+    def test_empty_batch_projection_does_not_create_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "empty.sqlite")
+            with patch.object(store, "_connect", wraps=store._connect) as opened:
+                self.assertEqual(MarkQueryService(store).latest_ads(), ())
+            self.assertEqual(opened.call_count, 1)
+            self.assertEqual(store.ad_histories(), ())
 
     def test_metric_evidence_preserves_original_timestamp_source_and_zero(self) -> None:
         store = self.make_store()

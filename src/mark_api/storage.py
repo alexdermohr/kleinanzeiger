@@ -1932,6 +1932,35 @@ class SnapshotStore:
                 )
         return len(snapshots) + len(absent_ids)
 
+    @staticmethod
+    def _decode_ad_history(
+        rows: Iterable[sqlite3.Row],
+    ) -> tuple[AdSnapshot, ...]:
+        """Order actual instants, then insertion IDs; preserve field evidence."""
+
+        parsed = sorted(
+            (
+                (datetime.fromisoformat(row["observed_at"]), int(row["id"]), row)
+                for row in rows
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        return tuple(
+            AdSnapshot(
+                ad_id=row["ad_id"],
+                observed_at=observed_at,
+                source=row["source"],
+                metric_source=row["metric_source"],
+                lifecycle_state=LifecycleState(row["lifecycle_state"]),
+                title=row["title"],
+                description=row["description"],
+                views=row["views"],
+                watch_count=row["watch_count"],
+                reply_count=row["reply_count"],
+            )
+            for observed_at, _, row in parsed
+        )
+
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
         """Return observations by actual instant, then insertion ID for ties."""
 
@@ -1945,27 +1974,33 @@ class SnapshotStore:
                 """,
                 (ad_id,),
             ).fetchall()
-        ordered_rows = sorted(
-            rows,
-            key=lambda row: (
-                datetime.fromisoformat(row["observed_at"]),
-                int(row["id"]),
-            ),
-        )
+        return self._decode_ad_history(rows)
+
+    def ad_histories(self) -> tuple[tuple[str, tuple[AdSnapshot, ...]], ...]:
+        """Return every tracked ad's history using one SQLite read snapshot.
+
+        The SQL statement binds all rows to the same SQLite snapshot. Group by
+        the same lexicographically ordered ad IDs as tracked_ad_ids(), then
+        order each history by actual instant and insertion ID, including
+        equivalent timestamps with different timezone offsets. This does not
+        infer ownership or a successful platform synchronization.
+        """
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, ad_id, observed_at, source, lifecycle_state, title,
+                       description, views, watch_count, reply_count, metric_source
+                FROM ad_snapshots
+                ORDER BY ad_id ASC, id ASC
+                """
+            ).fetchall()
+        by_ad: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            by_ad.setdefault(str(row["ad_id"]), []).append(row)
         return tuple(
-            AdSnapshot(
-                ad_id=row["ad_id"],
-                observed_at=datetime.fromisoformat(row["observed_at"]),
-                source=row["source"],
-                metric_source=row["metric_source"],
-                lifecycle_state=LifecycleState(row["lifecycle_state"]),
-                title=row["title"],
-                description=row["description"],
-                views=row["views"],
-                watch_count=row["watch_count"],
-                reply_count=row["reply_count"],
-            )
-            for row in ordered_rows
+            (ad_id, self._decode_ad_history(ad_rows))
+            for ad_id, ad_rows in by_ad.items()
         )
 
     def latest_ad_snapshot(self, ad_id: str) -> AdSnapshot | None:

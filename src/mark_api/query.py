@@ -96,8 +96,7 @@ class MarkQueryService:
 
     def latest_ads(self) -> tuple[AdView, ...]:
         rows: list[AdView] = []
-        for ad_id in self._store.tracked_ad_ids():
-            history = self._store.ad_history(ad_id)
+        for ad_id, history in self._store.ad_histories():
             if not history:
                 continue
             latest = history[-1]
