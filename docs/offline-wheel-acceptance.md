@@ -16,7 +16,7 @@ python_bin="$(command -v python)"
 unshare --user --map-root-user --net -- bash -c '
   set -euo pipefail
   ip link set lo up
-  exec env "MARK_WHEEL_PATH=$1" "$2" -m unittest discover -s tests -p test_offline_wheel_acceptance.py -v
+  exec env "MARK_WHEEL_PATH=$1" "$2" -m unittest discover -s tests -p offline_wheel_acceptance.py -v
 ' bash "$wheel" "$python_bin"
 ```
 

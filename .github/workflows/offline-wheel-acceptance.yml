@@ -52,7 +52,7 @@ jobs:
             ip link set lo up
             exec setpriv --reuid "$1" --regid "$2" --clear-groups \
               --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
-              env "MARK_WHEEL_PATH=$3" "$4" -m unittest discover -s tests -p test_offline_wheel_acceptance.py -v
+              env "MARK_WHEEL_PATH=$3" "$4" -m unittest discover -s tests -p offline_wheel_acceptance.py -v
           ' bash "$runner_uid" "$runner_gid" "${wheels[0]}" "$python_bin" 2>&1 | tee "$report"
           # No skipped acceptance, empty discovery, or "success without tests".
           grep -Eq '^Ran 1 test in [0-9.]+' "$report"
