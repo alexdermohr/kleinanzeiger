@@ -920,7 +920,7 @@ class MarkQueryServiceTests(SeededStoreMixin, unittest.TestCase):
             ad_id="7", observed_at=same_instant, source="new-status",
             lifecycle_state=LifecycleState.ABSENT,
         ))
-        histories = store.ad_histories()
+        histories = tuple(store.ad_histories())
         self.assertEqual([ad_id for ad_id, _ in histories], ["1", "2", "7"])
         self.assertEqual(
             histories,
@@ -934,13 +934,59 @@ class MarkQueryServiceTests(SeededStoreMixin, unittest.TestCase):
         self.assertEqual(item.metric_evidence["views"].source, "fresh-metric")
         self.assertTrue(item.metric_evidence["views"].last_known)
 
+    def test_ad_histories_are_streamed_one_group_at_a_time(self) -> None:
+        store = self.make_store()
+        # An ad's observation history must be decoded only when consumed.
+        with patch.object(
+            store, "_decode_ad_history", wraps=store._decode_ad_history,
+        ) as decoded:
+            stream = store.ad_histories()
+            self.assertEqual(decoded.call_count, 0)
+            first_id, first_history = next(stream)
+            self.assertEqual(first_id, "1")
+            self.assertEqual(len(first_history), 2)
+            self.assertEqual(decoded.call_count, 1)
+            # Explicit early closure must neither materialize another ad
+            # nor leave a SQLite cursor held by the generator.
+            stream.close()
+            self.assertEqual(decoded.call_count, 1)
+
+    def test_batch_index_scan_needs_no_temp_sort_for_grouping(self) -> None:
+        store = self.make_store()
+        with store._connect() as connection:
+            details = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT id, ad_id, observed_at "
+                "FROM ad_snapshots ORDER BY ad_id ASC"
+            ).fetchall()
+        plan = " ".join(str(row["detail"]) for row in details)
+        self.assertNotIn("USE TEMP B-TREE", plan)
+        self.assertIn("INDEX", plan)
+
+    def test_batched_history_membership_matches_tracked_ad_ids(self) -> None:
+        store = self.make_store()
+        # tracked_ad_ids() is SELECT DISTINCT ad_id FROM ad_snapshots.
+        # Unlike an owner attestation, a snapshot row itself is the tracking
+        # evidence; no extra invented membership can be derived from it.
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="3", observed_at=T0, source="synthetic",
+            lifecycle_state=LifecycleState.UNKNOWN,
+        ))
+        self.assertEqual(
+            tuple(ad_id for ad_id, _ in store.ad_histories()),
+            store.tracked_ad_ids(),
+        )
+        self.assertEqual(
+            tuple(row.ad_id for row in MarkQueryService(store).latest_ads()),
+            store.tracked_ad_ids(),
+        )
+
     def test_empty_batch_projection_does_not_create_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "empty.sqlite")
             with patch.object(store, "_connect", wraps=store._connect) as opened:
                 self.assertEqual(MarkQueryService(store).latest_ads(), ())
             self.assertEqual(opened.call_count, 1)
-            self.assertEqual(store.ad_histories(), ())
+            self.assertEqual(tuple(store.ad_histories()), ())
 
     def test_metric_evidence_preserves_original_timestamp_source_and_zero(self) -> None:
         store = self.make_store()

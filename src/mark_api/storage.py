@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, closing
 from dataclasses import asdict, dataclass
+from itertools import groupby
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Iterable, Mapping
+from typing import Iterable, Iterator, Mapping
 from urllib.parse import quote
 
 from .domain import (
@@ -1976,32 +1977,30 @@ class SnapshotStore:
             ).fetchall()
         return self._decode_ad_history(rows)
 
-    def ad_histories(self) -> tuple[tuple[str, tuple[AdSnapshot, ...]], ...]:
-        """Return every tracked ad's history using one SQLite read snapshot.
+    def ad_histories(self) -> Iterator[tuple[str, tuple[AdSnapshot, ...]]]:
+        """Stream one ad history at a time from a single SQLite read snapshot.
 
-        The SQL statement binds all rows to the same SQLite snapshot. Group by
-        the same lexicographically ordered ad IDs as tracked_ad_ids(), then
-        order each history by actual instant and insertion ID, including
-        equivalent timestamps with different timezone offsets. This does not
-        infer ownership or a successful platform synchronization.
+        ORDER BY ad_id uses the existing ad_id-leading index and preserves
+        tracked_ad_ids() membership/order (both read ad_snapshots). Snapshot
+        timestamps still require Python instant-ordering within each group.
+        Keep only one ad's raw rows/history in memory, not the entire table.
+        A consumer stopping early must close this generator to release the
+        database handle and its consistent read snapshot.
         """
 
-        with self._connect() as connection:
-            rows = connection.execute(
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
                 """
                 SELECT id, ad_id, observed_at, source, lifecycle_state, title,
                        description, views, watch_count, reply_count, metric_source
                 FROM ad_snapshots
-                ORDER BY ad_id ASC, id ASC
+                ORDER BY ad_id ASC
                 """
-            ).fetchall()
-        by_ad: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            by_ad.setdefault(str(row["ad_id"]), []).append(row)
-        return tuple(
-            (ad_id, self._decode_ad_history(ad_rows))
-            for ad_id, ad_rows in by_ad.items()
-        )
+            )
+            for ad_id, group in groupby(
+                cursor, key=lambda row: str(row["ad_id"])
+            ):
+                yield ad_id, self._decode_ad_history(group)
 
     def latest_ad_snapshot(self, ad_id: str) -> AdSnapshot | None:
         history = self.ad_history(ad_id)
