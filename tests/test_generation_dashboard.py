@@ -470,6 +470,44 @@ const imageOk = {
   assert.equal(dom["generation-image-preview"].hidden, true);
   assert.equal(dom["generation-apply-image"].disabled, true);
   assert.match(dom["generation-status"].textContent, /eingeben/);
+  // Keep the provider response pending while the user-visible prompt is
+  // changed by another DOM actor. Neither obsolete result may be applied.
+  let releaseProvider;
+  globalThis.fetch = (url, options) => {
+    networkCalls++;
+    assert.equal(url, "/api/dashboard/generate");
+    assert.equal(options.method, "POST");
+    return new Promise((resolve) => { releaseProvider = resolve; });
+  };
+  dom["generation-prompt"].value = "Text vor Anfrage";
+  dom["generation-consent"].checked = true;
+  const pendingText = requestGeneration("text");
+  assert.equal(dom["generation-prompt"].disabled, true);
+  assert.equal(dom["generation-apply-text"].disabled, true);
+  dom["generation-prompt"].value = "Text nach Anfrage";
+  releaseProvider(textOk);
+  await pendingText;
+  assert.equal(generationTextDraft, null);
+  assert.equal(dom["generation-draft-title"].value, "");
+  assert.equal(dom["generation-text-preview"].hidden, true);
+  assert.equal(dom["generation-apply-text"].disabled, true);
+  assert.equal(dom["generation-prompt"].disabled, false);
+  assert.match(dom["generation-status"].textContent, /verworfen/);
+
+  dom["generation-prompt"].value = "Bild vor Anfrage";
+  dom["generation-consent"].checked = true;
+  const pendingImage = requestGeneration("image");
+  assert.equal(dom["generation-prompt"].disabled, true);
+  dom["generation-prompt"].value = "Bild nach Anfrage";
+  releaseProvider(imageOk);
+  await pendingImage;
+  assert.equal(generationImageBlob, null);
+  assert.equal(generationImagePreviewUrl, null);
+  assert.equal(dom["generation-image-preview"].hidden, true);
+  assert.equal(dom["generation-apply-image"].disabled, true);
+  assert.equal(dom["generation-prompt"].disabled, false);
+  assert.deepEqual(revoked, ["blob:test-image-1"]);
+  assert.match(dom["generation-status"].textContent, /verworfen/);
   console.log("JS_DRAFT_RESET_PASS");
 })().catch((err) => { console.error(err); process.exitCode = 1; });
 """

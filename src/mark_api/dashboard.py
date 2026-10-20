@@ -1933,6 +1933,8 @@ function renderGenerationAvailability() {
   byId("generation-text").disabled = !canGenerate;
   byId("generation-image").disabled = !canGenerate;
   byId("generation-consent").disabled = generationBusy;
+  // Never display a draft next to a prompt edited during a pending request.
+  byId("generation-prompt").disabled = generationBusy;
   const canApply = writeUiReady() && !createInFlight;
   byId("generation-apply-text").disabled = !canApply || generationTextDraft === null;
   byId("generation-apply-image").disabled = !canApply || generationImageBlob === null;
@@ -2017,6 +2019,9 @@ async function requestGeneration(mode) {
       ) {
         throw new Error("Ungültige lokale Textentwurf-Antwort.");
       }
+      if (byId("generation-prompt").value.trim() !== prompt) {
+        throw new Error("Prompt während der Anfrage geändert; Ergebnis verworfen.");
+      }
       generationTextDraft = {title: draft.title, description: draft.description};
       byId("generation-draft-title").value = draft.title;
       byId("generation-draft-description").value = draft.description;
@@ -2029,6 +2034,9 @@ async function requestGeneration(mode) {
       const payload = await response.blob();
       if (!payload.size || payload.size > 18000000) {
         throw new Error("Lokaler Bildentwurf überschreitet die Größenbegrenzung.");
+      }
+      if (byId("generation-prompt").value.trim() !== prompt) {
+        throw new Error("Prompt während der Anfrage geändert; Ergebnis verworfen.");
       }
       const newUrl = URL.createObjectURL(payload);
       const oldUrl = generationImagePreviewUrl;
