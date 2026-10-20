@@ -1,6 +1,6 @@
 # Text- und Bildentwürfe für Anzeigen
 
-Stand: 19.10.2026. **Technischer Funktionsumfang:** Ein installierbarer
+Stand: 20.10.2026. **Technischer Funktionsumfang:** Ein installierbarer
 `mark-api-generate`-Befehl und die optionale lokale Dashboard-Ansicht
 erstellen nicht veröffentlichte Text- und Bildvorschläge. Nur der Nutzer
 entscheidet über eine spätere Übernahme oder Anzeigenaktion. Generierte
@@ -78,7 +78,8 @@ mark-api-generate image --prompt-file bildidee.txt --output bild-entwurf.png
 ungeeignet für vertrauliche Daten, da Prozessargumente sichtbar sein
 können. `--model` erlaubt nur gültige, vom Anbieter verfügbare
 Modellnamen. Der voreingestellte Textmodus verwendet `gpt-5-mini`,
-der Bildmodus `gpt-image-1`. Der Anbieter muss für das eigene
+der Bildmodus `gpt-image-2.5-flare`. Das ältere Modell
+`gpt-image-1` wird am 23.10.2026 abgeschaltet. Der Anbieter muss für das eigene
 API-Konto freigeschaltet sein; ein solcher Zugang wird nicht behauptet.
 Ein Aufruf kann kostenpflichtig sein.
 
