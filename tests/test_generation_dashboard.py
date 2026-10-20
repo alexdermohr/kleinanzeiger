@@ -169,6 +169,36 @@ class GenerationHttpTests(unittest.TestCase):
         self.assertEqual(self.generator.text_calls, [])
         self.assertEqual(self.generator.image_calls, [])
 
+    def test_mode_specific_pricing_is_visible_before_single_use_consent(self):
+        import inspect
+        from mark_api.generation import AdvertisementGenerator
+        with server_context(self.access) as (port, _):
+            status, _, page = http_call(port, "GET", "/")
+        self.assertEqual(status, 200)
+        text_model = inspect.signature(
+            AdvertisementGenerator.generate_text
+        ).parameters["model"].default
+        image_model = inspect.signature(
+            AdvertisementGenerator.generate_image
+        ).parameters["model"].default
+        self.assertEqual(text_model, "gpt-5-mini")
+        self.assertEqual(image_model, "gpt-image-2.5-flare")
+        for value in (
+            b'id="generation-pricing-note"',
+            text_model.encode(), image_model.encode(),
+            b"0.25 USD", b"2.00 USD", b"5.00 USD", b"30.00 USD",
+            b"developers.openai.com/api/docs/pricing",
+        ):
+            with self.subTest(value=value):
+                self.assertIn(value, page)
+        self.assertLess(
+            page.index(b'id="generation-pricing-note"'),
+            page.index(b'id="generation-consent"'),
+        )
+        self.assertIn(
+            b"Preisinformation oben", page,
+        )
+
     def test_single_request_cost_consent_and_budget(self):
         with server_context(self.access) as (port, _):
             for invalid in (body(consent=False), body(prompt=" "), body(mode="delete"),

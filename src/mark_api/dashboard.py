@@ -290,13 +290,18 @@ _DASHBOARD_HTML = """<!doctype html>
     <section id="generation-panel" class="panel" hidden>
       <h2>Anzeige entwerfen – Text und Bild</h2>
       <p class="muted">Diese Funktion erzeugt nur einen ungeprüften Entwurf. Eine Veröffentlichung erfolgt niemals automatisch. Für KI-Bilder und Texte können beim externen Anbieter Kosten entstehen; der Prompt wird an ihn übertragen.</p>
+      <p id="generation-pricing-note" class="note">Kostenbasis für das jeweils ausgewählte Verfahren (OpenAI-Standardtarife, Stand 20.10.2026):
+        <strong>Textentwurf:</strong> Modell <code>gpt-5-mini</code>, 0.25 USD je 1 Mio Text-Eingabetokens und 2.00 USD je 1 Mio Text-Ausgabetokens.
+        <strong>Bildentwurf:</strong> Modell <code>gpt-image-2.5-flare</code>, 5.00 USD je 1 Mio Text-Eingabetokens und 30.00 USD je 1 Mio Bild-Ausgabetokens.
+        Die tatsächlichen Kosten hängen vom Tokenverbrauch, Modell und ggf. weiteren Bild-/Cache-Eingaben ab; kein fixer Bildpreis und keine garantierte Kostenobergrenze.
+        Tarife können sich ändern. Offizielle OpenAI-Preisliste zum Nachprüfen (Adresse kopieren): <code>developers.openai.com/api/docs/pricing</code>, bevor die einzelne Anfrage bestätigt wird.</p>
       <p id="generation-session-note" class="note" hidden>Die Generierung muss für diese Sitzung mit <code>--enable-generation</code> aktiviert und das Dashboard über die vom Launcher ausgegebene URL geöffnet werden.</p>
       <label>Artikelangaben oder Bildidee
         <textarea id="generation-prompt" maxlength="4000" placeholder="Nur die tatsächlich bekannten Angaben zum Artikel eingeben. Keine privaten Daten."></textarea>
       </label>
       <label>
         <input id="generation-consent" type="checkbox">
-        Ich bestätige für genau die nächste Anfrage, dass der Prompt an einen externen KI-Anbieter übertragen wird und dadurch Kosten entstehen können.
+        Ich habe die Modell- und Preisinformation oben für diese Anfrage geprüft und bestätige für genau die nächste Anfrage die externe Promptübertragung sowie mögliche variable, nicht garantierte Kosten.
       </label>
       <div class="write-actions">
         <button id="generation-text" type="button">Textentwurf erzeugen</button>

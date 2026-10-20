@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from mark_api.generation import (
+    AdvertisementDraft,
     AdvertisementGenerator,
     GenerationError,
     _client,
@@ -133,7 +134,7 @@ class GenerationTests(unittest.TestCase):
             patch("sys.stderr", io.StringIO()) as error,
             patch("sys.stdout", io.StringIO()) as output,
         ):
-            code = main(["text", "--prompt", "Ein Artikel"])
+            code = main(["text", "--acknowledge-provider-cost", "--prompt", "Ein Artikel"])
         self.assertEqual(code, 2)
         self.assertIn("text provider returned invalid JSON", error.getvalue())
         self.assertNotIn("Traceback", error.getvalue())
@@ -219,13 +220,88 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.images.calls[0]["model"], "gpt-image-1-mini")
         self.assertEqual(self.images.calls[0]["output_format"], "png")
 
+    def test_cli_denies_text_and_image_without_separate_cost_ack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "not-created.png"
+            for mode, args in (
+                ("text", ["text", "--prompt", "Fahrrad"]),
+                ("image", ["image", "--prompt", "Fahrrad", "--output", str(target)]),
+            ):
+                with self.subTest(mode=mode):
+                    with (
+                        patch("mark_api.generation_cli.AdvertisementGenerator",
+                              side_effect=AssertionError("generator must not be created")),
+                        patch("sys.stderr", io.StringIO()) as errors,
+                        patch("sys.stdout", io.StringIO()) as output,
+                    ):
+                        self.assertEqual(main(args), 2)
+                        notice = errors.getvalue()
+                        self.assertIn("acknowledge-provider-cost", notice)
+                        self.assertIn("developers.openai.com/api/docs/pricing", notice)
+                        self.assertIn(
+                            "gpt-5-mini" if mode == "text" else "gpt-image-2.5-flare",
+                            notice,
+                        )
+                        self.assertEqual(output.getvalue(), "")
+            self.assertFalse(target.exists())
+        self.assertEqual(self.responses.calls, [])
+        self.assertEqual(self.images.calls, [])
+
+    def test_cli_cost_disclosure_occurs_before_provider_call(self):
+        observed = []
+        class ProviderWithNotice:
+            def generate_text(self, prompt, *, model):
+                # This assertion runs *inside* the provider call, not after it.
+                self_notice = notice.getvalue()
+                if "0.25 USD" not in self_notice or "gpt-5-mini" not in self_notice:
+                    raise AssertionError("model price not disclosed before provider")
+                observed.append(("provider", model))
+                return AdvertisementDraft("Fahrrad", "Gebraucht")
+        with (
+            patch("mark_api.generation_cli.AdvertisementGenerator",
+                  return_value=ProviderWithNotice()),
+            patch("sys.stderr", io.StringIO()) as notice,
+            patch("sys.stdout", io.StringIO()) as output,
+        ):
+            self.assertEqual(
+                main(["text", "--prompt", "Fahrrad",
+                      "--acknowledge-provider-cost"]), 0,
+            )
+            self.assertIn("0.25 USD", notice.getvalue())
+            self.assertIn("2.00 USD", notice.getvalue())
+            self.assertIn("gpt-5-mini", notice.getvalue())
+            self.assertEqual(json.loads(output.getvalue())["status"], "draft")
+        self.assertEqual(observed, [("provider", "gpt-5-mini")])
+        with (
+            patch("mark_api.generation_cli.AdvertisementGenerator",
+                  side_effect=AssertionError("cost acknowledgement must not persist")),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            self.assertEqual(main(["text", "--prompt", "Fahrrad"]), 2)
+
+    def test_cli_custom_model_discloses_unknown_price_without_inventing_tariff(self):
+        with (
+            patch("mark_api.generation_cli.AdvertisementGenerator",
+                  return_value=self.generator),
+            patch("sys.stdout", io.StringIO()),
+            patch("sys.stderr", io.StringIO()) as notice,
+        ):
+            self.assertEqual(
+                main(["text", "--prompt", "Fahrrad",
+                      "--model", "custom-text-model",
+                      "--acknowledge-provider-cost"]), 0,
+            )
+        self.assertIn("custom-text-model", notice.getvalue())
+        self.assertIn("Kein verifizierter Modelltarif", notice.getvalue())
+        self.assertEqual(self.responses.calls[-1]["model"], "custom-text-model")
+
     def test_cli_text_outputs_valid_draft_json_without_extra_provider(self):
         with (
             patch("mark_api.generation_cli.AdvertisementGenerator",
                   return_value=self.generator),
             patch("sys.stdout", io.StringIO()) as output,
         ):
-            self.assertEqual(main(["text", "--prompt", "Fahrrad"]), 0)
+            self.assertEqual(main(["text", "--acknowledge-provider-cost", "--prompt", "Fahrrad"]), 0)
         payload = json.loads(output.getvalue())
         self.assertFalse(payload["published"])
         self.assertEqual(payload["title"], "Gut erhaltenes Fahrrad")
@@ -238,7 +314,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stdout", io.StringIO()) as output,
             ):
-                self.assertEqual(main(["image", "--prompt", "Fahrrad",
+                self.assertEqual(main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                                        "--output", str(target)]), 0)
             self.assertEqual(target.read_bytes(), valid_png())
             self.assertEqual(self.images.calls[-1]["model"], "gpt-image-2.5-flare")
@@ -259,7 +335,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stderr", io.StringIO()) as error,
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
             self.assertIn("already exists", error.getvalue())
@@ -274,7 +350,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stderr", io.StringIO()) as error,
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
             self.assertIn("image destination is unavailable", error.getvalue())
@@ -292,7 +368,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stderr", io.StringIO()) as error,
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
             self.assertIn("must be private and user-owned", error.getvalue())
@@ -326,7 +402,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stderr", io.StringIO()) as error,
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
             self.assertTrue(observed_foreign)
@@ -344,7 +420,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stderr", io.StringIO()) as error,
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
             self.assertIn("must not be a symlink", error.getvalue())
@@ -359,7 +435,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stderr", io.StringIO()) as error,
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
             self.assertIn("parent traversal", error.getvalue())
@@ -388,7 +464,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stdout", io.StringIO()) as output,
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             # A same-UID process can replace a pathname after any check.
             # The CLI must never claim persistent name-to-inode stability.
@@ -418,7 +494,7 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stdout", io.StringIO()),
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 0)
             self.assertEqual(target.read_bytes(), valid_png())
@@ -436,7 +512,7 @@ class GenerationTests(unittest.TestCase):
                     "failure cleanup must never unlink an arbitrary pathname"
                 )),
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
             self.assertTrue(target.is_file())
@@ -465,7 +541,7 @@ class GenerationTests(unittest.TestCase):
                 patch("sys.stderr", io.StringIO()) as error,
                 patch("sys.stdout", io.StringIO()) as output,
             ):
-                code = main(["image", "--prompt", "Fahrrad",
+                code = main(["image", "--acknowledge-provider-cost", "--prompt", "Fahrrad",
                              "--output", str(target)])
             self.assertEqual(code, 2)
             self.assertIn("destination changed", error.getvalue())
@@ -482,11 +558,11 @@ class GenerationTests(unittest.TestCase):
                       return_value=self.generator),
                 patch("sys.stdout", io.StringIO()),
             ):
-                self.assertEqual(main(["text", "--prompt-file", str(prompt_path)]), 0)
+                self.assertEqual(main(["text", "--acknowledge-provider-cost", "--prompt-file", str(prompt_path)]), 0)
             self.assertEqual(self.responses.calls[-1]["input"], "Fahrrad aus eigener Sammlung")
             prompt_path.write_bytes(b"x" * (16 * 1024 + 1))
             with patch("sys.stderr", io.StringIO()) as error:
-                self.assertEqual(main(["text", "--prompt-file", str(prompt_path)]), 2)
+                self.assertEqual(main(["text", "--acknowledge-provider-cost", "--prompt-file", str(prompt_path)]), 2)
             self.assertIn("16 KiB", error.getvalue())
 
     def test_corrupt_image_checksum_rejected_before_output(self):

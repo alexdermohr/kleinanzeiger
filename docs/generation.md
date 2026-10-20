@@ -66,11 +66,11 @@ Entwurfstexte lassen sich dort manuell kopieren.
 
 ```bash
 printf '%s\n' 'Gut erhaltenes Trekkingrad, Größe M, Preis 120 Euro' > artikel.txt
-mark-api-generate text --prompt-file artikel.txt
+mark-api-generate text --prompt-file artikel.txt --acknowledge-provider-cost
 # JSON: title, description, status=draft, published=false
 
 printf '%s\n' 'Neutrale Illustration eines Trekkingrads' > bildidee.txt
-mark-api-generate image --prompt-file bildidee.txt --output bild-entwurf.png
+mark-api-generate image --prompt-file bildidee.txt --output bild-entwurf.png --acknowledge-provider-cost
 # Ausschließlich neue lokale PNG-Datei, Modus 0600
 ```
 
@@ -81,7 +81,32 @@ Modellnamen. Der voreingestellte Textmodus verwendet `gpt-5-mini`,
 der Bildmodus `gpt-image-2.5-flare`. Das ältere Modell
 `gpt-image-1` wird am 23.10.2026 abgeschaltet. Der Anbieter muss für das eigene
 API-Konto freigeschaltet sein; ein solcher Zugang wird nicht behauptet.
-Ein Aufruf kann kostenpflichtig sein.
+Ein Aufruf kann kostenpflichtig sein. Der installierte CLI-Einstieg verweigert
+ohne das ausschließlich für den aktuellen Aufruf ausdrücklich gesetzte Flag
+--acknowledge-provider-cost jeden Providerkontakt, auch bei gesetztem API-Key.
+Vor einem einzelnen Text- oder Bildaufruf zeigt er den gewählten Modus,
+das tatsächliche Modell sowie die derzeit bekannte, unverbindliche
+modellabhängige Kostenbasis an (ebenfalls bei Verwendung des Flags).
+CLI-Skripte müssen diese Bestätigung für jeden Aufruf bewusst setzen;
+es gibt keine dauerhafte globale oder implizite Zustimmung.
+
+OpenAI-Standard-Listenpreise (20.10.2026, USD):
+Text mit gpt-5-mini: 0.25 USD pro 1 Mio Text-Eingabetokens und
+2.00 USD pro 1 Mio Text-Ausgabetokens.
+Bilder mit gpt-image-2.5-flare: 5.00 USD pro 1 Mio
+Text-Eingabetokens und 30.00 USD pro 1 Mio Bild-Ausgabetokens.
+Der tatsächliche Betrag hängt vom Tokenverbrauch und ggf. weiteren
+modellabhängigen Eingabe- oder Cachekosten ab. Weder ein fixer
+Bildpreis noch eine Kostenobergrenze sind zugesichert.
+Für abweichende Modelle muss der Nutzer den aktuellen Tarif selbst prüfen;
+keine frei erfundenen Modellpreise verwenden.
+Vor jeder Kostenbestätigung die gültigen Tarife unter
+https://developers.openai.com/api/docs/pricing prüfen.
+
+Das Dashboard zeigt dieselben beiden Standardmodelle und Preisbasen
+oberhalb des einmalig anzuklickenden Zustimmungsfeldes an. Sein
+Backend verlangt weiterhin pro Anfrage den gesonderten
+acknowledge_provider_cost-Wert sowie Origin und Sitzungstoken.
 
 Der Textanbieter erhält die Vorgabe, ausschließlich vom Benutzer
 belegte Fakten zu verwenden, und muss ein streng strukturiertes JSON

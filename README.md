@@ -61,7 +61,11 @@ KI-Aufruf löst eine Plattformveröffentlichung aus. Für Bilder ist
 `gpt-image-2.5-flare` voreingestellt; das ältere `gpt-image-1`
 wird am 23.10.2026 abgeschaltet. Details,
 Installationsanleitung und noch fehlende Live-/Produktlauncher-Abnahme:
-[docs/generation.md](docs/generation.md).
+[docs/generation.md](docs/generation.md). Vor jeder einzelnen kostenpflichtigen
+CLI-Generierung ist --acknowledge-provider-cost ausdrücklich anzugeben;
+ohne das Flag wird der Anbieter nicht aufgerufen. CLI und Dashboard
+zeigen vor Bestätigung die Standardmodelle und variable Listenpreis-Basis
+sowie die aktuelle OpenAI-Preisquelle; es gibt keine Kostengarantie.
 
 ## Status
 
