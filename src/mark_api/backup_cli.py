@@ -247,7 +247,10 @@ def _shared_file_mappings() -> set[tuple[int, int]]:
     """
     found: set[tuple[int, int]] = set()
     try:
-        with open("/proc/self/maps", encoding="ascii") as mappings:
+        # Kernel filenames can contain non-ASCII and even undecodable bytes.
+        # Only the numeric ASCII columns are security-relevant; preserve
+        # opaque pathname bytes without weakening the device/inode checks.
+        with open("/proc/self/maps", encoding="ascii", errors="surrogateescape") as mappings:
             for line in mappings:
                 fields = line.split(maxsplit=5)
                 if len(fields) < 5 or len(fields[1]) != 4 or fields[1][3] != "s":

@@ -137,6 +137,49 @@ class BackupCliTests(unittest.TestCase):
                 (1,),
             )
 
+    def test_non_ascii_wal_shared_mapping_allows_backup_and_retains_fences(self) -> None:
+        # /proc/self/maps contains raw UTF-8 bytes for SQLite's live -shm
+        # mapping. The attestor only needs its ASCII numeric columns; the
+        # pathname must not make a valid owner-local WAL backup fail closed.
+        unicode_parent = self.root / "Bücher"
+        unicode_parent.mkdir(mode=0o700)
+        self.source = unicode_parent / "mark.sqlite"
+        self.backup = unicode_parent / "backup.sqlite"
+        self.store = SnapshotStore(self.source)
+        gc.collect()  # Release setUp database FDs before inode attestation.
+        with closing(sqlite3.connect(self.source)) as writer:
+            self.assertEqual(
+                writer.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",),
+            )
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute(
+                "INSERT INTO write_api_requests "
+                "(idempotency_key, request_sha256, state, requested_at) "
+                "VALUES (?, ?, 'in_progress', ?)",
+                ("unicode-wal-recovery-fence", "e" * 64, NOW.isoformat()),
+            )
+            writer.commit()
+            # Confirm the adversarial byte sequence really enters procfs.
+            # A test on non-WAL or unmapped paths would be a false positive.
+            self.assertIn(
+                os.fsencode("Bücher"), Path("/proc/self/maps").read_bytes(),
+            )
+            receipt = backup_store(self.source, backup_db=self.backup)
+            self.assertEqual(receipt.pending_api_writes, 1)
+            self.assertEqual(
+                stat.S_IMODE(self.backup.stat().st_mode), 0o400,
+            )
+        with closing(sqlite3.connect(
+            backup_cli._uri(self.backup, "ro"), uri=True,
+        )) as verified:
+            self.assertEqual(
+                verified.execute(
+                    "SELECT state FROM write_api_requests "
+                    "WHERE idempotency_key='unicode-wal-recovery-fence'"
+                ).fetchone(),
+                ("in_progress",),
+            )
+
     def test_backup_includes_committed_frames_still_in_live_wal(self) -> None:
         # Keep the SQLite writer open after commit, with automatic checkpoint
         # disabled. This proves the pending recovery fence is read from the
@@ -157,7 +200,7 @@ class BackupCliTests(unittest.TestCase):
             receipt = backup_store(self.source, backup_db=self.backup)
             self.assertEqual(receipt.pending_api_writes, 1)
             self.assertTrue(wal.is_file())
-        with closing(sqlite3.connect(self.backup)) as restored:
+        with closing(sqlite3.connect(backup_cli._uri(self.backup, "ro"), uri=True)) as restored:
             self.assertEqual(
                 restored.execute(
                     "SELECT state FROM write_api_requests WHERE idempotency_key=?",
@@ -293,7 +336,7 @@ with closing(sqlite3.connect(sys.argv[1])) as writer:
             )
             receipt = backup_store(self.source, backup_db=self.backup)
             self.assertEqual(receipt.pending_api_writes, 1)
-            with closing(sqlite3.connect(self.backup)) as copy:
+            with closing(sqlite3.connect(backup_cli._uri(self.backup, "ro"), uri=True)) as copy:
                 self.assertEqual(
                     copy.execute(
                         "SELECT state FROM write_api_requests "
@@ -381,7 +424,7 @@ with closing(sqlite3.connect(sys.argv[1])) as writer:
                 receipt = backup_store(self.source, backup_db=self.backup)
             self.assertTrue(simulated)
             self.assertEqual(receipt.pending_api_writes, 1)
-            with closing(sqlite3.connect(self.backup)) as restored:
+            with closing(sqlite3.connect(backup_cli._uri(self.backup, "ro"), uri=True)) as restored:
                 self.assertEqual(
                     restored.execute(
                         "SELECT state FROM write_api_requests "
@@ -407,7 +450,7 @@ with closing(sqlite3.connect(sys.argv[1])) as writer:
 
         self.assertTrue(self.backup.exists())
         self.assertEqual(receipt.pending_api_writes, 0)
-        with closing(sqlite3.connect(self.backup)) as check:
+        with closing(sqlite3.connect(backup_cli._uri(self.backup, "ro"), uri=True)) as check:
             self.assertEqual(check.execute("PRAGMA integrity_check").fetchone(), ("ok",))
 
     def test_previously_absent_wal_rejects_newly_planted_old_frames(self) -> None:
@@ -1098,7 +1141,7 @@ with closing(sqlite3.connect(db)) as c:
         self.assertTrue(attacked)
         self.assertEqual(receipt.pending_api_writes, 1)
         self.assertTrue(self.backup.exists())
-        with closing(sqlite3.connect(self.backup)) as backed_up:
+        with closing(sqlite3.connect(backup_cli._uri(self.backup, "ro"), uri=True)) as backed_up:
             self.assertEqual(
                 backed_up.execute(
                     "SELECT state FROM write_api_requests "
@@ -1203,7 +1246,7 @@ with closing(sqlite3.connect(db)) as c:
         self.assertFalse(used)
         self.assertEqual(receipt.pending_api_writes, 1)
         self.assertTrue(self.backup.exists())
-        with closing(sqlite3.connect(self.backup)) as db:
+        with closing(sqlite3.connect(backup_cli._uri(self.backup, "ro"), uri=True)) as db:
             self.assertEqual(
                 db.execute(
                     "SELECT state FROM write_api_requests "
@@ -1250,7 +1293,7 @@ with closing(sqlite3.connect(db)) as c:
             receipt = backup_store(self.source, backup_db=self.backup)
         self.assertFalse(used)
         self.assertEqual(receipt.pending_api_writes, 1)
-        with closing(sqlite3.connect(self.backup)) as db:
+        with closing(sqlite3.connect(backup_cli._uri(self.backup, "ro"), uri=True)) as db:
             self.assertEqual(
                 db.execute(
                     "SELECT state FROM write_api_requests "
