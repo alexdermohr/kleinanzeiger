@@ -7,6 +7,7 @@ installed distribution in a separate, isolated virtual environment.
 from __future__ import annotations
 
 import csv
+import errno
 import hashlib
 import io
 import json
@@ -43,6 +44,28 @@ def _require_loopback_only_network_namespace() -> None:
             "offline wheel test must run in a loopback-only Linux network "
             f"namespace; visible interfaces: {sorted(interfaces)}"
         )
+
+    # A root-created netns with runuser() is insufficient: a CI runner with
+    # passwordless sudo can nsenter back into the host netns. Require a child
+    # USER namespace mapping container UID 0 to a NON-ROOT host user instead.
+    uid_maps = Path("/proc/self/uid_map").read_text(encoding="ascii").splitlines()
+    fields = uid_maps[0].split() if len(uid_maps) == 1 else []
+    if (
+        len(fields) != 3
+        or fields[0] != "0"
+        or not fields[1].isdigit()
+        or int(fields[1]) <= 0
+        or fields[2] != "1"
+    ):
+        raise AssertionError("offline acceptance needs an unprivileged user namespace")
+
+    # Route lookup for a reserved documentation address must be denied by the
+    # kernel, not merely time out or be refused by a remote host.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1.0)
+        status = probe.connect_ex(("192.0.2.1", 443))
+    if status != errno.ENETUNREACH:
+        raise AssertionError(f"outbound route unexpectedly available: {status}")
 
 
 def _private_environment(home: Path) -> dict[str, str]:
@@ -95,7 +118,7 @@ def _offline_server(
     emails: tuple[Path, ...], *, initialize: bool = False,
 ):
     argv = [
-        str(python), "-I", "-m", "mark_api", "--db", str(database),
+        str(python), "-u", "-I", "-m", "mark_api", "--db", str(database),
         "--port", "0",
     ]
     if initialize:
@@ -112,29 +135,45 @@ def _offline_server(
         selector = selectors.DefaultSelector()
         try:
             assert process.stdout is not None
-            selector.register(process.stdout, selectors.EVENT_READ)
+            fd = process.stdout.fileno()
+            os.set_blocking(fd, False)
+            selector.register(fd, selectors.EVENT_READ)
             deadline = time.monotonic() + 12.0
+            pending = bytearray()
             while time.monotonic() < deadline:
                 if process.poll() is not None:
                     raise AssertionError(
-                        f"installed offline launcher exited before HTTP ready: "
+                        "installed offline launcher exited before HTTP ready: "
                         f"code={process.returncode}"
                     )
-                if not selector.select(timeout=min(0.2, deadline - time.monotonic())):
+                remaining = max(0.0, deadline - time.monotonic())
+                if not selector.select(timeout=min(0.2, remaining)):
                     continue
-                line = process.stdout.readline().strip()
-                match = re.fullmatch(
-                    r"Mark offline dashboard: http://127\.0\.0\.1:([0-9]+)/",
-                    line,
-                )
-                if match:
-                    port = int(match.group(1))
-                    if not 0 < port < 65536:
-                        raise AssertionError("offline launcher emitted invalid port")
-                    address = f"http://127.0.0.1:{port}"
+                try:
+                    chunk = os.read(fd, 4096)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    raise AssertionError("installed offline launcher closed stdout")
+                pending.extend(chunk)
+                if len(pending) > 8192:
+                    raise AssertionError("installed launcher emitted too much startup output")
+                while b"\n" in pending:
+                    raw, _, rest = pending.partition(b"\n")
+                    pending = bytearray(rest)
+                    line = raw.decode("utf-8", errors="strict").strip()
+                    match = re.fullmatch(
+                        r"Mark offline dashboard: http://127\.0\.0\.1:([0-9]+)/",
+                        line,
+                    )
+                    if match:
+                        port = int(match.group(1))
+                        if not 0 < port < 65536:
+                            raise AssertionError("offline launcher emitted invalid port")
+                        address = f"http://127.0.0.1:{port}"
+                        break
+                if address is not None:
                     break
-                if not line:
-                    raise AssertionError("installed launcher closed stdout")
             if address is None:
                 raise AssertionError("installed offline launcher never announced loopback")
             yield address
@@ -169,11 +208,12 @@ def _request(address: str, path: str, *, method: str = "GET", data=None):
             return exc.code, exc.headers, exc.read()
 
 
-@unittest.skipUnless(os.environ.get("MARK_WHEEL_PATH"), "set MARK_WHEEL_PATH for installed-wheel E2E")
 class InstalledOfflineWheelAcceptance(unittest.TestCase):
     def test_exact_installed_wheel_without_checkout_imports_or_platform_calls(self):
+        wheel_setting = os.environ.get("MARK_WHEEL_PATH")
+        self.assertTrue(wheel_setting, "MARK_WHEEL_PATH is required; never skip release acceptance")
         _require_loopback_only_network_namespace()
-        wheel = Path(os.environ["MARK_WHEEL_PATH"])
+        wheel = Path(wheel_setting)
         self.assertTrue(wheel.is_absolute(), "wheel must be an absolute path")
         self.assertTrue(wheel.is_file(), "wheel must exist before acceptance")
         self.assertEqual(wheel.suffix, ".whl")
@@ -301,7 +341,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "local_eml_events": 2, "sqlite_quick_check": "ok",
             "loopback_http": True, "csv": True, "denied_writes": True,
             "restart_deduplication": True,
-            "network_isolation": "linux-netns-loopback-only",
+            "network_isolation": "linux-usernetns-loopback-only",
         }, sort_keys=True))
 
 
