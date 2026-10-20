@@ -77,7 +77,7 @@ mark-api-generate image --prompt-file bildidee.txt --output bild-entwurf.png --a
 `--prompt-file -` liest aus stdin. `--prompt` ist möglich, aber
 ungeeignet für vertrauliche Daten, da Prozessargumente sichtbar sein
 können. `--model` erlaubt nur gültige, vom Anbieter verfügbare
-Modellnamen. Der voreingestellte Textmodus verwendet `gpt-5-mini`,
+Modellnamen. Der voreingestellte Textmodus verwendet `gpt-5.6-terra`,
 der Bildmodus `gpt-image-2.5-flare`. Das ältere Modell
 `gpt-image-1` wird am 23.10.2026 abgeschaltet. Der Anbieter muss für das eigene
 API-Konto freigeschaltet sein; ein solcher Zugang wird nicht behauptet.
@@ -91,10 +91,15 @@ CLI-Skripte müssen diese Bestätigung für jeden Aufruf bewusst setzen;
 es gibt keine dauerhafte globale oder implizite Zustimmung.
 
 OpenAI-Standard-Listenpreise (20.10.2026, USD):
-Text mit gpt-5-mini: 0.25 USD pro 1 Mio Text-Eingabetokens und
-2.00 USD pro 1 Mio Text-Ausgabetokens.
+Text mit gpt-5.6-terra: 2.00 USD pro 1 Mio Text-Eingabetokens und
+12.00 USD pro 1 Mio Text-Ausgabetokens.
 Bilder mit gpt-image-2.5-flare: 5.00 USD pro 1 Mio
 Text-Eingabetokens und 30.00 USD pro 1 Mio Bild-Ausgabetokens.
+Der vorherige Standard `gpt-5-mini` ist vom Anbieter für den 11.12.2026
+zur Abschaltung angekündigt. Der Nachfolger `gpt-5.6-terra` unterstützt
+strukturierte JSON-Ausgaben, kostet nach aktuellem Listenpreis jedoch mehr.
+Siehe https://developers.openai.com/api/docs/deprecations sowie
+https://developers.openai.com/api/docs/models/gpt-5.6-terra.
 Der tatsächliche Betrag hängt vom Tokenverbrauch und ggf. weiteren
 modellabhängigen Eingabe- oder Cachekosten ab. Weder ein fixer
 Bildpreis noch eine Kostenobergrenze sind zugesichert.
