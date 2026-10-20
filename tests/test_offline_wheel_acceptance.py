@@ -45,19 +45,34 @@ def _require_loopback_only_network_namespace() -> None:
             f"namespace; visible interfaces: {sorted(interfaces)}"
         )
 
-    # A root-created netns with runuser() is insufficient: a CI runner with
-    # passwordless sudo can nsenter back into the host netns. Require a child
-    # USER namespace mapping container UID 0 to a NON-ROOT host user instead.
+    # A root-created netns with plain runuser is insecure: the CI user may
+    # sudo/nsenter into the host network namespace again. Admit ONLY one of:
+    # (1) a user namespace mapping inside UID 0 to a NON-ROOT host UID; or
+    # (2) an ordinary non-root process with no-new-privs and ZERO capability
+    #     sets (including bounding set), enforced by the Linux kernel.
     uid_maps = Path("/proc/self/uid_map").read_text(encoding="ascii").splitlines()
     fields = uid_maps[0].split() if len(uid_maps) == 1 else []
-    if (
-        len(fields) != 3
-        or fields[0] != "0"
-        or not fields[1].isdigit()
-        or int(fields[1]) <= 0
-        or fields[2] != "1"
-    ):
-        raise AssertionError("offline acceptance needs an unprivileged user namespace")
+    unprivileged_userns = (
+        len(fields) == 3 and fields[0] == "0"
+        and fields[1].isdigit() and int(fields[1]) > 0
+        and fields[2] == "1"
+    )
+    status_values = {}
+    for line in Path("/proc/self/status").read_text(encoding="ascii").splitlines():
+        key, sep, value = line.partition(":")
+        if sep:
+            status_values[key] = value.strip()
+    cap_names = ("CapEff", "CapPrm", "CapInh", "CapBnd", "CapAmb")
+    unprivileged_no_new_privs = (
+        os.geteuid() != 0
+        and status_values.get("NoNewPrivs") == "1"
+        and all(int(status_values.get(name, "-1"), 16) == 0 for name in cap_names)
+    )
+    if not (unprivileged_userns or unprivileged_no_new_privs):
+        raise AssertionError(
+            "offline acceptance requires unprivileged userns OR "
+            "non-root no-new-privs with all capabilities dropped"
+        )
 
     # Route lookup for a reserved documentation address must be denied by the
     # kernel, not merely time out or be refused by a remote host.
@@ -341,7 +356,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "local_eml_events": 2, "sqlite_quick_check": "ok",
             "loopback_http": True, "csv": True, "denied_writes": True,
             "restart_deduplication": True,
-            "network_isolation": "linux-usernetns-loopback-only",
+            "network_isolation": "linux-non-escalating-loopback-netns",
         }, sort_keys=True))
 
 

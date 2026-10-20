@@ -1,13 +1,13 @@
 # Mark: installierte Offline-Wheel-Abnahme
 
-Der Test prüft die **installierte Distribution** in einem eigenständigen
-Python-3.12-venv. Er startet den echten lokalen Mark-Prozess und nutzt nur
-synthetische EML-Dateien, eine temporäre SQLite-Datenbank sowie Loopback-HTTP.
-Der Quellcheckout wird nicht als importiertes Produkt verwendet.
+Die Prüfung installiert das tatsächlich gebaute Wheel in einem temporären
+Python-3.12-venv. Das Produkt startet als separater lokaler Prozess mit
+synthetischen EML-Nachrichten, SQLite und Loopback-HTTP, ohne Quellimporte.
 
-## Ausführung unter Linux
+## Lokaler Test bei erlaubten unprivilegierten Usernamespaces
 
-Das Paket bauen und den tatsächlich gebauten Wheelpfad verwenden:
+Das gebaute Wheel auswählen und die Python-Tests nur in einer User- und
+Netzwerknamespace starten. In diesem Beispiel wird kein Host-root benötigt:
 
 ```sh
 python -m pip wheel --no-deps --wheel-dir /tmp/mark-wheels .
@@ -20,40 +20,43 @@ unshare --user --map-root-user --net -- bash -c '
 ' bash "$wheel" "$python_bin"
 ```
 
-**Sicherheitsgrenze:** Mit `unshare --user --map-root-user --net` wird
-der scheinbare UID 0 der Testumgebung **nur** auf die unprivilegierte Host-UID
-abgebildet. Die isolierte Netzwerknamespace enthält ausschließlich `lo`.
-Der Test prüft beide Voraussetzungen und den Kernel-Routenfehler
-`ENETUNREACH` beim Verbindungsversuch zu einer reservierten
-Dokumentationsadresse. Aus einer sudo-gestarteten Netznamespace ließe sich
-bei entsprechender Host-Berechtigung sonst wieder in die Host-Netznamespace
-wechseln; eine solche Ausführung ist deshalb **nicht** zugelassen.
+Einige GitHub-Runner verweigern unprivilegierte Usernamespace-UID-Mappings.
+Ein fehlgeschlagener Namespace-Test darf **nicht** ohne Isolation neu laufen.
 
-Falls unprivilegierte User-/Netzwerk-Namespaces auf dem Testhost nicht zulässig
-sind, muss die Abnahme **fehlschlagen**. Sie darf dann weder per sudo-only
-Netznamespace noch ganz ohne Isolation als PASS ausgegeben werden.
+## GitHub-Actions-Sicherheitsgrenze
 
-Die eigenständige GitHub-Actions-Pipeline
-`.github/workflows/offline-wheel-acceptance.yml` verwendet dieselbe
-Isolation. Sie verlangt explizit einen ausgeführten Test, den abschließenden
-`OK`-Status und das protokollierte JSON-Resultat `"PASS"`.
-Fehlendes `MARK_WHEEL_PATH`, Test-Skip, Null-Testlauf und Fehlstart
-sind kein Release-PASS; der Startprozess hat einen begrenzten, nichtblockierenden
-12-Sekunden-Bereitschaftscheck.
+Der CI-Workflow verwendet auf solchen Runnern eine andere, gleichfalls
+kernelgebundene Variante: Nur die festen Setup-Befehle laufen als Host-root,
+um eine neue Netzwerk-, PID- und Mountnamespace anzulegen und lo zu aktivieren.
+Unmittelbar vor dem ersten Test-/Wheel-Python-Prozess setzt setpriv die
+unprivilegierte Runner-UID/GID, löscht Zusatzgruppen, alle Linux-Capabilities
+(einschließlich der Bounding-Menge) und aktiviert PR_SET_NO_NEW_PRIVS.
+Dies verhindert eine spätere sudo- oder setuid-Eskalation und einen setns()
+zur Host-Netzwerknamespace. Ein host-root-runuser ohne diese Kernel-Guards
+wäre dagegen nicht ausreichend.
 
-## Abgedeckte Fälle
+Die Prüfung selbst verifiziert die Nichteskalation:
 
-- Installation des Wheels ohne Zugriff auf Paket-Repositories und ohne
-  Python-Importe aus dem Quellcheckout
-- Fehlende SQLite-Datenbank startet ohne ausdrückliches init-db nicht
-- Echter Loopback-HTTP-Server, Health-/Ready-Endpunkte und deaktivierte
-  Schreiboberfläche
-- Zwei synthetische EML-Nachrichten, Anzeigenreaktionen, Analytics und
-  UTF-8-CSV
-- Lokale Stadtkategorisierung, CSV-Gruppierung, Neustart und Deduplizierung
-- Schreib-/unbekannte Plattformrouten bleiben gesperrt; SQLite quick_check
+- Entweder Usernamespace-UID0 ist auf einen nichtroot-Hostnutzer gemappt,
+  oder die effektive UID ist nichtroot, NoNewPrivs ist 1 und sämtliche
+  Capability-Mengen sind null.
+- Es ist nur lo als Netzwerkschnittstelle sichtbar.
+- Der Socket-Routenversuch zur reservierten Testadresse 192.0.2.1
+  ergibt ENETUNREACH statt eines Netzwerkkontakts.
+- Ein fehlendes MARK_WHEEL_PATH führt zum Testfehler statt zu SKIP.
+- GitHub CI verlangt explizit Ran 1 test, OK und das JSON-Resultat PASS.
+- Der Launcher-Banner wird nonblocking und mit monotonic-Deadline geprüft.
 
-Ein PASS gilt nur für den **Offline-Read-only-Produktpfad der getesteten
-Revision**. Er ersetzt weder rechtmäßige Plattform-Entitlements noch sichere
-CDP-/Synchronisierung, KI-Anbieter-/Kostenkontrollen, A6-Host-Recovery oder
-die vollständige Produktfreigabe.
+Der Wheel-Build mit pip erfolgt *vor* der isolierten Laufzeitprüfung;
+das Nachladen der Build-Abhängigkeiten ist nicht Teil des Offline-Run-Claims.
+
+## Geprüfte Funktionen und Freigabegrenze
+
+Der E2E-Pfad deckt lokale Datenbankerstellung nur auf ausdrückliche Option,
+EML-Import/Deduplizierung, echte Health-/Ready- und Dashboard-Routen,
+Analytics/CSV, lokale Stadtklassifikation und SQLite-quick_check ab.
+HTTP-Schreibversuche und deaktivierte Plattformrouten müssen abgewiesen werden.
+
+Ein PASS gilt ausschließlich für die Offline-Read-only-Laufzeit des getesteten
+Wheels. Plattformberechtigung, CDP-Synchronisierung, KI-Kostenkontrolle,
+A6-Recovery und abschließende Produktfreigabe benötigen eigene Nachweise.
