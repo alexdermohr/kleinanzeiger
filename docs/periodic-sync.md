@@ -1,26 +1,32 @@
-# Periodischer Bestandsabgleich – isolierte Read-only-Komponente
+# Periodischer Bestandsabgleich – technisch getestete Read-only-Komponente
 
-Stand: 19. Oktober 2026. Der Modulstart python -m mark_api.periodic_sync
-bietet einen ausdrücklich gestarteten, ausschließlich lesenden periodischen
-Besitzerbestandsabgleich über eine bestehende authentifizierte lokale
-Chrome-/Chromium-CDP-Sitzung. Er verwendet den fest auf den Owner-Management-
-Ursprung gebundenen Browser-GET aus PR #127, ohne Cookieexport und ohne
-WriteCapabilities.
+Stand: 20. Oktober 2026. Die Klasse `PeriodicOwnerSync` unterstützt
+synthetisch geprüfte SQLite-Read-/Fehlerjournale, bestätigte Leerbestände,
+ABSENT-Übergänge und begrenztes Scheduling. Diese Komponente ist **keine
+Freigabe** zur Nutzung automatisierter Kleinanzeigen-Schnittstellen.
 
-## Bedienung
+## Öffentlicher Einstieg: fail-closed
 
-    # Nur eine bereits initialisierte Mark-SQLite-Datei, keine Neuanlage
-    python -m mark_api.periodic_sync --db /pfad/mark.sqlite --cdp-port 9222 --interval-seconds 300
+Der Modulstart `python -m mark_api.periodic_sync` verweigert bis zur
+unabhängigen Prüfung eines tatsächlich zugelassenen offiziellen Transports
+und der konto-/scopegebundenen Plattformberechtigung alle CDP-/Plattformreads,
+auch mit `--once` oder `--immediate`. Er öffnet dabei weder die SQLite-DB
+noch einen Browser und liefert Exit-Code 2. Eine angemeldete Chrome-Sitzung
+oder ein lokales Flag reicht nicht als Rechtfertigung (Issue #111).
 
-    # Ein unmittelbarer ausdrücklich ausgelöster Read
+Beispiel zur **negativen Kontrolle**, kein auszuführender Plattform-Read:
+
     python -m mark_api.periodic_sync --db /pfad/mark.sqlite --cdp-port 9222 --once
+    # Exit 2: automatic Kleinanzeigen/CDP reads are disabled
 
-    # Sofortiger Read, danach regulärer Abstand
-    python -m mark_api.periodic_sync --db /pfad/mark.sqlite --cdp-port 9222 --immediate --interval-seconds 300
+Eigene bereitgestellte `.eml`-Dateien oder offizielle Exporte bleiben
+über den unabhängigen Offline-Import verfügbar. Der rein synthetische
+`PeriodicOwnerSync(runtime_factory=FakeRuntime, ...)`-Integrationsseam bleibt
+für Regressionen erhalten; daraus entsteht keinerlei Plattformautorität.
 
 ## Verbindliche Betriebs- und Sicherheitsgrenze
 
-**Nur als alleiniger Benutzer der CDP-Lesesitzung verwenden. Nicht parallel
+**Nur bei später nachgewiesener offizieller Berechtigung und freigegebenem Transport: Als alleiniger Benutzer der CDP-Lesesitzung verwenden. Nicht parallel
 zu einem Plattformwriter, einem zweiten Inventurprozess oder einem anderen
 Browserautomaten mit derselben Konto-/CDP-Sitzung starten.** Die vorhandene
 Write API und der neue Standalone-Synchronisierer besitzen noch keinen

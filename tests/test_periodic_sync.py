@@ -352,17 +352,38 @@ class PeriodicReadTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(self.store.latest_sync_attempt().error_kind, status.value)
 
-    def test_poll_failure_is_not_a_successful_cli_exit(self):
-        # Simulate a failed authenticated read without ever building a browser.
-        with (
-            patch("mark_api.periodic_sync.PeriodicOwnerSync") as factory,
-            contextlib.redirect_stderr(io.StringIO()) as err,
+    def test_default_library_runtime_refuses_private_cdp(self):
+        # A direct PeriodicOwnerSync consumer must not bypass the public CLI
+        # restriction merely by leaving the runtime_factory unspecified.
+        with self.assertRaisesRegex(
+            PeriodicSyncError, "verified official platform entitlement"
         ):
-            factory.return_value.run_loop.side_effect = PeriodicSyncError("internal")
-            self.assertEqual(main([
-                "--db", str(self.path), "--cdp-port", "19610", "--immediate",
-            ]), 2)
-        self.assertIn("periodic read halted", err.getvalue())
+            PeriodicOwnerSync(store=self.store, cdp_port=19610)
+        self.assertIsNone(self.store.latest_sync_attempt())
+
+    def test_public_cli_always_refuses_private_cdp_before_any_io(self):
+        # A browser login or CLI flag is not an official platform entitlement.
+        # Neither SQLite nor browser/runtime may even be constructed.
+        for args in (
+            ["--once"],
+            ["--immediate"],
+            ["--interval-seconds", "60"],
+        ):
+            with (
+                self.subTest(args=args),
+                patch("mark_api.periodic_sync.SnapshotStore") as store,
+                patch("mark_api.periodic_sync.PeriodicOwnerSync") as factory,
+                patch("mark_api.periodic_sync.build_private_web_inventory_runtime") as cdp,
+                contextlib.redirect_stderr(io.StringIO()) as err,
+            ):
+                self.assertEqual(main([
+                    "--db", str(self.path), "--cdp-port", "19610", *args,
+                ]), 2)
+                self.assertIn("automatic Kleinanzeigen/CDP reads are disabled", err.getvalue())
+                self.assertIn("verified official platform entitlement", err.getvalue())
+                store.assert_not_called()
+                factory.assert_not_called()
+                cdp.assert_not_called()
 
     def test_invalid_period_and_port_fail_before_network_or_journal(self):
         runtime = Runtime(ReadResult.success_empty(()))
@@ -375,27 +396,24 @@ class PeriodicReadTests(unittest.TestCase):
         self.assertEqual(runtime.read_count, 0)
         self.assertIsNone(self.store.latest_sync_attempt())
 
-    def test_cli_missing_database_aborts_before_runtime_creation(self):
+    def test_cli_missing_database_is_not_created_while_platform_denied(self):
         missing = Path(self.temp.name) / "absent.sqlite"
         with contextlib.redirect_stderr(io.StringIO()) as output:
             code = main(["--db", str(missing), "--cdp-port", "19610", "--once"])
         self.assertEqual(code, 2)
         self.assertFalse(missing.exists())
-        self.assertIn("invalid or unavailable", output.getvalue())
+        self.assertIn("reads are disabled", output.getvalue())
 
-    def test_cli_once_uses_default_readonly_builder_without_any_write_api(self):
-        with (
-            patch("mark_api.periodic_sync.build_private_web_inventory_runtime"),
-            patch("mark_api.periodic_sync.PeriodicOwnerSync") as sync_factory,
-            contextlib.redirect_stdout(io.StringIO()) as output,
-        ):
-            mock_sync = sync_factory.return_value
-            mock_sync.run_once.return_value = ReadResult.success_empty(())
-            self.assertEqual(main([
-                "--db", str(self.path), "--cdp-port", "19610", "--once",
-            ]), 0)
-        self.assertEqual(mock_sync.run_once.call_count, 1)
-        self.assertIn("owner inventory recorded", output.getvalue())
+    def test_cli_refuses_user_supplied_entitlement_bypass(self):
+        # No locally forgeable flag or mere --once acknowledgement can
+        # establish the third-party account and official transport rights.
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                main([
+                    "--db", str(self.path), "--cdp-port", "19610",
+                    "--allow-platform-reads", "--once",
+                ])
+        self.assertEqual(caught.exception.code, 2)
 
 
 if __name__ == "__main__":
