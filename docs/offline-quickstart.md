@@ -39,10 +39,3 @@ automatischer Besitzerabgleich, Plattformschreibaktionen und die
 PR-127-/PR-133-Laufzeiten gesperrt. Generative Text- und Bildvorschläge
 sind ein unabhängiger, separat freizuschaltender Produktbaustein
 (siehe `docs/generation.md`, sobald dieser gemergt ist).
-
-Eine lokale SQLite-Sicherung ohne Plattformzugriff lässt sich ausschließlich auf
-ausdrücklichen Aufruf mit `mark-api-backup` erzeugen. Vorher den lokalen
-Dashboardprozess beenden und sicherstellen, dass keine andere Anwendung die
-Datenbank beschreibt. Hinweise zu Zielpfad, WAL, Uncertainty und den weiterhin
-**nicht** freigegebenen A6-Recovery-Grenzen stehen in
-[`docs/offline-backup.md`](offline-backup.md).
