@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import os
+import secrets
 import sqlite3
 from pathlib import Path
+from urllib.parse import quote
 
 from .analytics import ANALYTICS_METRICS, REACTION_METRICS, AnalyticsContract
-from .dashboard import create_server
+from .dashboard import DashboardGenerationAccess, create_server
 from .email_import import import_kleinanzeigen_email_files
 from .storage import SnapshotStore
 
@@ -48,6 +51,14 @@ def _parser() -> argparse.ArgumentParser:
         choices=ANALYTICS_METRICS,
         default=None,
     )
+    parser.add_argument(
+        "--enable-generation",
+        action="store_true",
+        help=(
+            "Enable separately consented text/image drafts using an external "
+            "provider; requires mark-api[generation] and OPENAI_API_KEY."
+        ),
+    )
     return parser
 
 
@@ -57,6 +68,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535:
         parser.error("--port must be an integer between 0 and 65535")
+
+    generation_access = None
+    if args.enable_generation:
+        if not os.environ.get("OPENAI_API_KEY"):
+            parser.error("--enable-generation requires OPENAI_API_KEY in the local process environment")
+        # Validate optional dependency before any database creation/import or
+        # network bind. Importing the SDK neither creates a client nor a call.
+        try:
+            from openai import OpenAI as _GenerationSdkClient
+        except Exception:
+            parser.error("--enable-generation requires installed mark-api[generation]")
+        if not callable(_GenerationSdkClient):
+            parser.error("--enable-generation requires installed mark-api[generation]")
+        generation_access = DashboardGenerationAccess(ui_token=secrets.token_urlsafe(32))
 
     contract = AnalyticsContract(
         reaction_metric=args.reaction_metric,
@@ -80,13 +105,27 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Omit write_proxy deliberately: no write routes, CDP, browser
         # inventory, bearer tokens, or platform network clients are constructed.
-        server = create_server(store, port=args.port, analytics_contract=contract)
+        server = create_server(
+            store,
+            port=args.port,
+            analytics_contract=contract,
+            **(
+                {"generation_access": generation_access}
+                if generation_access is not None else {}
+            ),
+        )
     except (OSError, ValueError) as exc:
         parser.error(f"read-only dashboard could not start: {exc}")
 
     host, port = server.server_address
-    print(f"Mark offline dashboard: http://{host}:{port}/", flush=True)
+    token_fragment = (
+        "#generation_token=" + quote(generation_access.ui_token, safe="")
+        if generation_access is not None else ""
+    )
+    print(f"Mark offline dashboard: http://{host}:{port}/{token_fragment}", flush=True)
     print("Platform sync and writes: disabled (local files only).", flush=True)
+    if generation_access is not None:
+        print("Draft generation: opt-in, separate consent and possible provider costs per request.", flush=True)
     if import_report is not None:
         print(
             "Local email import: "
