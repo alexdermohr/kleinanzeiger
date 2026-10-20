@@ -46,7 +46,7 @@ einen späteren autorisierten offiziellen API-Betrieb frei.
 Die nachstehenden historischen Private-Web-/Launcher-Beschreibungen
 dokumentieren Implementierungen, **keine Nutzungsfreigabe**.
 
-## Prompt-basierte Text- und Bildentwürfe (19.10.2026)
+## Prompt-basierte Text- und Bildentwürfe (20.10.2026)
 
 `mark-api-generate` ist der installierbare CLI-Einstieg für
 unveröffentlichte Anzeigen-Text- und PNG-Bildentwürfe.
@@ -57,7 +57,9 @@ Providerübertragung/Kostenpflicht Text- und Bildvorschläge an. Ohne
 Die sichere Entwurfübernahme in ein tatsächlich schreibberechtigtes
 Anzeigenformular erfolgt nur nach weiterer Benutzerentscheidung; die
 Standalone-Dashboard-Instanz besitzt keine Write-Capabilities. Kein
-KI-Aufruf löst eine Plattformveröffentlichung aus. Details,
+KI-Aufruf löst eine Plattformveröffentlichung aus. Für Bilder ist
+`gpt-image-2.5-flare` voreingestellt; das ältere `gpt-image-1`
+wird am 23.10.2026 abgeschaltet. Details,
 Installationsanleitung und noch fehlende Live-/Produktlauncher-Abnahme:
 [docs/generation.md](docs/generation.md).
 
