@@ -2458,6 +2458,106 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         self.assertEqual(blocked.exception.stage, "target_busy")
 
 
+
+    def test_close_during_discovery_cannot_free_target_or_start_websocket(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract UNIX target reservation required")
+        port = 19648
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/original",
+        }
+        captured = {}
+        state = {"close_denied": False, "rival_admitted": False, "ws_calls": 0}
+
+        class CapturingClient(_LoopbackCdpClient):
+            def _connect(self):
+                captured["owner"] = self
+                return super()._connect()
+
+        def opener(url, **kwargs):
+            try:
+                captured["owner"].close()
+            except PrivateWebCdpError:
+                state["close_denied"] = True
+            try:
+                rival = _LoopbackCdpClient(
+                    endpoint, timeout_seconds=1,
+                    opener=lambda u, **kw: FakeResponse([target], url=u),
+                    websocket_factory=lambda *a, **kw: FakeSocket([]),
+                    tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+                )
+            except PrivateWebCdpError as caught:
+                self.assertEqual(caught.stage, "target_busy")
+            else:
+                state["rival_admitted"] = True
+                rival.close()
+            return FakeResponse([target], url=url)
+
+        def websocket_factory(*args, **kwargs):
+            state["ws_calls"] += 1
+            return FakeSocket([])
+
+        try:
+            owner = CapturingClient(
+                endpoint, timeout_seconds=1,
+                opener=opener,
+                websocket_factory=websocket_factory,
+                tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+            )
+        except PrivateWebCdpError:
+            pass
+        else:
+            owner.close()
+        self.assertTrue(state["close_denied"])
+        self.assertFalse(state["rival_admitted"])
+        self.assertEqual(state["ws_calls"], 0)
+
+    def test_close_inside_raw_tcp_factory_prevents_websocket_handshake(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract UNIX target reservation required")
+        port = 19649
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/original",
+        }
+        state = {"close_denied": False, "ws_calls": 0}
+        captured = {}
+        raw = FakeTcpSocket()
+
+        class CapturingClient(_LoopbackCdpClient):
+            def _connect(self):
+                captured["owner"] = self
+                return super()._connect()
+
+        def tcp_factory(*args, **kwargs):
+            try:
+                captured["owner"].close()
+            except PrivateWebCdpError:
+                state["close_denied"] = True
+            return raw
+
+        def websocket_factory(*args, **kwargs):
+            state["ws_calls"] += 1
+            return FakeSocket([])
+
+        try:
+            owner = CapturingClient(
+                endpoint, timeout_seconds=1,
+                opener=lambda u, **kw: FakeResponse([target], url=u),
+                websocket_factory=websocket_factory,
+                tcp_socket_factory=tcp_factory,
+            )
+        except PrivateWebCdpError:
+            pass
+        else:
+            owner.close()
+        self.assertTrue(state["close_denied"])
+        self.assertEqual(state["ws_calls"], 0)
+        self.assertTrue(raw.closed)
+
     def test_opener_cannot_reenter_inner_cdp_connector(self) -> None:
         if sys.platform != "linux":
             self.skipTest("Linux AF_UNIX claim required")

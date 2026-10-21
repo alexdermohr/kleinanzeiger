@@ -366,6 +366,12 @@ class _LoopbackCdpClient:
                 if not callable(geturl) or geturl() != discovery_url:
                     raise ValueError("target discovery escaped loopback binding")
                 payload = response.read(_MAX_TARGET_BYTES + 1)
+            # An injected discovery reader may have called close(). Do not
+            # begin a TCP connect or WebSocket handshake on an unowned target.
+            with self._lifecycle_lock:
+                self._assert_live_target_reservation()
+                if self._closing or self._close_unknown:
+                    raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
             if len(payload) > _MAX_TARGET_BYTES:
                 raise ValueError("target list too large")
             targets = json.loads(payload.decode("utf-8"))
@@ -423,12 +429,26 @@ class _LoopbackCdpClient:
                     self._transport_construction_pending = False
                 raise
             try:
-                return factory(
+                # A supplied TCP factory may synchronously close() this
+                # client after constructing a raw FD. The original claim is
+                # then quarantined; no WebSocket handshake may follow.
+                with self._lifecycle_lock:
+                    self._assert_live_target_reservation()
+                    if self._closing or self._close_unknown:
+                        raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+                websocket = factory(
                     websocket_url,
                     timeout=self._timeout_seconds,
                     suppress_origin=True,
                     socket=raw_socket,
                 )
+                # A factory may itself invoke close() after handshake. Never
+                # return that transport as a successfully admitted client.
+                with self._lifecycle_lock:
+                    self._assert_live_target_reservation()
+                    if self._closing or self._close_unknown:
+                        raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+                return websocket
             except BaseException:
                 # SIGTERM/SIGINT can interrupt a WebSocket factory *after*
                 # it acquired a raw TCP socket but before it returns the
@@ -524,6 +544,7 @@ class _LoopbackCdpClient:
                 raise PrivateWebCdpError("close")
             if (
                 self._active_calls
+                or self._connect_in_progress
                 or self._reconnecting
                 or self._unresolved_call
                 or self._unresolved_submit
