@@ -273,6 +273,29 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             self.assertEqual(refused.returncode, 2)
             self.assertFalse(missing.exists(), "missing database was created without --init-db")
 
+            # A local switch or a browser login is never an official,
+            # account-bound Kleinanzeigen entitlement. Exercise the actual
+            # installed legacy CLI before any database or CDP side effect.
+            forbidden_db = root / "denied-platform" / "must-not-create.sqlite"
+            pretend_entitlement = {
+                **env,
+                "MARK_PLATFORM_WRITES_ENABLED": "true",
+                "MARK_PRIVATE_WEB_APPROVED": "true",
+                "MARK_PROSELLERS_API_ENTITLEMENT_CONFIRMED": "true",
+            }
+            denied_launcher = _command(
+                str(venv / "bin" / "mark-api-launch"),
+                "--db", str(forbidden_db), "--init-db",
+                "--cdp-port", "9222",
+                "--email", str(root / "nonexistent-private-email.eml"),
+                cwd=root, env=pretend_entitlement,
+            )
+            self.assertEqual(denied_launcher.returncode, 2, denied_launcher.stderr)
+            self.assertIn("not authorized", denied_launcher.stderr)
+            self.assertEqual(denied_launcher.stdout, "")
+            self.assertFalse(forbidden_db.parent.exists())
+            self.assertFalse(forbidden_db.exists())
+
             email_a = root / "synthetic-a.eml"
             email_b = root / "synthetic-b.eml"
             email_a.write_bytes(_notification("wheel-msg-1", "Thu, 24 Sep 2026 10:37:48 +0000"))
