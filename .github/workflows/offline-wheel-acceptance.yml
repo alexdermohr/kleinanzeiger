@@ -7,18 +7,26 @@ permissions:
   contents: read
 jobs:
   installed-offline:
-    name: installed-offline
+    name: ${{ matrix.check_name }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python_version: "3.12"
+            check_name: installed-offline
+          - python_version: "3.13"
+            check_name: installed-offline-py313
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Set up Python 3.12
+      - name: Set up Python ${{ matrix.python_version }}
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python_version }}"
       - name: Build distributable wheel
         shell: bash
         run: |
