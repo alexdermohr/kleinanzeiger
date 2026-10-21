@@ -37,20 +37,6 @@ class ProductLauncherError(RuntimeError):
     """The user-facing product launcher could not start or stop safely."""
 
 
-def _require_private_web_authorization() -> None:
-    """No independently approved private-Web/CDP platform authority exists.
-
-    Logged-in Chrome, CDP, token, environment setting and test credentials
-    are never proof of contractual Kleinanzeigen automation permission.
-    A future official ProSellers transport needs a separate verified account
-    entitlement, scope and credential admission. It cannot grant this path.
-    """
-    raise ProductLauncherError(
-        "Private-Web/CDP platform automation is not authorized. "
-        "Use mark-api-offline with explicitly supplied local EML/exports."
-    )
-
-
 class _InventoryRuntime(Protocol):
     def read_inventory(self) -> ReadResult[tuple[AdSnapshot, ...]]:
         ...
@@ -171,12 +157,14 @@ class ProductLauncherRuntime:
         startup_inventory_count: int,
         startup_persisted_count: int,
         startup_email_import_report: EmailImportReport,
+        writes_enabled: bool,
     ) -> None:
         self._inventory_runtime = inventory_runtime
         self._write_runtime = write_runtime
         self._write_access = write_access
         self._server = server
         self._dashboard_write_token = dashboard_write_token
+        self._writes_enabled = writes_enabled
         self._startup_inventory_count = startup_inventory_count
         self._startup_persisted_count = startup_persisted_count
         self._startup_email_import_report = startup_email_import_report
@@ -206,11 +194,11 @@ class ProductLauncherRuntime:
     @property
     def dashboard_url(self) -> str:
         host, port = self.server_address
+        base_url = f"http://{host}:{port}/"
+        if not self._writes_enabled:
+            return base_url
         encoded_write_token = quote(self._dashboard_write_token, safe="")
-        return (
-            f"http://{host}:{port}/"
-            f"#write_token={encoded_write_token}"
-        )
+        return base_url + f"#write_token={encoded_write_token}"
 
     @property
     def startup_inventory_count(self) -> int:
@@ -232,6 +220,10 @@ class ProductLauncherRuntime:
     @property
     def write_bearer_token(self) -> str:
         return self._write_access.bearer_token
+
+    @property
+    def writes_enabled(self) -> bool:
+        return self._writes_enabled
 
     def reconcile_media_submit(self) -> None:
         with self._state_lock:
@@ -349,6 +341,7 @@ def build_product_launcher(
     dashboard_factory: _DashboardFactory = create_server,
     store_factory: _StoreFactory = SnapshotStore,
     initialize_db: bool = False,
+    enable_writes: bool = False,
     token_factory: _TokenFactory | None = None,
     dashboard_token_factory: _TokenFactory | None = None,
     clock: _Clock = _utc_now,
@@ -357,13 +350,9 @@ def build_product_launcher(
 
     Authentication and browser lifecycle remain caller-owned. This launcher
     consumes only an already-running loopback CDP endpoint. Product writes are
-    composed by default through the existing authenticated/idempotent Write API.
-
-    This historical candidate is not authorized for normal product runtime.
+    available only by explicit local opt-in through the existing
+    authenticated/idempotent Write API. This is not platform entitlement.
     """
-
-    # Deny before SQLite, CDP, IPC, runtime and Write token side effects.
-    _require_private_web_authorization()
 
     if not isinstance(db_path, Path):
         raise TypeError("db_path must be pathlib.Path")
@@ -398,6 +387,8 @@ def build_product_launcher(
         raise TypeError("store_factory must be callable")
     if not isinstance(initialize_db, bool):
         raise TypeError("initialize_db must be bool")
+    if not isinstance(enable_writes, bool):
+        raise TypeError("enable_writes must be bool")
     if token_factory is not None and not callable(token_factory):
         raise TypeError("token_factory must be callable or None")
     if dashboard_token_factory is not None and not callable(
@@ -406,7 +397,6 @@ def build_product_launcher(
         raise TypeError("dashboard_token_factory must be callable or None")
     if not callable(clock):
         raise TypeError("clock must be callable")
-
     resolved_write_runtime_factory = (
         build_private_web_write_api_runtime
         if write_runtime_factory is None
@@ -522,15 +512,15 @@ def build_product_launcher(
         write_access = WriteApiAccess(
             principal="mark-api-launch",
             bearer_token=resolved_token_factory(),
-            capabilities=frozenset(WriteCapability),
-            writes_enabled=True,
+            capabilities=frozenset(WriteCapability) if enable_writes else frozenset(),
+            writes_enabled=enable_writes,
         )
         write_runtime = resolved_write_runtime_factory(
             cdp_port=cdp_port,
             store=store,
             access=write_access,
-            core_writes_enabled=True,
-            media_writes_enabled=True,
+            core_writes_enabled=enable_writes,
+            media_writes_enabled=enable_writes,
             port=write_port,
             timeout_seconds=timeout,
             clock=clock,
@@ -538,12 +528,15 @@ def build_product_launcher(
         write_runtime.start()
         write_host, write_actual_port = write_runtime.server_address
         dashboard_write_token = resolved_dashboard_token_factory()
-        write_proxy = DashboardWriteProxy(
-            host=str(write_host),
-            port=int(write_actual_port),
-            bearer_token=write_access.bearer_token,
-            ui_token=dashboard_write_token,
-            timeout_seconds=max(30.0, timeout * 12.0),
+        write_proxy = (
+            DashboardWriteProxy(
+                host=str(write_host),
+                port=int(write_actual_port),
+                bearer_token=write_access.bearer_token,
+                ui_token=dashboard_write_token,
+                timeout_seconds=max(30.0, timeout * 12.0),
+            )
+            if enable_writes else None
         )
         server = dashboard_factory(
             store,
@@ -610,15 +603,16 @@ def build_product_launcher(
         startup_inventory_count=len(snapshots),
         startup_persisted_count=persisted,
         startup_email_import_report=email_report,
+        writes_enabled=enable_writes,
     )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Historical Private-Web/CDP launcher: currently unavailable "
-            "(no verified platform permission). For local EML and a "
-            "read-only dashboard use mark-api-offline."
+            "Start Mark from an already-authenticated local Chrome/CDP session, "
+            "perform one fresh owner-inventory sync, and serve the dashboard "
+            "plus optional locally authorized loopback Write API."
         ),
     )
     parser.add_argument(
@@ -649,6 +643,15 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=8766,
         help="Loopback Write API port (default: 8766; use 0 for an ephemeral port).",
+    )
+    parser.add_argument(
+        "--enable-writes",
+        action="store_true",
+        help=(
+            "Explicit local activation of owner-scoped write capabilities "
+            "for this run; disabled by default. This does not assert or "
+            "grant an external platform entitlement."
+        ),
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -692,12 +695,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    try:
-        # CLI admission precedes any injected/mocked product builder.
-        _require_private_web_authorization()
-    except ProductLauncherError as exc:
-        print(f"mark-api-launch: {exc}", file=sys.stderr)
-        return 2
     contract = AnalyticsContract(
         reaction_metric=args.reaction_metric,
         objective_metric=args.objective_metric,
@@ -713,6 +710,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
             analytics_contract=contract,
             email_paths=tuple(args.email_paths),
+            enable_writes=args.enable_writes,
         )
     except (ProductLauncherError, PrivateWebRuntimeDependencyError) as exc:
         print(f"mark-api-launch: {exc}", file=sys.stderr)
@@ -721,16 +719,13 @@ def main(argv: list[str] | None = None) -> int:
         print("mark-api-launch: invalid startup configuration", file=sys.stderr)
         return 2
 
-    write_host, write_port = launcher.write_server_address
     print(f"Mark dashboard: {launcher.dashboard_url}", flush=True)
-    print(
-        f"Mark write API: http://{write_host}:{write_port}/api/write/",
-        flush=True,
-    )
-    print(
-        f"Mark write bearer token: {launcher.write_bearer_token}",
-        flush=True,
-    )
+    if args.enable_writes:
+        write_host, write_port = launcher.write_server_address
+        print(f"Mark write API: http://{write_host}:{write_port}/api/write/", flush=True)
+    else:
+        print("Mark platform writes: disabled (use --enable-writes for local opt-in)", flush=True)
+    # Never print the backend bearer into terminal scrollback or process logs.
     print(
         "Startup sync: "
         f"{launcher.startup_inventory_count} current ad(s), "
