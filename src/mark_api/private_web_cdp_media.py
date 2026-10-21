@@ -43,6 +43,7 @@ class CdpPrivateWebMediaPage(CdpPrivateWebPage):
         self._media_file_object_id: str | None = None
         self._media_prepared: _PreparedPrivateWebMedia | None = None
         self._media_submit_unsettled = False
+        self._media_unknown_client: _LoopbackCdpClient | None = None
 
     def _release_media_handle(self) -> None:
         object_id = self._media_file_object_id
@@ -76,6 +77,7 @@ class CdpPrivateWebMediaPage(CdpPrivateWebPage):
         self._release_media_files()
         self._media_expected_create_snapshot = None
         self._media_submit_unsettled = False
+        self._media_unknown_client = None
         super().open_create_form(category_path)
 
     def close(self) -> None:
@@ -535,6 +537,21 @@ function() {{
                 "create_media_submit_reconcile"
             )
         self._wait_for_media_submit_settlement()
+        native_client = self._media_unknown_client
+        if native_client is not None:
+            # A confirmed path in an unrelated replacement target or client
+            # is not evidence that the original one-shot publish succeeded.
+            if self._client_instance is not native_client:
+                raise PrivateWebSubmitUnknownError(
+                    "create_media_submit_settle"
+                )
+            try:
+                native_client.settle_unknown_submit()
+            except Exception:
+                raise PrivateWebSubmitUnknownError(
+                    "create_media_submit_settle"
+                ) from None
+        self._media_unknown_client = None
         self._media_submit_unsettled = False
 
     def submit_create_media(
@@ -621,6 +638,12 @@ function() {{
         # From the first browser-input dispatch onward, cleanup is unsafe until
         # the existing post-submit state is observed. Keep this armed for every
         # UNKNOWN outcome; reconciliation below never repeats browser input.
+        if isinstance(client, _LoopbackCdpClient):
+            # Arm at the actual kernel claim BEFORE the first possible
+            # browser-input effect. GC and direct close must not free it while
+            # settlement of this one-shot publish remains UNKNOWN.
+            client.arm_unknown_submit()
+            self._media_unknown_client = client
         self._media_submit_unsettled = True
         try:
             self._dispatch_browser_click(
