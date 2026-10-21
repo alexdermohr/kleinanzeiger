@@ -4,6 +4,7 @@ import json
 import math
 import socket
 import time
+from threading import RLock
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Protocol
@@ -246,11 +247,20 @@ class _LoopbackCdpClient:
                     suppress_origin=True,
                     socket=raw_socket,
                 )
-            except Exception:
+            except BaseException:
+                # SIGTERM/SIGINT can interrupt a WebSocket factory *after*
+                # it acquired a raw TCP socket but before it returns the
+                # WebSocket object. Always settle this raw socket first.
                 try:
                     raw_socket.close()
-                except Exception:
-                    pass
+                except BaseException:
+                    # An uncertain TCP cleanup is an UNKNOWN target outcome.
+                    # Retain the raw FD and the kernel reservation together,
+                    # even though the caller's original interrupt propagates.
+                    claim = getattr(self, "_target_reservation", None)
+                    if claim is not None:
+                        _QUARANTINED_CDP_TARGETS.append((claim, raw_socket))
+                        self._target_reservation = None
                 raise
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.
             raise PrivateWebCdpError("connect") from None
@@ -349,6 +359,7 @@ class CdpCookieProvider:
             )
         )
         self._client_instance: _CdpClient | None = None
+        self._client_lock = RLock()
 
     @classmethod
     def from_port(
@@ -372,41 +383,54 @@ class CdpCookieProvider:
         return self._client_instance
 
     def close(self) -> None:
-        client = self._client_instance
-        self._client_instance = None
-        if client is not None:
-            client.close()
+        with self._client_lock:
+            client = self._client_instance
+            self._client_instance = None
+            if client is not None:
+                client.close()
 
     def __call__(self) -> str | None:
-        client = self._client()
-        try:
-            result = client.call(
-                "Network.getCookies",
-                {"urls": [self._target_url]},
-            )
-            raw_cookies = result.get("cookies")
-            if not isinstance(raw_cookies, list):
-                raise ValueError("invalid cookie result")
-            pairs: list[str] = []
-            for item in raw_cookies:
-                if not isinstance(item, dict):
-                    raise ValueError("invalid cookie item")
-                name = item.get("name")
-                value = item.get("value")
-                if (
-                    not isinstance(name, str)
-                    or not name
-                    or any(char in name for char in "\r\n;=")
-                    or not isinstance(value, str)
-                    or any(char in value for char in "\r\n;")
-                ):
-                    raise ValueError("unsafe cookie item")
-                pairs.append(f"{name}={value}")
-            return "; ".join(pairs) if pairs else None
-        except PrivateWebCdpError:
-            raise PrivateWebCdpError("cookies") from None
-        except Exception:  # noqa: BLE001 - never expose cookie/provider detail.
-            raise PrivateWebCdpError("cookies") from None
+        # The inventory/cookie CDP claim must NOT outlive one cookie read.
+        # Otherwise the following editor/create/state/delete page gets
+        # target_busy on the very same sole Chrome target. Serialize this
+        # provider's callers and release before returning to the owner read.
+        with self._client_lock:
+            client = self._client()
+            try:
+                result = client.call(
+                    "Network.getCookies",
+                    {"urls": [self._target_url]},
+                )
+                raw_cookies = result.get("cookies")
+                if not isinstance(raw_cookies, list):
+                    raise ValueError("invalid cookie result")
+                pairs: list[str] = []
+                for item in raw_cookies:
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid cookie item")
+                    name = item.get("name")
+                    value = item.get("value")
+                    if (
+                        not isinstance(name, str)
+                        or not name
+                        or any(char in name for char in "\r\n;=")
+                        or not isinstance(value, str)
+                        or any(char in value for char in "\r\n;")
+                    ):
+                        raise ValueError("unsafe cookie item")
+                    pairs.append(f"{name}={value}")
+                return "; ".join(pairs) if pairs else None
+            except PrivateWebCdpError:
+                raise PrivateWebCdpError("cookies") from None
+            except Exception:  # noqa: BLE001 - no cookie/provider detail.
+                raise PrivateWebCdpError("cookies") from None
+            finally:
+                # A failed close quarantines its target in _LoopbackCdpClient,
+                # so a later editor still cannot race an unknown browser FD.
+                try:
+                    self.close()
+                except Exception:
+                    raise PrivateWebCdpError("cookies") from None
 
 
 class CdpPrivateWebPage:

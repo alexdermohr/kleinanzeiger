@@ -1474,20 +1474,19 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             page.submit()
         self.assertEqual(second.exception.stage, "submit_already_attempted")
 
-    def test_cookie_provider_reuses_client_and_closes_explicitly(self) -> None:
-        client = FakeClient(
-            lambda method, params: {
-                "cookies": [
-                    {"name": "session", "value": "opaque-one"},
-                    {"name": "other", "value": "opaque-two"},
-                ]
-            }
-        )
-        factory_calls = 0
+    def test_cookie_provider_releases_each_client_before_next_read(self) -> None:
+        clients = []
 
         def factory():
-            nonlocal factory_calls
-            factory_calls += 1
+            client = FakeClient(
+                lambda method, params: {
+                    "cookies": [
+                        {"name": "session", "value": "opaque-one"},
+                        {"name": "other", "value": "opaque-two"},
+                    ]
+                }
+            )
+            clients.append(client)
             return client
 
         provider = CdpCookieProvider(
@@ -1500,18 +1499,106 @@ class CdpPrivateWebPageTests(unittest.TestCase):
 
         self.assertEqual(first, "session=opaque-one; other=opaque-two")
         self.assertEqual(second, first)
-        self.assertEqual(factory_calls, 1)
+        self.assertEqual(len(clients), 2)
+        self.assertTrue(all(client.closed for client in clients))
         self.assertEqual(
-            [method for method, _params in client.calls],
-            ["Network.getCookies", "Network.getCookies"],
+            [[method for method, _params in client.calls] for client in clients],
+            [["Network.getCookies"], ["Network.getCookies"]],
         )
         self.assertEqual(
-            client.calls[0][1]["urls"],
+            clients[0].calls[0][1]["urls"],
             ["https://www.kleinanzeigen.de/m-meine-anzeigen-verwalten.json"],
         )
-        self.assertFalse(client.closed)
         provider.close()
-        self.assertTrue(client.closed)
+
+    def test_cookie_lookup_releases_kernel_target_before_editor(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX abstract target reservation required")
+        endpoint = "http://127.0.0.1:19616"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19616/devtools/page/opaque-target",
+        }
+        created = []
+
+        def new_client(cookies):
+            sock = FakeSocket(
+                [{"id": 1, "result": {"cookies": [
+                    {"name": "session", "value": "opaque-one"},
+                ]}}] if cookies else []
+            )
+            created.append(sock)
+            return _LoopbackCdpClient(
+                endpoint, timeout_seconds=1,
+                opener=lambda url, **kwargs: FakeResponse([target], url=url),
+                websocket_factory=lambda *args, **kwargs: sock,
+                tcp_socket_factory=lambda *args, **kwargs: FakeTcpSocket(),
+            )
+
+        provider = CdpCookieProvider(
+            endpoint, client_factory=lambda: new_client(True),
+        )
+        self.assertEqual(provider(), "session=opaque-one")
+        self.assertTrue(created[0].closed)
+        # Exact bug: retained cookie client would still own the port lock and
+        # forbid the editor opening even though the cookie read had completed.
+        page = CdpPrivateWebPage(
+            endpoint, client_factory=lambda: new_client(False),
+        )
+        editor_client = page._client()
+        self.assertIsNotNone(editor_client)
+        page.close()
+        self.assertEqual(len(created), 2)
+        self.assertTrue(all(sock.closed for sock in created))
+        provider.close()
+
+    def test_interrupt_during_ws_handshake_quarantines_uncertain_raw_socket(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX abstract target reservation required")
+        endpoint = "http://127.0.0.1:19617"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19617/devtools/page/opaque-target",
+        }
+        effects = []
+        class UncertainRaw:
+            def close(self):
+                effects.append("raw_close_attempt")
+                raise OSError("uncertain close")
+
+        def new_client(factory, tcp_factory=None):
+            return _LoopbackCdpClient(
+                endpoint, timeout_seconds=1,
+                opener=lambda url, **kw: (
+                    effects.append("http_discovery") or
+                    FakeResponse([target], url=url)
+                ),
+                websocket_factory=factory,
+                tcp_socket_factory=tcp_factory or (
+                    lambda *args, **kwargs: UncertainRaw()
+                ),
+            )
+
+        def interrupt_handshake(*args, **kwargs):
+            effects.append("ws_handshake_started")
+            raise KeyboardInterrupt()
+
+        with self.assertRaises(KeyboardInterrupt):
+            new_client(interrupt_handshake)
+        with self.assertRaises(PrivateWebCdpError) as blocked:
+            new_client(
+                lambda *args, **kwargs: FakeSocket([]),
+                tcp_factory=lambda *args, **kwargs: FakeTcpSocket(),
+            )
+        self.assertEqual(blocked.exception.stage, "target_busy")
+        self.assertEqual(effects, [
+            "http_discovery", "ws_handshake_started",
+            "raw_close_attempt",
+        ])
+        # Deliberately don't clear process-lifetime quarantine of ambiguous
+        # client: a new target reader must stay blocked until the process exits.
 
     def test_cookie_provider_empty_or_malformed_is_fail_closed(self) -> None:
         empty_client = FakeClient(
