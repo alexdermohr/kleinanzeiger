@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 from email import policy
@@ -379,7 +379,7 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
         self.assertEqual(self.backend.requests, [])
 
     def test_malformed_pending_uniques_block_platform_forwarding(self) -> None:
-        with sqlite3.connect(self.store.path) as connection:
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
             connection.execute("DROP TABLE dashboard_pending_writes")
             connection.execute(
                 """
@@ -1251,7 +1251,7 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
 
     def test_readyz_detects_existing_recovery_table_missing_required_columns(self) -> None:
         self.assertEqual(json.loads(self.get("/readyz")[2]), {"status": "ready"})
-        with sqlite3.connect(self.store.path) as connection:
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
             connection.execute("DROP TABLE write_api_requests")
             connection.execute(
                 "CREATE TABLE write_api_requests (idempotency_key TEXT PRIMARY KEY)"
@@ -1320,7 +1320,7 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
 
     def test_corrupted_sync_journal_returns_sanitized_unavailable_http(self) -> None:
         attempt = self.store.begin_sync_attempt(source="owner", started_at=T1)
-        with sqlite3.connect(self.store.path) as connection:
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
             connection.execute(
                 "UPDATE sync_attempts SET started_at='corrupt private value' WHERE id=?",
                 (attempt,),
