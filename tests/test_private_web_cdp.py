@@ -2340,6 +2340,40 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             os.close(reader)
             owner.close()
 
+
+    def test_owned_client_cannot_open_second_transport_by_direct_connect(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX kernel claim required")
+        endpoint = "http://127.0.0.1:19638"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19638/devtools/page/initial",
+        }
+        observations = []
+
+        def opener(url, **kwargs):
+            observations.append("discovery")
+            if len(observations) != 1:
+                raise RuntimeError("unexpected second browser-target discovery")
+            return FakeResponse([target], url=url)
+
+        owner = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=opener,
+            websocket_factory=lambda *args, **kwargs: FakeSocket([]),
+            tcp_socket_factory=lambda *args, **kwargs: FakeTcpSocket(),
+        )
+        try:
+            with self.assertRaises(
+                PrivateWebCdpWriteNotAttemptedError
+            ) as rejected:
+                owner._connect()
+            self.assertEqual(rejected.exception.stage, "target_unowned")
+            self.assertEqual(observations, ["discovery"])
+        finally:
+            owner.close()
+
     def test_loopback_client_closes_direct_socket_on_websocket_failure(self) -> None:
         good_target = {
             "type": "page",

@@ -5,7 +5,7 @@ import math
 import os
 import socket
 import time
-from threading import RLock
+from threading import RLock, get_ident
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Protocol
@@ -175,6 +175,8 @@ class _LoopbackCdpClient:
         self._timeout_seconds = timeout_seconds
         self._socket = None
         self._owner_pid = os.getpid()
+        self._connect_owner_thread: int | None = None
+        self._connect_in_progress = False
         self._target_websocket_url: str | None = None
         self._transport_construction_pending = False
         self._close_unknown = False
@@ -192,8 +194,12 @@ class _LoopbackCdpClient:
             self._websocket_factory = websocket_factory
             self._tcp_socket_factory = tcp_socket_factory
             self._next_id = 0
-            self._socket = self._connect()
-            self._transport_construction_pending = False
+            self._connect_owner_thread = get_ident()
+            try:
+                self._socket = self._connect()
+                self._transport_construction_pending = False
+            finally:
+                self._connect_owner_thread = None
         except BaseException:
             # Release on incomplete connect without masking the original error.
             # If cleanup fails, close() quarantines the uncertain target.
@@ -254,8 +260,12 @@ class _LoopbackCdpClient:
                     raise
                 self._socket = None
             # If a prior discovery failed, retry under the SAME claim.
-            self._socket = self._connect()
-            self._transport_construction_pending = False
+            self._connect_owner_thread = get_ident()
+            try:
+                self._socket = self._connect()
+                self._transport_construction_pending = False
+            finally:
+                self._connect_owner_thread = None
         finally:
             with self._lifecycle_lock:
                 self._reconnecting = False
@@ -279,9 +289,34 @@ class _LoopbackCdpClient:
             self._unresolved_submit = False
 
     def _connect(self):
-        # Direct callers must not bypass constructor admission via __new__.
+        # Only construction and explicit observation-only reconnect may create
+        # a transport. A direct same-process call must not create a second
+        # WebSocket under an already owned kernel claim.
         _require_private_web_cdp_authority()
         self._assert_live_target_reservation()
+        if (
+            getattr(self, "_connect_owner_thread", None) != get_ident()
+            or getattr(self, "_connect_in_progress", False)
+            or getattr(self, "_closing", False)
+            or getattr(self, "_socket", None) is not None
+        ):
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        self._connect_in_progress = True
+        try:
+            return self._connect_under_owner()
+        finally:
+            self._connect_in_progress = False
+
+    def _connect_under_owner(self):
+        # The actual discovery method is also directly importable. It may
+        # never bypass the narrow owning-thread and reentrancy checks.
+        _require_private_web_cdp_authority()
+        self._assert_live_target_reservation()
+        if (
+            getattr(self, "_connect_owner_thread", None) != get_ident()
+            or not getattr(self, "_connect_in_progress", False)
+        ):
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
         try:
             discovery_url = f"{self._endpoint}/json/list"
             with self._opener(
