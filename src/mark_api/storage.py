@@ -2036,8 +2036,20 @@ class SnapshotStore:
             # Every yield below runs AFTER SQLite has released the read lock.
             if not page:
                 break
+            # SQLite uses dynamic value types even in TEXT columns. A BLOB
+            # key must not be stringified into a TEXT keyset cursor: SQLite
+            # would compare the changed storage class and repeat this page.
+            # Validate the whole page before yielding any of its groups.
             for row in page:
-                ad_id = str(row["ad_id"])
+                if (
+                    type(row["ad_id"]) is not str
+                    or type(row["observed_at"]) is not str
+                    or type(row["id"]) is not int
+                    or row["id"] < 1
+                ):
+                    raise sqlite3.DatabaseError("invalid ad snapshot key storage class")
+            for row in page:
+                ad_id = row["ad_id"]
                 if pending_ad_id is None:
                     pending_ad_id = ad_id
                 elif ad_id != pending_ad_id:
@@ -2046,9 +2058,7 @@ class SnapshotStore:
                     pending_ad_id = ad_id
                 pending_rows.append(row)
             tail = page[-1]
-            last_key = (
-                str(tail["ad_id"]), str(tail["observed_at"]), int(tail["id"])
-            )
+            last_key = (tail["ad_id"], tail["observed_at"], tail["id"])
             if len(page) < _AD_HISTORY_PAGE_ROWS:
                 break
 

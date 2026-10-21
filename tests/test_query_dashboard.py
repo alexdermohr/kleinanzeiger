@@ -1047,6 +1047,51 @@ class MarkQueryServiceTests(SeededStoreMixin, unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertIn("writer-unblocked", store.tracked_ad_ids())
 
+    def test_paged_history_rejects_blob_key_storage_classes(self) -> None:
+        # SQLite TEXT affinity does not forbid inserted BLOBs. A coerced
+        # cursor would re-fetch an already processed page indefinitely.
+        for column in ("ad_id", "observed_at"):
+            with self.subTest(column=column):
+                store = self.make_store()
+                connection = store._connect()
+                try:
+                    with connection:
+                        connection.executemany(
+                            "INSERT INTO ad_snapshots "
+                            "(ad_id, observed_at, source, lifecycle_state, views) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            [
+                                ("1", T0.isoformat(), "synthetic",
+                                 LifecycleState.ACTIVE.value, index)
+                                for index in range(300)
+                            ],
+                        )
+                        bad_ad_id = (
+                            sqlite3.Binary(b"blob-ad-id")
+                            if column == "ad_id" else "1"
+                        )
+                        bad_time = (
+                            sqlite3.Binary(b"blob-timestamp")
+                            if column == "observed_at" else T0.isoformat()
+                        )
+                        connection.execute(
+                            "INSERT INTO ad_snapshots "
+                            "(ad_id, observed_at, source, lifecycle_state) "
+                            "VALUES (?, ?, ?, ?)",
+                            (bad_ad_id, bad_time, "synthetic-invalid",
+                             LifecycleState.ACTIVE.value),
+                        )
+                finally:
+                    connection.close()
+                histories = store.ad_histories()
+                try:
+                    with self.assertRaisesRegex(
+                        sqlite3.DatabaseError, "invalid ad snapshot key"
+                    ):
+                        tuple(histories)
+                finally:
+                    histories.close()
+
     def test_paged_projection_excludes_new_rows_after_high_water(self) -> None:
         store = self.make_store()
         # More than one fetch page, including a history crossing the
