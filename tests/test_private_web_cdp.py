@@ -2681,6 +2681,58 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         )
         owner.close()
 
+
+    def test_ambiguous_call_send_exception_retains_cdp_target(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX target claim required")
+
+        for port, error in (
+            (19646, OSError("partial browser send")),
+            (19647, KeyboardInterrupt("interrupted after browser input")),
+        ):
+            with self.subTest(port=port):
+                endpoint = f"http://127.0.0.1:{port}"
+                target = {
+                    "type": "page",
+                    "webSocketDebuggerUrl":
+                        f"ws://127.0.0.1:{port}/devtools/page/one",
+                }
+
+                class PartialSend(FakeSocket):
+                    def send(self, payload):
+                        # A browser-effecting Runtime.evaluate might already
+                        # have been sent when the transport raised.
+                        super().send(payload)
+                        raise error
+
+                def build(sock):
+                    return _LoopbackCdpClient(
+                        endpoint, timeout_seconds=1,
+                        opener=lambda url, **kw: FakeResponse([target], url=url),
+                        websocket_factory=lambda *a, **kw: sock,
+                        tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+                    )
+
+                initial_sock = PartialSend([])
+                client = build(initial_sock)
+                expected = (
+                    PrivateWebCdpError
+                    if isinstance(error, Exception) else type(error)
+                )
+                with self.assertRaises(expected):
+                    client.call(
+                        "Runtime.evaluate",
+                        {"expression": "document.querySelector('button').click()"},
+                    )
+                self.assertEqual(len(initial_sock.sent), 1)
+                with self.assertRaises(PrivateWebCdpError):
+                    client.close()
+                with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+                    client.call("Runtime.evaluate", {"expression": "1"})
+                with self.assertRaises(PrivateWebCdpError) as blocked:
+                    build(FakeSocket([]))
+                self.assertEqual(blocked.exception.stage, "target_busy")
+
     def test_loopback_client_closes_direct_socket_on_websocket_failure(self) -> None:
         good_target = {
             "type": "page",

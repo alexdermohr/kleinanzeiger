@@ -182,6 +182,7 @@ class _LoopbackCdpClient:
         self._transport_construction_pending = False
         self._close_unknown = False
         self._unresolved_submit = False
+        self._unresolved_call = False
         # Short-lived state lock: never wait for browser I/O while holding it.
         self._lifecycle_lock = RLock()
         self._active_calls = 0
@@ -252,6 +253,7 @@ class _LoopbackCdpClient:
                 or self._active_calls
                 or self._transport_construction_pending
                 or self._close_unknown
+                or (self._unresolved_call and not self._unresolved_submit)
             ):
                 # A prior unknown factory/WS outcome retains the original
                 # browser claim, but may not create a second observer socket.
@@ -297,6 +299,7 @@ class _LoopbackCdpClient:
                 self._closing
                 or self._reconnecting
                 or self._close_unknown
+                or self._unresolved_call
                 or self._unresolved_submit
             ):
                 raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
@@ -315,6 +318,7 @@ class _LoopbackCdpClient:
             ):
                 raise PrivateWebCdpError("submit_unsettled")
             self._unresolved_submit = False
+            self._unresolved_call = False
 
     def _connect(self):
         # Only construction and explicit observation-only reconnect may create
@@ -462,9 +466,17 @@ class _LoopbackCdpClient:
                 # consume/drop this call's reply, then falsely report UNKNOWN.
                 # Reject before dispatch rather than interleaving CDP frames.
                 raise PrivateWebCdpWriteNotAttemptedError("target_busy")
+            if self._unresolved_call and not self._unresolved_submit:
+                # A previous CDP request may have caused a browser effect
+                # without an acknowledgement. No second write may follow.
+                raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
             transport = self._socket
             if transport is None:
                 raise PrivateWebCdpError("call")
+            # Pin uncertainty BEFORE any send(), encoding or scheduling
+            # effect. Exception and BaseException cannot later lose the
+            # browser claim merely because the call stack unwound.
+            self._unresolved_call = True
             self._next_id += 1
             message_id = self._next_id
             self._active_calls += 1
@@ -492,6 +504,7 @@ class _LoopbackCdpClient:
                         # A competing close quarantined this target while the
                         # browser outcome was in flight. Never claim success.
                         raise PrivateWebCdpError("call")
+                    self._unresolved_call = False
                 return result
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.
             raise PrivateWebCdpError("call") from None
@@ -512,6 +525,7 @@ class _LoopbackCdpClient:
             if (
                 self._active_calls
                 or self._reconnecting
+                or self._unresolved_call
                 or self._unresolved_submit
                 or self._transport_construction_pending
                 or self._close_unknown
