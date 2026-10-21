@@ -12,6 +12,7 @@ from .private_web_cdp import (
     CdpPrivateWebPage,
     PrivateWebCdpError,
     PrivateWebCdpWriteNotAttemptedError,
+    _LoopbackCdpClient,
     _CREATE_FORM_PATH,
     _POST_SUBMIT_PATH,
     _require_private_web_cdp_authority,
@@ -476,10 +477,21 @@ function() {{
 
     def _discard_media_submit_client(self) -> None:
         client = self._client_instance
-        self._client_instance = None
-        # The retained object handle belongs to that CDP session. Once the
-        # session failed it is unusable, but the page-owned files must remain.
+        # The retained object handle belongs to the old CDP transport.
         self._media_file_object_id = None
+        if self._media_submit_unsettled and isinstance(client, _LoopbackCdpClient):
+            # Input may already have reached the page. Replace only its
+            # transport under the SAME kernel reservation, never closing
+            # that reservation while submit settlement remains UNKNOWN.
+            try:
+                client.reconnect_for_observation()
+            except Exception:
+                # Preserve claim/client for a later observation-only attempt.
+                # A failed close retains its socket, so no other writer enters.
+                pass
+            return
+        # Injected synthetic clients retain their original close/rebuild path.
+        self._client_instance = None
         if client is not None:
             try:
                 client.close()

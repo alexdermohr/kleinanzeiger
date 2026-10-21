@@ -1887,6 +1887,192 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         self.assertEqual(caught.exception.stage, "target_unowned")
         self.assertEqual(effects, [])
 
+
+    def test_unowned_cached_socket_cannot_call_cdp(self) -> None:
+        client = object.__new__(_LoopbackCdpClient)
+        client._port = 19612
+        client._target_reservation = None
+        client._next_id = 0
+        socket = FakeSocket([{"id": 1, "result": {}}])
+        client._socket = socket
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError) as caught:
+            client.call("Page.navigate", {"url": "https://example.invalid/"})
+        self.assertEqual(caught.exception.stage, "target_unowned")
+        self.assertEqual(socket.sent, [])
+
+    def test_interrupt_after_quarantine_append_keeps_kernel_claim(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract UNIX socket namespace required")
+        endpoint = "http://127.0.0.1:19618"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19618/devtools/page/synthetic",
+        }
+
+        # Simulate SIGINT at the exact unsafe ownership-transfer boundary:
+        # the global holder already has the claim but the client still does.
+        import mark_api.private_web_cdp as cdp_module
+
+        def interrupt_after_append(client, transport):
+            claim = client._target_reservation
+            list.append(cdp_module._QUARANTINED_CDP_TARGETS, (claim, transport))
+            raise KeyboardInterrupt()
+
+        class UncertainRaw:
+            def close(self):
+                raise OSError("unresolved raw socket close")
+
+        def make_client(raw_factory, websocket_factory):
+            return _LoopbackCdpClient(
+                endpoint,
+                timeout_seconds=1,
+                opener=lambda url, **kwargs: FakeResponse([target], url=url),
+                tcp_socket_factory=raw_factory,
+                websocket_factory=websocket_factory,
+            )
+
+        with patch.object(
+            _LoopbackCdpClient, "_quarantine_transport",
+            interrupt_after_append,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                make_client(
+                    lambda *args, **kwargs: UncertainRaw(),
+                    lambda *args, **kwargs: (_ for _ in ()).throw(
+                        KeyboardInterrupt()
+                    ),
+                )
+            with self.assertRaises(PrivateWebCdpError) as blocked:
+                make_client(
+                    lambda *args, **kwargs: FakeTcpSocket(),
+                    lambda *args, **kwargs: FakeSocket([]),
+                )
+            self.assertEqual(blocked.exception.stage, "target_busy")
+
+    def test_unknown_media_submit_retains_target_during_reconnect(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract UNIX socket namespace required")
+        from mark_api.private_web_cdp_media import CdpPrivateWebMediaPage
+
+        endpoint = "http://127.0.0.1:19619"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19619/devtools/page/synthetic",
+        }
+        sockets = [
+            FakeSocket([]),
+            FakeSocket([
+                {"id": 1, "result": {
+                    "result": {"type": "string", "value": "confirmed"}
+                }},
+            ]),
+        ]
+        created = []
+
+        def open_websocket(*args, **kwargs):
+            sock = sockets.pop(0)
+            created.append(sock)
+            return sock
+
+        def build():
+            return _LoopbackCdpClient(
+                endpoint,
+                timeout_seconds=1,
+                opener=lambda url, **kwargs: FakeResponse([target], url=url),
+                websocket_factory=open_websocket,
+                tcp_socket_factory=lambda *args, **kwargs: FakeTcpSocket(),
+            )
+
+        owner = build()
+        page = CdpPrivateWebMediaPage(
+            endpoint,
+            client_factory=lambda: owner,
+            monotonic=lambda: 0.0,
+            sleep=lambda _: None,
+        )
+        page._client_instance = owner
+        page._media_submit_unsettled = True
+        try:
+            page._discard_media_submit_client()
+            self.assertIs(page._client_instance, owner)
+            self.assertEqual(len(created), 2)
+            self.assertTrue(created[0].closed)
+            with self.assertRaises(PrivateWebCdpError) as blocked:
+                build()
+            self.assertEqual(blocked.exception.stage, "target_busy")
+            # Separate process cannot bind even while the old WS was rotated.
+            child = (
+                "import socket,sys\n"
+                "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
+                "try:\n"
+                " s.bind(bytes([0])+b'mark-api-cdp-target-v1:19619')\n"
+                "except OSError:\n"
+                " sys.exit(0)\n"
+                "else:\n"
+                " sys.exit(3)\n"
+                "finally:\n"
+                " s.close()\n"
+            )
+            child_result = subprocess.run(
+                [sys.executable, "-B", "-c", child],
+                capture_output=True, text=True, check=False, timeout=4,
+            )
+            self.assertEqual(child_result.returncode, 0, child_result.stderr)
+            page.reconcile_create_media_submit()
+            self.assertFalse(page._media_submit_unsettled)
+        finally:
+            if page._media_submit_unsettled:
+                page._media_submit_unsettled = False
+            page.close()
+
+
+    def test_transient_observation_reconnect_retains_exclusive_claim(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract UNIX socket namespace required")
+        endpoint = "http://127.0.0.1:19620"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19620/devtools/page/synthetic",
+        }
+        discovery_calls = 0
+        sockets = [
+            FakeSocket([]),
+            FakeSocket([{"id": 1, "result": {"value": 3}}]),
+        ]
+
+        def opener(url, **kwargs):
+            nonlocal discovery_calls
+            discovery_calls += 1
+            if discovery_calls == 2:
+                raise OSError("synthetic observation discovery failure")
+            return FakeResponse([target], url=url)
+
+        def build():
+            return _LoopbackCdpClient(
+                endpoint, timeout_seconds=1,
+                opener=opener,
+                websocket_factory=lambda *args, **kwargs: sockets.pop(0),
+                tcp_socket_factory=lambda *args, **kwargs: FakeTcpSocket(),
+            )
+
+        owner = build()
+        try:
+            with self.assertRaises(PrivateWebCdpError) as transient:
+                owner.reconnect_for_observation()
+            self.assertEqual(transient.exception.stage, "connect")
+            self.assertIsNone(owner._socket)
+            with self.assertRaises(PrivateWebCdpError) as blocked:
+                build()
+            self.assertEqual(blocked.exception.stage, "target_busy")
+            owner.reconnect_for_observation()
+            self.assertEqual(owner.call("Runtime.evaluate"), {"value": 3})
+            self.assertEqual(discovery_calls, 3)
+        finally:
+            owner.close()
+
     def test_loopback_client_closes_direct_socket_on_websocket_failure(self) -> None:
         good_target = {
             "type": "page",
