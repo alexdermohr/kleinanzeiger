@@ -534,6 +534,7 @@ class PeriodicReadTests(unittest.TestCase):
             with (
                 patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
                 patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient", return_value=cdp),
+                patch("mark_api.private_web_inventory_cdp._require_private_web_cdp_authority"),
             ):
                 with self.assertRaises(PeriodicSyncStopped):
                     sync.run_once()

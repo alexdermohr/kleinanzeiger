@@ -27,6 +27,7 @@ from .domain import AdSnapshot
 from .private_web_cdp import (
     PrivateWebCdpError, PrivateWebCdpReadCancelled,
     PrivateWebCdpReadSetupError, _CdpClient, _LoopbackCdpClient,
+    _require_private_web_cdp_authority,
 )
 from .results import ReadResult, ReadStatus
 
@@ -100,7 +101,9 @@ class CdpManagementInventoryReader:
             raise ValueError("source must be nonempty")
         self._source = source
         self._timeout = float(timeout_seconds)
-        self._client_factory = client_factory or (
+        # Avoid evaluating a custom factory's __bool__ before admission.
+        self._client_factory = (
+            client_factory if client_factory is not None else
             lambda: _LoopbackCdpClient(
                 f"http://127.0.0.1:{cdp_port}",
                 timeout_seconds=self._timeout,
@@ -114,6 +117,8 @@ class CdpManagementInventoryReader:
 
     @staticmethod
     def _value(client: _CdpClient, expression: str, *, await_promise: bool = False) -> object:
+        # Also guard this directly callable helper and injected clients.
+        _require_private_web_cdp_authority()
         result = client.call(
             "Runtime.evaluate",
             {
@@ -130,6 +135,9 @@ class CdpManagementInventoryReader:
         return remote["value"]
 
     def _open_management(self, client: _CdpClient) -> None:
+        # Do not create a probe or navigate through a preconnected client
+        # before the account/transport authority has been independently proven.
+        _require_private_web_cdp_authority()
         marker = json.dumps(f"__mark_inventory_probe_{secrets.token_hex(8)}__")
         armed = self._value(
             client,
@@ -258,8 +266,9 @@ class CdpManagementInventoryReader:
                         raise PrivateWebInventoryReadSetupError("invalid stop callback")
                     if stop_requested():
                         raise PrivateWebInventoryReadCancelled("inventory transport cancelled")
-                # CDP target discovery is loopback only. The real platform
-                # operation begins when a guarded CDP command is sent.
+                # An injected factory can itself open external transport.
+                # Admission must happen before ANY client factory call.
+                _require_private_web_cdp_authority()
                 client = self._client_factory()
                 if stop_requested is not None:
                     binder = getattr(client, "bind_cancellable_reads", None)

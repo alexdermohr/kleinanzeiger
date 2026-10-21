@@ -13,6 +13,7 @@ from mark_api.private_web_inventory_cdp import (
     PrivateWebInventoryReadSetupError,
 )
 from mark_api.private_web_runtime import build_private_web_inventory_runtime
+from mark_api.private_web_cdp import PrivateWebCdpError
 from mark_api.results import ReadResult, ReadStatus
 
 
@@ -67,6 +68,14 @@ def payload(ads, *, last=1, status=200):
 
 
 class BrowserInventoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Existing tests exercise only synthetic fake browser clients.
+        # The production default-deny guard is unpatched in the independent
+        # negative authorization tests below.
+        p = patch("mark_api.private_web_inventory_cdp._require_private_web_cdp_authority")
+        p.start()
+        self.addCleanup(p.stop)
+
     @staticmethod
     def reader(client, **kwargs):
         return CdpManagementInventoryReader(
@@ -353,6 +362,67 @@ class BrowserInventoryTests(unittest.TestCase):
             sync = SnapshotStore(db).latest_sync_attempt()
             self.assertIsNotNone(sync)
             self.assertEqual(sync.outcome, "failed")
+
+
+class BrowserInventoryAuthorizationTests(unittest.TestCase):
+    """Negative admission tests use the genuine unpatched default-deny."""
+
+    def test_factory_and_preconnected_client_denied_before_any_effect(self) -> None:
+        effects = []
+        class EffectfulFactory:
+            def __bool__(self):
+                effects.append("factory_bool")
+                return True
+            def __call__(self):
+                effects.append("factory_call")
+                return FakeClient([payload([])])
+
+        factory = EffectfulFactory()
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610, client_factory=factory,
+        )
+        self.assertEqual(effects, [], "constructor evaluated untrusted factory")
+        result = reader.read_ads()
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(effects, [], "an unauthorized factory ran")
+
+        # A real, already-created client must not be navigated or evaluated
+        # just because it was handed in through the injection seam.
+        preconnected = FakeClient([payload([])])
+        direct = CdpManagementInventoryReader(
+            cdp_port=19610, client_factory=lambda: preconnected,
+        )
+        denied = direct.read_ads()
+        self.assertEqual(denied.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(preconnected.calls, [])
+        self.assertFalse(preconnected.closed)
+
+    def test_raw_transport_helpers_deny_even_preconnected_client(self) -> None:
+        client = FakeClient([payload([])])
+        reader = CdpManagementInventoryReader(cdp_port=19610)
+        operations = (
+            lambda: CdpManagementInventoryReader._value(client, "true"),
+            lambda: reader._open_management(client),
+            lambda: CdpManagementInventoryReader._page(client, 1),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation), self.assertRaises(PrivateWebCdpError):
+                operation()
+        self.assertEqual(client.calls, [], "unauthorized injected client was used")
+
+    def test_synthetic_allowlist_mock_is_narrow_and_explicit(self) -> None:
+        client = FakeClient([payload([])])
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610, client_factory=lambda: client,
+        )
+        with patch("mark_api.private_web_inventory_cdp._require_private_web_cdp_authority"):
+            success = reader.read_ads()
+        self.assertEqual(success.status, ReadStatus.SUCCESS_EMPTY)
+        self.assertTrue(client.closed)
+        self.assertEqual(
+            [method for method, _ in client.calls],
+            ["Runtime.evaluate", "Page.navigate", "Runtime.evaluate", "Runtime.evaluate"],
+        )
 
 
 if __name__ == "__main__":
