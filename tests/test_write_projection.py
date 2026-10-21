@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from dataclasses import replace
@@ -240,7 +241,7 @@ class ProjectionStorageTests(unittest.TestCase):
         with patch.object(self.store, "_insert_ad_snapshot", side_effect=sqlite3.OperationalError("synthetic")):
             with self.assertRaises(sqlite3.OperationalError):
                 self.store.append_operation_receipt(self.receipt)
-        with sqlite3.connect(self.store.path) as connection:
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
             self.assertEqual(connection.execute("SELECT count(*) FROM operation_receipts").fetchone()[0], 0)
         self.assertEqual(self.store.ad_history(TARGET), (snapshot(),))
 
@@ -248,7 +249,7 @@ class ProjectionStorageTests(unittest.TestCase):
         with patch.object(self.store, "_insert_ad_snapshot", side_effect=sqlite3.OperationalError("synthetic")):
             with self.assertRaises(sqlite3.OperationalError):
                 self.store.append_create_operation_receipt(self.create_receipt)
-        with sqlite3.connect(self.store.path) as connection:
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
             self.assertEqual(connection.execute("SELECT count(*) FROM create_operation_receipts").fetchone()[0], 0)
         self.assertIsNone(self.store.latest_ad_snapshot(CREATED))
 
