@@ -114,6 +114,22 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
                     table, "source", path, sqlite3.Binary(b"bad-source"),
                 )
 
+    def test_native_blob_ad_ids_must_not_disappear_before_history_lookup(self):
+        # Native BLOB values sort differently from TEXT in indexed SQLite.
+        # A WHERE ad_id=? filter silently hides them without prevalidation.
+        cases = (
+            ("reaction_snapshots",
+             "/api/analytics/ads?metric=conversation_count"),
+            ("inbound_message_events", "/api/email-reactions"),
+            ("ad_classifications",
+             "/api/analytics/groups?dimension=city&metric=views"),
+        )
+        for table, path in cases:
+            with self.subTest(table=table):
+                self._assert_sanitized_503(
+                    table, "ad_id", path, sqlite3.Binary(b"native-blob-ad-id"),
+                )
+
     def test_blob_optional_classification_label_and_reaction_counter(self):
         self._assert_sanitized_503(
             "ad_classifications", "city",

@@ -1996,6 +1996,7 @@ class SnapshotStore:
         """Return observations by actual instant, then insertion ID for ties."""
 
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "ad_snapshots")
             rows = connection.execute(
                 """
                 SELECT id, ad_id, observed_at, source, lifecycle_state, title,
@@ -2102,6 +2103,7 @@ class SnapshotStore:
     def tracked_ad_ids(self) -> tuple[str, ...]:
         """Return every ad ID ever observed by this store."""
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "ad_snapshots")
             rows = connection.execute(
                 """
                 SELECT DISTINCT ad_id
@@ -2109,8 +2111,31 @@ class SnapshotStore:
                 ORDER BY ad_id ASC
                 """
             ).fetchall()
-        return tuple(str(row["ad_id"]) for row in rows)
+        return tuple(self._required_observation_text(row["ad_id"]) for row in rows)
 
+
+    @classmethod
+    def _assert_native_history_ad_ids(
+        cls, connection: sqlite3.Connection, table: str,
+    ) -> None:
+        """Fail closed on rows that a typed WHERE ad_id=? could silently hide.
+
+        SQLite sorts NULL/numeric values before native TEXT and BLOB values
+        after TEXT. Both extrema therefore prove every stored ad_id is TEXT;
+        the existing (ad_id, observed_at, id) indexes bound each probe.
+        Never coerce a native BLOB into a synthetic ad ID.
+        """
+        if table not in (
+            "ad_snapshots", "reaction_snapshots",
+            "inbound_message_events", "ad_classifications",
+        ):
+            raise ValueError("unsupported historical ad ID table")
+        for direction in ("ASC", "DESC"):
+            row = connection.execute(
+                f"SELECT ad_id FROM {table} ORDER BY ad_id {direction} LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                cls._required_observation_text(row["ad_id"])
 
     @staticmethod
     def _required_observation_text(value: object) -> str:
@@ -2147,6 +2172,7 @@ class SnapshotStore:
 
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "reaction_snapshots")
             rows = connection.execute(
                 """
                 SELECT ad_id, observed_at, source, conversation_count,
@@ -2184,6 +2210,7 @@ class SnapshotStore:
         ad_id: str,
     ) -> tuple[InboundMessageEvent, ...]:
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
             rows = connection.execute(
                 """
                 SELECT id, ad_id, conversation_id, provider_message_id,
@@ -2227,6 +2254,7 @@ class SnapshotStore:
         """Return every ad ID represented by imported inbound-message events."""
 
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
             rows = connection.execute(
                 """
                 SELECT DISTINCT ad_id
@@ -2234,12 +2262,13 @@ class SnapshotStore:
                 ORDER BY ad_id ASC
                 """
             ).fetchall()
-        return tuple(str(row["ad_id"]) for row in rows)
+        return tuple(self._required_observation_text(row["ad_id"]) for row in rows)
 
     def inbound_message_counts(self, ad_id: str) -> tuple[int, int]:
         """Return (conversation_count, inbound_message_count) for one ad."""
 
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
             row = connection.execute(
                 """
                 SELECT COUNT(DISTINCT conversation_id) AS conversations,
@@ -2254,6 +2283,7 @@ class SnapshotStore:
 
     def classification_history(self, ad_id: str) -> tuple[AdClassification, ...]:
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "ad_classifications")
             rows = connection.execute(
                 """
                 SELECT id, ad_id, observed_at, source, image_type, city,
