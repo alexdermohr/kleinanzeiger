@@ -12,6 +12,7 @@ import threading
 import unittest
 from urllib.error import HTTPError
 from urllib.request import urlopen
+from unittest.mock import patch
 
 from mark_api.dashboard import create_server
 from mark_api.domain import (
@@ -141,6 +142,58 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
             "/api/analytics/ads?metric=conversation_count",
             sqlite3.Binary(b"bad-count"),
         )
+
+    def test_history_key_guard_and_lookup_use_one_wal_snapshot(self):
+        """A writer between extrema and WHERE must not forge an empty result."""
+        with closing(sqlite3.connect(self.store.path)) as db:
+            mode = db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        self.assertEqual(mode.lower(), "wal")
+
+        for table, reader_name in (
+            ("ad_snapshots", "ad_history"),
+            ("reaction_snapshots", "reaction_history"),
+        ):
+            with self.subTest(table=table):
+                errors = []
+                original_guard = self.store._assert_native_history_ad_ids
+
+                def commit_bad_key():
+                    try:
+                        with closing(sqlite3.connect(
+                            self.store.path, timeout=3,
+                        )) as writer, writer:
+                            writer.execute(
+                                f"UPDATE {table} SET ad_id=? WHERE ad_id=?",
+                                (sqlite3.Binary(b"writer-after-validation"),
+                                 "1234567890"),
+                            )
+                    except Exception as exc:
+                        errors.append(exc)
+
+                def between_guard_and_keyed_query(connection, checked_table):
+                    original_guard(connection, checked_table)
+                    if checked_table == table:
+                        writer = threading.Thread(
+                            target=commit_bad_key, daemon=True,
+                        )
+                        writer.start()
+                        writer.join(timeout=4)
+                        self.assertFalse(writer.is_alive(), "WAL writer blocked")
+                        self.assertEqual(errors, [])
+
+                reader = getattr(self.store, reader_name)
+                try:
+                    with patch.object(
+                        self.store, "_assert_native_history_ad_ids",
+                        side_effect=between_guard_and_keyed_query,
+                    ):
+                        prior_snapshot = reader("1234567890")
+                    self.assertEqual(len(prior_snapshot), 1)
+                    self.assertEqual(prior_snapshot[0].ad_id, "1234567890")
+                    with self.assertRaises(sqlite3.DatabaseError):
+                        reader("1234567890")
+                finally:
+                    self._replace(table, "ad_id", "1234567890")
 
     def test_inbound_history_actual_instants_and_id_ties_remain_ordered(self):
         first = InboundMessageEvent(

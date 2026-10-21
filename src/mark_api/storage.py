@@ -2130,6 +2130,10 @@ class SnapshotStore:
             "inbound_message_events", "ad_classifications",
         ):
             raise ValueError("unsupported historical ad ID table")
+        # sqlite3 SELECT alone does not pin a transaction across statements.
+        # Bind both validation probes and the following keyed SELECT to the
+        # same read snapshot, even while a WAL writer commits concurrently.
+        connection.execute("BEGIN")
         for direction in ("ASC", "DESC"):
             row = connection.execute(
                 f"SELECT ad_id FROM {table} ORDER BY ad_id {direction} LIMIT 1"
