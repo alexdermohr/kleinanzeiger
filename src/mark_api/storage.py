@@ -1958,13 +1958,22 @@ class SnapshotStore:
         """Order actual instants, then insertion IDs; preserve field evidence."""
 
         try:
-            parsed = sorted(
-                (
+            parsed = []
+            for row in rows:
+                # SQLite TEXT affinity still admits native BLOB values.
+                # AdSnapshot accepts bytes for source/title/description, but
+                # JSON serialization would abort the HTTP connection.
+                for field in ("ad_id", "observed_at", "source", "lifecycle_state"):
+                    if type(row[field]) is not str:
+                        raise sqlite3.DatabaseError("invalid ad snapshot data")
+                for field in ("metric_source", "title", "description"):
+                    value = row[field]
+                    if value is not None and type(value) is not str:
+                        raise sqlite3.DatabaseError("invalid ad snapshot data")
+                parsed.append(
                     (datetime.fromisoformat(row["observed_at"]), int(row["id"]), row)
-                    for row in rows
-                ),
-                key=lambda item: (item[0], item[1]),
-            )
+                )
+            parsed.sort(key=lambda item: (item[0], item[1]))
             return tuple(
                 AdSnapshot(
                     ad_id=row["ad_id"],
