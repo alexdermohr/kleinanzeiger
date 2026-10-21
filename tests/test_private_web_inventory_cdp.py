@@ -303,6 +303,7 @@ class BrowserInventoryTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.launcher._require_private_web_cdp_authority"),
             patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient",
                   return_value=client),
             patch("mark_api.private_web_runtime.ManagementReadAdapter",
@@ -344,6 +345,7 @@ class BrowserInventoryTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.launcher._require_private_web_cdp_authority"),
             patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient",
                   return_value=client),
             patch("mark_api.launcher.build_private_web_write_api_runtime",

@@ -103,8 +103,11 @@ class ProductStartupTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "state.sqlite"
-            with patch("mark_api.launcher.build_private_web_write_api_runtime",
-                       side_effect=AssertionError("use injected write only")):
+            with (
+                patch("mark_api.launcher._require_private_web_cdp_authority"),
+                patch("mark_api.launcher.build_private_web_write_api_runtime",
+                      side_effect=AssertionError("use injected write only")),
+            ):
                 launcher = build_product_launcher(
                     db_path=db, cdp_port=9222, initialize_db=True,
                     runtime_factory=lambda **_kwargs: Owner(),
@@ -143,8 +146,11 @@ class ProductStartupTests(unittest.TestCase):
             db = Path(tmp) / "typo" / "state.sqlite"
             def unexpected_runtime(**kwargs):
                 raise AssertionError("unexpected CDP")
-            with self.assertRaisesRegex(
-                ProductLauncherError, "local snapshot store startup failed"
+            with (
+                patch("mark_api.launcher._require_private_web_cdp_authority"),
+                self.assertRaisesRegex(
+                    ProductLauncherError, "local snapshot store startup failed"
+                ),
             ):
                 build_product_launcher(db_path=db, cdp_port=9222,
                                        runtime_factory=unexpected_runtime)
@@ -209,6 +215,27 @@ class ProductStartupTests(unittest.TestCase):
                         storage.assert_not_called()
                         writer.assert_not_called()
                     self.assertFalse(db.exists())
+
+    def test_public_builder_injected_runtime_never_bypasses_entitlement(self):
+        # This public API accepts a factory for fakes, not platform authority.
+        # In production even an injected factory must be denied before DB.
+        for enabled in (False, True):
+            with self.subTest(enable_writes=enabled):
+                with tempfile.TemporaryDirectory() as tmp:
+                    db = Path(tmp) / "must-not-exist.sqlite"
+                    calls = []
+                    def fake_browser(**_kw):
+                        calls.append("unentitled_factory_invoked")
+                        raise RuntimeError("synthetic browser should not run")
+                    with self.assertRaisesRegex(
+                        ProductLauncherError, "verified official account entitlement"
+                    ):
+                        build_product_launcher(
+                            db_path=db, cdp_port=19610, initialize_db=True,
+                            enable_writes=enabled, runtime_factory=fake_browser,
+                        )
+                    self.assertFalse(db.exists(), "unentitled programmatic call created SQLite")
+                    self.assertEqual(calls, [], "unentitled custom factory was invoked")
 
     def test_public_cli_denies_before_sqlite_and_cdp_even_with_flags(self):
         with tempfile.TemporaryDirectory() as tmp:

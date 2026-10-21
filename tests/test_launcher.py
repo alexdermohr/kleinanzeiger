@@ -161,6 +161,11 @@ class ProductLauncherTests(unittest.TestCase):
     DASHBOARD_TOKEN = "fake-dashboard-write-token-0001"
 
     def setUp(self) -> None:
+        # These tests supply synthetic owner and write runtimes. Never
+        # relax the production guard outside this one fixture class.
+        admission = patch("mark_api.launcher._require_private_web_cdp_authority")
+        admission.start()
+        self.addCleanup(admission.stop)
         self.write_runtime = WriteRuntime()
         write_patch = patch(
             "mark_api.launcher.build_private_web_write_api_runtime",

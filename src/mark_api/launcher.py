@@ -20,6 +20,7 @@ from .dashboard import DashboardWriteProxy, LoopbackDashboardServer, create_serv
 from .domain import AdSnapshot
 from .email_import import EmailImportReport, import_kleinanzeigen_email_files
 from .private_web import PrivateWebSubmitUnknownError
+from .private_web_cdp import PrivateWebCdpError, _require_private_web_cdp_authority
 from .private_web_runtime import (
     PrivateWebRuntimeDependencyError,
     build_private_web_inventory_runtime,
@@ -31,7 +32,7 @@ from .write_api import WriteApiAccess, WriteCapability
 
 
 _LAUNCHER_SOURCE = "private-web-product-launcher"
-# Immutable default binding: monkeypatching an imported name is not an entitlement.
+# The default factory is not an entitlement; admission is unconditional.
 _DEFAULT_INVENTORY_RUNTIME = build_private_web_inventory_runtime
 
 
@@ -400,16 +401,18 @@ def build_product_launcher(
     if not callable(clock):
         raise TypeError("clock must be callable")
     # Owning a logged-in browser or opting into local writes is not external
-    # Kleinanzeigen API permission. The default private-CDP inventory reader
-    # has no independently attested account entitlement / approved transport.
-    # Deny before database creation or any sync journal / browser activity;
-    # injected synthetic runtimes remain an explicit offline test seam.
-    if runtime_factory is _DEFAULT_INVENTORY_RUNTIME:
+    # Kleinanzeigen API permission. Even an injected runtime_factory may
+    # discover/open transport; a callable identity comparison is never an
+    # entitlement decision. Deny before SQLite, journal and *any* factory.
+    # In offline synthetic tests ONLY, the narrow authority guard is mocked.
+    try:
+        _require_private_web_cdp_authority()
+    except PrivateWebCdpError:
         raise ProductLauncherError(
             "automatic Kleinanzeigen/CDP access is unavailable without "
             "verified official account entitlement and approved transport; "
             "use mark-api-offline for user-provided local exports"
-        )
+        ) from None
     resolved_write_runtime_factory = (
         build_private_web_write_api_runtime
         if write_runtime_factory is None
