@@ -2549,6 +2549,71 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         self.assertEqual(another.exception.stage, "target_busy")
         # Deliberately leave UNKNOWN transport quarantined for process life.
 
+
+    def test_concurrent_same_client_calls_cannot_consume_other_responses(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX target claim required")
+        from threading import Event, Thread
+
+        endpoint = "http://127.0.0.1:19643"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19643/devtools/page/synthetic",
+        }
+        entered = Event()
+        release = Event()
+        class BlockingSocket(FakeSocket):
+            def __init__(self):
+                super().__init__([])
+                self.first_send = True
+
+            def send(self, payload):
+                if self.first_send:
+                    self.first_send = False
+                    entered.set()
+                    if not release.wait(4):
+                        raise AssertionError("first send timed out")
+                super().send(payload)
+                request_id = self.sent[-1]["id"]
+                self.responses.append({
+                    "id": request_id, "result": {"method_id": request_id},
+                })
+
+        sock = BlockingSocket()
+        owner = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kwargs: FakeResponse([target], url=url),
+            websocket_factory=lambda *args, **kwargs: sock,
+            tcp_socket_factory=lambda *args, **kwargs: FakeTcpSocket(),
+        )
+        first_outcome = []
+        def first():
+            try:
+                first_outcome.append(owner.call("Runtime.first"))
+            except Exception as exc:
+                first_outcome.append(exc)
+
+        t = Thread(target=first, daemon=True)
+        t.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            with self.assertRaises(PrivateWebCdpWriteNotAttemptedError) as denied:
+                owner.call("Runtime.second")
+            self.assertEqual(denied.exception.stage, "target_busy")
+            # A second request may not dispatch while the first response is
+            # unresolved. Dropping an unrelated response would risk UNKNOWN.
+            self.assertEqual(sock.sent, [])
+        finally:
+            release.set()
+            t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(first_outcome, [{"method_id": 1}])
+        self.assertEqual(
+            [item["method"] for item in sock.sent], ["Runtime.first"],
+        )
+        owner.close()
+
     def test_loopback_client_closes_direct_socket_on_websocket_failure(self) -> None:
         good_target = {
             "type": "page",

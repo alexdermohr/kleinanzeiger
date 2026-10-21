@@ -438,6 +438,11 @@ class _LoopbackCdpClient:
             self._assert_live_target_reservation()
             if self._closing or self._reconnecting:
                 raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+            if self._active_calls:
+                # There is one WebSocket response stream. Another call could
+                # consume/drop this call's reply, then falsely report UNKNOWN.
+                # Reject before dispatch rather than interleaving CDP frames.
+                raise PrivateWebCdpWriteNotAttemptedError("target_busy")
             transport = self._socket
             if transport is None:
                 raise PrivateWebCdpError("call")
