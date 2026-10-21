@@ -127,6 +127,19 @@ class PrivateWebRuntimeSetupError(WriteNotAttemptedError):
     """Per-call private-Web page setup failed before any platform write."""
 
 
+class PrivateWebRuntimeAdmissionError(WriteNotAttemptedError):
+    """The real Private-Web/CDP transport has no attested platform authority."""
+
+
+def _require_private_web_runtime_authority() -> None:
+    # There is intentionally no user-configurable override. A future approved
+    # official API transport must establish real account-scoped entitlement,
+    # not revive Private-Web automation through an environment flag.
+    raise PrivateWebRuntimeAdmissionError(
+        "private Web/CDP runtime not authorized; use mark-api-offline"
+    )
+
+
 class _RejectManagementRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -1466,6 +1479,8 @@ def build_private_web_write_api_runtime(
     requires the separate target-bound content/detail read.
     """
 
+    _require_private_web_runtime_authority()
+
     if not isinstance(access, WriteApiAccess):
         raise TypeError("access must be WriteApiAccess")
     if (
@@ -1676,6 +1691,8 @@ def build_private_web_media_create_runtime(
     change the media-free AdCreateRequest, MarkService, or loopback Write API.
     """
 
+    _require_private_web_runtime_authority()
+
     require_private_web_runtime_dependency()
 
     def page_factory() -> CdpPrivateWebMediaPage:
@@ -1695,6 +1712,8 @@ def build_private_web_inventory_runtime(
     clock: Callable[[], datetime] | None = None,
 ) -> PrivateWebInventoryRuntime:
     """Build only the owner-inventory read surface for an existing CDP worker."""
+
+    _require_private_web_runtime_authority()
 
     require_private_web_runtime_dependency()
     owner_reader, cookie_provider = _build_private_web_owner_reader(
@@ -1722,6 +1741,8 @@ def build_private_web_content_runtime(
     browser. Login/MFA/CAPTCHA/security-challenge handling remains in the
     already-authenticated user browser session and the fail-closed page driver.
     """
+
+    _require_private_web_runtime_authority()
 
     require_private_web_runtime_dependency()
     management_reader, cookie_provider = _build_private_web_owner_reader(
