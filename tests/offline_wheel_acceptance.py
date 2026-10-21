@@ -14,14 +14,16 @@ import json
 import os
 import re
 import selectors
+import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from email import policy
 from email.message import EmailMessage
 from pathlib import Path
@@ -347,7 +349,67 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 code, _, payload = _request(address, "/api/dashboard/config")
                 self.assertEqual((code, json.loads(payload)), (200, {"write_ui_available": False}))
 
-            with sqlite3.connect(database) as connection:
+            # Optional generation is still a local draft-only capability. No
+            # paid provider call may start in either mode without per-call consent.
+            for mode in ("text", "image"):
+                image_target = root / "should-not-create.png"
+                request = [
+                    str(venv / "bin" / "mark-api-generate"), mode,
+                    "--prompt", "synthetic offline draft",
+                ]
+                if mode == "image":
+                    request.extend(("--output", str(image_target)))
+                denied = _command(*request, cwd=root, env=env)
+                self.assertEqual(denied.returncode, 2, denied.stderr)
+                self.assertIn("--acknowledge-provider-cost", denied.stderr)
+                self.assertIn("https://developers.openai.com/api/docs/pricing", denied.stderr)
+                self.assertEqual(denied.stdout, "")
+                self.assertFalse(image_target.exists())
+
+            # This is a create-only, same-user *offline* backup, NOT hostile
+            # service-UID A6 recovery. Test installed CLI, receipt and manual
+            # copy-to-new-path recovery; never overwrite the source or backup.
+            backup = root / "verified-local-backup.sqlite"
+            backup_bin = str(venv / "bin" / "mark-api-backup")
+            backed = _command(
+                backup_bin, "--db", str(database), "--backup", str(backup),
+                cwd=root, env=env, timeout=90,
+            )
+            self.assertEqual(backed.returncode, 0, backed.stderr)
+            backup_receipt = json.loads(backed.stdout)
+            self.assertTrue(backup.is_file())
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o400)
+            backup_sha256 = hashlib.sha256(backup.read_bytes()).hexdigest()
+            self.assertEqual(backup_receipt["backup_sha256"], backup_sha256)
+            self.assertEqual(backup_receipt["inbound_message_events"], 2)
+            self.assertEqual(backup_receipt["pending_api_writes"], 0)
+            self.assertEqual(backup_receipt["pending_dashboard_writes"], 0)
+            with closing(sqlite3.connect(f"file:{backup}?mode=ro", uri=True)) as backup_db:
+                self.assertEqual(backup_db.execute("PRAGMA quick_check(1)").fetchone()[0], "ok")
+                self.assertEqual(
+                    backup_db.execute("SELECT COUNT(*) FROM inbound_message_events").fetchone()[0],
+                    2,
+                )
+
+            denied_overwrite = _command(
+                backup_bin, "--db", str(database), "--backup", str(backup),
+                cwd=root, env=env,
+            )
+            self.assertEqual(denied_overwrite.returncode, 2)
+            self.assertEqual(hashlib.sha256(backup.read_bytes()).hexdigest(), backup_sha256)
+
+            restored = root / "restored-from-local-backup.sqlite"
+            shutil.copyfile(backup, restored)
+            os.chmod(restored, 0o600)
+            with _offline_server(python, root, env, restored, ()) as address:
+                code, _, payload = _request(address, "/api/email-reactions")
+                self.assertEqual(code, 200)
+                self.assertEqual(json.loads(payload)[0]["inbound_message_count"], 2)
+                code, _, payload = _request(address, groups_path.replace(".csv", ""))
+                self.assertEqual(code, 200)
+                self.assertEqual(json.loads(payload)[0]["label"], "Berlin")
+
+            with closing(sqlite3.connect(database)) as connection:
                 self.assertEqual(connection.execute("PRAGMA quick_check(1)").fetchone()[0], "ok")
 
         print(json.dumps({
@@ -356,6 +418,10 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "local_eml_events": 2, "sqlite_quick_check": "ok",
             "loopback_http": True, "csv": True, "denied_writes": True,
             "restart_deduplication": True,
+            "provider_consent_default_deny": True,
+            "backup_scope": "create-only-offline-not-a6",
+            "backup_sha256": backup_sha256,
+            "offline_restore_checked": True,
             "network_isolation": "linux-non-escalating-loopback-netns",
         }, sort_keys=True))
 
