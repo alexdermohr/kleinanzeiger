@@ -260,14 +260,23 @@ class _LoopbackCdpClient:
         try:
             old_socket = getattr(self, "_socket", None)
             if old_socket is not None:
+                # Arm the UNKNOWN fence before the first possibly effective
+                # old-socket close; interruption may have unknown effects.
+                self._close_unknown = True
                 try:
                     old_socket.close()
                 except BaseException as exc:
-                    # Unknown close: keep the old socket and its live claim.
+                    # Never reuse an uncertain old socket or admit another.
+                    self._quarantine_transport(old_socket)
+                    self._socket = None
                     if isinstance(exc, Exception):
                         raise PrivateWebCdpError("reconnect") from None
                     raise
-                self._socket = None
+                with self._lifecycle_lock:
+                    if self._closing or self._target_reservation is None:
+                        raise PrivateWebCdpError("reconnect")
+                    self._socket = None
+                    self._close_unknown = False
             # If a prior discovery failed, retry under the SAME claim.
             self._connect_owner_thread = get_ident()
             try:
@@ -284,7 +293,12 @@ class _LoopbackCdpClient:
         _require_private_web_cdp_authority()
         with self._lifecycle_lock:
             self._assert_live_target_reservation()
-            if self._closing or self._reconnecting or self._unresolved_submit:
+            if (
+                self._closing
+                or self._reconnecting
+                or self._close_unknown
+                or self._unresolved_submit
+            ):
                 raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
             self._unresolved_submit = True
 
@@ -293,7 +307,12 @@ class _LoopbackCdpClient:
         _require_private_web_cdp_authority()
         with self._lifecycle_lock:
             self._assert_live_target_reservation()
-            if self._closing or not self._unresolved_submit:
+            if (
+                self._closing
+                or self._reconnecting
+                or self._close_unknown
+                or not self._unresolved_submit
+            ):
                 raise PrivateWebCdpError("submit_unsettled")
             self._unresolved_submit = False
 
@@ -436,7 +455,7 @@ class _LoopbackCdpClient:
         with lock:
             # Atomic admission against concurrent close or reconnect.
             self._assert_live_target_reservation()
-            if self._closing or self._reconnecting:
+            if self._closing or self._reconnecting or self._close_unknown:
                 raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
             if self._active_calls:
                 # There is one WebSocket response stream. Another call could

@@ -2550,6 +2550,73 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         # Deliberately leave UNKNOWN transport quarantined for process life.
 
 
+
+    def test_reconnect_failed_old_socket_close_quarantines_transport(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX kernel reservation required")
+        import mark_api.private_web_cdp as cdp_module
+
+        for port, exception in (
+            (19644, OSError("ambiguous close")),
+            (19645, KeyboardInterrupt("interrupted close")),
+        ):
+            with self.subTest(port=port):
+                endpoint = f"http://127.0.0.1:{port}"
+                target = {
+                    "type": "page",
+                    "webSocketDebuggerUrl":
+                        f"ws://127.0.0.1:{port}/devtools/page/pinned",
+                }
+                opened = []
+
+                class UnknownCloseSocket(FakeSocket):
+                    def close(self):
+                        # It may have closed the OS socket, or not. Neither
+                        # state may be inferred from the raised exception.
+                        raise exception
+
+                def websocket_factory(*args, **kwargs):
+                    sock = UnknownCloseSocket([
+                        {"id": 1, "result": {"unsafe": True}},
+                    ]) if not opened else FakeSocket([])
+                    opened.append(sock)
+                    return sock
+
+                owner = _LoopbackCdpClient(
+                    endpoint,
+                    timeout_seconds=1,
+                    opener=lambda url, **kw: FakeResponse([target], url=url),
+                    websocket_factory=websocket_factory,
+                    tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+                )
+                expected = (
+                    PrivateWebCdpError
+                    if isinstance(exception, Exception) else type(exception)
+                )
+                with self.assertRaises(expected):
+                    owner.reconnect_for_observation()
+                self.assertTrue(owner._close_unknown)
+                self.assertIsNone(owner._target_reservation)
+                self.assertIsNone(owner._socket)
+                self.assertEqual(len(opened), 1)
+                with self.assertRaises(PrivateWebCdpError):
+                    owner.reconnect_for_observation()
+                with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+                    owner.call("Runtime.evaluate", {"expression": "1"})
+                self.assertEqual(opened[0].sent, [])
+                self.assertTrue(any(
+                    transport is opened[0]
+                    for _, transport in cdp_module._QUARANTINED_CDP_TARGETS
+                ))
+                with self.assertRaises(PrivateWebCdpError) as busy:
+                    _LoopbackCdpClient(
+                        endpoint, timeout_seconds=1,
+                        opener=lambda url, **kw: FakeResponse([target], url=url),
+                        websocket_factory=lambda *a, **kw: FakeSocket([]),
+                        tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+                    )
+                self.assertEqual(busy.exception.stage, "target_busy")
+
     def test_concurrent_same_client_calls_cannot_consume_other_responses(self) -> None:
         if sys.platform != "linux":
             self.skipTest("Linux AF_UNIX target claim required")
