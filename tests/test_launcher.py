@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import threading
 import tomllib
@@ -218,7 +219,7 @@ class ProductLauncherTests(unittest.TestCase):
 
     def test_missing_write_request_table_prevents_launch_and_recreation(self) -> None:
         _tmp, db = self.make_db()
-        with sqlite3.connect(db) as connection:
+        with closing(sqlite3.connect(db)) as connection, connection:
             connection.execute("DROP TABLE write_api_requests")
         inventory_called = False
 
@@ -240,7 +241,7 @@ class ProductLauncherTests(unittest.TestCase):
                     )
         self.assertFalse(inventory_called)
         self.assertEqual(self.write_runtime.start_calls, 0)
-        with sqlite3.connect(db) as connection:
+        with closing(sqlite3.connect(db)) as connection, connection:
             self.assertIsNone(
                 connection.execute(
                     "SELECT name FROM sqlite_master "
