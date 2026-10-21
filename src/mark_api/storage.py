@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import AbstractContextManager, closing
 from dataclasses import asdict, dataclass
@@ -188,6 +189,18 @@ _REQUIRED_SINGLE_COLUMN_UNIQUES: dict[str, tuple[str, ...]] = {
     "dashboard_pending_writes": ("scope", "resource_key", "idempotency_key"),
 }
 
+# History grouping and native type checks assume literal BINARY ad identities.
+# These named indexes are part of the real delivered schema. A collating index
+# can make the high-water keyset enumerate groups in a different order from
+# Python's exact string identity; never silently accept that as a valid store.
+_HISTORY_BINARY_INDEXES: dict[str, str] = {
+    table: f"idx_{table}_ad_id_observed"
+    for table in (
+        "ad_snapshots", "reaction_snapshots",
+        "inbound_message_events", "ad_classifications",
+    )
+}
+
 @dataclass(frozen=True, slots=True)
 class SyncAttemptRecord:
     id: int
@@ -363,6 +376,56 @@ class SnapshotStore:
         return connection
 
     @staticmethod
+    def _validate_history_index_collation(
+        connection: sqlite3.Connection, table: str,
+    ) -> None:
+        """Reject history schemas with noncanonical key identity/order.
+
+        PRAGMA index_xinfo reports *effective* SQLite collations, including
+        inherited column COLLATE NOCASE/RTRIM. A maliciously overridden BINARY
+        index can mask an incompatible NOCASE table column, so explicit index
+        COLLATE clauses are rejected as well. All names originate from this
+        fixed internal allowlist, never from database-controlled SQL.
+        """
+        index_name = _HISTORY_BINARY_INDEXES[table]
+        matches = [
+            row for row in connection.execute(f"PRAGMA index_list({table})")
+            if row["name"] == index_name
+        ]
+        if (
+            len(matches) != 1
+            or matches[0]["unique"] != 0
+            or matches[0]["partial"] != 0
+            or matches[0]["origin"] != "c"
+        ):
+            raise sqlite3.DatabaseError("invalid history key collation")
+        definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND tbl_name=? AND name=?",
+            (table, index_name),
+        ).fetchone()
+        if (
+            definition is None
+            or type(definition["sql"]) is not str
+            or re.search(r"\bCOLLATE\b", definition["sql"], re.IGNORECASE)
+        ):
+            # Do not trust an index's BINARY override if its table column
+            # may still use NOCASE for WHERE or SELECT DISTINCT.
+            raise sqlite3.DatabaseError("invalid history key collation")
+        keys = [
+            (item["name"], item["coll"], item["desc"])
+            for item in connection.execute(
+                f'PRAGMA index_xinfo("{index_name}")'
+            ) if item["key"] == 1
+        ]
+        if keys != [
+            ("ad_id", "BINARY", 0),
+            ("observed_at", "BINARY", 0),
+            ("id", "BINARY", 0),
+        ]:
+            raise sqlite3.DatabaseError("invalid history key collation")
+
+    @staticmethod
     def _validate_store_schema(
         connection: sqlite3.Connection, *, allow_additive_migrations: bool = False
     ) -> None:
@@ -389,6 +452,8 @@ class SnapshotStore:
             )
             if not (set(expected) - migratable).issubset(columns):
                 raise sqlite3.DatabaseError("database schema is incomplete")
+            if table in _HISTORY_BINARY_INDEXES:
+                SnapshotStore._validate_history_index_collation(connection, table)
 
             if table in _REQUIRED_SINGLE_COLUMN_UNIQUES:
                 unique_columns: set[str] = set()
@@ -2029,6 +2094,13 @@ class SnapshotStore:
         while True:
             with closing(self._connect()) as connection:
                 connection.execute("PRAGMA query_only=ON")
+                # Pages must observe their own schema and rows atomically.
+                # Keep the read transaction only until this page is fetched;
+                # it is released before every generator yield.
+                connection.execute("BEGIN")
+                self._validate_history_index_collation(
+                    connection, "ad_snapshots"
+                )
                 if high_water_id is None:
                     maximum = connection.execute(
                         "SELECT MAX(id) AS max_id FROM ad_snapshots"
@@ -2134,6 +2206,10 @@ class SnapshotStore:
         # Bind both validation probes and the following keyed SELECT to the
         # same read snapshot, even while a WAL writer commits concurrently.
         connection.execute("BEGIN")
+        # The store may survive an external schema change after startup.
+        # Check under the SAME read snapshot as the extrema validation and
+        # the following keyed history read (no validation/lookup TOCTOU).
+        cls._validate_history_index_collation(connection, table)
         for direction in ("ASC", "DESC"):
             row = connection.execute(
                 f"SELECT ad_id FROM {table} ORDER BY ad_id {direction} LIMIT 1"
