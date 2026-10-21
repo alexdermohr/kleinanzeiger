@@ -123,11 +123,11 @@ Frühere offene Punkte zu Verwaltungsscope, Integrationsarchitektur, technischen
 
 ## 5. Technische Gates und Betriebsgrenzen
 
-**Stand auf Main `8ea011d`:** Die folgenden Launcher-/Write-Gate-Verträge (insbesondere Punkte 1, 7 und 9) beschreiben den implementierten technischen Aufbau, **nicht** einen derzeit erreichbaren Product-Launcher. `_require_private_web_authorization()` blockiert den normalen Start und den programmatischen Builder vor deren Ausführung. Der bestehende Offline-Modus bleibt separat nutzbar. Eine spätere Freischaltung setzt frische Tests und technische Abnahme voraus.
+**Technischer Kandidatenstand (D-029, 19.10.2026):** Der reguläre Launcher benötigt eine bereits authentifizierte Browserseite, bestätigt seinen anfänglichen Besitzerbestand über ein festes same-origin Browser-CDP-GET und schaltet Plattformwrites nur nach explizitem lokalem `--enable-writes` frei. Ein erfolgreicher synthetischer Start ist keine live verifizierte Plattformnutzung, Freigabe oder vollständige Kundenabnahme.
 
 Der aktuelle Core und die Runtime-Surfaces erzwingen insbesondere:
 
-1. Die generischen Core-/Runtime-Surfaces bleiben fail-safe default-off. Der normale Produktstart `mark-api-launch` öffnet die bestehenden Capability-, API-, Core- und Media-Gates dagegen ausdrücklich und automatisch für seine lokale, loopback-only Write-Komposition; es gibt keinen zusätzlichen Write-Opt-in im Produktpfad.
+1. Die generischen Core-/Runtime-Surfaces und der normale Produktstart `mark-api-launch` bleiben fail-safe default-off. Erst `--enable-writes` aktiviert die vorhandenen Capability-, API-, Core-/Media-Write-Gates und den Same-Origin-Dashboard-Proxy ausdrücklich für diese lokale Sitzung. Das ist kein externes Plattform-Entitlement (D-029).
 2. ID-gebundene Writes verwenden einen frischen Owner-Pre-Read, genau einen Mutationsversuch und einen frischen target-bound Post-Readback; Create/Delete folgen zusätzlich dem in D-019 festgelegten Confirmation-Vertrag ohne künstlich duplizierte Management-Runtime.
 3. Ein unklarer oder `AMBIGUOUS` Ausgang autorisiert keinen Blind-Retry.
 4. Bei Delete ist die authentifizierte, exakt pfad-ID-gebundene Nutzeroperation selbst die Freigabe; die stabile Idempotency-ID liefert intern die Audit-/Authorization-Referenz.
@@ -135,16 +135,16 @@ Der aktuelle Core und die Runtime-Surfaces erzwingen insbesondere:
 6. Login, MFA, CAPTCHA und sonstige Sicherheitschallenges werden nicht automatisiert oder umgangen.
 7. Die schreibfähige HTTP-Surface bleibt als separate loopback-only Write API erhalten. Der Product Launcher bindet die sichtbare Dashboard Write UX ausschließlich über einen Same-Origin-Proxy daran; der Browser erhält nicht den Backend-Bearer, sondern einen getrennten per-process Dashboard-Token. Beide Tokens werden nicht in SQLite persistiert. Standalone `mark-api-dashboard` bleibt GET-only/read-only.
 8. Die Analytics-Entscheidungen `reaction_metric` und `objective_metric` bleiben unabhängig von den Write-Gates und standardmäßig ungesetzt.
-9. `mark-api-launch` verwendet eine bereits authentifizierte loopback-CDP-Sitzung, führt genau einen fail-closed Initial-Inventory-Sync aus und kann danach ausdrücklich angegebene lokale `.eml`-Reaction-Evidenz batch-atomar importieren. Erst anschließend startet er die default-on Write API und danach das daran gebundene Dashboard. Die Dashboard Write UX delegiert ausschließlich an diese Write API, führt keine automatischen Retries aus und eröffnet weder CORS noch einen privaten/mobile Messaging-Readpfad. Der Launcher startet keinen Browser und automatisiert keinen Login. Automatisierte Tests dieses Slices führen keine Kleinanzeigen-Plattformwrites aus.
+9. `mark-api-launch` verwendet eine bereits authentifizierte loopback-CDP-Sitzung und bestätigt einen fail-closed Initial-Inventory-Sync über ein festes same-origin Management-GET **innerhalb der Browserseite**, ohne Legacy-HTTP-Transport oder Cookie-Export. Danach kann er ausdrücklich angegebene lokale `.eml`-Reaction-Evidenz batch-atomar importieren. Die Write-API-Laufzeit ist zunächst ohne Rechte; nur bei `--enable-writes` wird der Dashboard-Write-Proxy für einzelne autorisierte Nutzeraktionen aktiviert. Automatische Retries, CORS, Login- oder CAPTCHA-Umgehung bleiben ausgeschlossen. Tests dieses Slices führen keine Kleinanzeigen-Plattformwrites aus.
 10. E-Mail-Evidenz bleibt source-explizit: sie erzeugt keine Owner-Identität, keinen `AdSnapshot` und keinen `unique_buyer_count`; `reaction_metric` bleibt default-off. Lokale Klassifikation darf an eine durch Owner-Snapshot **oder** importiertes E-Mail-Event belegte ID gebunden werden. Email-only-IDs nehmen nur an Gruppenrankings von Metriken teil, deren eigene Ranking-Population sie enthält; insbesondere nicht an Views-/Owner-/`ReactionSnapshot`-Gruppen.
 11. Periodische Synchronisation sowie die weitergehende Freshness-/Recovery-UX bleiben spätere Produktslices. Ein Media-Submit-`UNKNOWN` autorisiert weiterhin keinen Write-Retry; beim Launcher-Shutdown ist höchstens die bestehende observation-only Media-Reconciliation vor erneutem Cleanup zulässig.
 12. Die Write API serialisiert ihre Prozessautorität zusätzlich über einen exklusiven OS-Lock auf der SQLite-Datei. Persistente Idempotency-Claims sind runtime-owner-gebunden und besitzen einen separaten Execution-Start-Barrier. Nur ein gleichartiger Claim eines beendeten Runtimes ohne gesetzten Barrier darf übernommen werden; gesetzter Barrier und Legacy-Claims ohne beweisbaren Owner bleiben über Neustarts fail-closed.
 
-Die maßgeblichen Architektur- und Sicherheitsentscheidungen sind in D-006 bis D-027 dokumentiert. Ein implementierter technischer Pfad ist keine automatische Freigabe für reale Plattformwrites außerhalb einer vom Nutzer ausgelösten Produktoperation.
+Die maßgeblichen Architektur- und Sicherheitsentscheidungen sind in D-006 bis D-029 dokumentiert. Ein implementierter technischer Pfad ist keine automatische Freigabe für reale Plattformwrites außerhalb einer vom Nutzer ausgelösten Produktoperation.
 
 ## 6. Vorhandene MVP-Bausteine (noch keine vollständige Produktabnahme)
 
-Die folgende Liste bezeichnet implementierte Verträge/Komponenten und historisch getestete Einzelpfade. Insbesondere die Launcher-/Default-on-Elemente 10 bis 12, 14 und 16 sind auf Main `8ea011d` wegen des vorgeschalteten pauschalen Startup-Abbruchs **nicht als Endnutzerpfad ausführbar**. Aus ihrer Existenz folgt daher weder vollständige installierte Nutzbarkeit noch eine neue Plattformberechtigung:
+Die folgende Liste bezeichnet implementierte Verträge/Komponenten und historisch getestete Einzelpfade. Der aktuelle Browser-Owner-Read und die explizite lokale Write-Aktivierung sind synthetisch getestet. Daraus folgt weder eine vollständig bestätigte Live-Benutzbarkeit noch eine Plattformberechtigung:
 
 1. Synchronisation und read-only Besitzer-/Bestandsdaten,
 2. ID-gebundenes Content-Update,
@@ -157,19 +157,19 @@ Die folgende Liste bezeichnet implementierte Verträge/Komponenten und historisc
 9. Analytics-Rohmetriken und Vergleiche nach Bild-Typ, Stadt, Text-Typ und Titel-Typ,
 10. read-only Daten-/Analytics-Dashboard plus im Product Launcher Same-Origin Write UX für die bestehenden Create-/Media-/Content-/State-/Delete-Surfaces, Grafiken, Top-Listen und lokale Runtime-Smokes,
 11. installierter `mark-api-launch`-Startpfad mit genau einem bestätigten Startup-Inventory-Sync vor Dashboard und Write API,
-12. Default-on Produktkomposition der bestehenden Create-, Media-, Content-, State- und Delete-Surfaces mit prozesslokalem Bearer und unveränderten Idempotency-/Confirmation-/No-Blind-Retry-Grenzen.
+12. Default-Deny Produktkomposition mit lokalem `--enable-writes` für Create-, Media-, Content-, State- und Delete-Surfaces, prozessinternem (nicht ausgegebenem) Bearer und unveränderten Idempotency-/Confirmation-/No-Blind-Retry-Grenzen.
 13. Interne Auth-/Idempotency-Härtung mit exklusiver SQLite-Write-Runtime, runtime-owner-gebundenen Claims, persistiertem Execution-Start-Barrier und fail-closed Legacy-Migration.
 14. Im normalen Launcher optionaler, ausdrücklich dateigebundener Reaction-Import lokaler Kleinanzeigen-E-Mail-Kopien vor den HTTP-Surfaces; idempotent, ohne Mailbox-/Messaging-Netzwerkzugriff und ohne erfundene Owner- oder Buyer-Fakten.
 15. Explizite lokale Klassifikation von Email-only-IDs mit source-expliziten E-Mail-Gruppenrankings, ohne `AdSnapshot`, Owner-/Presence-Folgerung oder Ausweitung auf nicht belegte Metriken.
 16. Same-Origin Dashboard Write UX mit getrenntem UI-Token, serverseitiger Bearer-Injektion, strikter Proxy-Allowlist und exakt gebundener UI-Idempotenz ohne automatische Wiederholung bei unbekanntem Transportausgang.
 
-Text- und Bildgenerierung bleiben dokumentiert, aber für diesen MVP depriorisiert.
+Text- und Bildgenerierung sind gemäß D-028 verpflichtender Endproduktumfang; ihr vollständig bedienbarer, integrierter Pfad ist noch nicht abgenommen.
 
 Reale sichtbare Testanzeigen, Testnachrichten oder zyklische Plattformwrites werden nicht als normale Regressionstests verwendet.
 
 ## 7. Nächste Produktphase
 
-Die bislang implementierte Launcher-Komposition soll den kohärenten Startpfad aus Initial-Sync, read-only Daten-/Analytics-Dashboard, Same-Origin Write UX und default-on Write-Komposition schließen; auf Main `8ea011d` verhindert das pauschale Admission-Gate ihre Ausführung. Der Endnutzerpfad muss nach der gezielten Korrektur erneut installiert und Ende-zu-Ende getestet werden. Die bestehenden Authentizitäts-, Ownership-, Confirmation-, TOCTOU-, Readback- und No-Blind-Retry-Sicherheiten bleiben erhalten; D-024 härtet zusätzlich die persistente Idempotenz über Prozessabbruch und Neustart.
+Der neue Launcher-Kandidat soll den kohärenten Startpfad aus browsergebundenem Initial-Sync, read-only Daten-/Analytics-Dashboard und bei expliziter lokaler Benutzeraktivierung zusätzlich Same-Origin Write UX schließen. Der frühere pauschale Startabbruch und die nach PR #125 gesperrte direkte Legacy-Management-Abfrage werden nicht als Ersatz für die eigentliche Produktfunktion akzeptiert. Der Endnutzerpfad muss nach der gezielten Korrektur erneut installiert und Ende-zu-Ende getestet werden. Die bestehenden Authentizitäts-, Ownership-, Confirmation-, TOCTOU-, Readback- und No-Blind-Retry-Sicherheiten bleiben erhalten; D-024 härtet zusätzlich die persistente Idempotenz über Prozessabbruch und Neustart.
 
 Die interne Auth-/Idempotency-Härtung, der explizite lokale Reaction-Data-Startup-Pfad, Email-only Classification und Dashboard Write UX sind implementierte Bausteine. Ihre Integration in einen tatsächlich startbaren und vollständig geprüften Produktpfad sowie wiederholbarer Sync/Freshness, Recovery UX, SQLite Lifecycle, Shutdown, Packaging, Full E2E und der finale Produktaudit bleiben konkrete Lieferarbeiten.
 

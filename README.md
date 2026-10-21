@@ -67,6 +67,26 @@ ohne das Flag wird der Anbieter nicht aufgerufen. CLI und Dashboard
 zeigen vor Bestätigung die Standardmodelle und variable Listenpreis-Basis
 sowie die aktuelle OpenAI-Preisquelle; es gibt keine Kostengarantie.
 
+## Periodischer Besitzer-Bestandsabgleich – getrennte, gegatete Komponente
+
+Der modulare `mark_api.periodic_sync`-Synchronisierer protokolliert
+ausschließlich **synthetische**, read-only Owner-Inventarbeobachtungen
+mit persistentem SQLite-Versuchsjournal, ohne zweite parallele
+Bestandsabfrage oder automatische Schreibwiederholung. Die unterliegende
+CDP-Ereignisverarbeitung berücksichtigt SIGINT/SIGTERM und eine begrenzte
+Sende-/Empfangsfrist. Tests benutzen Fake-Runtimes ohne Plattformverkehr.
+
+**Keine Freigabe automatisierter Kleinanzeigen-Abfragen:** Der öffentliche
+Einstieg `python -m mark_api.periodic_sync` und der ungeprüfte
+Default-PrivateWeb-Runtimepfad verweigern bis zum Nachweis einer
+kontogebundenen offiziellen Transportberechtigung jeden CDP-/Plattform-Read.
+`--once`, `--immediate`, eine lokale Anmeldung oder eigene CLI-Flags
+sind keine Berechtigungsnachweise. Für die erlaubte Offline-Nutzung stehen
+eigene EML-Dateien und offizielle Exporte bereit.
+Siehe [docs/periodic-sync.md](docs/periodic-sync.md) sowie
+[Issue #111](https://github.com/alexdermohr/mark-api/issues/111).
+Die vollständige Host-/Recovery-Abnahme aus Issue #76 bleibt gesondert offen.
+
 ## Status
 
 **Core, Dashboard und Analytics implementiert / PrivateWebWriter + Runtime-Smoke real belegt / Product Launcher mit Default-on Write Composition, lokalem Reaction-Import und Same-Origin Dashboard Write UX implementiert / Write-API-Auth-/Idempotency-Runtime crash-sicher gehärtet** — Stand: 05.10.2026.
