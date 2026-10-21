@@ -2374,6 +2374,181 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         finally:
             owner.close()
 
+
+    def test_stdlib_tcp_refusal_does_not_permanently_quarantine_target(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX target ownership required")
+        import socket
+
+        # A locally bound but non-listening AF_INET socket guarantees a
+        # refused loopback connect without contacting a real Chrome browser.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+            blocker.bind(("127.0.0.1", 0))
+            port = blocker.getsockname()[1]
+            endpoint = f"http://127.0.0.1:{port}"
+            target = {
+                "type": "page",
+                "webSocketDebuggerUrl":
+                    f"ws://127.0.0.1:{port}/devtools/page/synthetic",
+            }
+
+            def opener(url, **kwargs):
+                return FakeResponse([target], url=url)
+
+            with self.assertRaises(PrivateWebCdpError) as refused:
+                _LoopbackCdpClient(
+                    endpoint,
+                    timeout_seconds=1,
+                    opener=opener,
+                    websocket_factory=lambda *args, **kwargs: FakeSocket([]),
+                    tcp_socket_factory=socket.create_connection,
+                )
+            self.assertEqual(refused.exception.stage, "connect")
+
+            # create_connection closed its attempted raw socket on OSError.
+            # A cooperating client must be able to reserve the same CDP port
+            # now; permanent quarantine would turn a known failure into DoS.
+            recovered = _LoopbackCdpClient(
+                endpoint,
+                timeout_seconds=1,
+                opener=opener,
+                websocket_factory=lambda *args, **kwargs: FakeSocket([]),
+                tcp_socket_factory=lambda *args, **kwargs: FakeTcpSocket(),
+            )
+            recovered.close()
+
+
+    def test_injected_tcp_factory_error_keeps_ambiguous_target_quarantined(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX target claim required")
+        endpoint = "http://127.0.0.1:19639"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19639/devtools/page/synthetic",
+        }
+        retained_raw = []
+
+        def injected_factory(*args, **kwargs):
+            # Unlike stdlib create_connection, an injected factory can retain
+            # a partially constructed socket before raising ordinary OSError.
+            retained_raw.append(FakeTcpSocket())
+            raise OSError("unknown injected TCP ownership")
+
+        with self.assertRaises(PrivateWebCdpError) as failed:
+            _LoopbackCdpClient(
+                endpoint,
+                timeout_seconds=1,
+                opener=lambda url, **kw: FakeResponse([target], url=url),
+                websocket_factory=lambda *args, **kw: FakeSocket([]),
+                tcp_socket_factory=injected_factory,
+            )
+        self.assertEqual(failed.exception.stage, "connect")
+        self.assertEqual(len(retained_raw), 1)
+
+        # The unknown injected transport must not make a busy page reusable.
+        with self.assertRaises(PrivateWebCdpError) as blocked:
+            _LoopbackCdpClient(
+                endpoint,
+                timeout_seconds=1,
+                opener=lambda url, **kw: FakeResponse([target], url=url),
+                websocket_factory=lambda *args, **kw: FakeSocket([]),
+                tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+            )
+        self.assertEqual(blocked.exception.stage, "target_busy")
+
+
+    def test_opener_cannot_reenter_inner_cdp_connector(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX claim required")
+        state = {"discovery": 0, "websockets": 0, "reentry_denied": False}
+        owner = {}
+        endpoint = "http://127.0.0.1:19641"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19641/devtools/page/pinned",
+        }
+
+        class CapturingClient(_LoopbackCdpClient):
+            def _connect(self):
+                owner["client"] = self
+                return super()._connect()
+
+        def opener(url, **kwargs):
+            state["discovery"] += 1
+            if state["discovery"] == 1:
+                try:
+                    nested = owner["client"]._connect_under_owner()
+                except PrivateWebCdpWriteNotAttemptedError:
+                    state["reentry_denied"] = True
+                else:
+                    nested.close()
+            return FakeResponse([target], url=url)
+
+        def websocket_factory(*args, **kwargs):
+            state["websockets"] += 1
+            return FakeSocket([])
+
+        client = CapturingClient(
+            endpoint,
+            timeout_seconds=1,
+            opener=opener,
+            websocket_factory=websocket_factory,
+            tcp_socket_factory=lambda *args, **kwargs: FakeTcpSocket(),
+        )
+        try:
+            self.assertTrue(state["reentry_denied"])
+            self.assertEqual(state["discovery"], 1)
+            self.assertEqual(state["websockets"], 1)
+        finally:
+            client.close()
+
+    def test_unknown_tcp_reconnect_quarantines_before_second_factory(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX claim required")
+        endpoint = "http://127.0.0.1:19642"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19642/devtools/page/pinned",
+        }
+        calls = []
+        retained_raw = []
+
+        def factory(*args, **kwargs):
+            calls.append("tcp")
+            if len(calls) == 2:
+                retained_raw.append(FakeTcpSocket())
+                raise OSError("unknown injected transport ownership")
+            return FakeTcpSocket()
+
+        client = _LoopbackCdpClient(
+            endpoint,
+            timeout_seconds=1,
+            opener=lambda url, **kwargs: FakeResponse([target], url=url),
+            websocket_factory=lambda *args, **kwargs: FakeSocket([]),
+            tcp_socket_factory=factory,
+        )
+        with self.assertRaises(PrivateWebCdpError) as failed:
+            client.reconnect_for_observation()
+        self.assertEqual(failed.exception.stage, "connect")
+        with self.assertRaises(PrivateWebCdpError) as denied:
+            client.reconnect_for_observation()
+        self.assertIn(denied.exception.stage, ("target_unowned", "reconnect"))
+        self.assertEqual(calls, ["tcp", "tcp"])
+        self.assertEqual(len(retained_raw), 1)
+        with self.assertRaises(PrivateWebCdpError) as another:
+            _LoopbackCdpClient(
+                endpoint,
+                timeout_seconds=1,
+                opener=lambda url, **kwargs: FakeResponse([target], url=url),
+                websocket_factory=lambda *args, **kwargs: FakeSocket([]),
+                tcp_socket_factory=lambda *args, **kwargs: FakeTcpSocket(),
+            )
+        self.assertEqual(another.exception.stage, "target_busy")
+        # Deliberately leave UNKNOWN transport quarantined for process life.
+
     def test_loopback_client_closes_direct_socket_on_websocket_failure(self) -> None:
         good_target = {
             "type": "page",

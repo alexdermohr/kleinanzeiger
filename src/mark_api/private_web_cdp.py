@@ -177,6 +177,7 @@ class _LoopbackCdpClient:
         self._owner_pid = os.getpid()
         self._connect_owner_thread: int | None = None
         self._connect_in_progress = False
+        self._connect_role_token: object | None = None
         self._target_websocket_url: str | None = None
         self._transport_construction_pending = False
         self._close_unknown = False
@@ -245,7 +246,15 @@ class _LoopbackCdpClient:
         _require_private_web_cdp_authority()
         self._assert_live_target_reservation()
         with self._lifecycle_lock:
-            if self._closing or self._reconnecting or self._active_calls:
+            if (
+                self._closing
+                or self._reconnecting
+                or self._active_calls
+                or self._transport_construction_pending
+                or self._close_unknown
+            ):
+                # A prior unknown factory/WS outcome retains the original
+                # browser claim, but may not create a second observer socket.
                 raise PrivateWebCdpError("reconnect")
             self._reconnecting = True
         try:
@@ -302,21 +311,28 @@ class _LoopbackCdpClient:
         ):
             raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
         self._connect_in_progress = True
+        token = object()
+        self._connect_role_token = token
         try:
-            return self._connect_under_owner()
+            return self._connect_under_owner(token)
         finally:
+            self._connect_role_token = None
             self._connect_in_progress = False
 
-    def _connect_under_owner(self):
-        # The actual discovery method is also directly importable. It may
-        # never bypass the narrow owning-thread and reentrancy checks.
+    def _connect_under_owner(self, token: object | None = None):
+        # A factory/opener runs while outer _connect_in_progress is true.
+        # Consume this single-use private token *before* invoking any such
+        # hook, so reentry by that hook cannot create a second WebSocket.
         _require_private_web_cdp_authority()
         self._assert_live_target_reservation()
         if (
             getattr(self, "_connect_owner_thread", None) != get_ident()
             or not getattr(self, "_connect_in_progress", False)
+            or token is None
+            or token is not getattr(self, "_connect_role_token", None)
         ):
             raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        self._connect_role_token = None
         try:
             discovery_url = f"{self._endpoint}/json/list"
             with self._opener(
@@ -369,10 +385,20 @@ class _LoopbackCdpClient:
 
                 factory = websocket.create_connection
             self._transport_construction_pending = True
-            raw_socket = self._tcp_socket_factory(
-                ("127.0.0.1", self._port),
-                timeout=self._timeout_seconds,
-            )
+            try:
+                raw_socket = self._tcp_socket_factory(
+                    ("127.0.0.1", self._port),
+                    timeout=self._timeout_seconds,
+                )
+            except Exception:
+                if self._tcp_socket_factory is socket.create_connection:
+                    # The stdlib helper closes every attempted socket on an
+                    # ordinary connect error. No raw transport escapes it, so
+                    # constructor cleanup may release this claim for retry.
+                    # Injected factories and BaseException are *not* trusted
+                    # to provide that guarantee: retain the UNKNOWN fence.
+                    self._transport_construction_pending = False
+                raise
             try:
                 return factory(
                     websocket_url,
