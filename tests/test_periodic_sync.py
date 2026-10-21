@@ -503,7 +503,7 @@ class PeriodicReadTests(unittest.TestCase):
     def test_real_sigterm_during_cdp_call_aborts_without_next_navigation(self):
         if not hasattr(signal, "pthread_sigmask"):
             self.skipTest("Linux/POSIX signal mask required")
-        from mark_api.private_web_runtime import build_private_web_inventory_runtime
+        from mark_api.private_web_inventory_cdp import CdpManagementInventoryReader
         calls = []
         class FakeCdp:
             def __init__(self):
@@ -518,22 +518,34 @@ class PeriodicReadTests(unittest.TestCase):
                     calls.append(method)
                     if len(calls) == 1:
                         signal.raise_signal(signal.SIGTERM)
-                        return {"result": {"value": True}}
+                        # The owner checks an already-open management tab,
+                        # never navigates the browser under a running writer.
+                        return {"result": {"value": {
+                            "readyState": "complete",
+                            "origin": "https://www.kleinanzeigen.de",
+                            "path": "/m-meine-anzeigen.html",
+                        }}}
                     raise AssertionError("no CDP call allowed after SIGTERM")
             def close(self):
                 self.closed = True
         cdp = FakeCdp()
-        sync = self.controller(
-            lambda **kw: build_private_web_inventory_runtime(**kw),
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610,
+            preconnected_client=cdp,
+            client_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("lazy CDP connect forbidden on stop-aware read")
+            ),
         )
+        runtime = PrivateWebInventoryRuntime(
+            owner_reader=reader, close_runtime=reader.close,
+        )
+        sync = self.controller(lambda **_: runtime)
         original = signal.signal(
             signal.SIGTERM,
             lambda *_: sync.request_stop_from_signal(),
         )
         try:
             with (
-                patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
-                patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient", return_value=cdp),
                 patch("mark_api.private_web_inventory_cdp._require_private_web_cdp_authority"),
             ):
                 with self.assertRaises(PeriodicSyncStopped):
