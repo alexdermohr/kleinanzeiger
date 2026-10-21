@@ -303,6 +303,22 @@ def _validated_write_api_claim_owner(value: str) -> str:
     return value
 
 
+class _ClosingSQLiteConnection(sqlite3.Connection):
+    """End the transaction and close the handle when a with-block exits.
+
+    sqlite3.Connection.__exit__ only commits or rolls back: it does not close
+    the descriptor. SnapshotStore uses transaction scopes throughout, so the
+    exit must keep the original commit/rollback semantics *then* close, even
+    on malformed data, cancellation, or a failing commit.
+    """
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class SnapshotStore:
     """Append-only SQLite storage for normalized observations and write receipts."""
 
@@ -340,7 +356,9 @@ class SnapshotStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._existing_uri, uri=True)
+        connection = sqlite3.connect(
+            self._existing_uri, uri=True, factory=_ClosingSQLiteConnection
+        )
         connection.row_factory = sqlite3.Row
         return connection
 
