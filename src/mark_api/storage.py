@@ -1939,28 +1939,31 @@ class SnapshotStore:
     ) -> tuple[AdSnapshot, ...]:
         """Order actual instants, then insertion IDs; preserve field evidence."""
 
-        parsed = sorted(
-            (
-                (datetime.fromisoformat(row["observed_at"]), int(row["id"]), row)
-                for row in rows
-            ),
-            key=lambda item: (item[0], item[1]),
-        )
-        return tuple(
-            AdSnapshot(
-                ad_id=row["ad_id"],
-                observed_at=observed_at,
-                source=row["source"],
-                metric_source=row["metric_source"],
-                lifecycle_state=LifecycleState(row["lifecycle_state"]),
-                title=row["title"],
-                description=row["description"],
-                views=row["views"],
-                watch_count=row["watch_count"],
-                reply_count=row["reply_count"],
+        try:
+            parsed = sorted(
+                (
+                    (datetime.fromisoformat(row["observed_at"]), int(row["id"]), row)
+                    for row in rows
+                ),
+                key=lambda item: (item[0], item[1]),
             )
-            for observed_at, _, row in parsed
-        )
+            return tuple(
+                AdSnapshot(
+                    ad_id=row["ad_id"],
+                    observed_at=observed_at,
+                    source=row["source"],
+                    metric_source=row["metric_source"],
+                    lifecycle_state=LifecycleState(row["lifecycle_state"]),
+                    title=row["title"],
+                    description=row["description"],
+                    views=row["views"],
+                    watch_count=row["watch_count"],
+                    reply_count=row["reply_count"],
+                )
+                for observed_at, _, row in parsed
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise sqlite3.DatabaseError("invalid ad snapshot data") from exc
 
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
         """Return observations by actual instant, then insertion ID for ties."""

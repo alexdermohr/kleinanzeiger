@@ -1591,6 +1591,52 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
                     self.assertEqual(payload, {"error": "database_unavailable"})
                 self.assertNotIn("corrupt private value", str(payload))
 
+    def test_malformed_snapshot_text_is_sanitized_for_http_clients(self) -> None:
+        """Invalid native TEXT must not abort the HTTP connection."""
+        self.assertEqual(self.get("/api/ads")[0], 200)
+        self.assertEqual(self.get("/api/summary")[0], 200)
+        for field, damaged in (
+            ("observed_at", "not-a-timestamp-private-value"),
+            ("lifecycle_state", "not-a-lifecycle-private-value"),
+        ):
+            with self.subTest(field=field):
+                with sqlite3.connect(self.store.path) as connection:
+                    original_row = connection.execute(
+                        f"SELECT {field} FROM ad_snapshots WHERE id = 1"
+                    ).fetchone()
+                    self.assertIsNotNone(original_row)
+                    original_value = original_row[0]
+                    connection.execute(
+                        f"UPDATE ad_snapshots SET {field} = ? WHERE id = 1",
+                        (damaged,),
+                    )
+                try:
+                    self.assertEqual(
+                        json.loads(self.get("/healthz")[2]), {"status": "ok"}
+                    )
+                    for path in ("/api/ads", "/api/summary", "/api/ads/1/history"):
+                        with self.subTest(path=path):
+                            with self.assertRaises(HTTPError) as failure:
+                                urlopen(self.base + path, timeout=2)
+                            response = failure.exception
+                            self.assertEqual(response.code, 503)
+                            self.assertEqual(
+                                response.headers["Cache-Control"], "no-store"
+                            )
+                            body = response.read().decode("utf-8")
+                            self.assertEqual(
+                                json.loads(body), {"error": "database_unavailable"}
+                            )
+                            self.assertNotIn(damaged, body)
+                            self.assertNotIn(str(self.store.path), body)
+                finally:
+                    with sqlite3.connect(self.store.path) as connection:
+                        connection.execute(
+                            f"UPDATE ad_snapshots SET {field} = ? WHERE id = 1",
+                            (original_value,),
+                        )
+                self.assertEqual(self.get("/api/ads")[0], 200)
+
     def test_history_and_reactions_endpoints(self) -> None:
         _, _, history_body = self.get("/api/ads/1/history")
         history = json.loads(history_body)
