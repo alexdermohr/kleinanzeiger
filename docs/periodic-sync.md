@@ -1,82 +1,30 @@
-# Periodischer Bestandsabgleich – technisch getestete Read-only-Komponente
+# Kleinanzeiger – regelmäßige Bestandssynchronisation
 
-Stand: 20. Oktober 2026. Die Klasse `PeriodicOwnerSync` unterstützt
-synthetisch geprüfte SQLite-Read-/Fehlerjournale, bestätigte Leerbestände,
-ABSENT-Übergänge und begrenztes Scheduling. Diese Komponente ist **keine
-Freigabe** zur Nutzung automatisierter Kleinanzeigen-Schnittstellen.
+**Technische Funktion:** Der installierte Befehl `kleinanzeiger-sync` verwendet denselben abgesicherten, rein lesenden Besitzerbestand-Adapter und das SQLite-Synchronisationsjournal wie Kleinanzeiger. Er benötigt eine bereits vom Anwender authentifizierte lokale Chrome-/Chromium-Sitzung mit exakt lokal gebundenem CDP-Port. Der Befehl startet keinen Browser und führt weder Login/MFA/CAPTCHA noch Anzeigenänderungen aus.
 
-## Öffentlicher Einstieg: fail-closed
+## Benutzung
 
-Der Modulstart `python -m mark_api.periodic_sync` verweigert bis zur
-unabhängigen Prüfung eines tatsächlich zugelassenen offiziellen Transports
-und der konto-/scopegebundenen Plattformberechtigung alle CDP-/Plattformreads,
-auch mit `--once` oder `--immediate`. Er öffnet dabei weder die SQLite-DB
-noch einen Browser und liefert Exit-Code 2. Eine angemeldete Chrome-Sitzung
-oder ein lokales Flag reicht nicht als Rechtfertigung (Issue #111).
+```bash
+# Einzelne bestätigte Bestandsbeobachtung auf bestehender Datenbank
+kleinanzeiger-sync --db /pfad/kleinanzeiger.sqlite --cdp-port 9222 --once
 
-Beispiel zur **negativen Kontrolle**, kein auszuführender Plattform-Read:
+# Initialer Read und anschließende Aktualisierung alle fünf Minuten
+kleinanzeiger-sync --db /pfad/kleinanzeiger.sqlite --cdp-port 9222 --immediate --interval-seconds 300
 
-    python -m mark_api.periodic_sync --db /pfad/mark.sqlite --cdp-port 9222 --once
-    # Exit 2: automatic Kleinanzeigen/CDP reads are disabled
+# Ohne --immediate: erster Read nach dem ersten Intervall
+kleinanzeiger-sync --db /pfad/kleinanzeiger.sqlite --cdp-port 9222 --interval-seconds 300
+```
 
-Eigene bereitgestellte `.eml`-Dateien oder offizielle Exporte bleiben
-über den unabhängigen Offline-Import verfügbar. Der rein synthetische
-`PeriodicOwnerSync(runtime_factory=FakeRuntime, ...)`-Integrationsseam bleibt
-für Regressionen erhalten; daraus entsteht keinerlei Plattformautorität.
+Das zulässige Intervall beträgt 60 bis 86.400 Sekunden. Ein neuer Poll beginnt erst nach Abschluss des vorigen Durchlaufs; keine Catch-up-Bursts. **Die SQLite-Datei muss bereits existieren** und wird durch diesen Einstieg niemals stillschweigend ersetzt oder neu angelegt.
 
-## Verbindliche Betriebs- und Sicherheitsgrenze
+**Keine parallelen Chrome-Operatoren:** Den Synchronisierer nicht gleichzeitig mit dem Produktstarter oder einem anderen Writer auf demselben Browserziel ausführen. Die bestehende exklusive CDP-Zielreservierung verweigert konkurrierende Zugriffe der eigenen Prozesse. Sie ersetzt keine Browser- oder Account-Authentifizierung und garantiert keine Koordination mit fremden Programmen.
 
-**Nur bei später nachgewiesener offizieller Berechtigung und freigegebenem Transport: Als alleiniger Benutzer der CDP-Lesesitzung verwenden. Nicht parallel
-zu einem Plattformwriter, einem zweiten Inventurprozess oder einem anderen
-Browserautomaten mit derselben Konto-/CDP-Sitzung starten.** Die vorhandene
-Write API und der neue Standalone-Synchronisierer besitzen noch keinen
-gemeinsamen prozessübergreifenden CDP-Mutex. Die produktweite automatische
-Aktivierung ist bis zum Nachweis dieser Exklusivität weiterhin NO-GO.
-Die Browseranmeldung ist keine behauptete externe Plattformberechtigung.
+## Fehler- und Wiederanlaufvertrag
 
-Der Normalstart führt den ersten Read erst nach dem konfigurierten Intervall
-aus. --immediate ist eine ausdrückliche Ausnahme. Intervalle sind auf 60 bis
-86400 Sekunden begrenzt. Jeder weitere Read beginnt erst nach dem Ende des
-vorhergehenden Versuchs; es gibt keine parallelen Requests oder
-Catch-up-Schleife.
+- Vor jedem Browserread wird ein `in_progress`-Versuch mit Zeitpunkt und Quelle im vorhandenen SQLite-Journal angelegt.
+- Nur ein erfolgreich bestätigter Besitzerread speichert Bestands-Snapshots und `success_empty` beziehungsweise `success_nonempty` atomar mit dem Journalabschluss. Eigene, bisher vorhandene Anzeigen können erst aufgrund bestätigter Abwesenheit auf `ABSENT` wechseln.
+- Fehlgeschlagene, beschädigte, unauthentifizierte oder uneindeutige Reads überschreiben weder die bisherige Anzeigenhistorie noch die letzte erfolgreiche Beobachtung. Sie beenden den Polling-Lauf ohne automatischen Blind-Retry und zeigen einen begrenzten Fehler.
+- Ein durch Prozessabbruch offener Versuch bleibt `in_progress`/ungeklärt, niemals ein behaupteter Erfolg. Ein erneuter Aufruf prüft den tatsächlichen Bestand neu und verwendet keine vorherige unbekannte Antwort als Bestätigung.
+- `SIGINT` und `SIGTERM` stoppen weitere Polls kontrolliert. Ein bereits begonnener Read kann nur nach seiner eigenen konservativen Abbruch-/Journalbehandlung enden; `SIGKILL` kann einen ungeklärten Datensatz hinterlassen.
 
-Vor jedem Browserkontakt wird ein eigener persistenter in_progress-Eintrag
-im vorhandenen SQLite-sync_attempts-Journal eröffnet. Erfolgreiche
-Bestandsbeobachtungen und success_empty/success_nonempty einschließlich
-ABSENT-Übergänge werden atomar gemeinsam geschrieben. Ein bereits als
-ABSENT dokumentiertes Inserat erhält bei nachfolgenden leeren Bestandsreads
-keine weiteren identischen ABSENT-Zeilen; die neuesten Zustände werden
-mit **einem** read-only SQLite-Stream ermittelt, dessen letzte Zustände
-anhand echter UTC-Zeitpunkte (einschließlich Mikrosekunden) und Eintrags-IDs
-verglichen werden. Unterschiedliche Zeitzonen-Offsets dürfen eine
-ABSENT-/ACTIVE-Reihenfolge nicht verfälschen. Es gibt weder einen neuen
-SQLite-Verbindungsaufbau noch einen vollständigen History-Sort pro Anzeige.
-Erst eine erneute Beobachtung als vorhanden erlaubt einen späteren
-ABSENT-Übergang.
-Fehlerhafte oder unauthentifizierte Reads überschreiben weder vorher
-bestätigte Snapshots noch den letzten tatsächlich erfolgreichen Abgleich.
-**Jede fehlgeschlagene Inventur beendet den Polling-Prozess mit Fehlercode.**
-Das umfasst Transportfehler: Ein Login-Redirect kann von der darunterliegenden
-CDP-Komponente statt als UNAUTHENTICATED auch als TRANSPORT_ERROR erscheinen.
-Aus Sicherheitsgründen startet der Scheduler in diesem unklaren Zustand keine
-neuen automatischen Managementabfragen. Nach Prüfung ist ein expliziter
-Neustart notwendig, auch nach einem bloß temporären Netzwerkfehler.
-
-SIGINT und SIGTERM beenden die Planung weiterer Zyklen. Auch wenn das
-Stoppsignal erst zwischen zwei Zykluschecks eingeht, endet der Prozess
-regulär ohne neuen Browserzugriff und ohne irreführenden Fehlercode.
-Ein bereits begonnener Browser-Read darf keine falsche Erfolgsaussage erzeugen.
-Ein Prozessabbruch bzw. SIGKILL kann in_progress hinterlassen: Der Ausgang
-bleibt dann ungeklärt. Ein unklarer SQLite-Commit wird niemals durch einen
-blinden Retry oder einen erfundenen Erfolgsstatus kaschiert; der bestehende
-CAS beim Versuchabschluss entscheidet unabhängig. Wenn auch der Versuch,
-eine Fehlerklasse zu speichern, wegen ausgefallener SQLite scheitert,
-erscheint nach außen ausschließlich der begrenzte Fehler samt Exit-Code 2;
-der angefangene Versuch bleibt dokumentiert als in_progress/ungeklärt.
-
-Das Modul stellt weder Plattform-POST-/PATCH-/DELETE-Operationen noch
-eine Write API bereit, verlangt keinen generischen Freigabe-Boolean
-und erzeugt keine Credential-/Cookieexporte. Die endgültige Verbindung
-mit dem Produktlauncher, vollständige installierte Endnutzerläufe sowie
-ein exklusiver gemeinsamer CDP-/Write-Scheduler bleiben gesondert zu
-implementieren und zu prüfen.
+Die Analyseoberfläche zeigt **Synchronisationszeit und Herkunft getrennt von der Aktualität einzelner Kennzahlen**. Eine lokale E-Mail- oder Katalogdatei erzeugt keinen bestätigten Besitzerstatus. Für die vollständige Endabnahme sind die installierte Dashboard-/Write-/Sync-Kette sowie Backup und Wiederherstellung auf demselben Liefercommit zu prüfen.
