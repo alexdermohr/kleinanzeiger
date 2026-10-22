@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
@@ -891,6 +892,254 @@ class MarkQueryServiceTests(SeededStoreMixin, unittest.TestCase):
         self.assertEqual(deleted.watch_count, 0)
         self.assertEqual(deleted.reply_count, 1)
 
+    def test_latest_ads_reads_all_history_in_one_connection(self) -> None:
+        store = self.make_store()
+        # The old path opened one connection for tracked_ad_ids and another
+        # for every tracked ad. A single consistent read must replace it.
+        with patch.object(store, "_connect", wraps=store._connect) as opened:
+            views = MarkQueryService(store).latest_ads()
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual([item.ad_id for item in views], ["1", "2"])
+        self.assertEqual(views[0].views, 15)
+        self.assertFalse(views[0].present)
+
+    def test_batched_history_preserves_timezone_and_insertion_ties(self) -> None:
+        store = self.make_store()
+        # Insert out-of-order status and same-instant, differently offset facts.
+        # Equal instants must break ties by SQLite insertion ID, not ISO text.
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="7", observed_at=T1, source="fresh-metric",
+            lifecycle_state=LifecycleState.ACTIVE, views=0, watch_count=8,
+        ))
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="7", observed_at=T0, source="late-arrival",
+            lifecycle_state=LifecycleState.PAUSED, views=900,
+        ))
+        same_instant = T1.astimezone(timezone(timedelta(hours=2)))
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="7", observed_at=same_instant, source="new-status",
+            lifecycle_state=LifecycleState.ABSENT,
+        ))
+        histories = tuple(store.ad_histories())
+        self.assertEqual([ad_id for ad_id, _ in histories], ["1", "2", "7"])
+        self.assertEqual(
+            histories,
+            tuple((ad_id, store.ad_history(ad_id)) for ad_id, _ in histories),
+        )
+        item = {view.ad_id: view for view in MarkQueryService(store).latest_ads()}["7"]
+        self.assertEqual(item.lifecycle_state, LifecycleState.ABSENT)
+        self.assertEqual(item.observed_at, same_instant)
+        self.assertEqual(item.views, 0)
+        self.assertEqual(item.watch_count, 8)
+        self.assertEqual(item.metric_evidence["views"].source, "fresh-metric")
+        self.assertTrue(item.metric_evidence["views"].last_known)
+
+    def test_ad_histories_are_streamed_one_group_at_a_time(self) -> None:
+        store = self.make_store()
+        # An ad's observation history must be decoded only when consumed.
+        with patch.object(
+            store, "_decode_ad_history", wraps=store._decode_ad_history,
+        ) as decoded:
+            stream = store.ad_histories()
+            self.assertEqual(decoded.call_count, 0)
+            first_id, first_history = next(stream)
+            self.assertEqual(first_id, "1")
+            self.assertEqual(len(first_history), 2)
+            self.assertEqual(decoded.call_count, 1)
+            # Explicit early closure must neither materialize another ad
+            # nor leave a SQLite cursor held by the generator.
+            stream.close()
+            self.assertEqual(decoded.call_count, 1)
+
+    def test_batch_index_scan_needs_no_temp_sort_for_grouping(self) -> None:
+        store = self.make_store()
+        with store._connect() as connection:
+            details = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT id, ad_id, observed_at "
+                "FROM ad_snapshots ORDER BY ad_id ASC"
+            ).fetchall()
+        plan = " ".join(str(row["detail"]) for row in details)
+        self.assertNotIn("USE TEMP B-TREE", plan)
+        self.assertIn("INDEX", plan)
+
+    def test_batched_history_membership_matches_tracked_ad_ids(self) -> None:
+        store = self.make_store()
+        # tracked_ad_ids() is SELECT DISTINCT ad_id FROM ad_snapshots.
+        # Unlike an owner attestation, a snapshot row itself is the tracking
+        # evidence; no extra invented membership can be derived from it.
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="3", observed_at=T0, source="synthetic",
+            lifecycle_state=LifecycleState.UNKNOWN,
+        ))
+        self.assertEqual(
+            tuple(ad_id for ad_id, _ in store.ad_histories()),
+            store.tracked_ad_ids(),
+        )
+        self.assertEqual(
+            tuple(row.ad_id for row in MarkQueryService(store).latest_ads()),
+            store.tracked_ad_ids(),
+        )
+
+    def test_empty_batch_projection_does_not_create_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "empty.sqlite")
+            with patch.object(store, "_connect", wraps=store._connect) as opened:
+                self.assertEqual(MarkQueryService(store).latest_ads(), ())
+            self.assertEqual(opened.call_count, 1)
+            self.assertEqual(tuple(store.ad_histories()), ())
+
+    def test_keyset_history_pages_do_not_use_sqlite_temp_sort(self) -> None:
+        store = self.make_store()
+        connection = store._connect()
+        try:
+            plan = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT id, ad_id, observed_at "
+                "FROM ad_snapshots "
+                "WHERE id <= ? AND (ad_id, observed_at, id) > (?, ?, ?) "
+                "ORDER BY ad_id ASC, observed_at ASC, id ASC LIMIT ?",
+                (100, "1", T0.isoformat(), 0, 256),
+            ).fetchall()
+        finally:
+            connection.close()
+        details = " ".join(str(row["detail"]) for row in plan)
+        self.assertIn("idx_ad_snapshots_ad_id_observed", details)
+        self.assertNotIn("USE TEMP B-TREE", details)
+
+    def test_paused_stream_never_blocks_concurrent_writer_commit(self) -> None:
+        # Reproduces Codex P2 on rollback-journal SQLite. The previous live
+        # cursor kept a shared lock across generator yields and blocked the
+        # writer's committed snapshot (even though the reader was idle).
+        store = self.make_store()
+        connection = store._connect()
+        try:
+            mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(mode, "delete")
+        stream = store.ad_histories()
+        first_id, _history = next(stream)
+        self.assertEqual(first_id, "1")
+        errors: list[Exception] = []
+        finished = threading.Event()
+
+        def write_observation() -> None:
+            try:
+                store.append_ad_snapshot(AdSnapshot(
+                    ad_id="writer-unblocked", observed_at=T1,
+                    source="synthetic-concurrent", lifecycle_state=LifecycleState.ACTIVE,
+                ))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=write_observation, daemon=True)
+        try:
+            worker.start()
+            self.assertTrue(
+                finished.wait(timeout=2),
+                "read cursor held shared SQLite lock across generator yield",
+            )
+            self.assertEqual(errors, [])
+        finally:
+            stream.close()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertIn("writer-unblocked", store.tracked_ad_ids())
+
+    def test_paged_history_rejects_blob_key_storage_classes(self) -> None:
+        # SQLite TEXT affinity does not forbid inserted BLOBs. A coerced
+        # cursor would re-fetch an already processed page indefinitely.
+        for column in ("ad_id", "observed_at"):
+            with self.subTest(column=column):
+                store = self.make_store()
+                connection = store._connect()
+                try:
+                    with connection:
+                        connection.executemany(
+                            "INSERT INTO ad_snapshots "
+                            "(ad_id, observed_at, source, lifecycle_state, views) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            [
+                                ("1", T0.isoformat(), "synthetic",
+                                 LifecycleState.ACTIVE.value, index)
+                                for index in range(300)
+                            ],
+                        )
+                        bad_ad_id = (
+                            sqlite3.Binary(b"blob-ad-id")
+                            if column == "ad_id" else "1"
+                        )
+                        bad_time = (
+                            sqlite3.Binary(b"blob-timestamp")
+                            if column == "observed_at" else T0.isoformat()
+                        )
+                        connection.execute(
+                            "INSERT INTO ad_snapshots "
+                            "(ad_id, observed_at, source, lifecycle_state) "
+                            "VALUES (?, ?, ?, ?)",
+                            (bad_ad_id, bad_time, "synthetic-invalid",
+                             LifecycleState.ACTIVE.value),
+                        )
+                finally:
+                    connection.close()
+                histories = store.ad_histories()
+                try:
+                    with self.assertRaisesRegex(
+                        sqlite3.DatabaseError, "invalid ad snapshot key"
+                    ):
+                        tuple(histories)
+                finally:
+                    histories.close()
+
+    def test_paged_projection_excludes_new_rows_after_high_water(self) -> None:
+        store = self.make_store()
+        # More than one fetch page, including a history crossing the
+        # 256-row boundary. No temp sort and no O(all histories) buffering.
+        connection = store._connect()
+        try:
+            with connection:
+                connection.executemany(
+                    "INSERT INTO ad_snapshots "
+                    "(ad_id, observed_at, source, lifecycle_state, views) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [
+                        ("1", T0.isoformat(), "synthetic-backdated",
+                         LifecycleState.ACTIVE.value, index)
+                        for index in range(300)
+                    ],
+                )
+        finally:
+            connection.close()
+        before_two = store.ad_history("2")
+        stream = store.ad_histories()
+        try:
+            first_id, first_history = next(stream)
+            self.assertEqual(first_id, "1")
+            self.assertEqual(
+                first_history,
+                store.ad_history("1"),
+                "group split across pages lost rows or timestamp ties",
+            )
+            # This writer succeeds while the generator is deliberately idle.
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="z-new-after-reader", observed_at=T1,
+                source="synthetic-concurrent", lifecycle_state=LifecycleState.ACTIVE,
+            ))
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="2", observed_at=T1 + timedelta(seconds=1),
+                source="newer-than-high-water", lifecycle_state=LifecycleState.ABSENT,
+            ))
+            rest = dict(stream)
+        finally:
+            stream.close()
+        self.assertNotIn("z-new-after-reader", rest)
+        self.assertEqual(rest["2"], before_two)
+        self.assertEqual(
+            MarkQueryService(store).latest_ads()[-1].ad_id,
+            "z-new-after-reader",
+        )
+
     def test_metric_evidence_preserves_original_timestamp_source_and_zero(self) -> None:
         store = self.make_store()
         payloads = {
@@ -1341,6 +1590,52 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
                 else:
                     self.assertEqual(payload, {"error": "database_unavailable"})
                 self.assertNotIn("corrupt private value", str(payload))
+
+    def test_malformed_snapshot_text_is_sanitized_for_http_clients(self) -> None:
+        """Invalid native TEXT must not abort the HTTP connection."""
+        self.assertEqual(self.get("/api/ads")[0], 200)
+        self.assertEqual(self.get("/api/summary")[0], 200)
+        for field, damaged in (
+            ("observed_at", "not-a-timestamp-private-value"),
+            ("lifecycle_state", "not-a-lifecycle-private-value"),
+        ):
+            with self.subTest(field=field):
+                with sqlite3.connect(self.store.path) as connection:
+                    original_row = connection.execute(
+                        f"SELECT {field} FROM ad_snapshots WHERE id = 1"
+                    ).fetchone()
+                    self.assertIsNotNone(original_row)
+                    original_value = original_row[0]
+                    connection.execute(
+                        f"UPDATE ad_snapshots SET {field} = ? WHERE id = 1",
+                        (damaged,),
+                    )
+                try:
+                    self.assertEqual(
+                        json.loads(self.get("/healthz")[2]), {"status": "ok"}
+                    )
+                    for path in ("/api/ads", "/api/summary", "/api/ads/1/history"):
+                        with self.subTest(path=path):
+                            with self.assertRaises(HTTPError) as failure:
+                                urlopen(self.base + path, timeout=2)
+                            response = failure.exception
+                            self.assertEqual(response.code, 503)
+                            self.assertEqual(
+                                response.headers["Cache-Control"], "no-store"
+                            )
+                            body = response.read().decode("utf-8")
+                            self.assertEqual(
+                                json.loads(body), {"error": "database_unavailable"}
+                            )
+                            self.assertNotIn(damaged, body)
+                            self.assertNotIn(str(self.store.path), body)
+                finally:
+                    with sqlite3.connect(self.store.path) as connection:
+                        connection.execute(
+                            f"UPDATE ad_snapshots SET {field} = ? WHERE id = 1",
+                            (original_value,),
+                        )
+                self.assertEqual(self.get("/api/ads")[0], 200)
 
     def test_history_and_reactions_endpoints(self) -> None:
         _, _, history_body = self.get("/api/ads/1/history")

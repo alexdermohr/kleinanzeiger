@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Mapping
 from datetime import datetime
@@ -96,33 +97,35 @@ class MarkQueryService:
 
     def latest_ads(self) -> tuple[AdView, ...]:
         rows: list[AdView] = []
-        for ad_id in self._store.tracked_ad_ids():
-            history = self._store.ad_history(ad_id)
-            if not history:
-                continue
-            latest = history[-1]
-            metrics = {
-                field_name: _last_metric_with_evidence(history, field_name)
-                for field_name in ("views", "watch_count", "reply_count")
-            }
-            rows.append(
-                AdView(
-                    ad_id=ad_id,
-                    lifecycle_state=latest.lifecycle_state,
-                    present=latest.lifecycle_state is not LifecycleState.ABSENT,
-                    observed_at=latest.observed_at,
-                    source=latest.source,
-                    title=_last_not_none(history, "title"),
-                    description=_last_not_none(history, "description"),
-                    views=metrics["views"][0],
-                    watch_count=metrics["watch_count"][0],
-                    reply_count=metrics["reply_count"][0],
-                    metric_evidence={
-                        field_name: evidence
-                        for field_name, (_, evidence) in metrics.items()
-                    },
+        # The generator owns one SQLite read cursor; close it even when a
+        # malformed snapshot raises during the projection.
+        with closing(self._store.ad_histories()) as histories:
+            for ad_id, history in histories:
+                if not history:
+                    continue
+                latest = history[-1]
+                metrics = {
+                    field_name: _last_metric_with_evidence(history, field_name)
+                    for field_name in ("views", "watch_count", "reply_count")
+                }
+                rows.append(
+                    AdView(
+                        ad_id=ad_id,
+                        lifecycle_state=latest.lifecycle_state,
+                        present=latest.lifecycle_state is not LifecycleState.ABSENT,
+                        observed_at=latest.observed_at,
+                        source=latest.source,
+                        title=_last_not_none(history, "title"),
+                        description=_last_not_none(history, "description"),
+                        views=metrics["views"][0],
+                        watch_count=metrics["watch_count"][0],
+                        reply_count=metrics["reply_count"][0],
+                        metric_evidence={
+                            field_name: evidence
+                            for field_name, (_, evidence) in metrics.items()
+                        },
+                    )
                 )
-            )
         return tuple(rows)
 
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
