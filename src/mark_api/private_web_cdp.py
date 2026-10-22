@@ -308,7 +308,7 @@ class _LoopbackCdpClient:
         """Pin a one-shot submit and its exact permitted observation."""
         _require_private_web_cdp_authority()
         if settlement_expression is not None and (
-            not isinstance(settlement_expression, str)
+            type(settlement_expression) is not str
             or not settlement_expression.strip()
             or len(settlement_expression) > _MAX_TARGET_BYTES
         ):
@@ -547,6 +547,19 @@ class _LoopbackCdpClient:
             transport = self._socket
             if transport is None:
                 raise PrivateWebCdpError("call")
+            # Hostile str/float/key subclasses can execute __eq__ or
+            # __hash__ within this reentrant lifecycle RLock before the
+            # one-shot step is consumed. Admit only native inert scalars
+            # before any key lookup or equality while a submit is armed.
+            if self._unresolved_submit:
+                if type(method) is not str or type(params) is not dict:
+                    raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+                if any(
+                    type(key) is not str
+                    or type(value) not in (str, int, float, bool)
+                    for key, value in params.items()
+                ):
+                    raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
             expected_expression = self._submit_settlement_expression
             observing_submit = bool(
                 self._unresolved_submit
