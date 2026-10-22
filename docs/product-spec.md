@@ -1,10 +1,18 @@
 # Produktspezifikation
 
-Stand: 18.10.2026 (Lieferziel aktualisiert; technischer Stand nur revisionsgebunden)
+Stand: 22.10.2026 (Lieferziel und technischer Arbeitsmodus aktualisiert; Ergebnisse revisionsgebunden)
 
-Status: **Gesamtprodukt noch nicht abgenommen.** Wesentliche Core-, Analytics-, Dashboard- und Write-Komponenten sind implementiert, aber auf Main `8ea011d562ab41f6c7d49e38781b81fbe76d356c` blockiert der Private-Web-Produktstarter noch pauschal. Integrations-, Recovery- und installierte Ende-zu-Ende-Nachweise müssen auf dem tatsächlichen späteren Liefercommit erneuert werden.
+Status: **Gesamtprodukt noch nicht abgenommen.** Die frühere Beobachtung eines pauschal blockierten Private-Web-Produktstarters war an `8ea011d562ab41f6c7d49e38781b81fbe76d356c` gebunden und ist kein aktueller Live-Nachweis. Neuere Integrationsstände und der spätere Liefercommit müssen frisch geprüft werden. Der vollständige Lieferumfang einschließlich Write bleibt unabhängig von der historischen Sperre verbindlich.
 
 Quelle: `docs/requirements-source-2026-09-23.md`
+
+## Verbindlicher Liefer- und Arbeitsmodus (D-028/D-029)
+
+**Kundenerfolg ist der Maßstab:** Mark wird als **installierbares Gesamtprodukt mit vollständigen Write-Funktionen** geliefert. Das umfasst Create/Publish, Medien-/Bildvorbereitung und Media-Create, Titel-/Beschreibungspflege, Pause, Reaktivierung, Delete sowie Bestandssynchronisation, Analytics, Prompt-basierte Text-/Bildgenerierung und sichere Datenwiederherstellung. Ein Offline-Dashboard oder nur isoliert getestete Adapter erfüllen diesen Vertrag nicht.
+
+**Plattformfreigabe ist kein Entwicklungsauftrag und kein pauschales technisches Gate.** Die fehlende generelle externe Kleinanzeigen-Freigabe blockiert weder die Implementierung noch die technische Abnahme dieser Funktionalität. End-to-End-Tests verwenden eine frisch installierte Mark-Distribution samt echter UI, API, Persistenz und zustandsbehafteten synthetischen Plattformgegenstellen, einschließlich der positiven und unklaren Write-Ausgänge. Die tatsächliche Berechtigung zum späteren externen Einsatz ist getrennt vom Kunden/Betreiber je konkretem Zugriffsweg zu klären und wird weder erfunden noch durch lokale Schalter ersetzt. Bestehende Transport-, Konto-, Login-, CSRF-, Ownership-, Idempotenz- und Recovery-Schranken bleiben unverändert; keine unberechtigten Live-Writes oder bezahlten Provideraufrufe zu Testzwecken.
+
+**Ein gemeinsamer Lieferkandidat statt Prozessschleifen:** Bestehende relevante PRs sicher konvergieren, bestätigte Produkt-/P1-/P2-Fehler beheben, die komplette installierte Benutzerkette auf dem exakten Kandidaten testen und risikogerecht unabhängig prüfen. Zusätzliche Entwicklungszweige, Review-Ebenen oder Architektur entstehen nur bei belegtem Nutzen. Der Abschluss trennt technisch fertig und synthetisch belegt von tatsächlich autorisiertem Live-Einsatz.
 
 ## 0. Lieferziel und nachprüfbare Endabnahme (Kundenauftrag 18.10.2026)
 
@@ -25,7 +33,7 @@ Die vorhandenen technischen Authentifizierungs-, Owner-/ID-, CSRF-/Origin-, Capa
 
 Für Marks Kleinanzeigen-Account soll eine Lösung entstehen, die Anzeigen verwaltet und Leistungsdaten in einem Dashboard auswertet. Aus den gesammelten Daten sollen Vergleiche, Ranglisten und Optimierungsvorschläge entstehen.
 
-Die ursprünglich genannten Wünsche nach externer Titel-/Beschreibungsgenerierung und Bildgenerierung bleiben dokumentiert, sind nach Projektentscheidung vom 24.09.2026 jedoch **nicht MVP-priorisiert**. Der MVP konzentriert sich auf Anzeigenverwaltung, Synchronisation, Messaging und messbare Leistungsdaten. Für die **finale Auslieferung** gehören die ursprünglich bestätigten Generierungsfunktionen gemäß D-028 wieder zum vollständigen Lieferumfang; ihr aktueller Implementierungs- und Integrationsstatus bleibt offen.
+Die ursprüngliche MVP-Reihenfolge vom 24.09.2026 war nur ein Zwischenziel. **Für das verbindliche Endprodukt sind Text- und Bildgenerierung einschließlich Übernahme in die Anzeigenverwaltung Pflichtumfang** (D-028/D-029). Implementierung, Integration und nutzbare Funktion sind auf dem späteren Liefercommit nachzuweisen.
 
 ## 2. Belegter Funktionsumfang
 
@@ -43,20 +51,20 @@ Der gewünschte Oberbegriff „Anzeigen verwalten“ ist für den vorhandenen MV
 
 Create/Publish ist zusätzlich als eigener, stärker gegateter Write-Pfad implementiert. Daraus folgt keine automatische Produktionsfreigabe.
 
-### 2.2 Textgenerierung — bestätigt, aber depriorisiert
+### 2.2 Textgenerierung — Pflichtumfang der Endlieferung
 
 - Titel aus Prompts generieren.
 - Beschreibungstexte aus Prompts generieren.
 - Generierte Inhalte für Anzeigen verwenden.
 
-Diese ursprünglich bestätigte Anforderung ist **kein MVP-Schwerpunkt**.
+Textgenerierung muss im installierten Produkt vom Prompt bis zum übernehmbaren und bearbeitbaren Anzeigenentwurf funktionieren. Kostenpflichtige Provideraufrufe erfordern gesonderte Zustimmung pro Aufruf.
 
-### 2.3 Bildgenerierung — bestätigt, aber depriorisiert
+### 2.3 Bildgenerierung — Pflichtumfang der Endlieferung
 
 - Bilder aus Prompts generieren.
 - Generierte Bilder automatisch für Anzeigen verwenden.
 
-Diese ursprünglich bestätigte Anforderung ist **kein MVP-Schwerpunkt**. Der vorhandene Media-Create-Pfad betrifft dagegen die sichere Verwendung explizit zugelassener lokaler Medien und ersetzt keine generative Bildfunktion.
+Generierte Bilder müssen im installierten Produkt sicher vorbereitet und in die bestehende Anzeigen-/Media-Kette übergeben werden können. Eine Übernahme veröffentlicht nichts ohne gesonderte Benutzeraktion. Der vorhandene Media-Create-Pfad ersetzt keine Bildgenerierung.
 
 ### 2.4 Dashboard und Product Launcher
 
@@ -97,13 +105,13 @@ Dafür ist eine explizite `objective_metric` erforderlich. Der Contract setzt ke
 
 ## 3. Funktionale Anforderungen
 
-- **FR-01:** Anzeigen erstellen, jedoch nur über den separat gegateten Create-Pfad.
+- **FR-01:** Anzeigen über Oberfläche und Write API erstellen und nach expliziter Benutzeraktion veröffentlichen; alle Create-/Owner-/Transport-Sicherheitsprüfungen bleiben verpflichtend.
 - **FR-02:** Anzeigen löschen; Delete bleibt zusätzlich ID-gebunden freigabepflichtig.
 - **FR-03:** Anzeigen gemäß Abschnitt 2.1 verwalten.
-- **FR-04 (depriorisiert):** Titel anhand eines Prompts generieren.
-- **FR-05 (depriorisiert):** Beschreibungstexte anhand eines Prompts generieren.
-- **FR-06 (depriorisiert):** Bilder anhand eines Prompts generieren.
-- **FR-07 (depriorisiert):** Generierte Bilder einer Anzeige automatisch zur Verwendung zuführen.
+- **FR-04:** Titel anhand eines Prompts generieren und in einen Anzeigenentwurf übernehmen.
+- **FR-05:** Beschreibungstexte anhand eines Prompts generieren und in einen Anzeigenentwurf übernehmen.
+- **FR-06:** Bilder anhand eines Prompts generieren und sicher privat speichern.
+- **FR-07:** Generierte Bilder in die Anzeigen-/Media-Vorbereitung integrieren, ohne sie ohne Benutzerbestätigung zu veröffentlichen.
 - **FR-08:** Aufrufzahlen erfassen, soweit der gewählte Datenpfad diese bereitstellt.
 - **FR-09:** `conversation_count`, `unique_buyer_count` und `inbound_message_count` getrennt erfassen; die fachliche Bedeutung von „wie viele geschrieben haben“ nur über eine explizite `reaction_metric` festlegen.
 - **FR-10:** Kennzahlen und Grafiken im Dashboard visualisieren.
@@ -140,7 +148,7 @@ Der aktuelle Core und die Runtime-Surfaces erzwingen insbesondere:
 11. Periodische Synchronisation sowie die weitergehende Freshness-/Recovery-UX bleiben spätere Produktslices. Ein Media-Submit-`UNKNOWN` autorisiert weiterhin keinen Write-Retry; beim Launcher-Shutdown ist höchstens die bestehende observation-only Media-Reconciliation vor erneutem Cleanup zulässig.
 12. Die Write API serialisiert ihre Prozessautorität zusätzlich über einen exklusiven OS-Lock auf der SQLite-Datei. Persistente Idempotency-Claims sind runtime-owner-gebunden und besitzen einen separaten Execution-Start-Barrier. Nur ein gleichartiger Claim eines beendeten Runtimes ohne gesetzten Barrier darf übernommen werden; gesetzter Barrier und Legacy-Claims ohne beweisbaren Owner bleiben über Neustarts fail-closed.
 
-Die maßgeblichen Architektur- und Sicherheitsentscheidungen sind in D-006 bis D-027 dokumentiert. Ein implementierter technischer Pfad ist keine automatische Freigabe für reale Plattformwrites außerhalb einer vom Nutzer ausgelösten Produktoperation.
+Die maßgeblichen Architektur-, Sicherheits- und Lieferentscheidungen sind in D-006 bis D-029 dokumentiert. Ein implementierter technischer Pfad ist keine automatische Freigabe für reale Plattformwrites außerhalb einer vom Nutzer ausgelösten Produktoperation.
 
 ## 6. Vorhandene MVP-Bausteine (noch keine vollständige Produktabnahme)
 
@@ -163,7 +171,7 @@ Die folgende Liste bezeichnet implementierte Verträge/Komponenten und historisc
 15. Explizite lokale Klassifikation von Email-only-IDs mit source-expliziten E-Mail-Gruppenrankings, ohne `AdSnapshot`, Owner-/Presence-Folgerung oder Ausweitung auf nicht belegte Metriken.
 16. Same-Origin Dashboard Write UX mit getrenntem UI-Token, serverseitiger Bearer-Injektion, strikter Proxy-Allowlist und exakt gebundener UI-Idempotenz ohne automatische Wiederholung bei unbekanntem Transportausgang.
 
-Text- und Bildgenerierung bleiben dokumentiert, aber für diesen MVP depriorisiert.
+Die frühere MVP-Depriorisierung der Text- und Bildgenerierung schränkt den verbindlichen vollständigen Lieferumfang **nicht** ein (D-028/D-029).
 
 Reale sichtbare Testanzeigen, Testnachrichten oder zyklische Plattformwrites werden nicht als normale Regressionstests verwendet.
 
