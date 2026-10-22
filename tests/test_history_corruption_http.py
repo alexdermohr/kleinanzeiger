@@ -131,6 +131,20 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
                     table, "ad_id", path, sqlite3.Binary(b"native-blob-ad-id"),
                 )
 
+    def test_native_empty_text_ad_ids_fail_closed_before_filtered_http_lookups(self):
+        """Issue #180: native empty TEXT keys must never disappear as HTTP 200 []."""
+        # Unlike BLOBs, these values pass a type-only TEXT-affinity guard.
+        # Index extrema make empty strings observable without a table scan.
+        paths = (
+            ("reaction_snapshots", "/api/analytics/ads?metric=conversation_count"),
+            ("inbound_message_events", "/api/email-reactions"),
+            ("ad_classifications", "/api/analytics/groups?dimension=city&metric=views"),
+        )
+        for invalid in ("", "   ", "\t", "\u2003", " \t\u2003 "):
+            for table, path in paths:
+                with self.subTest(table=table, invalid=repr(invalid)):
+                    self._assert_sanitized_503(table, "ad_id", path, invalid)
+
     def test_blob_optional_classification_label_and_reaction_counter(self):
         self._assert_sanitized_503(
             "ad_classifications", "city",
