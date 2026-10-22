@@ -19,6 +19,66 @@ kleinanzeiger --db /pfad/kleinanzeiger.sqlite --cdp-port 9222
 
 Für lokale E-Mail-Analysen ohne Plattformverbindung steht zusätzlich `kleinanzeiger-offline --db /pfad/kleinanzeiger.sqlite --init-db --email /pfad/nachricht.eml` bereit. Dieser Zusatzweg führt keine Anzeigenoperationen aus.
 
+### Expliziter lokaler Anzeigenkatalog (keine Plattformbeobachtung)
+
+Zusätzlich kann der **rein lokale, read-only** Produktstart ausdrücklich
+übergebene JSON-Dateien mit bereits selbst notierten Anzeigen und Kennzahlen
+anzeigen. Mark ruft dafür keinerlei Kleinanzeigen-Webseite oder API auf.
+Die Eingaben sind nicht signiert und begründen **keinen verifizierten
+Eigentümerbestand, keine aktive Anzeige und keine Write-Berechtigung**.
+Die Lebenszyklus-Anzeige bleibt deshalb `unknown`, und die Datenquelle
+lautet `user-supplied-local-catalog`. Reine Katalog-IDs erhalten ohne zusätzliche echte Owner-Beobachtung
+`present=false` und erhöhen den aktuellen Owner-Bestand
+`current_ads` nicht. Existiert bereits eine gesonderte bestätigte
+Owner-Beobachtung zur selben ID, entscheidet ausschließlich diese
+über Präsenz, Lifecycle und als Owner ausgewiesenen Titel/Beschreibung;
+lokale Kennzahlen bleiben über ihre eigene Metrik-Quelle erkennbar. Die Uhrzeit stammt ausschließlich
+aus der vom Nutzer angegebenen Beobachtung und benötigt einen UTC-Offset.
+
+Beispiel `mein-katalog.json` (nur ausdrücklich übergebene Dateien):
+
+```json
+{
+  "schema": "mark-local-catalog-v1",
+  "ads": [
+    {
+      "ad_id": "1234567890",
+      "observed_at": "2026-10-22T03:10:00+02:00",
+      "title": "Lokal notierter Anzeigentitel",
+      "views": 23,
+      "watch_count": 0
+    }
+  ]
+}
+```
+
+```bash
+mark-api-offline --db /pfad/mark.sqlite --init-db --catalog /pfad/mein-katalog.json
+# Wiederholung oder zusätzlicher manueller Datenstand:
+mark-api-offline --db /pfad/mark.sqlite --catalog /pfad/mein-katalog.json
+# E-Mail-Evidenz kann zusätzlich explizit und unabhängig importiert werden:
+mark-api-offline --db /pfad/mark.sqlite --email /pfad/nachricht.eml --catalog /pfad/mein-katalog.json
+```
+
+Zulässige Felder je Eintrag: `ad_id` (5–20 ASCII-Ziffern),
+`observed_at` (ISO-8601 mit Offset), optional `title`, `description`,
+`views`, `watch_count` und `reply_count`. Eigene Angaben über
+`source`, `lifecycle_state` oder ein angeblich bestätigtes Konto
+werden verweigert. Dateien und Anzahl sind begrenzt; Symbolic Links,
+Pipes und mehrdeutige JSON-Felder werden abgelehnt. Fehlen dem
+Betriebssystem die erforderlichen sicheren Open-Flags, wird der
+Katalogimport ausdrücklich verweigert. Ein vollständiger
+Katalogbatch wird vor dem Schreiben validiert und in einer einzigen
+SQLite-Transaktion eingefügt. Identische Wiederholungen erzeugen
+**keine** doppelten Beobachtungen; widersprüchliche Beobachtungen mit
+gleicher Anzeigen-ID und UTC-Beobachtungszeit brechen den ganzen
+Katalogbatch ab, ohne vorherige Evidenz zu überschreiben. Katalog- und
+EML-Import sind **jeweils** separat atomare, idempotente Batches;
+über beide Datenquellen besteht ausdrücklich keine gemeinsame
+Transaktionsgarantie. Sichtbare Zahlen sind manuell gelieferte Evidenz
+und keine aktuelle automatisierte Plattform-Synchronisation.
+
+
 ## Prompt-basierte Text- und Bildentwürfe (20.10.2026)
 
 `mark-api-generate` ist der installierbare CLI-Einstieg für

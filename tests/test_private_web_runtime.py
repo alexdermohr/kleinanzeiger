@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import threading
 import unittest
@@ -787,7 +788,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
             [event[0] for event in events].count("media_submit"),
             1,
         )
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             persisted = connection.execute(
                 "SELECT COUNT(*) FROM create_operation_receipts"
             ).fetchone()
@@ -884,7 +885,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
             [event[0] for event in events].count("media_submit"),
             1,
         )
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             persisted = connection.execute(
                 "SELECT COUNT(*) FROM create_operation_receipts"
             ).fetchone()
@@ -953,7 +954,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], created_id)
         self.assertGreater(calls[0][1], 0)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             checkpoint = connection.execute(
                 """
                 SELECT checkpoint_kind, created_ad_id, outcome,
@@ -1033,7 +1034,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
         self.assertEqual(receipt.completed_at, NOW + timedelta(seconds=3))
         self.assertTrue(receipt.media_persistence_confirmed)
         self.assertEqual(len(verifier.calls), 1)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             persisted_completed_at = connection.execute(
                 "SELECT completed_at FROM create_operation_receipts"
             ).fetchone()
@@ -2540,130 +2541,73 @@ class PrivateWebContentRuntimeTests(unittest.TestCase):
         )
 
     def test_inventory_builder_has_no_writer_surface_or_page_factory(self) -> None:
-        class CookieDelegate:
-            def __init__(self) -> None:
-                self.closed = 0
-
-            def __call__(self):
-                return "session=opaque"
-
-            def close(self) -> None:
-                self.closed += 1
-
-        delegate = CookieDelegate()
-        owner_reader = OwnerReader(
-            ReadResult.success_nonempty((owner_snapshot(),))
-        )
-        management_transport = object()
-
+        owner_reader = OwnerReader(ReadResult.success_nonempty((owner_snapshot(),)))
+        closed = []
+        owner_reader.close = lambda: closed.append(True)
         with (
-            patch(
-                "mark_api.private_web_runtime.require_private_web_runtime_dependency"
-            ) as dependency,
-            patch(
-                "mark_api.private_web_runtime.CdpCookieProvider.from_port",
-                return_value=delegate,
-            ) as cookies,
-            patch(
-                "mark_api.private_web_runtime._NoRedirectManagementTransport",
-                return_value=management_transport,
-            ) as transport_factory,
-            patch(
-                "mark_api.private_web_runtime.ManagementReadAdapter",
-                return_value=owner_reader,
-            ) as management,
-            patch(
-                "mark_api.private_web_runtime.CdpPrivateWebPage.from_port",
-                side_effect=AssertionError("inventory runtime must not create a page"),
-            ) as pages,
+            patch("mark_api.private_web_runtime.require_private_web_runtime_dependency") as dependency,
+            patch("mark_api.private_web_runtime.CdpManagementInventoryReader",
+                  return_value=owner_reader) as browser_reader,
+            patch("mark_api.private_web_runtime.CdpCookieProvider.from_port",
+                  side_effect=AssertionError("legacy CDP cookie export is forbidden")) as cookies,
+            patch("mark_api.private_web_runtime._NoRedirectManagementTransport",
+                  side_effect=AssertionError("direct HTTP transport must stay denied")) as transport,
+            patch("mark_api.private_web_runtime.ManagementReadAdapter",
+                  side_effect=AssertionError("legacy owner adapter must stay denied")) as management,
+            patch("mark_api.private_web_runtime.CdpPrivateWebPage.from_port",
+                  side_effect=AssertionError("inventory builder must not open an editor")) as pages,
         ):
-            runtime = build_private_web_inventory_runtime(
-                cdp_port=19610,
-                timeout_seconds=4.0,
-            )
+            runtime = build_private_web_inventory_runtime(cdp_port=19610, timeout_seconds=4.0)
 
-        self.assertIsInstance(runtime, PrivateWebInventoryRuntime)
         dependency.assert_called_once_with()
-        cookies.assert_called_once_with(19610, timeout_seconds=4.0)
-        transport_factory.assert_called_once_with(timeout_seconds=4.0)
-        self.assertEqual(management.call_count, 1)
-        self.assertEqual(management.call_args.kwargs["endpoint"], MANAGEMENT_URL)
-        self.assertIs(
-            management.call_args.kwargs["transport"],
-            management_transport,
+        browser_reader.assert_called_once_with(
+            cdp_port=19610, timeout_seconds=4.0, source="kleinanzeigen-management",
         )
+        cookies.assert_not_called()
+        transport.assert_not_called()
+        management.assert_not_called()
         pages.assert_not_called()
-        for name in (
-            "content_writer",
-            "create_writer",
-            "state_writer",
-            "delete_writer",
-            "content_reader_for",
-        ):
+        for name in ("content_writer", "create_writer", "state_writer",
+                     "delete_writer", "content_reader_for"):
             self.assertFalse(hasattr(runtime, name), name)
-
-        result = runtime.read_inventory()
-        self.assertEqual(result.status, ReadStatus.SUCCESS_NONEMPTY)
+        self.assertEqual(runtime.read_inventory().status, ReadStatus.SUCCESS_NONEMPTY)
         self.assertEqual(owner_reader.calls, 1)
-
         runtime.close()
         runtime.close()
-        self.assertEqual(delegate.closed, 1)
+        self.assertEqual(len(closed), 1)
 
     def test_builder_consumes_existing_cdp_port_without_opening_page_eagerly(self) -> None:
-        class CookieDelegate:
-            def __init__(self) -> None:
-                self.closed = 0
-
-            def __call__(self):
-                return "session=opaque"
-
-            def close(self) -> None:
-                self.closed += 1
-
-        delegate = CookieDelegate()
         owner_reader = OwnerReader(ReadResult.success_empty(()))
-        management_transport = object()
-
+        closed = []
+        owner_reader.close = lambda: closed.append(True)
         with (
-            patch(
-                "mark_api.private_web_runtime.require_private_web_runtime_dependency"
-            ) as dependency,
-            patch(
-                "mark_api.private_web_runtime.CdpCookieProvider.from_port",
-                return_value=delegate,
-            ) as cookies,
-            patch(
-                "mark_api.private_web_runtime._NoRedirectManagementTransport",
-                return_value=management_transport,
-            ) as transport_factory,
-            patch(
-                "mark_api.private_web_runtime.ManagementReadAdapter",
-                return_value=owner_reader,
-            ) as management,
-            patch(
-                "mark_api.private_web_runtime.CdpPrivateWebPage.from_port",
-                side_effect=AssertionError("page must be lazy"),
-            ) as pages,
+            patch("mark_api.private_web_runtime.require_private_web_runtime_dependency") as dependency,
+            patch("mark_api.private_web_runtime.CdpManagementInventoryReader",
+                  return_value=owner_reader) as browser_reader,
+            patch("mark_api.private_web_runtime.CdpCookieProvider.from_port",
+                  side_effect=AssertionError("no cookie export")) as cookies,
+            patch("mark_api.private_web_runtime._NoRedirectManagementTransport",
+                  side_effect=AssertionError("no direct HTTP")) as transport,
+            patch("mark_api.private_web_runtime.ManagementReadAdapter",
+                  side_effect=AssertionError("no legacy admission bypass")) as management,
+            patch("mark_api.private_web_runtime.CdpPrivateWebPage.from_port",
+                  side_effect=AssertionError("content page must stay lazy")) as pages,
         ):
-            runtime = build_private_web_content_runtime(
-                cdp_port=19610,
-                timeout_seconds=4.0,
-            )
+            runtime = build_private_web_content_runtime(cdp_port=19610, timeout_seconds=4.0)
 
         dependency.assert_called_once_with()
-        cookies.assert_called_once_with(19610, timeout_seconds=4.0)
-        transport_factory.assert_called_once_with(timeout_seconds=4.0)
-        self.assertEqual(management.call_count, 1)
-        self.assertEqual(management.call_args.kwargs["endpoint"], MANAGEMENT_URL)
-        self.assertIs(
-            management.call_args.kwargs["transport"],
-            management_transport,
+        browser_reader.assert_called_once_with(
+            cdp_port=19610, timeout_seconds=4.0, source="kleinanzeigen-management",
         )
+        cookies.assert_not_called()
+        transport.assert_not_called()
+        management.assert_not_called()
         pages.assert_not_called()
-
+        self.assertEqual(owner_reader.calls, 0)
+        self.assertEqual(runtime.read_inventory().status, ReadStatus.SUCCESS_EMPTY)
+        self.assertEqual(owner_reader.calls, 1)
         runtime.close()
-        self.assertEqual(delegate.closed, 1)
+        self.assertEqual(len(closed), 1)
 
 
 class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
