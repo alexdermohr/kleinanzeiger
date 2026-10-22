@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -47,7 +48,7 @@ class SnapshotStoreTests(unittest.TestCase):
             sqlite3.connect(foreign).close()
             with self.assertRaises(sqlite3.Error):
                 SnapshotStore(foreign, create_if_missing=False)
-            with sqlite3.connect(foreign) as connection:
+            with closing(sqlite3.connect(foreign)) as connection, connection:
                 self.assertEqual(
                     connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -98,7 +99,7 @@ class SnapshotStoreTests(unittest.TestCase):
             'mark:source-v1:{"source":"forged","metric_source":"forged"}',
             "mark:source-v1:{not-json",
         )
-        with sqlite3.connect(store.path) as conn:
+        with closing(sqlite3.connect(store.path)) as conn, conn:
             for index, source in enumerate(originals):
                 conn.execute(
                     "INSERT INTO ad_snapshots "
@@ -115,20 +116,20 @@ class SnapshotStoreTests(unittest.TestCase):
 
     def test_metric_source_column_upgrade_requires_prior_recovery_validation(self) -> None:
         store = self.make_store()
-        with sqlite3.connect(store.path) as conn:
+        with closing(sqlite3.connect(store.path)) as conn, conn:
             fields = {row[1] for row in conn.execute("PRAGMA table_info(ad_snapshots)")}
             if "metric_source" in fields:
                 conn.execute("ALTER TABLE ad_snapshots DROP COLUMN metric_source")
         reopened = SnapshotStore(store.path, create_if_missing=False)
         self.assertTrue(reopened.is_ready())
-        with sqlite3.connect(store.path) as conn:
+        with closing(sqlite3.connect(store.path)) as conn, conn:
             fields = {row[1] for row in conn.execute("PRAGMA table_info(ad_snapshots)")}
             self.assertIn("metric_source", fields)
             conn.execute("ALTER TABLE ad_snapshots DROP COLUMN metric_source")
             conn.execute("DROP TABLE write_api_requests")
         with self.assertRaises(sqlite3.DatabaseError):
             SnapshotStore(store.path, create_if_missing=False)
-        with sqlite3.connect(store.path) as conn:
+        with closing(sqlite3.connect(store.path)) as conn, conn:
             fields = {row[1] for row in conn.execute("PRAGMA table_info(ad_snapshots)")}
             self.assertNotIn("metric_source", fields)
             self.assertIsNone(conn.execute(
@@ -153,7 +154,7 @@ class SnapshotStoreTests(unittest.TestCase):
         reopened = SnapshotStore(store.path, create_if_missing=False)
         self.assertEqual(reopened.latest_ad_snapshot("origin"), value)
         self.assertEqual(reopened.latest_ad_snapshot("literal"), literal)
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             stored = connection.execute(
                 "SELECT source, metric_source FROM ad_snapshots WHERE ad_id='origin'"
             ).fetchone()
@@ -171,12 +172,12 @@ class SnapshotStoreTests(unittest.TestCase):
     def test_readiness_requires_write_recovery_tables(self) -> None:
         store = self.make_store()
         self.assertTrue(store.is_ready())
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             connection.execute("DROP TABLE dashboard_pending_writes")
         self.assertFalse(store.is_ready())
         with self.assertRaises(sqlite3.DatabaseError):
             SnapshotStore(store.path, create_if_missing=False)
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             self.assertIsNone(
                 connection.execute(
                     "SELECT name FROM sqlite_master "
@@ -191,11 +192,11 @@ class SnapshotStoreTests(unittest.TestCase):
                     path = Path(tmp) / (table + ".sqlite")
                     store = SnapshotStore(path)
                     self.assertTrue(store.is_ready())
-                    with sqlite3.connect(path) as connection:
+                    with closing(sqlite3.connect(path)) as connection, connection:
                         connection.execute(f"DROP TABLE {table}")
                     with self.assertRaises(sqlite3.DatabaseError):
                         SnapshotStore(path, create_if_missing=True)
-                    with sqlite3.connect(path) as connection:
+                    with closing(sqlite3.connect(path)) as connection, connection:
                         self.assertIsNone(
                             connection.execute(
                                 "SELECT name FROM sqlite_master "
@@ -218,14 +219,14 @@ class SnapshotStoreTests(unittest.TestCase):
                     path = Path(tmp) / (table + ".sqlite")
                     store = SnapshotStore(path)
                     self.assertTrue(store.is_ready())
-                    with sqlite3.connect(path) as connection:
+                    with closing(sqlite3.connect(path)) as connection, connection:
                         connection.execute(f"DROP TABLE {table}")
                         connection.execute(f"CREATE TABLE {table} ({columns})")
                     self.assertFalse(store.is_ready())
                     for initialize in (False, True):
                         with self.assertRaises(sqlite3.DatabaseError):
                             SnapshotStore(path, create_if_missing=initialize)
-                    with sqlite3.connect(path) as connection:
+                    with closing(sqlite3.connect(path)) as connection, connection:
                         self.assertEqual(
                             {row[1] for row in connection.execute(
                                 f"PRAGMA table_info({table})"
@@ -239,7 +240,7 @@ class SnapshotStoreTests(unittest.TestCase):
 
     def test_partial_unique_write_key_is_not_full_recovery_uniqueness(self) -> None:
         store = self.make_store()
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             connection.execute("DROP TABLE write_api_requests")
             connection.execute(
                 """
@@ -290,7 +291,7 @@ class SnapshotStoreTests(unittest.TestCase):
 
     def test_partial_unique_pending_resource_cannot_authorize_claim(self) -> None:
         store = self.make_store()
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             connection.execute("DROP TABLE dashboard_pending_writes")
             connection.execute(
                 """
@@ -346,7 +347,7 @@ class SnapshotStoreTests(unittest.TestCase):
 
     def test_missing_uniqueness_blocks_live_pending_claim(self) -> None:
         store = self.make_store()
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             connection.execute("DROP TABLE dashboard_pending_writes")
             connection.execute(
                 """
@@ -376,7 +377,7 @@ class SnapshotStoreTests(unittest.TestCase):
 
     def test_missing_write_request_primary_key_blocks_live_claim(self) -> None:
         store = self.make_store()
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             connection.execute("DROP TABLE write_api_requests")
             connection.execute(
                 """
@@ -405,7 +406,7 @@ class SnapshotStoreTests(unittest.TestCase):
     def test_readiness_requires_analytics_schema_too(self) -> None:
         store = self.make_store()
         self.assertTrue(store.is_ready())
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             connection.execute("DROP TABLE reaction_snapshots")
         self.assertFalse(store.is_ready())
         with self.assertRaises(sqlite3.DatabaseError):
@@ -476,8 +477,14 @@ class SnapshotStoreTests(unittest.TestCase):
         self.assertIsNone(history[1].views)
         self.assertEqual(store.latest_ad_snapshot("3521676801"), history[-1])
 
-    def test_nonempty_inventory_marks_other_tracked_ids_absent(self) -> None:
+    def test_nonempty_inventory_marks_previously_owned_ids_absent(self) -> None:
         store = self.make_store()
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="1",
+            observed_at=NOW - timedelta(minutes=1),
+            source="management",
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
         present = AdSnapshot(
             ad_id="2",
             observed_at=NOW,
@@ -519,7 +526,7 @@ class SnapshotStoreTests(unittest.TestCase):
 
         store.append_operation_receipt(receipt)
 
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             row = connection.execute(
                 """
                 SELECT authorization_by, authorization_reference, outcome
@@ -567,7 +574,7 @@ class SnapshotStoreTests(unittest.TestCase):
 
         store.append_create_operation_receipt(receipt)
 
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             row = connection.execute(
                 """
                 SELECT created_ad_id, outcome, confirmation_pre_read_status,
@@ -625,7 +632,7 @@ class SnapshotStoreTests(unittest.TestCase):
         checkpoint_id = store.append_create_operation_checkpoint(receipt)
 
         self.assertGreater(checkpoint_id, 0)
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             row = connection.execute(
                 """
                 SELECT checkpoint_kind, created_ad_id, outcome,
@@ -661,7 +668,7 @@ class SnapshotStoreTests(unittest.TestCase):
         # Keep the complete store; only this table has the legacy column layout.
         # Missing write-recovery tables must never be silently restored.
         SnapshotStore(db_path)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             connection.execute("DROP TABLE create_operation_receipts")
             connection.execute(
                 """
@@ -704,7 +711,7 @@ class SnapshotStoreTests(unittest.TestCase):
         )
         store.append_create_operation_receipt(receipt)
 
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             columns = {
                 row[1]
                 for row in connection.execute(
@@ -808,7 +815,7 @@ class SnapshotStoreTests(unittest.TestCase):
         # Keep the complete store; only this table has the legacy column layout.
         # Missing write-recovery tables must never be silently restored.
         SnapshotStore(db_path)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             connection.execute("DROP TABLE dashboard_pending_writes")
             connection.execute(
                 """
@@ -842,7 +849,7 @@ class SnapshotStoreTests(unittest.TestCase):
             )
 
         store = SnapshotStore(db_path)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             columns = {
                 row[1]
                 for row in connection.execute(
@@ -951,7 +958,7 @@ class SnapshotStoreTests(unittest.TestCase):
         # Keep the complete store; only this table has the legacy column layout.
         # Missing write-recovery tables must never be silently restored.
         SnapshotStore(db_path)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             connection.execute("DROP TABLE write_api_requests")
             connection.execute(
                 """
@@ -977,7 +984,7 @@ class SnapshotStoreTests(unittest.TestCase):
             )
 
         store = SnapshotStore(db_path)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             columns = {
                 row[1]
                 for row in connection.execute(
