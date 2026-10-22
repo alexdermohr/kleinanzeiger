@@ -553,6 +553,408 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 self.assertEqual(denied.stdout, "")
                 self.assertFalse(image_target.exists())
 
+            # The installed wheel must also complete BOTH positive draft
+            # generation paths, not merely refuse requests lacking consent.
+            # A fake in-process SDK is injected only in this isolated test
+            # subprocess. No OpenAI dependency, API key, browser, network
+            # transport or publish operation is needed or permitted.
+            simulated_generation = textwrap.dedent(r"""
+                import base64
+                import hashlib
+                import io
+                import json
+                import os
+                import stat
+                import struct
+                import sys
+                import zlib
+                from contextlib import redirect_stderr, redirect_stdout
+                from pathlib import Path
+                from types import SimpleNamespace
+                from unittest.mock import patch
+
+                import mark_api
+                import mark_api.generation_cli as cli
+                from mark_api.generation import AdvertisementGenerator
+
+                assert "site-packages" in Path(mark_api.__file__).parts
+                assert "site-packages" in Path(cli.__file__).parts
+                assert not os.environ.get("OPENAI_API_KEY")
+                assert not any(name == "openai" or name.startswith("openai.")
+                               for name in sys.modules)
+
+                def chunk(tag, data):
+                    checksum = zlib.crc32(tag + data) & 0xffffffff
+                    return (struct.pack(">I", len(data)) + tag + data
+                            + struct.pack(">I", checksum))
+
+                # Complete PNG with a decompressed 1024x1024 RGBA raster.
+                raster = (b"\x00" + b"\x00" * (1024 * 4)) * 1024
+                png = (b"\x89PNG\r\n\x1a\n"
+                       + chunk(b"IHDR", struct.pack(">IIBBBBB",
+                              1024, 1024, 8, 6, 0, 0, 0))
+                       + chunk(b"IDAT", zlib.compress(raster))
+                       + chunk(b"IEND", b""))
+
+                class FakeResponses:
+                    def __init__(self):
+                        self.calls = []
+                        self.fail = False
+
+                    def create(self, **arguments):
+                        # The user-facing cost notice must be printed BEFORE
+                        # the provider interface can be invoked.
+                        assert "gpt-5.6-terra" in sys.stderr.getvalue()
+                        assert "Aktuelle Preise" in sys.stderr.getvalue()
+                        self.calls.append(arguments)
+                        if self.fail:
+                            raise RuntimeError("secret provider diagnostic")
+                        return SimpleNamespace(output_text=json.dumps({
+                            "title": "Geprüfter Fahrrad-Entwurf",
+                            "description": "Synthetisch erzeugter Textentwurf.",
+                        }))
+
+                class FakeImages:
+                    def __init__(self):
+                        self.calls = []
+
+                    def generate(self, **arguments):
+                        assert "gpt-image-2.5-flare" in sys.stderr.getvalue()
+                        assert "Aktuelle Preise" in sys.stderr.getvalue()
+                        self.calls.append(arguments)
+                        return SimpleNamespace(data=[SimpleNamespace(
+                            b64_json=base64.b64encode(png).decode("ascii"),
+                        )])
+
+                provider = SimpleNamespace(
+                    responses=FakeResponses(), images=FakeImages(),
+                )
+                generator = AdvertisementGenerator(client=provider)
+
+                def invoke(*arguments):
+                    output, error = io.StringIO(), io.StringIO()
+                    with (
+                        patch.object(cli, "AdvertisementGenerator",
+                                     return_value=generator),
+                        redirect_stdout(output),
+                        redirect_stderr(error),
+                    ):
+                        code = cli.main(list(arguments))
+                    return code, output.getvalue(), error.getvalue()
+
+                status, output, notice = invoke(
+                    "text", "--prompt", "Synthetisches Fahrrad",
+                    "--acknowledge-provider-cost",
+                )
+                assert status == 0, (status, notice)
+                text_draft = json.loads(output)
+                assert text_draft == {
+                    "title": "Geprüfter Fahrrad-Entwurf",
+                    "description": "Synthetisch erzeugter Textentwurf.",
+                    "status": "draft",
+                    "published": False,
+                }
+                assert len(provider.responses.calls) == 1
+                assert provider.responses.calls[0]["input"] == "Synthetisches Fahrrad"
+                assert provider.responses.calls[0]["model"] == "gpt-5.6-terra"
+                assert provider.responses.calls[0]["text"]["format"]["type"] == "json_schema"
+
+                # GitHub CI drops all capabilities as a real non-root UID;
+                # locally, unprivileged userns maps only its inside UID 0.
+                # In the latter mode, host-owned / and /tmp look foreign.
+                # Use an owned private chroot ONLY in that rootless-userns
+                # test environment; never weaken production path checks.
+                # Both modes retain the kernel loopback-only network ns.
+                private_root = Path(sys.argv[1])
+                assert private_root.is_dir()
+                assert private_root.stat().st_uid == os.geteuid()
+                assert stat.S_IMODE(private_root.stat().st_mode) == 0o700
+                uid_map = Path("/proc/self/uid_map").read_text().splitlines()
+                fields = uid_map[0].split() if len(uid_map) == 1 else []
+                rootless_userns = (
+                    os.geteuid() == 0 and len(fields) == 3
+                    and fields[0] == "0"
+                    and fields[1].isdigit() and int(fields[1]) > 0
+                    and fields[2] == "1"
+                )
+                if rootless_userns:
+                    os.chdir(private_root)
+                    os.chroot(private_root)
+                    os.chdir("/")
+                    assert Path("/").stat().st_uid == os.geteuid()
+                    target = Path("/positive-synthetic-draft.png")
+                else:
+                    # Host root-owned ancestors have real UID 0, so the
+                    # original strictly checked installed output path works.
+                    assert os.geteuid() != 0
+                    target = private_root / "positive-synthetic-draft.png"
+                assert not target.exists()
+                status, output, notice = invoke(
+                    "image", "--prompt", "Synthetisches Fahrradbild",
+                    "--acknowledge-provider-cost", "--output", str(target),
+                )
+                assert status == 0, (status, notice)
+                image_draft = json.loads(output)
+                assert image_draft["status"] == "draft"
+                assert image_draft["published"] is False
+                assert image_draft["image_sha256"] == hashlib.sha256(png).hexdigest()
+                assert image_draft["image_path"] == str(target)
+                assert image_draft["path_binding"] == "verified_at_write_only"
+                assert image_draft["persistent_path_guarantee"] is False
+                assert target.read_bytes() == png
+                assert stat.S_IMODE(target.stat().st_mode) == 0o600
+                assert len(provider.images.calls) == 1
+                assert provider.images.calls[0]["model"] == "gpt-image-2.5-flare"
+                assert provider.images.calls[0]["size"] == "1024x1024"
+                assert provider.images.calls[0]["output_format"] == "png"
+
+                # The next explicit request may not clobber an existing
+                # destination or reach the provider before reservation.
+                status, output, error = invoke(
+                    "image", "--prompt", "No overwrite allowed",
+                    "--acknowledge-provider-cost", "--output", str(target),
+                )
+                assert status == 2 and not output and "already exists" in error
+                assert len(provider.images.calls) == 1
+                assert target.read_bytes() == png
+
+                # Injected provider failures are sanitized and never retried.
+                provider.responses.fail = True
+                status, output, error = invoke(
+                    "text", "--prompt", "Failing synthetic text",
+                    "--acknowledge-provider-cost",
+                )
+                assert status == 2 and not output
+                assert "text generation request failed" in error
+                assert "secret provider diagnostic" not in error
+                assert len(provider.responses.calls) == 2
+
+                assert not any(name == "openai" or name.startswith("openai.")
+                               for name in sys.modules)
+                print(json.dumps({
+                    "installed_text_draft": True,
+                    "installed_image_draft_png": True,
+                    "private_create_only_image": True,
+                    "fake_provider_called_once_per_user_request": True,
+                    "provider_failure_sanitized": True,
+                    "platform_writes": False,
+                    "actual_provider_calls": 0,
+                }, sort_keys=True))
+            """)
+            generation_root = root / "private-generation-root"
+            generation_root.mkdir(mode=0o700)
+            generation = _command(
+                str(python), "-I", "-c", simulated_generation, str(generation_root),
+                cwd=root, env=env, timeout=40,
+            )
+            self.assertEqual(generation.returncode, 0, generation.stderr[-2000:])
+            self.assertEqual(json.loads(generation.stdout), {
+                "installed_text_draft": True,
+                "installed_image_draft_png": True,
+                "private_create_only_image": True,
+                "fake_provider_called_once_per_user_request": True,
+                "provider_failure_sanitized": True,
+                "platform_writes": False,
+                "actual_provider_calls": 0,
+            })
+
+            private_generated = generation_root / "positive-synthetic-draft.png"
+            self.assertTrue(private_generated.is_file())
+            self.assertEqual(stat.S_IMODE(private_generated.stat().st_mode), 0o600)
+            self.assertTrue(
+                private_generated.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            )
+
+
+            # Installed wheel must join the actual dashboard same-origin write
+            # gateway to the Write API and persisted projection, using only a
+            # wholly in-memory, synthetic platform double.
+            simulated_dashboard_write = textwrap.dedent(r"""
+                import json
+                import sys
+                from dataclasses import replace
+                from datetime import datetime, timedelta, timezone
+                from pathlib import Path
+                from threading import Thread
+                from urllib.error import HTTPError
+                from urllib.request import ProxyHandler, Request, build_opener
+
+                import mark_api
+                from mark_api.application import MarkService
+                from mark_api.dashboard import DashboardWriteProxy, create_server
+                from mark_api.domain import AdSnapshot, LifecycleState
+                from mark_api.results import ReadResult
+                from mark_api.storage import SnapshotStore
+                from mark_api.write_api import (
+                    WriteApiAccess, WriteCapability, create_write_api_server,
+                )
+
+                assert "site-packages" in Path(mark_api.__file__).parts
+                now = datetime(2026, 10, 4, tzinfo=timezone.utc)
+                backend_token = "synthetic-installed-backend-token-0001"
+                ui_token = "synthetic-installed-ui-token-0000001"
+
+                class SyntheticPlatform:
+                    def __init__(self):
+                        self.ads = {"314": AdSnapshot(
+                            ad_id="314", observed_at=now, source="synthetic-owner",
+                            lifecycle_state=LifecycleState.ACTIVE, title="Existing",
+                        )}
+                        self.effects = []
+                    def read_ads(self):
+                        ads = tuple(self.ads.values())
+                        return (ReadResult.success_nonempty(ads) if ads
+                                else ReadResult.success_empty(()))
+                    def update_content(self, ad_id, *, title=None, description=None):
+                        prior = self.ads[ad_id]
+                        self.ads[ad_id] = replace(
+                            prior, title=prior.title if title is None else title,
+                            description=prior.description if description is None else description,
+                            observed_at=now + timedelta(seconds=len(self.effects)+1),
+                        )
+                        self.effects.append("update_content")
+                    def set_state(self, ad_id, state):
+                        self.ads[ad_id] = replace(
+                            self.ads[ad_id], lifecycle_state=state,
+                            observed_at=now + timedelta(seconds=len(self.effects)+1),
+                        )
+                        self.effects.append("set_state")
+                    def create_ad(self, request):
+                        self.ads["315"] = AdSnapshot(
+                            ad_id="315", observed_at=now + timedelta(seconds=2),
+                            source="synthetic-owner", lifecycle_state=LifecycleState.ACTIVE,
+                            title=request.title, description=request.description,
+                        )
+                        self.effects.append("create")
+                    def delete_ad(self, ad_id):
+                        del self.ads[ad_id]
+                        self.effects.append("delete")
+
+                class FilterReader:
+                    def __init__(self, platform, ad_id):
+                        self.platform, self.ad_id = platform, ad_id
+                    def read_ads(self):
+                        items = tuple(x for x in self.platform.ads.values()
+                                      if x.ad_id == self.ad_id)
+                        return (ReadResult.success_nonempty(items) if items
+                                else ReadResult.success_empty(()))
+
+                platform = SyntheticPlatform()
+                store = SnapshotStore(Path(sys.argv[1]))
+                store.append_ad_snapshot(platform.ads["314"])
+                service = MarkService(
+                    owner_reader=platform, management_reader=platform,
+                    delete_confirmation_reader=platform, reaction_reader=None,
+                    state_writer=platform, delete_writer=platform,
+                    content_writer=platform, create_writer=platform,
+                    content_reader_factory=lambda ad_id: FilterReader(platform, ad_id),
+                    store=store, writes_enabled=True, clock=lambda: now + timedelta(seconds=10),
+                )
+                access = WriteApiAccess(
+                    principal="synthetic-wheel-only", bearer_token=backend_token,
+                    capabilities=frozenset(WriteCapability) - {WriteCapability.CREATE_MEDIA}, writes_enabled=True,
+                )
+                backend = create_write_api_server(service, store, access, port=0)
+                dashboard = create_server(
+                    store, port=0, write_proxy=DashboardWriteProxy(
+                        host="127.0.0.1", port=backend.server_port,
+                        bearer_token=backend_token, ui_token=ui_token,
+                    ),
+                )
+                threads = []
+                try:
+                    for server in (backend, dashboard):
+                        t = Thread(target=server.serve_forever, daemon=True)
+                        t.start()
+                        threads.append(t)
+                    base = "http://127.0.0.1:" + str(dashboard.server_port)
+                    opener = build_opener(ProxyHandler({}))
+                    def call(path, *, method="GET", payload=None, key=None, authorized=True):
+                        headers = {"Accept": "application/json"}
+                        if method != "GET":
+                            headers.update({
+                                "Origin": base,
+                                "X-Mark-Dashboard-Write": "1",
+                                "Content-Type": "application/json",
+                                "Idempotency-Key": key,
+                            })
+                            if authorized:
+                                headers["X-Mark-Dashboard-Token"] = ui_token
+                        req = Request(
+                            base + path,
+                            data=None if payload is None else json.dumps(payload).encode(),
+                            method=method, headers=headers,
+                        )
+                        try:
+                            res = opener.open(req, timeout=3)
+                        except HTTPError as error:
+                            res = error
+                        with res:
+                            return res.status, json.loads(res.read()), dict(res.headers)
+                    assert call("/api/dashboard/config")[:2] == (
+                        200, {"write_ui_available": True},
+                    )
+                    status, _, _ = call(
+                        "/api/write/ads/314/pause", method="POST",
+                        key="wheel-denied", authorized=False,
+                    )
+                    assert status == 403 and not platform.effects
+                    data = {
+                        "category_path": ["Freizeit", "Sammeln"],
+                        "title": "Installed synthetic creation",
+                        "description": "Only an in-memory simulated advertisement",
+                        "price_eur": 10,
+                    }
+                    status, created, _ = call(
+                        "/api/write/ads", method="POST", payload=data, key="wheel-create",
+                    )
+                    assert status == 200, (status, created)
+                    assert created["operation_receipt"]["outcome"] == "confirmed"
+                    rows = {r["ad_id"]: r for r in call("/api/ads")[1]}
+                    assert rows["315"]["title"] == data["title"]
+                    assert rows["314"]["lifecycle_state"] == "active"
+                    status, paused, _ = call(
+                        "/api/write/ads/315/pause", method="POST", key="wheel-pause",
+                    )
+                    assert status == 200 and paused["operation_receipt"]["outcome"] == "confirmed"
+                    assert {r["ad_id"]: r for r in call("/api/ads")[1]}["315"]["lifecycle_state"] == "paused"
+                    status, replay, headers = call(
+                        "/api/write/ads/315/pause", method="POST", key="wheel-pause",
+                    )
+                    assert status == 200 and replay == paused
+                    assert headers["Idempotency-Replayed"] == "true"
+                    assert platform.effects == ["create", "set_state"]
+                    assert len(store.ad_history("315")) == 2
+                finally:
+                    for server in (dashboard, backend):
+                        server.shutdown()
+                        server.server_close()
+                    for thread in threads:
+                        thread.join(timeout=3)
+                print(json.dumps({
+                    "installed_dashboard_write_proxy": True,
+                    "installed_write_create_and_pause": True,
+                    "persisted_dashboard_projection": True,
+                    "same_origin_ui_token_enforced": True,
+                    "write_idempotency_replay": True,
+                    "synthetic_platform_only": True,
+                }, sort_keys=True))
+            """)
+            write_ui_database = root / "synthetic-dashboard-write.sqlite"
+            write_ui = _command(
+                str(python), "-I", "-c", simulated_dashboard_write,
+                str(write_ui_database), cwd=root, env=env, timeout=60,
+            )
+            self.assertEqual(write_ui.returncode, 0, write_ui.stderr[-2500:])
+            self.assertEqual(json.loads(write_ui.stdout), {
+                "installed_dashboard_write_proxy": True,
+                "installed_write_create_and_pause": True,
+                "persisted_dashboard_projection": True,
+                "same_origin_ui_token_enforced": True,
+                "write_idempotency_replay": True,
+                "synthetic_platform_only": True,
+            })
+
             # This is a create-only, same-user *offline* backup, NOT hostile
             # service-UID A6 recovery. Test installed CLI, receipt and manual
             # copy-to-new-path recovery; never overwrite the source or backup.
@@ -610,6 +1012,9 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "loopback_http": True, "csv": True, "denied_writes": True,
             "restart_deduplication": True,
             "provider_consent_default_deny": True,
+            "installed_synthetic_text_and_image_drafts": True,
+            "installed_synthetic_dashboard_write_end_to_end": True,
+            "image_draft_private_and_create_only": True,
             "backup_scope": "create-only-offline-not-a6",
             "backup_sha256": backup_sha256,
             "offline_restore_checked": True,
