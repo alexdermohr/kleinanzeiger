@@ -4707,5 +4707,204 @@ class CdpPrivateWebDeletePageTests(unittest.TestCase):
             page.submit_delete()
 
 
+class HostileSubmitParameterGateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        synthetic = patch("mark_api.private_web_cdp._require_private_web_cdp_authority")
+        synthetic.start()
+        cls.addClassCleanup(synthetic.stop)
+
+    def test_float_subclass_cannot_reenter_armed_click_comparison(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target reservation required")
+        port = 19831
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/original",
+        }
+        sock = FakeSocket([
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {}},
+            {"id": 3, "result": {
+                "result": {"type": "string", "value": "confirmed"}
+            }},
+        ])
+        client = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *a, **kw: sock,
+            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+        )
+        pressed = {
+            "type": "mousePressed", "x": 12.0, "y": 20.0,
+            "button": "left", "buttons": 1, "clickCount": 1,
+        }
+        expression = "(() => 'confirmed')()"
+        client.arm_unknown_submit(
+            settlement_expression=expression, click_point=(12.0, 20.0),
+        )
+        comparison_hooks = []
+
+        class HostileFloat(float):
+            def __eq__(self, other):
+                comparison_hooks.append("entered")
+                try:
+                    client.call("Input.dispatchMouseEvent", pressed)
+                except PrivateWebCdpWriteNotAttemptedError:
+                    pass
+                else:
+                    comparison_hooks.append("nested_browser_click")
+                return super().__eq__(other)
+
+        hostile = dict(pressed)
+        hostile["x"] = HostileFloat(12.0)
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError) as blocked:
+            client.call("Input.dispatchMouseEvent", hostile)
+        self.assertEqual(blocked.exception.stage, "submit_unowned")
+        self.assertEqual(comparison_hooks, [])
+        self.assertEqual(sock.sent, [])
+        client.call("Input.dispatchMouseEvent", pressed)
+        client.call("Input.dispatchMouseEvent", dict(pressed, type="mouseReleased", buttons=0))
+        client.call("Runtime.evaluate", {
+            "expression": expression, "returnByValue": True, "awaitPromise": False,
+        })
+        client.settle_unknown_submit()
+        client.close()
+        self.assertEqual(
+            [frame["method"] for frame in sock.sent],
+            ["Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.evaluate"],
+        )
+
+    def _synthetic_armed_owner(self, port: int, responses):
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/original",
+        }
+        sock = FakeSocket(responses)
+        client = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *a, **kw: sock,
+            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+        )
+        return client, sock
+
+    def test_str_subclass_key_cannot_reenter_pinned_observation(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target reservation required")
+        client, sock = self._synthetic_armed_owner(19832, [{
+            "id": 1, "result": {
+                "result": {"type": "string", "value": "confirmed"},
+            },
+        }])
+        expression = "(() => 'confirmed')()"
+        canonical = {
+            "expression": expression, "returnByValue": True, "awaitPromise": False,
+        }
+        client.arm_unknown_submit(settlement_expression=expression)
+        comparison_hooks = []
+
+        class HostileKey(str):
+            __hash__ = str.__hash__
+
+            def __eq__(self, other):
+                comparison_hooks.append("entered")
+                try:
+                    client.call("Runtime.evaluate", canonical)
+                except PrivateWebCdpWriteNotAttemptedError:
+                    pass
+                else:
+                    comparison_hooks.append("nested_observer")
+                return super().__eq__(other)
+
+        hostile = {
+            HostileKey("expression"): expression,
+            "returnByValue": True,
+            "awaitPromise": False,
+        }
+        comparison_hooks.clear()
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+            client.call("Runtime.evaluate", hostile)
+        self.assertEqual(comparison_hooks, [])
+        self.assertEqual(sock.sent, [])
+        client.call("Runtime.evaluate", canonical)
+        client.settle_unknown_submit()
+        client.close()
+
+    def test_str_subclass_method_cannot_reenter_mouse_press(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target reservation required")
+        responses = [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {}},
+            {"id": 3, "result": {
+                "result": {"type": "string", "value": "confirmed"},
+            }},
+        ]
+        client, sock = self._synthetic_armed_owner(19833, responses)
+        pressed = {
+            "type": "mousePressed", "x": 12.0, "y": 20.0,
+            "button": "left", "buttons": 1, "clickCount": 1,
+        }
+        expression = "(() => 'confirmed')()"
+        client.arm_unknown_submit(
+            settlement_expression=expression, click_point=(12.0, 20.0),
+        )
+        comparison_hooks = []
+
+        class HostileMethod(str):
+            def __eq__(self, other):
+                comparison_hooks.append("entered")
+                try:
+                    client.call("Input.dispatchMouseEvent", pressed)
+                except PrivateWebCdpWriteNotAttemptedError:
+                    pass
+                else:
+                    comparison_hooks.append("nested_click")
+                return super().__eq__(other)
+
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+            client.call(HostileMethod("Input.dispatchMouseEvent"), pressed)
+        self.assertEqual(comparison_hooks, [])
+        self.assertEqual(sock.sent, [])
+        client.call("Input.dispatchMouseEvent", pressed)
+        client.call("Input.dispatchMouseEvent", dict(
+            pressed, type="mouseReleased", buttons=0,
+        ))
+        client.call("Runtime.evaluate", {
+            "expression": expression, "returnByValue": True, "awaitPromise": False,
+        })
+        client.settle_unknown_submit()
+        client.close()
+
+    def test_settlement_expression_subclass_cannot_execute_before_arming(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target reservation required")
+        client, sock = self._synthetic_armed_owner(
+            19834, [{"id": 1, "result": {}}],
+        )
+        executed = []
+
+        class HostileExpression(str):
+            def strip(self, *args, **kwargs):
+                executed.append("strip")
+                client.call("Page.navigate", {
+                    "url": "https://example.invalid/",
+                })
+                return super().strip(*args, **kwargs)
+
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+            client.arm_unknown_submit(
+                settlement_expression=HostileExpression("(() => 'confirmed')()"),
+            )
+        self.assertEqual(executed, [])
+        self.assertEqual(sock.sent, [])
+        self.assertFalse(client._unresolved_submit)
+        client.close()
+
+
 if __name__ == "__main__":
     unittest.main()
