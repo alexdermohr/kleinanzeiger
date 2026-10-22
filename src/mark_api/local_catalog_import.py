@@ -17,10 +17,10 @@ from pathlib import Path
 from typing import Iterable
 
 from .domain import AdSnapshot, LifecycleState
-from .storage import SnapshotStore
+from .storage import LOCAL_CATALOG_SOURCE, SnapshotStore
 
 _SCHEMA = "mark-local-catalog-v1"
-_SOURCE = "user-supplied-local-catalog"
+_SOURCE = LOCAL_CATALOG_SOURCE
 _MAX_FILE_BYTES = 4 * 1024 * 1024
 _MAX_ROWS_PER_FILE = 2500
 _MAX_TOTAL_ROWS = 5000

@@ -24,6 +24,8 @@ from .domain import (
 from .results import ReadResult, ReadStatus
 
 _SYNC_SCHEMA_VERSION = 1
+# Deliberately unverified, user-provided observations: never an owner read.
+LOCAL_CATALOG_SOURCE = "user-supplied-local-catalog"
 _SYNC_ERROR_KINDS = frozenset({
     "unauthenticated", "http_error", "transport_error", "parse_error",
     "reader_exception", "runtime_unavailable", "invalid_inventory",
@@ -1927,9 +1929,25 @@ class SnapshotStore:
             raise ValueError("inconsistent owner inventory")
         present_ids = {snapshot.ad_id for snapshot in snapshots}
         tracked_ids = {ad_id for ad_id in tracked_ad_ids if ad_id.strip()}
-        absent_ids = sorted(tracked_ids - present_ids)
-
         with self._connect() as connection:
+            # Serialize the evidence check with the inserts. Otherwise a
+            # concurrent owner/catalog writer can change the inferred set
+            # after validation but before an ABSENT record is committed.
+            connection.execute("BEGIN IMMEDIATE")
+            # A manual-only ID, or an ID with only historical ABSENT
+            # assertions, has never established prior owner presence.
+            # The caller's tracked list is not itself owner evidence.
+            owned_ids: set[str] = set()
+            if tracked_ids:
+                owned_ids = {
+                    row["ad_id"]
+                    for row in connection.execute(
+                        "SELECT DISTINCT ad_id FROM ad_snapshots "
+                        "WHERE source != ? AND lifecycle_state != ?",
+                        (LOCAL_CATALOG_SOURCE, LifecycleState.ABSENT.value),
+                    ).fetchall()
+                }
+            absent_ids = sorted((tracked_ids & owned_ids) - present_ids)
             for snapshot in snapshots:
                 self._insert_ad_snapshot(connection, snapshot)
             for ad_id in absent_ids:
