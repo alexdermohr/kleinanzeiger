@@ -271,6 +271,46 @@ class BrowserInventoryTests(unittest.TestCase):
             with self.subTest(port=port), self.assertRaises(ValueError):
                 CdpManagementInventoryReader(cdp_port=port)
 
+    def test_only_exact_canonical_inventory_reads_are_certified(self):
+        from mark_api.private_web_inventory_cdp import (
+            _INVENTORY_TAB_PROBE, _inventory_page_expression,
+            _is_fixed_inventory_read_only_evaluation,
+        )
+        allowed = _is_fixed_inventory_read_only_evaluation
+        self.assertTrue(allowed(_INVENTORY_TAB_PROBE, False))
+        self.assertTrue(allowed(_inventory_page_expression(1), True))
+        self.assertTrue(allowed(_inventory_page_expression(100), True))
+        self.assertFalse(allowed(_INVENTORY_TAB_PROBE + ";document.body.remove()", False))
+        self.assertFalse(allowed(_inventory_page_expression(1) + ";alert(1)", True))
+        self.assertFalse(allowed(_inventory_page_expression(1), False))
+        self.assertFalse(allowed(_inventory_page_expression(1), 1))
+        self.assertFalse(allowed("document.querySelector('button').click()", False))
+
+    def test_production_inventory_builder_admits_cancellable_native_client(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal mask required")
+        fake = FakeClient([payload([])])
+        with (
+            patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient",
+                  return_value=fake) as native_factory,
+        ):
+            runtime = build_private_web_inventory_runtime(
+                cdp_port=19610, timeout_seconds=0.2,
+            )
+            try:
+                result = runtime.read_inventory(stop_requested=lambda: False)
+                self.assertEqual(result.status, ReadStatus.SUCCESS_EMPTY)
+                native_factory.assert_called_once()
+                self.assertIsNotNone(fake._send_guard)
+                self.assertEqual(
+                    [method for method, _ in fake.calls],
+                    ["Runtime.evaluate", "Runtime.evaluate"],
+                )
+            finally:
+                runtime.close()
+            self.assertTrue(fake.closed)
+
     def test_stop_aware_reader_never_calls_lazy_client_factory(self):
         invoked = []
         def factory():

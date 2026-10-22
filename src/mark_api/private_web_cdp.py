@@ -732,10 +732,40 @@ class _LoopbackCdpClient:
             # Pin uncertainty BEFORE any send(), encoding or scheduling
             # effect. Exception and BaseException cannot later lose the
             # browser claim merely because the call stack unwound.
-            # A successful CDP response is only a transport acknowledgment.
-            # Keep the kernel claim after abandoned calls that can change the
-            # browser. Network.getCookies is natively read-only.
-            if type(method) is not str or method != "Network.getCookies":
+            # Only exact fixed-origin owner-inventory GETs are certified
+            # read-only. Arbitrary Runtime.evaluate and UNKNOWN calls retain
+            # their browser-effect fence, even after a CDP transport ACK.
+            inventory_read = False
+            if (
+                not self._unresolved_submit
+                and type(method) is str and method == "Runtime.evaluate"
+                and type(params) is dict and len(params) == 3
+                and params.get("returnByValue") is True
+            ):
+                # Snapshot the native immutable parameters before checking
+                # them. The caller may change its dict from another thread
+                # or a reentrant JSON serializer after admission.
+                read_expression = params.get("expression")
+                read_await_promise = params.get("awaitPromise")
+                if type(read_expression) is str and type(read_await_promise) is bool:
+                    from .private_web_inventory_cdp import (
+                        _is_fixed_inventory_read_only_evaluation,
+                    )
+                    inventory_read = _is_fixed_inventory_read_only_evaluation(
+                        read_expression, read_await_promise,
+                    )
+                    if inventory_read:
+                        # Serialize only the exact evaluated safe expression,
+                        # not the mutable caller dict used for classification.
+                        bound_params = {
+                            "expression": read_expression,
+                            "returnByValue": True,
+                            "awaitPromise": read_await_promise,
+                        }
+            if (
+                type(method) is not str
+                or (method != "Network.getCookies" and not inventory_read)
+            ):
                 self._possible_browser_side_effect = True
             self._unresolved_call = True
             self._next_id += 1

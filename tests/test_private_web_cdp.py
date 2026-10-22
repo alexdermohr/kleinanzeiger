@@ -2377,6 +2377,101 @@ class CdpPrivateWebPageTests(unittest.TestCase):
                         claim.close()
                     _ACTIVE_CDP_TARGET_CLAIMS.pop(claim_id, None)
 
+    def test_certified_inventory_reads_release_kernel_target_for_followup_writer(self) -> None:
+        """A successful fixed-origin GET must not deadlock all subsequent writes."""
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract AF_UNIX target required")
+        from mark_api.private_web_inventory_cdp import (
+            _INVENTORY_TAB_PROBE, _inventory_page_expression,
+        )
+        endpoint = "http://127.0.0.1:19937"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19937/devtools/page/inventory-one",
+        }
+
+        def new_client():
+            socket = FakeSocket([
+                {"id": 1, "result": {"result": {
+                    "type": "object", "value": {"readyState": "complete"}}}},
+                {"id": 2, "result": {"result": {
+                    "type": "object", "value": {"status": 200, "body": "{}"}}}},
+            ])
+            return _LoopbackCdpClient(
+                endpoint, timeout_seconds=1,
+                opener=lambda url, **kw: FakeResponse([target], url=url),
+                websocket_factory=lambda *args, **kw: socket,
+                tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+            )
+
+        original = new_client()
+        reservation = original._target_reservation
+        self.assertFalse(original._possible_browser_side_effect)
+        for expression, await_promise in (
+            (_INVENTORY_TAB_PROBE, False),
+            (_inventory_page_expression(1), True),
+        ):
+            original.call("Runtime.evaluate", {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": await_promise,
+            })
+            self.assertFalse(original._possible_browser_side_effect)
+            self.assertFalse(original._unresolved_call)
+        original.close()
+        self.assertEqual(reservation.fileno(), -1)
+        # The same port can now be acquired by the next browser operation.
+        replacement = new_client()
+        self.assertIsNotNone(replacement._target_reservation)
+        replacement.close()
+
+    def test_certified_inventory_payload_freezes_mutable_caller_params(self) -> None:
+        """A serializer hook must never turn an approved GET into a click."""
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX target required")
+        from mark_api.private_web_inventory_cdp import _INVENTORY_TAB_PROBE
+
+        endpoint = "http://127.0.0.1:19938"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19938/devtools/page/inventory-two",
+        }
+        socket = FakeSocket([
+            {"id": 1, "result": {"result": {"type": "object", "value": "ok"}}},
+        ])
+        client = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *args, **kw: socket,
+            tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+        )
+        params = {
+            "expression": _INVENTORY_TAB_PROBE,
+            "returnByValue": True,
+            "awaitPromise": False,
+        }
+        original_dumps = json.dumps
+        malicious = "document.querySelector('button')?.click()"
+
+        def hostile_serializer(request, *args, **kwargs):
+            if isinstance(request, dict) and request.get("method") == "Runtime.evaluate":
+                params["expression"] = malicious
+            return original_dumps(request, *args, **kwargs)
+
+        try:
+            with patch("mark_api.private_web_cdp.json.dumps", side_effect=hostile_serializer):
+                client.call("Runtime.evaluate", params)
+            self.assertEqual(params["expression"], malicious)
+            self.assertEqual(
+                socket.sent[0]["params"]["expression"], _INVENTORY_TAB_PROBE,
+            )
+            self.assertFalse(client._possible_browser_side_effect)
+            self.assertFalse(client._unresolved_call)
+        finally:
+            client.close()
+
     def test_nonmedia_ack_cannot_release_target_via_explicit_close(self) -> None:
         """Only platform settlement, never a CDP transport ACK, permits release."""
         if sys.platform != "linux":

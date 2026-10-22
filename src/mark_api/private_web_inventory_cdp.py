@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import secrets
 import signal
 import time
@@ -37,6 +38,76 @@ _MANAGER_PATH = "/m-meine-anzeigen.html"
 _MANAGEMENT_JSON_PATH = "/m-meine-anzeigen-verwalten.json"
 _MAX_PAGE_BYTES = 2 * 1024 * 1024
 _STOP_SIGNALS = frozenset((signal.SIGTERM, signal.SIGINT))
+
+
+_INVENTORY_TAB_PROBE = (
+    "(() => ({readyState: document.readyState,"
+    "origin: location.origin, path: location.pathname}))()"
+)
+
+
+def _inventory_page_expression(page: int) -> str:
+    """Exact fixed-origin, GET-only script shared with CDP safety classification."""
+    if type(page) is not int or not 1 <= page <= MAX_PAGES:
+        raise ValueError("invalid inventory page")
+    url = _MANAGEMENT_JSON_PATH + "?" + urlencode(
+        {"sort": "DEFAULT", "pageNum": page},
+    )
+    # Text is collected by a bounded stream reader, not response.text().
+    # The browser owns credentials. No Cookie header leaves the page.
+    return f"""
+(async () => {{
+  if (location.origin !== {json.dumps(_ORIGIN)} ||
+  location.pathname !== {json.dumps(_MANAGER_PATH)}) {{
+return {{error: "wrong_origin_or_page"}};
+  }}
+  const response = await fetch({json.dumps(url)}, {{
+method: "GET", credentials: "same-origin", mode: "same-origin",
+redirect: "error", cache: "no-store",
+headers: {{"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"}}
+  }});
+  if (!response.body || !response.body.getReader) {{
+return {{error: "missing_body"}};
+  }}
+  const reader = response.body.getReader();
+  let total = 0;
+  const chunks = [];
+  while (true) {{
+const item = await reader.read();
+if (item.done) break;
+total += item.value.byteLength;
+if (total > {_MAX_PAGE_BYTES}) {{
+  void reader.cancel();
+  return {{error: "oversized_body"}};
+}}
+chunks.push(item.value);
+  }}
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {{
+bytes.set(chunk, offset);
+offset += chunk.byteLength;
+  }}
+  return {{status: response.status, body: new TextDecoder("utf-8", {{fatal: true}}).decode(bytes)}};
+}})()
+"""
+
+
+def _is_fixed_inventory_read_only_evaluation(
+    expression: object, await_promise: object,
+) -> bool:
+    """Accept only exact Mark-owned GET inventory reads, never arbitrary JS."""
+    if type(expression) is not str or type(await_promise) is not bool:
+        return False
+    if not await_promise:
+        return expression == _INVENTORY_TAB_PROBE
+    page_match = re.search(r"pageNum=([1-9][0-9]{0,2})", expression)
+    if page_match is None:
+        return False
+    page = int(page_match.group(1))
+    return page <= MAX_PAGES and expression == _inventory_page_expression(page)
+
+
 
 
 class PrivateWebInventoryReadCancelled(RuntimeError):
@@ -114,6 +185,7 @@ class CdpManagementInventoryReader:
         # before it installs the cancellation binder. A preconnected client
         # is an isolated test seam, not an entitlement for a real transport.
         self._preconnected_client = preconnected_client
+        self._factory_is_internal = client_factory is None
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._sleep = sleep
@@ -149,11 +221,7 @@ class CdpManagementInventoryReader:
         path again before its read-only fetch.
         """
         _require_private_web_cdp_authority()
-        current = self._value(
-            client,
-            "(() => ({readyState: document.readyState,"
-            "origin: location.origin, path: location.pathname}))()",
-        )
+        current = self._value(client, _INVENTORY_TAB_PROBE)
         if not (
             isinstance(current, dict)
             and current.get("readyState") == "complete"
@@ -166,47 +234,7 @@ class CdpManagementInventoryReader:
     def _page(client: _CdpClient, page: int) -> ReadResult[dict[str, Any]]:
         if isinstance(page, bool) or not isinstance(page, int) or not 1 <= page <= MAX_PAGES:
             return ReadResult.failure(ReadStatus.PARSE_ERROR, error="invalid_page_number")
-        url = _MANAGEMENT_JSON_PATH + "?" + urlencode(
-            {"sort": "DEFAULT", "pageNum": page},
-        )
-        # Text is collected by a bounded stream reader, not response.text().
-        # The browser owns credentials. No Cookie header leaves the page.
-        expression = f"""
-(async () => {{
-  if (location.origin !== {json.dumps(_ORIGIN)} ||
-      location.pathname !== {json.dumps(_MANAGER_PATH)}) {{
-    return {{error: "wrong_origin_or_page"}};
-  }}
-  const response = await fetch({json.dumps(url)}, {{
-    method: "GET", credentials: "same-origin", mode: "same-origin",
-    redirect: "error", cache: "no-store",
-    headers: {{"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"}}
-  }});
-  if (!response.body || !response.body.getReader) {{
-    return {{error: "missing_body"}};
-  }}
-  const reader = response.body.getReader();
-  let total = 0;
-  const chunks = [];
-  while (true) {{
-    const item = await reader.read();
-    if (item.done) break;
-    total += item.value.byteLength;
-    if (total > {_MAX_PAGE_BYTES}) {{
-      void reader.cancel();
-      return {{error: "oversized_body"}};
-    }}
-    chunks.push(item.value);
-  }}
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {{
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }}
-  return {{status: response.status, body: new TextDecoder("utf-8", {{fatal: true}}).decode(bytes)}};
-}})()
-"""
+        expression = _inventory_page_expression(page)
         payload = CdpManagementInventoryReader._value(
             client, expression, await_promise=True,
         )
@@ -261,11 +289,21 @@ class CdpManagementInventoryReader:
                     client = self._client_factory()
                 else:
                     if self._preconnected_client is None:
-                        raise PrivateWebInventoryReadSetupError(
-                            "cancellable CDP connection not composed"
-                        )
-                    client = self._preconnected_client
-                    self._preconnected_client = None
+                        if not self._factory_is_internal:
+                            # Callers' arbitrary factories may cause uncontrolled
+                            # browser effects before cancellation is installed.
+                            raise PrivateWebInventoryReadSetupError(
+                                "cancellable CDP connection not composed"
+                            )
+                        # The native factory opens ONLY its loopback discovery
+                        # and WebSocket before the first platform read. A stop
+                        # arriving during connection cannot authorize the
+                        # following evaluate: admission is rechecked on send.
+                        with _cancellable_transport_entry(stop_requested):
+                            client = self._client_factory()
+                    else:
+                        client = self._preconnected_client
+                        self._preconnected_client = None
                     binder = getattr(client, "bind_cancellable_reads", None)
                     if not callable(binder):
                         raise PrivateWebInventoryReadSetupError(
