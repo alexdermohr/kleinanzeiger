@@ -195,6 +195,97 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
                 finally:
                     self._replace(table, "ad_id", "1234567890")
 
+    def _replace_ad_snapshot_schema(self, key_declaration=None, index_key=None):
+        # Rebuild only this synthetic fixture's table. Neither main nor any
+        # production SQLite database is opened or mutated by these tests.
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            ddl = db.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='ad_snapshots'"
+            ).fetchone()[0]
+            self.assertIn("ad_id TEXT NOT NULL", ddl)
+            ddl = ddl.replace(
+                "ad_snapshots", "ad_snapshots_replacement", 1,
+            )
+            if key_declaration is not None:
+                ddl = ddl.replace(
+                    "ad_id TEXT NOT NULL", key_declaration, 1,
+                )
+            db.execute(ddl)
+            db.execute(
+                "INSERT INTO ad_snapshots_replacement "
+                "SELECT * FROM ad_snapshots"
+            )
+            db.execute("DROP TABLE ad_snapshots")
+            db.execute(
+                "ALTER TABLE ad_snapshots_replacement RENAME TO ad_snapshots"
+            )
+            if index_key is None:
+                index_key = "ad_id"
+            db.execute(
+                "CREATE INDEX idx_ad_snapshots_ad_id_observed "
+                f"ON ad_snapshots({index_key}, observed_at, id)"
+            )
+
+    def _assert_history_schema_denied(self):
+        self.assertFalse(self.store.is_ready())
+        with self.assertRaises(sqlite3.DatabaseError):
+            SnapshotStore(self.store.path)
+        with self.assertRaises(sqlite3.DatabaseError):
+            list(self.store.ad_histories())
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.store.ad_history("1234567890")
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.store.tracked_ad_ids()
+        status, body = self._get("/api/ads")
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            json.loads(body), {"error": "database_unavailable"},
+        )
+        self.assertNotIn(str(self.store.path).encode(), body)
+
+    def test_canonical_binary_ad_identity_groups_exactly(self):
+        for i, ad_id in enumerate(("A", "a", "A", "a")):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id=ad_id,
+                observed_at=self.instant + timedelta(seconds=i),
+                source="synthetic",
+                lifecycle_state=LifecycleState.ACTIVE,
+            ))
+        groups = dict(self.store.ad_histories())
+        self.assertEqual(len(groups["A"]), 2)
+        self.assertEqual(len(groups["a"]), 2)
+        self.assertEqual(
+            set(self.store.tracked_ad_ids()), {"1234567890", "A", "a"},
+        )
+        self.assertEqual(self._get("/api/ads")[0], 200)
+        self.assertTrue(self.store.is_ready())
+
+    def test_nocase_ad_id_is_denied_on_startup_and_live_read(self):
+        self.assertEqual(self._get("/api/ads")[0], 200)
+        self._replace_ad_snapshot_schema(
+            key_declaration="ad_id TEXT COLLATE NOCASE NOT NULL",
+        )
+        self._assert_history_schema_denied()
+
+    def test_rtrim_ad_id_is_denied_on_startup_and_live_read(self):
+        self._replace_ad_snapshot_schema(
+            key_declaration="ad_id TEXT COLLATE RTRIM NOT NULL",
+        )
+        self._assert_history_schema_denied()
+
+    def test_binary_column_with_nocase_index_is_denied(self):
+        self._replace_ad_snapshot_schema(
+            index_key="ad_id COLLATE NOCASE",
+        )
+        self._assert_history_schema_denied()
+
+    def test_quoted_custom_column_ddl_fails_closed(self):
+        self._replace_ad_snapshot_schema(
+            key_declaration='"ad_id" TEXT COLLATE NOCASE NOT NULL',
+        )
+        self._assert_history_schema_denied()
+
     def test_inbound_history_actual_instants_and_id_ties_remain_ordered(self):
         first = InboundMessageEvent(
             ad_id="1234567890", conversation_id="synthetic-chat",
