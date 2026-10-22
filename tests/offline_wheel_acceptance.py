@@ -765,6 +765,196 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 private_generated.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
             )
 
+
+            # Installed wheel must join the actual dashboard same-origin write
+            # gateway to the Write API and persisted projection, using only a
+            # wholly in-memory, synthetic platform double.
+            simulated_dashboard_write = textwrap.dedent(r"""
+                import json
+                import sys
+                from dataclasses import replace
+                from datetime import datetime, timedelta, timezone
+                from pathlib import Path
+                from threading import Thread
+                from urllib.error import HTTPError
+                from urllib.request import ProxyHandler, Request, build_opener
+
+                import mark_api
+                from mark_api.application import MarkService
+                from mark_api.dashboard import DashboardWriteProxy, create_server
+                from mark_api.domain import AdSnapshot, LifecycleState
+                from mark_api.results import ReadResult
+                from mark_api.storage import SnapshotStore
+                from mark_api.write_api import (
+                    WriteApiAccess, WriteCapability, create_write_api_server,
+                )
+
+                assert "site-packages" in Path(mark_api.__file__).parts
+                now = datetime(2026, 10, 4, tzinfo=timezone.utc)
+                backend_token = "synthetic-installed-backend-token-0001"
+                ui_token = "synthetic-installed-ui-token-0000001"
+
+                class SyntheticPlatform:
+                    def __init__(self):
+                        self.ads = {"314": AdSnapshot(
+                            ad_id="314", observed_at=now, source="synthetic-owner",
+                            lifecycle_state=LifecycleState.ACTIVE, title="Existing",
+                        )}
+                        self.effects = []
+                    def read_ads(self):
+                        ads = tuple(self.ads.values())
+                        return (ReadResult.success_nonempty(ads) if ads
+                                else ReadResult.success_empty(()))
+                    def update_content(self, ad_id, *, title=None, description=None):
+                        prior = self.ads[ad_id]
+                        self.ads[ad_id] = replace(
+                            prior, title=prior.title if title is None else title,
+                            description=prior.description if description is None else description,
+                            observed_at=now + timedelta(seconds=len(self.effects)+1),
+                        )
+                        self.effects.append("update_content")
+                    def set_state(self, ad_id, state):
+                        self.ads[ad_id] = replace(
+                            self.ads[ad_id], lifecycle_state=state,
+                            observed_at=now + timedelta(seconds=len(self.effects)+1),
+                        )
+                        self.effects.append("set_state")
+                    def create_ad(self, request):
+                        self.ads["315"] = AdSnapshot(
+                            ad_id="315", observed_at=now + timedelta(seconds=2),
+                            source="synthetic-owner", lifecycle_state=LifecycleState.ACTIVE,
+                            title=request.title, description=request.description,
+                        )
+                        self.effects.append("create")
+                    def delete_ad(self, ad_id):
+                        del self.ads[ad_id]
+                        self.effects.append("delete")
+
+                class FilterReader:
+                    def __init__(self, platform, ad_id):
+                        self.platform, self.ad_id = platform, ad_id
+                    def read_ads(self):
+                        items = tuple(x for x in self.platform.ads.values()
+                                      if x.ad_id == self.ad_id)
+                        return (ReadResult.success_nonempty(items) if items
+                                else ReadResult.success_empty(()))
+
+                platform = SyntheticPlatform()
+                store = SnapshotStore(Path(sys.argv[1]))
+                store.append_ad_snapshot(platform.ads["314"])
+                service = MarkService(
+                    owner_reader=platform, management_reader=platform,
+                    delete_confirmation_reader=platform, reaction_reader=None,
+                    state_writer=platform, delete_writer=platform,
+                    content_writer=platform, create_writer=platform,
+                    content_reader_factory=lambda ad_id: FilterReader(platform, ad_id),
+                    store=store, writes_enabled=True, clock=lambda: now + timedelta(seconds=10),
+                )
+                access = WriteApiAccess(
+                    principal="synthetic-wheel-only", bearer_token=backend_token,
+                    capabilities=frozenset(WriteCapability) - {WriteCapability.CREATE_MEDIA}, writes_enabled=True,
+                )
+                backend = create_write_api_server(service, store, access, port=0)
+                dashboard = create_server(
+                    store, port=0, write_proxy=DashboardWriteProxy(
+                        host="127.0.0.1", port=backend.server_port,
+                        bearer_token=backend_token, ui_token=ui_token,
+                    ),
+                )
+                threads = []
+                try:
+                    for server in (backend, dashboard):
+                        t = Thread(target=server.serve_forever, daemon=True)
+                        t.start()
+                        threads.append(t)
+                    base = "http://127.0.0.1:" + str(dashboard.server_port)
+                    opener = build_opener(ProxyHandler({}))
+                    def call(path, *, method="GET", payload=None, key=None, authorized=True):
+                        headers = {"Accept": "application/json"}
+                        if method != "GET":
+                            headers.update({
+                                "Origin": base,
+                                "X-Mark-Dashboard-Write": "1",
+                                "Content-Type": "application/json",
+                                "Idempotency-Key": key,
+                            })
+                            if authorized:
+                                headers["X-Mark-Dashboard-Token"] = ui_token
+                        req = Request(
+                            base + path,
+                            data=None if payload is None else json.dumps(payload).encode(),
+                            method=method, headers=headers,
+                        )
+                        try:
+                            res = opener.open(req, timeout=3)
+                        except HTTPError as error:
+                            res = error
+                        with res:
+                            return res.status, json.loads(res.read()), dict(res.headers)
+                    assert call("/api/dashboard/config")[:2] == (
+                        200, {"write_ui_available": True},
+                    )
+                    status, _, _ = call(
+                        "/api/write/ads/314/pause", method="POST",
+                        key="wheel-denied", authorized=False,
+                    )
+                    assert status == 403 and not platform.effects
+                    data = {
+                        "category_path": ["Freizeit", "Sammeln"],
+                        "title": "Installed synthetic creation",
+                        "description": "Only an in-memory simulated advertisement",
+                        "price_eur": 10,
+                    }
+                    status, created, _ = call(
+                        "/api/write/ads", method="POST", payload=data, key="wheel-create",
+                    )
+                    assert status == 200, (status, created)
+                    assert created["operation_receipt"]["outcome"] == "confirmed"
+                    rows = {r["ad_id"]: r for r in call("/api/ads")[1]}
+                    assert rows["315"]["title"] == data["title"]
+                    assert rows["314"]["lifecycle_state"] == "active"
+                    status, paused, _ = call(
+                        "/api/write/ads/315/pause", method="POST", key="wheel-pause",
+                    )
+                    assert status == 200 and paused["operation_receipt"]["outcome"] == "confirmed"
+                    assert {r["ad_id"]: r for r in call("/api/ads")[1]}["315"]["lifecycle_state"] == "paused"
+                    status, replay, headers = call(
+                        "/api/write/ads/315/pause", method="POST", key="wheel-pause",
+                    )
+                    assert status == 200 and replay == paused
+                    assert headers["Idempotency-Replayed"] == "true"
+                    assert platform.effects == ["create", "set_state"]
+                    assert len(store.ad_history("315")) == 2
+                finally:
+                    for server in (dashboard, backend):
+                        server.shutdown()
+                        server.server_close()
+                    for thread in threads:
+                        thread.join(timeout=3)
+                print(json.dumps({
+                    "installed_dashboard_write_proxy": True,
+                    "installed_write_create_and_pause": True,
+                    "persisted_dashboard_projection": True,
+                    "same_origin_ui_token_enforced": True,
+                    "write_idempotency_replay": True,
+                    "synthetic_platform_only": True,
+                }, sort_keys=True))
+            """)
+            write_ui_database = root / "synthetic-dashboard-write.sqlite"
+            write_ui = _command(
+                str(python), "-I", "-c", simulated_dashboard_write,
+                str(write_ui_database), cwd=root, env=env, timeout=60,
+            )
+            self.assertEqual(write_ui.returncode, 0, write_ui.stderr[-2500:])
+            self.assertEqual(json.loads(write_ui.stdout), {
+                "installed_dashboard_write_proxy": True,
+                "installed_write_create_and_pause": True,
+                "persisted_dashboard_projection": True,
+                "same_origin_ui_token_enforced": True,
+                "write_idempotency_replay": True,
+                "synthetic_platform_only": True,
+            })
+
             # This is a create-only, same-user *offline* backup, NOT hostile
             # service-UID A6 recovery. Test installed CLI, receipt and manual
             # copy-to-new-path recovery; never overwrite the source or backup.
@@ -823,6 +1013,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "restart_deduplication": True,
             "provider_consent_default_deny": True,
             "installed_synthetic_text_and_image_drafts": True,
+            "installed_synthetic_dashboard_write_end_to_end": True,
             "image_draft_private_and_create_only": True,
             "backup_scope": "create-only-offline-not-a6",
             "backup_sha256": backup_sha256,
