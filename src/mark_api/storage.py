@@ -27,17 +27,27 @@ from .results import ReadResult, ReadStatus
 _SYNC_SCHEMA_VERSION = 1
 _AD_HISTORY_PAGE_ROWS = 256  # Close read connection before projection.
 
-# Canonical SQLite-generated table declaration prefix. Reject noncanonical
-# declarations, including quoted/annotated rewrites, rather than trying to
-# infer column collations with a SQL regex that could parse comments as DDL.
-# Native ad ID identity must be BINARY for both keyset pagination and Python
-# grouping; a preexisting NOCASE/RTRIM table is untrusted, never auto-repaired.
-_AD_SNAPSHOT_BINARY_KEY_DDL = re.compile(
-    r"\ACREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?ad_snapshots"
-    r"\s*\(\s*id\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\s*,"
-    r"\s*ad_id\s+TEXT\s+NOT\s+NULL\s*,",
-    re.IGNORECASE,
-)
+# Historical ad IDs must have SQLite BINARY identity in every keyed history
+# table: SQL WHERE identity and Python projection grouping must not disagree.
+# A deliberately conservative DDL prefix rejects unrecognized manually
+# altered/quoted/commented schemas rather than guessing at SQL collation syntax.
+_HISTORY_BINARY_KEY_DDL = {
+    table: re.compile(
+        r"\ACREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?" + table
+        + r"\s*\(\s*id\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\s*,"
+        + (
+            r"\s*provider_message_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE\s*,"
+            if table == "inbound_message_events" else ""
+        )
+        + r"\s*ad_id\s+TEXT\s+NOT\s+NULL\s*,",
+        re.IGNORECASE,
+    )
+    for table in (
+        "ad_snapshots", "reaction_snapshots", "inbound_message_events",
+        "ad_classifications",
+    )
+}
+
 _SYNC_ERROR_KINDS = frozenset({
     "unauthenticated", "http_error", "transport_error", "parse_error",
     "reader_exception", "runtime_unavailable", "invalid_inventory",
@@ -376,46 +386,47 @@ class SnapshotStore:
         return connection
 
     @staticmethod
-    def _assert_binary_ad_snapshot_schema(
-        connection: sqlite3.Connection,
+    def _assert_binary_history_key_schema(
+        connection: sqlite3.Connection, table: str,
     ) -> None:
-        """Refuse ad identity collations that split or merge history groups.
+        """Fail closed when SQLite identity and Python exact IDs diverge.
 
-        PRAGMA table_info omits declared column collation. Match only the
-        canonical generated DDL prefix with no SQL comments/quoted aliases,
-        then verify the actual index keys with SQLite's own parser metadata.
-        Unrecognized legacy/manual DDL requires explicit inspected migration.
+        PRAGMA table_info omits native column collation. Verify an anchored
+        canonical unquoted DDL prefix, then validate actual index collations
+        via SQLite's index_xinfo. The table is always from a fixed whitelist.
         """
+        rule = _HISTORY_BINARY_KEY_DDL.get(table)
+        if rule is None:
+            raise ValueError("unsupported historical ad ID table")
         record = connection.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type='table' AND name='ad_snapshots'"
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
         ).fetchone()
         if (
             record is None
             or type(record["sql"]) is not str
-            or _AD_SNAPSHOT_BINARY_KEY_DDL.match(record["sql"]) is None
+            or rule.match(record["sql"]) is None
         ):
-            raise sqlite3.DatabaseError("invalid ad snapshot key collation")
+            raise sqlite3.DatabaseError("invalid history key collation")
 
+        index_name = f"idx_{table}_ad_id_observed"
         index = next((
-            row for row in connection.execute(
-                "PRAGMA index_list(ad_snapshots)"
-            ) if row["name"] == "idx_ad_snapshots_ad_id_observed"
+            row for row in connection.execute(f"PRAGMA index_list({table})")
+            if row["name"] == index_name
         ), None)
         if index is None or index["partial"] or index["origin"] != "c":
-            raise sqlite3.DatabaseError("invalid ad snapshot key index")
+            raise sqlite3.DatabaseError("invalid history key index")
         key_columns = [
             (row["name"], row["coll"], row["desc"])
-            for row in connection.execute(
-                "PRAGMA index_xinfo(idx_ad_snapshots_ad_id_observed)"
-            ) if row["key"]
+            for row in connection.execute(f"PRAGMA index_xinfo({index_name})")
+            if row["key"]
         ]
         if key_columns != [
             ("ad_id", "BINARY", 0),
             ("observed_at", "BINARY", 0),
             ("id", "BINARY", 0),
         ]:
-            raise sqlite3.DatabaseError("invalid ad snapshot key index")
+            raise sqlite3.DatabaseError("invalid history key index")
 
     @staticmethod
     def _validate_store_schema(
@@ -444,8 +455,8 @@ class SnapshotStore:
             )
             if not (set(expected) - migratable).issubset(columns):
                 raise sqlite3.DatabaseError("database schema is incomplete")
-            if table == "ad_snapshots":
-                SnapshotStore._assert_binary_ad_snapshot_schema(connection)
+            if table in _HISTORY_BINARY_KEY_DDL:
+                SnapshotStore._assert_binary_history_key_schema(connection, table)
 
             if table in _REQUIRED_SINGLE_COLUMN_UNIQUES:
                 unique_columns: set[str] = set()
@@ -2089,7 +2100,7 @@ class SnapshotStore:
                 # Schema validation and keyset lookup share one read snapshot,
                 # including if a hostile WAL writer replaces the schema.
                 connection.execute("BEGIN")
-                self._assert_binary_ad_snapshot_schema(connection)
+                self._assert_binary_history_key_schema(connection, "ad_snapshots")
                 if high_water_id is None:
                     maximum = connection.execute(
                         "SELECT MAX(id) AS max_id FROM ad_snapshots"
@@ -2195,8 +2206,7 @@ class SnapshotStore:
         # Bind both validation probes and the following keyed SELECT to the
         # same read snapshot, even while a WAL writer commits concurrently.
         connection.execute("BEGIN")
-        if table == "ad_snapshots":
-            cls._assert_binary_ad_snapshot_schema(connection)
+        cls._assert_binary_history_key_schema(connection, table)
         for direction in ("ASC", "DESC"):
             row = connection.execute(
                 f"SELECT ad_id FROM {table} ORDER BY ad_id {direction} LIMIT 1"

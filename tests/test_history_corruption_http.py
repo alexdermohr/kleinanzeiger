@@ -195,49 +195,53 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
                 finally:
                     self._replace(table, "ad_id", "1234567890")
 
-    def _replace_ad_snapshot_schema(self, key_declaration=None, index_key=None):
-        # Rebuild only this synthetic fixture's table. Neither main nor any
-        # production SQLite database is opened or mutated by these tests.
+    def _replace_history_key_schema(
+        self, table, key_declaration=None, index_key=None,
+    ):
+        # Rebuild only a synthetic temporary test table, never a live store.
+        self.assertIn(table, (
+            "ad_snapshots", "reaction_snapshots",
+            "inbound_message_events", "ad_classifications",
+        ))
         with closing(sqlite3.connect(self.store.path)) as db, db:
             ddl = db.execute(
-                "SELECT sql FROM sqlite_master "
-                "WHERE type='table' AND name='ad_snapshots'"
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
             ).fetchone()[0]
             self.assertIn("ad_id TEXT NOT NULL", ddl)
-            ddl = ddl.replace(
-                "ad_snapshots", "ad_snapshots_replacement", 1,
-            )
+            ddl = ddl.replace(table, f"{table}_replacement", 1)
             if key_declaration is not None:
                 ddl = ddl.replace(
                     "ad_id TEXT NOT NULL", key_declaration, 1,
                 )
             db.execute(ddl)
             db.execute(
-                "INSERT INTO ad_snapshots_replacement "
-                "SELECT * FROM ad_snapshots"
+                f"INSERT INTO {table}_replacement SELECT * FROM {table}"
             )
-            db.execute("DROP TABLE ad_snapshots")
+            db.execute(f"DROP TABLE {table}")
             db.execute(
-                "ALTER TABLE ad_snapshots_replacement RENAME TO ad_snapshots"
+                f"ALTER TABLE {table}_replacement RENAME TO {table}"
             )
-            if index_key is None:
-                index_key = "ad_id"
             db.execute(
-                "CREATE INDEX idx_ad_snapshots_ad_id_observed "
-                f"ON ad_snapshots({index_key}, observed_at, id)"
+                f"CREATE INDEX idx_{table}_ad_id_observed "
+                f"ON {table}({index_key or 'ad_id'}, observed_at, id)"
             )
 
-    def _assert_history_schema_denied(self):
+    def _assert_history_schema_denied(
+        self, *, reader="ad_history", path="/api/ads",
+        ad_snapshot=True,
+    ):
         self.assertFalse(self.store.is_ready())
         with self.assertRaises(sqlite3.DatabaseError):
             SnapshotStore(self.store.path)
+        if ad_snapshot:
+            with self.assertRaises(sqlite3.DatabaseError):
+                list(self.store.ad_histories())
+            with self.assertRaises(sqlite3.DatabaseError):
+                self.store.tracked_ad_ids()
         with self.assertRaises(sqlite3.DatabaseError):
-            list(self.store.ad_histories())
-        with self.assertRaises(sqlite3.DatabaseError):
-            self.store.ad_history("1234567890")
-        with self.assertRaises(sqlite3.DatabaseError):
-            self.store.tracked_ad_ids()
-        status, body = self._get("/api/ads")
+            getattr(self.store, reader)("1234567890")
+        status, body = self._get(path)
         self.assertEqual(status, 503)
         self.assertEqual(
             json.loads(body), {"error": "database_unavailable"},
@@ -263,28 +267,84 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
 
     def test_nocase_ad_id_is_denied_on_startup_and_live_read(self):
         self.assertEqual(self._get("/api/ads")[0], 200)
-        self._replace_ad_snapshot_schema(
+        self._replace_history_key_schema("ad_snapshots",
             key_declaration="ad_id TEXT COLLATE NOCASE NOT NULL",
         )
         self._assert_history_schema_denied()
 
     def test_rtrim_ad_id_is_denied_on_startup_and_live_read(self):
-        self._replace_ad_snapshot_schema(
+        self._replace_history_key_schema("ad_snapshots",
             key_declaration="ad_id TEXT COLLATE RTRIM NOT NULL",
         )
         self._assert_history_schema_denied()
 
     def test_binary_column_with_nocase_index_is_denied(self):
-        self._replace_ad_snapshot_schema(
+        self._replace_history_key_schema("ad_snapshots",
             index_key="ad_id COLLATE NOCASE",
         )
         self._assert_history_schema_denied()
 
     def test_quoted_custom_column_ddl_fails_closed(self):
-        self._replace_ad_snapshot_schema(
+        self._replace_history_key_schema("ad_snapshots",
             key_declaration='"ad_id" TEXT COLLATE NOCASE NOT NULL',
         )
         self._assert_history_schema_denied()
+
+    def test_reaction_nocase_never_aliases_other_exact_ad_id(self):
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="A", observed_at=self.instant, source="synthetic",
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
+        self.store.append_reaction_snapshot(ReactionSnapshot(
+            ad_id="a", observed_at=self.instant, source="synthetic",
+            conversation_count=11, unique_buyer_count=8,
+            inbound_message_count=4,
+        ))
+        self.assertEqual(self.store.reaction_history("A"), ())
+        self._replace_history_key_schema(
+            "reaction_snapshots",
+            key_declaration="ad_id TEXT COLLATE NOCASE NOT NULL",
+        )
+        self.assertFalse(self.store.is_ready())
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.store.reaction_history("A")
+        self._assert_history_schema_denied(
+            reader="reaction_history",
+            path="/api/analytics/ads?metric=conversation_count",
+            ad_snapshot=False,
+        )
+
+    def test_inbound_nocase_ad_id_denied(self):
+        self._replace_history_key_schema(
+            "inbound_message_events",
+            key_declaration="ad_id TEXT COLLATE NOCASE NOT NULL",
+        )
+        self._assert_history_schema_denied(
+            reader="inbound_message_history",
+            path="/api/email-reactions",
+            ad_snapshot=False,
+        )
+
+    def test_classification_nocase_ad_id_denied(self):
+        self._replace_history_key_schema(
+            "ad_classifications",
+            key_declaration="ad_id TEXT COLLATE NOCASE NOT NULL",
+        )
+        self._assert_history_schema_denied(
+            reader="classification_history",
+            path="/api/analytics/groups?dimension=city&metric=views",
+            ad_snapshot=False,
+        )
+
+    def test_reaction_binary_column_with_nocase_index_denied(self):
+        self._replace_history_key_schema(
+            "reaction_snapshots", index_key="ad_id COLLATE NOCASE",
+        )
+        self._assert_history_schema_denied(
+            reader="reaction_history",
+            path="/api/analytics/ads?metric=conversation_count",
+            ad_snapshot=False,
+        )
 
     def test_inbound_history_actual_instants_and_id_ties_remain_ordered(self):
         first = InboundMessageEvent(
