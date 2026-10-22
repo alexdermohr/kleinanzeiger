@@ -12,6 +12,7 @@ from .private_web_cdp import (
     CdpPrivateWebPage,
     PrivateWebCdpError,
     PrivateWebCdpWriteNotAttemptedError,
+    _LoopbackCdpClient,
     _CREATE_FORM_PATH,
     _POST_SUBMIT_PATH,
     _require_private_web_cdp_authority,
@@ -42,6 +43,7 @@ class CdpPrivateWebMediaPage(CdpPrivateWebPage):
         self._media_file_object_id: str | None = None
         self._media_prepared: _PreparedPrivateWebMedia | None = None
         self._media_submit_unsettled = False
+        self._media_unknown_client: _LoopbackCdpClient | None = None
 
     def _release_media_handle(self) -> None:
         object_id = self._media_file_object_id
@@ -75,6 +77,7 @@ class CdpPrivateWebMediaPage(CdpPrivateWebPage):
         self._release_media_files()
         self._media_expected_create_snapshot = None
         self._media_submit_unsettled = False
+        self._media_unknown_client = None
         super().open_create_form(category_path)
 
     def close(self) -> None:
@@ -476,10 +479,21 @@ function() {{
 
     def _discard_media_submit_client(self) -> None:
         client = self._client_instance
-        self._client_instance = None
-        # The retained object handle belongs to that CDP session. Once the
-        # session failed it is unusable, but the page-owned files must remain.
+        # The retained object handle belongs to the old CDP transport.
         self._media_file_object_id = None
+        if self._media_submit_unsettled and isinstance(client, _LoopbackCdpClient):
+            # Input may already have reached the page. Replace only its
+            # transport under the SAME kernel reservation, never closing
+            # that reservation while submit settlement remains UNKNOWN.
+            try:
+                client.reconnect_for_observation()
+            except Exception:
+                # Preserve claim/client for a later observation-only attempt.
+                # A failed close retains its socket, so no other writer enters.
+                pass
+            return
+        # Injected synthetic clients retain their original close/rebuild path.
+        self._client_instance = None
         if client is not None:
             try:
                 client.close()
@@ -523,6 +537,21 @@ function() {{
                 "create_media_submit_reconcile"
             )
         self._wait_for_media_submit_settlement()
+        native_client = self._media_unknown_client
+        if native_client is not None:
+            # A confirmed path in an unrelated replacement target or client
+            # is not evidence that the original one-shot publish succeeded.
+            if self._client_instance is not native_client:
+                raise PrivateWebSubmitUnknownError(
+                    "create_media_submit_settle"
+                )
+            try:
+                native_client.settle_unknown_submit()
+            except Exception:
+                raise PrivateWebSubmitUnknownError(
+                    "create_media_submit_settle"
+                ) from None
+        self._media_unknown_client = None
         self._media_submit_unsettled = False
 
     def submit_create_media(
@@ -609,6 +638,18 @@ function() {{
         # From the first browser-input dispatch onward, cleanup is unsafe until
         # the existing post-submit state is observed. Keep this armed for every
         # UNKNOWN outcome; reconciliation below never repeats browser input.
+        if isinstance(client, _LoopbackCdpClient):
+            # Arm at the actual kernel claim BEFORE the first possible
+            # browser-input effect. GC and direct close must not free it while
+            # settlement of this one-shot publish remains UNKNOWN.
+            # Couple reservation release to this exact read-only settlement
+            # expression, observed on the same original CDP target. Direct
+            # settle_unknown_submit() cannot invent a successful publish.
+            client.arm_unknown_submit(
+                settlement_expression=self._media_submit_settlement_expression(),
+                click_point=(point[0], point[1]),
+            )
+            self._media_unknown_client = client
         self._media_submit_unsettled = True
         try:
             self._dispatch_browser_click(

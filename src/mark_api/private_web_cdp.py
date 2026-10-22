@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import socket
 import time
+from threading import RLock, get_ident
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Protocol
@@ -33,9 +35,16 @@ _MANAGEMENT_PATH = "/m-meine-anzeigen.html"
 _MANAGEMENT_MAX_PAGES = 100
 _POST_SUBMIT_PATH = _MANAGEMENT_PATH
 _MAX_TARGET_BYTES = 64 * 1024
-# Cancellable inventory CDP only. Keep signal delivery prompt even when
-# Chrome stops responding, without changing ordinary write/owner clients.
 _CDP_CANCEL_RECV_POLL_SECONDS = 0.25
+# A failed WebSocket close is an UNKNOWN target-release outcome, never a
+# reason to admit the next browser client. Keep the kernel claim and socket
+# strongly referenced until this process exits (when the kernel releases it).
+# No arbitrary in-process retry or cleanup can remove this quarantine.
+_QUARANTINED_CDP_TARGETS: list[tuple[socket.socket, object]] = []
+# Strong claim ownership starts BEFORE HTTP discovery and remains independent
+# of page/client GC. Only an explicitly successful transport close unregisters
+# it. UNKNOWN outcomes keep this claim for the remaining process lifetime.
+_ACTIVE_CDP_TARGET_CLAIMS: dict[int, socket.socket] = {}
 
 
 class _RejectRedirectHandler(HTTPRedirectHandler):
@@ -132,8 +141,34 @@ def _validated_https_origin(origin: str) -> str:
     return f"https://{parsed.hostname}"
 
 
+def _reserve_exclusive_cdp_target(port: int) -> socket.socket:
+    """Reserve one CDP browser target before any discovery or navigation.
+
+    Linux abstract UNIX sockets enforce a non-blocking exclusive claim across
+    cooperating Mark threads and processes in the same network namespace.
+    A competing client fails before HTTP/WebSocket effects. The claim is held
+    for the complete client lifetime, including an unresolved submit.
+
+    This is neither an official platform entitlement nor protection against
+    external browser users or processes ignoring this protocol.
+    """
+    claim = None
+    try:
+        claim = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        claim.bind(b"\x00mark-api-cdp-target-v1:" + str(port).encode("ascii"))
+        _ACTIVE_CDP_TARGET_CLAIMS[id(claim)] = claim
+        return claim
+    except (OSError, AttributeError, ValueError):
+        if claim is not None:
+            try:
+                claim.close()
+            except OSError:
+                pass
+        raise PrivateWebCdpWriteNotAttemptedError("target_busy") from None
+
+
 class _LoopbackCdpClient:
-    """Minimal CDP client bound to one loopback Chrome page websocket."""
+    """Minimal CDP client bound to an exclusively held loopback page."""
 
     def __init__(
         self,
@@ -147,17 +182,254 @@ class _LoopbackCdpClient:
         _require_private_web_cdp_authority()
         self._endpoint, self._port = _validated_loopback_endpoint(endpoint)
         self._timeout_seconds = timeout_seconds
-        self._opener = opener or _proxy_free_loopback_opener()
-        self._websocket_factory = websocket_factory
-        self._tcp_socket_factory = tcp_socket_factory
-        self._next_id = 0
-        self._read_stop_check = None
-        self._read_send_guard = None
-        self._socket = self._connect()
+        self._socket = None
+        self._owner_pid = os.getpid()
+        self._connect_owner_thread: int | None = None
+        self._connect_in_progress = False
+        self._connect_role_token: object | None = None
+        self._target_websocket_url: str | None = None
+        self._transport_construction_pending = False
+        self._close_unknown = False
+        self._unresolved_submit = False
+        self._unresolved_call = False
+        self._submit_settlement_expression: str | None = None
+        self._submit_mouse_press: dict[str, object] | None = None
+        self._submit_mouse_release: dict[str, object] | None = None
+        self._submit_phase = "idle"
+        self._verified_submit_settlement = False
+        # Short-lived state lock: never wait for browser I/O while holding it.
+        self._lifecycle_lock = RLock()
+        self._active_calls = 0
+        self._reconnecting = False
+        self._closing = False
+        self._close_in_progress = False
+        self._target_reservation = _reserve_exclusive_cdp_target(self._port)
+        try:
+            # The claim precedes even evaluation of supplied factories.
+            self._opener = opener if opener is not None else _proxy_free_loopback_opener()
+            self._websocket_factory = websocket_factory
+            self._tcp_socket_factory = tcp_socket_factory
+            self._next_id = 0
+            self._read_stop_check = None
+            self._read_send_guard = None
+            self._connect_owner_thread = get_ident()
+            try:
+                self._socket = self._connect()
+                self._transport_construction_pending = False
+            finally:
+                self._connect_owner_thread = None
+        except BaseException:
+            # Release on incomplete connect without masking the original error.
+            # If cleanup fails, close() quarantines the uncertain target.
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise
+
+
+    def _assert_live_target_reservation(self) -> None:
+        """Prevent calls on a cached socket without a live exclusive claim."""
+        if getattr(self, "_owner_pid", None) != os.getpid():
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        reservation = getattr(self, "_target_reservation", None)
+        port = getattr(self, "_port", None)
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        expected = bytes([0]) + b"mark-api-cdp-target-v1:" + str(port).encode("ascii")
+        try:
+            if (
+                not isinstance(reservation, socket.socket)
+                or _ACTIVE_CDP_TARGET_CLAIMS.get(id(reservation)) is not reservation
+                or reservation.fileno() < 0
+                or reservation.getsockname() != expected
+            ):
+                raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        except (OSError, AttributeError, ValueError, TypeError):
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned") from None
+
+    def _quarantine_transport(self, transport: object) -> None:
+        """Keep an uncertain socket and kernel claim alive until process exit."""
+        self._close_unknown = True
+        claim = getattr(self, "_target_reservation", None)
+        if claim is None:
+            return
+        # Native append is atomic; close() also detects interrupted handoff.
+        list.append(_QUARANTINED_CDP_TARGETS, (claim, transport))
+        self._target_reservation = None
+
+    def reconnect_for_observation(self) -> None:
+        """Reconnect an UNKNOWN submit without surrendering its browser claim."""
+        _require_private_web_cdp_authority()
+        self._assert_live_target_reservation()
+        with self._lifecycle_lock:
+            if (
+                self._closing
+                or self._reconnecting
+                or self._active_calls
+                or self._transport_construction_pending
+                or self._close_unknown
+                or (self._unresolved_call and not self._unresolved_submit)
+                or (
+                    self._unresolved_submit
+                    and self._submit_phase in ("press", "release")
+                )
+            ):
+                # A prior unknown factory/WS outcome retains the original
+                # browser claim, but may not create a second observer socket.
+                raise PrivateWebCdpError("reconnect")
+            self._reconnecting = True
+        try:
+            old_socket = getattr(self, "_socket", None)
+            if old_socket is not None:
+                # Arm the UNKNOWN fence before the first possibly effective
+                # old-socket close; interruption may have unknown effects.
+                self._close_unknown = True
+                try:
+                    old_socket.close()
+                except BaseException as exc:
+                    # Never reuse an uncertain old socket or admit another.
+                    self._quarantine_transport(old_socket)
+                    self._socket = None
+                    if isinstance(exc, Exception):
+                        raise PrivateWebCdpError("reconnect") from None
+                    raise
+                with self._lifecycle_lock:
+                    if self._closing or self._target_reservation is None:
+                        raise PrivateWebCdpError("reconnect")
+                    self._socket = None
+                    self._close_unknown = False
+            # If a prior discovery failed, retry under the SAME claim.
+            self._connect_owner_thread = get_ident()
+            try:
+                self._socket = self._connect()
+                self._transport_construction_pending = False
+            finally:
+                self._connect_owner_thread = None
+        finally:
+            with self._lifecycle_lock:
+                self._reconnecting = False
+
+    def arm_unknown_submit(
+        self,
+        *,
+        settlement_expression: str | None = None,
+        click_point: tuple[float, float] | None = None,
+    ) -> None:
+        """Pin a one-shot submit and its exact permitted observation."""
+        _require_private_web_cdp_authority()
+        if settlement_expression is not None and (
+            type(settlement_expression) is not str
+            or not settlement_expression.strip()
+            or len(settlement_expression) > _MAX_TARGET_BYTES
+        ):
+            raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+        if click_point is not None:
+            if (
+                type(click_point) is not tuple
+                or len(click_point) != 2
+                or any(
+                    type(value) not in (int, float)
+                    or not math.isfinite(float(value))
+                    or float(value) < 0
+                    for value in click_point
+                )
+            ):
+                raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+            x, y = (float(value) for value in click_point)
+            press: dict[str, object] | None = {
+                "type": "mousePressed", "x": x, "y": y,
+                "button": "left", "buttons": 1, "clickCount": 1,
+            }
+            release: dict[str, object] | None = {
+                "type": "mouseReleased", "x": x, "y": y,
+                "button": "left", "buttons": 0, "clickCount": 1,
+            }
+        else:
+            press, release = None, None
+        with self._lifecycle_lock:
+            self._assert_live_target_reservation()
+            if (
+                self._closing
+                or self._reconnecting
+                or self._close_unknown
+                or self._unresolved_call
+                or self._unresolved_submit
+                or self._active_calls
+                or getattr(self, "_connect_in_progress", False)
+                or getattr(self, "_read_stop_check", None) is not None
+            ):
+                # A cancellable inventory's caller-controlled stop predicate
+                # must never run before a one-shot submit phase is consumed.
+                raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+            # Pin exactly the two permitted one-shot mouse frames and the
+            # final observation before *any* possible browser input.
+            self._submit_settlement_expression = settlement_expression
+            self._submit_mouse_press = press
+            self._submit_mouse_release = release
+            self._submit_phase = "press" if press is not None else "observe"
+            self._verified_submit_settlement = False
+            self._unresolved_submit = True
+
+    def settle_unknown_submit(self) -> None:
+        """Release a media UNKNOWN only after CDP confirmed its pinned page."""
+        _require_private_web_cdp_authority()
+        with self._lifecycle_lock:
+            self._assert_live_target_reservation()
+            if (
+                self._closing
+                or self._reconnecting
+                or self._close_unknown
+                or self._active_calls
+                or not self._unresolved_submit
+                or not self._verified_submit_settlement
+                or self._unresolved_call
+            ):
+                raise PrivateWebCdpError("submit_unsettled")
+            self._unresolved_submit = False
+            self._unresolved_call = False
+            self._verified_submit_settlement = False
+            self._submit_settlement_expression = None
+            self._submit_mouse_press = None
+            self._submit_mouse_release = None
+            self._submit_phase = "idle"
 
     def _connect(self):
-        # Direct callers must not bypass constructor admission via __new__.
+        # Only construction and explicit observation-only reconnect may create
+        # a transport. A direct same-process call must not create a second
+        # WebSocket under an already owned kernel claim.
         _require_private_web_cdp_authority()
+        self._assert_live_target_reservation()
+        if (
+            getattr(self, "_connect_owner_thread", None) != get_ident()
+            or getattr(self, "_connect_in_progress", False)
+            or getattr(self, "_closing", False)
+            or getattr(self, "_socket", None) is not None
+        ):
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        self._connect_in_progress = True
+        token = object()
+        self._connect_role_token = token
+        try:
+            return self._connect_under_owner(token)
+        finally:
+            self._connect_role_token = None
+            self._connect_in_progress = False
+
+    def _connect_under_owner(self, token: object | None = None):
+        # A factory/opener runs while outer _connect_in_progress is true.
+        # Consume this single-use private token *before* invoking any such
+        # hook, so reentry by that hook cannot create a second WebSocket.
+        _require_private_web_cdp_authority()
+        self._assert_live_target_reservation()
+        if (
+            getattr(self, "_connect_owner_thread", None) != get_ident()
+            or not getattr(self, "_connect_in_progress", False)
+            or token is None
+            or token is not getattr(self, "_connect_role_token", None)
+        ):
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        self._connect_role_token = None
         try:
             discovery_url = f"{self._endpoint}/json/list"
             with self._opener(
@@ -168,6 +440,12 @@ class _LoopbackCdpClient:
                 if not callable(geturl) or geturl() != discovery_url:
                     raise ValueError("target discovery escaped loopback binding")
                 payload = response.read(_MAX_TARGET_BYTES + 1)
+            # An injected discovery reader may have called close(). Do not
+            # begin a TCP connect or WebSocket handshake on an unowned target.
+            with self._lifecycle_lock:
+                self._assert_live_target_reservation()
+                if self._closing or self._close_unknown:
+                    raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
             if len(payload) > _MAX_TARGET_BYTES:
                 raise ValueError("target list too large")
             targets = json.loads(payload.decode("utf-8"))
@@ -197,27 +475,66 @@ class _LoopbackCdpClient:
                 or parsed.fragment
             ):
                 raise ValueError("page websocket escaped loopback binding")
+            previous_target = self._target_websocket_url
+            if previous_target is not None and websocket_url != previous_target:
+                raise ValueError("page target identity changed")
+            # Pin the ORIGINAL page identity before transport effects, so a
+            # reconnect can never treat an unrelated page as post-submit proof.
+            if previous_target is None:
+                self._target_websocket_url = websocket_url
             factory = self._websocket_factory
             if factory is None:
                 import websocket  # type: ignore[import-not-found]
 
                 factory = websocket.create_connection
-            raw_socket = self._tcp_socket_factory(
-                ("127.0.0.1", self._port),
-                timeout=self._timeout_seconds,
-            )
+            self._transport_construction_pending = True
             try:
-                return factory(
+                raw_socket = self._tcp_socket_factory(
+                    ("127.0.0.1", self._port),
+                    timeout=self._timeout_seconds,
+                )
+            except Exception:
+                if self._tcp_socket_factory is socket.create_connection:
+                    # The stdlib helper closes every attempted socket on an
+                    # ordinary connect error. No raw transport escapes it, so
+                    # constructor cleanup may release this claim for retry.
+                    # Injected factories and BaseException are *not* trusted
+                    # to provide that guarantee: retain the UNKNOWN fence.
+                    self._transport_construction_pending = False
+                raise
+            try:
+                # A supplied TCP factory may synchronously close() this
+                # client after constructing a raw FD. The original claim is
+                # then quarantined; no WebSocket handshake may follow.
+                with self._lifecycle_lock:
+                    self._assert_live_target_reservation()
+                    if self._closing or self._close_unknown:
+                        raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+                websocket = factory(
                     websocket_url,
                     timeout=self._timeout_seconds,
                     suppress_origin=True,
                     socket=raw_socket,
                 )
-            except Exception:
+                # A factory may itself invoke close() after handshake. Never
+                # return that transport as a successfully admitted client.
+                with self._lifecycle_lock:
+                    self._assert_live_target_reservation()
+                    if self._closing or self._close_unknown:
+                        raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+                return websocket
+            except BaseException:
+                # SIGTERM/SIGINT can interrupt a WebSocket factory *after*
+                # it acquired a raw TCP socket but before it returns the
+                # WebSocket object. Always settle this raw socket first.
                 try:
                     raw_socket.close()
-                except Exception:
-                    pass
+                except BaseException:
+                    # Claim was pinned globally before any factory side effect.
+                    # Its pending state also protects the pre-append SIGINT gap.
+                    self._quarantine_transport(raw_socket)
+                else:
+                    self._transport_construction_pending = False
                 raise
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.
             raise PrivateWebCdpError("connect") from None
@@ -226,63 +543,178 @@ class _LoopbackCdpClient:
         self, *, stop_requested: Callable[[], bool],
         send_guard: Callable[[], Any],
     ) -> None:
-        if (
-            self._next_id != 0 or getattr(self, "_read_stop_check", None) is not None
-            or not callable(stop_requested) or not callable(send_guard)
-            or not callable(getattr(self._socket, "settimeout", None))
-            or isinstance(self._timeout_seconds, bool)
-            or not isinstance(self._timeout_seconds, (int, float))
-            or not math.isfinite(float(self._timeout_seconds))
-            or not 0 < self._timeout_seconds <= 30
-        ):
+        """Bind a read-only inventory admission, never a submit continuation."""
+        _require_private_web_cdp_authority()
+        self._assert_live_target_reservation()
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
             raise PrivateWebCdpReadSetupError("invalid cancellable CDP binding")
-        self._read_stop_check = stop_requested
-        self._read_send_guard = send_guard
+        # An injected WebSocket accessor can reenter. Validate it outside the
+        # lifecycle lock, then recheck all authoritative state under that lock.
+        supports_timeout = callable(
+            getattr(getattr(self, "_socket", None), "settimeout", None)
+        )
+        with lock:
+            self._assert_live_target_reservation()
+            if (
+                self._closing or self._reconnecting or self._close_unknown
+                or self._active_calls or self._unresolved_call
+                or self._unresolved_submit
+                or self._transport_construction_pending
+                or self._connect_in_progress
+                or self._next_id != 0
+                or getattr(self, "_read_stop_check", None) is not None
+                or not callable(stop_requested) or not callable(send_guard)
+                or not supports_timeout
+                or type(self._timeout_seconds) not in (int, float)
+                or not math.isfinite(self._timeout_seconds)
+                or not 0 < self._timeout_seconds <= 30
+            ):
+                raise PrivateWebCdpReadSetupError("invalid cancellable CDP binding")
+            # Atomic with arm_unknown_submit() under the same lifecycle lock.
+            self._read_stop_check = stop_requested
+            self._read_send_guard = send_guard
 
     def call(
         self,
         method: str,
         params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
-        # Even a caller-supplied cached socket cannot send unadmitted CDP data.
+        # A direct or cached socket may never send without a live target claim.
         _require_private_web_cdp_authority()
+        self._assert_live_target_reservation()
         stop_requested = getattr(self, "_read_stop_check", None)
         if stop_requested is not None and stop_requested():
             raise PrivateWebCdpReadCancelled("inventory read cancelled")
-        # The total call deadline also bounds a stream of unrelated CDP
-        # event frames that would otherwise reset per-recv socket timeouts.
+        # The global deadline bounds unrelated CDP event traffic too.
         deadline = (
             time.monotonic() + self._timeout_seconds
             if stop_requested is not None else None
         )
-        self._next_id += 1
-        message_id = self._next_id
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        with lock:
+            # Atomic admission against concurrent close or reconnect.
+            self._assert_live_target_reservation()
+            if self._closing or self._reconnecting or self._close_unknown:
+                raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+            if self._active_calls:
+                # There is one WebSocket response stream. Another call could
+                # consume/drop this call's reply, then falsely report UNKNOWN.
+                # Reject before dispatch rather than interleaving CDP frames.
+                raise PrivateWebCdpWriteNotAttemptedError("target_busy")
+            transport = self._socket
+            if transport is None:
+                raise PrivateWebCdpError("call")
+            # Hostile str/float/key subclasses can execute __eq__ or
+            # __hash__ within this reentrant lifecycle RLock before the
+            # one-shot step is consumed. Admit only native inert scalars
+            # before any key lookup or equality while a submit is armed.
+            if self._unresolved_submit:
+                if type(method) is not str or type(params) is not dict:
+                    raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+                if any(
+                    type(key) is not str
+                    or type(value) not in (str, int, float, bool)
+                    for key, value in params.items()
+                ):
+                    raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+            expected_expression = self._submit_settlement_expression
+            observing_submit = bool(
+                self._unresolved_submit
+                and self._submit_phase == "observe"
+                and isinstance(expected_expression, str)
+                and method == "Runtime.evaluate"
+                and type(params) is dict
+                and len(params) == 3
+                and params.get("expression") == expected_expression
+                and params.get("returnByValue") is True
+                and params.get("awaitPromise") is False
+            )
+            click_phase: str | None = None
+            if self._unresolved_submit:
+                if (
+                    method == "Input.dispatchMouseEvent"
+                    and type(params) is dict
+                    and self._submit_phase == "press"
+                    and params == self._submit_mouse_press
+                ):
+                    click_phase = "press"
+                elif (
+                    method == "Input.dispatchMouseEvent"
+                    and type(params) is dict
+                    and self._submit_phase == "release"
+                    and params == self._submit_mouse_release
+                ):
+                    click_phase = "release"
+                elif not observing_submit:
+                    # Never turn an unresolved media click into a generic
+                    # second CDP writer. Only the exact remaining mouse
+                    # continuation or pinned DOM observation is admissible.
+                    raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+                if self._unresolved_call and click_phase is not None:
+                    raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+                if click_phase is not None:
+                    # Pessimistically consume the step *before* send(). If
+                    # send or recv fails, the mouse action is UNKNOWN and
+                    # only read-only observation remains possible.
+                    self._submit_phase = "observe"
+                elif observing_submit:
+                    self._verified_submit_settlement = False
+            elif self._unresolved_call:
+                # A prior CDP send could have affected the page. It cannot
+                # be followed by an unrelated write without reconciliation.
+                raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+            # Freeze every submit-fenced payload while holding the admission
+            # lock. An injected serializer or another thread can mutate the
+            # caller's dict after this block, but never the approved frame.
+            bound_params: dict[str, object] | None = None
+            if click_phase == "press":
+                bound_params = dict(self._submit_mouse_press or {})
+            elif click_phase == "release":
+                bound_params = dict(self._submit_mouse_release or {})
+            elif observing_submit:
+                bound_params = {
+                    "expression": expected_expression,
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                }
+            # Pin uncertainty BEFORE any send(), encoding or scheduling
+            # effect. Exception and BaseException cannot later lose the
+            # browser claim merely because the call stack unwound.
+            self._unresolved_call = True
+            self._next_id += 1
+            message_id = self._next_id
+            self._active_calls += 1
         request: dict[str, object] = {
             "id": message_id,
             "method": method,
         }
-        if params:
+        if bound_params is not None:
+            request["params"] = bound_params
+        elif params:
             request["params"] = params
         try:
             serialized = json.dumps(request, separators=(",", ":"), ensure_ascii=False)
             send_guard = getattr(self, "_read_send_guard", None)
             if send_guard is None:
-                self._socket.send(serialized)
+                transport.send(serialized)
             else:
                 # websocket-client's send_frame loops on partial writes.
                 # Set the socket NONBLOCKING before masking signals so every
                 # partial send either progresses or fails on EAGAIN, rather
                 # than indefinitely waiting while SIGTERM is blocked. A
                 # partial frame failure is unknown, NEVER retried.
-                self._socket.settimeout(0.0)
+                transport.settimeout(0.0)
                 try:
                     with send_guard():
-                        self._socket.send(serialized)
+                        transport.send(serialized)
                 finally:
                     # The response wait is never signal-masked. Poll at a
                     # short bounded socket timeout so a flag-only SIGTERM
                     # can cancel even when Chrome sends no more frames.
-                    self._socket.settimeout(_CDP_CANCEL_RECV_POLL_SECONDS)
+                    transport.settimeout(_CDP_CANCEL_RECV_POLL_SECONDS)
             while True:
                 if stop_requested is not None:
                     if stop_requested():
@@ -292,11 +724,11 @@ class _LoopbackCdpClient:
                         raise PrivateWebCdpError("call")
                     # Never enlarge caller-configured timeout (which may be
                     # shorter than our normal cancellation-poll interval).
-                    self._socket.settimeout(
+                    transport.settimeout(
                         min(_CDP_CANCEL_RECV_POLL_SECONDS, remaining)
                     )
                 try:
-                    response = json.loads(self._socket.recv())
+                    response = json.loads(transport.recv())
                 except Exception as exc:
                     # websocket-client wraps socket.timeout in its own
                     # WebSocketTimeoutException. No retries of a platform
@@ -329,17 +761,100 @@ class _LoopbackCdpClient:
                 result = response.get("result")
                 if not isinstance(result, dict):
                     raise ValueError("cdp returned an invalid result")
+                with lock:
+                    if self._closing:
+                        # A competing close quarantined this target while the
+                        # browser outcome was in flight. Never claim success.
+                        raise PrivateWebCdpError("call")
+                    # The original pinned WebSocket target must actually
+                    # acknowledge the exact DOM read as "confirmed".
+                    remote = result.get("result")
+                    if (
+                        observing_submit
+                        and "exceptionDetails" not in result
+                        and isinstance(remote, dict)
+                        and remote.get("type") == "string"
+                        and remote.get("value") == "confirmed"
+                        and self._unresolved_submit
+                        and self._submit_settlement_expression == expected_expression
+                    ):
+                        self._verified_submit_settlement = True
+                    if click_phase == "press":
+                        self._submit_phase = "release"
+                    self._unresolved_call = False
                 return result
         except (PrivateWebCdpReadCancelled, PrivateWebCdpReadSetupError):
             raise
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.
             raise PrivateWebCdpError("call") from None
+        finally:
+            with lock:
+                self._active_calls -= 1
 
     def close(self) -> None:
+        # A fork-inherited copy must not mutate a parent's socket or claim.
+        if getattr(self, "_owner_pid", None) != os.getpid():
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+        with lock:
+            if self._close_in_progress:
+                raise PrivateWebCdpError("close")
+            if (
+                self._active_calls
+                or self._connect_in_progress
+                or self._reconnecting
+                or self._unresolved_call
+                or self._unresolved_submit
+                or self._transport_construction_pending
+                or self._close_unknown
+            ):
+                # In-flight/UNKNOWN operations may have touched the page.
+                # Quarantine without waiting for unsafe injected close hooks.
+                self._closing = True
+                self._close_unknown = True
+                self._quarantine_transport(self._socket)
+                self._socket = None
+                raise PrivateWebCdpError("close")
+            self._closing = True
+            self._close_in_progress = True
+            # If interrupted within the WebSocket close itself, do NOT
+            # subsequently consider an unknown release successful.
+            self._close_unknown = True
         try:
-            self._socket.close()
-        except Exception:  # noqa: BLE001 - close is best effort and sanitized.
-            pass
+            sock = getattr(self, "_socket", None)
+            reservation = getattr(self, "_target_reservation", None)
+            if reservation is not None and any(
+                claim is reservation for claim, _ in _QUARANTINED_CDP_TARGETS
+            ):
+                self._target_reservation = None
+                raise PrivateWebCdpError("close")
+            if sock is not None:
+                try:
+                    sock.close()
+                except BaseException as exc:
+                    if reservation is not None:
+                        self._quarantine_transport(sock)
+                    self._socket = None
+                    if isinstance(exc, Exception):
+                        raise PrivateWebCdpError("close") from None
+                    raise
+            self._socket = None
+            if reservation is not None:
+                try:
+                    reservation.close()
+                except BaseException as exc:
+                    self._quarantine_transport(sock)
+                    if isinstance(exc, Exception):
+                        raise PrivateWebCdpError("close") from None
+                    raise
+                _ACTIVE_CDP_TARGET_CLAIMS.pop(id(reservation), None)
+            self._target_reservation = None
+            self._close_unknown = False
+        finally:
+            with lock:
+                self._close_in_progress = False
 
 
 class CdpCookieProvider:
@@ -376,6 +891,7 @@ class CdpCookieProvider:
             )
         )
         self._client_instance: _CdpClient | None = None
+        self._client_lock = RLock()
 
     @classmethod
     def from_port(
@@ -399,41 +915,54 @@ class CdpCookieProvider:
         return self._client_instance
 
     def close(self) -> None:
-        client = self._client_instance
-        self._client_instance = None
-        if client is not None:
-            client.close()
+        with self._client_lock:
+            client = self._client_instance
+            self._client_instance = None
+            if client is not None:
+                client.close()
 
     def __call__(self) -> str | None:
-        client = self._client()
-        try:
-            result = client.call(
-                "Network.getCookies",
-                {"urls": [self._target_url]},
-            )
-            raw_cookies = result.get("cookies")
-            if not isinstance(raw_cookies, list):
-                raise ValueError("invalid cookie result")
-            pairs: list[str] = []
-            for item in raw_cookies:
-                if not isinstance(item, dict):
-                    raise ValueError("invalid cookie item")
-                name = item.get("name")
-                value = item.get("value")
-                if (
-                    not isinstance(name, str)
-                    or not name
-                    or any(char in name for char in "\r\n;=")
-                    or not isinstance(value, str)
-                    or any(char in value for char in "\r\n;")
-                ):
-                    raise ValueError("unsafe cookie item")
-                pairs.append(f"{name}={value}")
-            return "; ".join(pairs) if pairs else None
-        except PrivateWebCdpError:
-            raise PrivateWebCdpError("cookies") from None
-        except Exception:  # noqa: BLE001 - never expose cookie/provider detail.
-            raise PrivateWebCdpError("cookies") from None
+        # The inventory/cookie CDP claim must NOT outlive one cookie read.
+        # Otherwise the following editor/create/state/delete page gets
+        # target_busy on the very same sole Chrome target. Serialize this
+        # provider's callers and release before returning to the owner read.
+        with self._client_lock:
+            client = self._client()
+            try:
+                result = client.call(
+                    "Network.getCookies",
+                    {"urls": [self._target_url]},
+                )
+                raw_cookies = result.get("cookies")
+                if not isinstance(raw_cookies, list):
+                    raise ValueError("invalid cookie result")
+                pairs: list[str] = []
+                for item in raw_cookies:
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid cookie item")
+                    name = item.get("name")
+                    value = item.get("value")
+                    if (
+                        not isinstance(name, str)
+                        or not name
+                        or any(char in name for char in "\r\n;=")
+                        or not isinstance(value, str)
+                        or any(char in value for char in "\r\n;")
+                    ):
+                        raise ValueError("unsafe cookie item")
+                    pairs.append(f"{name}={value}")
+                return "; ".join(pairs) if pairs else None
+            except PrivateWebCdpError:
+                raise PrivateWebCdpError("cookies") from None
+            except Exception:  # noqa: BLE001 - no cookie/provider detail.
+                raise PrivateWebCdpError("cookies") from None
+            finally:
+                # A failed close quarantines its target in _LoopbackCdpClient,
+                # so a later editor still cannot race an unknown browser FD.
+                try:
+                    self.close()
+                except Exception:
+                    raise PrivateWebCdpError("cookies") from None
 
 
 class CdpPrivateWebPage:
