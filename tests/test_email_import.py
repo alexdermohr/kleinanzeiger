@@ -5,7 +5,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage
@@ -234,7 +234,7 @@ class KleinanzeigenEmailImportTests(unittest.TestCase):
 
     def test_storage_schema_contains_no_message_body_or_person_name(self) -> None:
         _, store = self.make_store()
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             columns = {
                 row[1]
                 for row in connection.execute(
