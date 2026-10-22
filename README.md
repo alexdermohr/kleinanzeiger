@@ -44,9 +44,12 @@ anzeigen. Mark ruft dafür keinerlei Kleinanzeigen-Webseite oder API auf.
 Die Eingaben sind nicht signiert und begründen **keinen verifizierten
 Eigentümerbestand, keine aktive Anzeige und keine Write-Berechtigung**.
 Die Lebenszyklus-Anzeige bleibt deshalb \`unknown\`, und die Datenquelle
-lautet \`user-supplied-local-catalog\`. Unverifizierte lokale Einträge erhalten ausdrücklich auch
-`present=false`; sie erhöhen nicht die aktuell als Owner-Bestand
-geführte Kennzahl `current_ads`. Die Uhrzeit stammt ausschließlich
+lautet \`user-supplied-local-catalog\`. Reine Katalog-IDs erhalten ohne zusätzliche echte Owner-Beobachtung
+`present=false` und erhöhen den aktuellen Owner-Bestand
+`current_ads` nicht. Existiert bereits eine gesonderte bestätigte
+Owner-Beobachtung zur selben ID, entscheidet ausschließlich diese
+über Präsenz, Lifecycle und als Owner ausgewiesenen Titel/Beschreibung;
+lokale Kennzahlen bleiben über ihre eigene Metrik-Quelle erkennbar. Die Uhrzeit stammt ausschließlich
 aus der vom Nutzer angegebenen Beobachtung und benötigt einen UTC-Offset.
 
 Beispiel \`mein-katalog.json\` (nur ausdrücklich übergebene Dateien):
@@ -79,7 +82,9 @@ Zulässige Felder je Eintrag: \`ad_id\` (5–20 ASCII-Ziffern),
 \`views\`, \`watch_count\` und \`reply_count\`. Eigene Angaben über
 \`source\`, \`lifecycle_state\` oder ein angeblich bestätigtes Konto
 werden verweigert. Dateien und Anzahl sind begrenzt; Symbolic Links,
-Pipes und mehrdeutige JSON-Felder werden abgelehnt. Ein vollständiger
+Pipes und mehrdeutige JSON-Felder werden abgelehnt. Fehlen dem
+Betriebssystem die erforderlichen sicheren Open-Flags, wird der
+Katalogimport ausdrücklich verweigert. Ein vollständiger
 Katalogbatch wird vor dem Schreiben validiert und in einer einzigen
 SQLite-Transaktion eingefügt. Identische Wiederholungen erzeugen
 **keine** doppelten Beobachtungen; widersprüchliche Beobachtungen mit

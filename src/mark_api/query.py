@@ -100,26 +100,50 @@ class MarkQueryService:
             history = self._store.ad_history(ad_id)
             if not history:
                 continue
-            latest = history[-1]
-            metrics = {
-                field_name: _last_metric_with_evidence(history, field_name)
-                for field_name in ("views", "watch_count", "reply_count")
-            }
+            # A manual observation may be much later (even future-dated)
+            # than a genuine owner read. It may contribute only explicitly
+            # sourced fallback metrics, NEVER owner lifecycle, current-presence,
+            # title or description provenance. Preserve former owner semantics
+            # unchanged for databases that contain no local catalog entries.
+            owner_history = tuple(
+                item for item in history
+                if item.source != "user-supplied-local-catalog"
+            )
+            catalog_history = tuple(
+                item for item in history
+                if item.source == "user-supplied-local-catalog"
+            )
+            owner = owner_history[-1] if owner_history else None
+            latest = owner if owner is not None else history[-1]
+            metrics = {}
+            for field_name in ("views", "watch_count", "reply_count"):
+                value, evidence = _last_metric_with_evidence(
+                    owner_history if owner_history else history, field_name,
+                )
+                if value is None and owner_history:
+                    value, evidence = _last_metric_with_evidence(
+                        catalog_history, field_name,
+                    )
+                metrics[field_name] = value, evidence
             rows.append(
                 AdView(
                     ad_id=ad_id,
-                    lifecycle_state=latest.lifecycle_state,
-                    # User-supplied catalog observations are NOT authenticated
-                    # owner inventory. UNKNOWN on other sources may mean present;
-                    # explicit unverified local provenance never proves presence.
+                    lifecycle_state=(
+                        owner.lifecycle_state if owner is not None
+                        else LifecycleState.UNKNOWN
+                    ),
                     present=(
-                        latest.lifecycle_state is not LifecycleState.ABSENT
-                        and latest.source != "user-supplied-local-catalog"
+                        owner is not None
+                        and owner.lifecycle_state is not LifecycleState.ABSENT
                     ),
                     observed_at=latest.observed_at,
                     source=latest.source,
-                    title=_last_not_none(history, "title"),
-                    description=_last_not_none(history, "description"),
+                    title=_last_not_none(
+                        owner_history if owner_history else history, "title",
+                    ),
+                    description=_last_not_none(
+                        owner_history if owner_history else history, "description",
+                    ),
                     views=metrics["views"][0],
                     watch_count=metrics["watch_count"][0],
                     reply_count=metrics["reply_count"][0],

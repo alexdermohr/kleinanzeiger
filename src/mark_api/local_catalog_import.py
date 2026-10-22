@@ -57,8 +57,14 @@ def _unique_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _read_regular_file(path: Path) -> bytes:
     # Reject symlinks, devices and FIFOs without following links or blocking.
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    flags |= getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if (
+        type(nofollow) is not int or nofollow == 0
+        or type(nonblock) is not int or nonblock == 0
+    ):
+        raise CatalogImportError("secure local catalog file opening is unavailable")
+    flags = os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -96,10 +102,11 @@ def _snapshot(row: object) -> AdSnapshot:
         raise CatalogImportError("local catalog observation time is invalid")
     try:
         instant = datetime.fromisoformat(raw_date)
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            raise CatalogImportError("local catalog observation time needs an offset")
+        normalized_time = instant.astimezone(timezone.utc)
     except (ValueError, OverflowError):
         raise CatalogImportError("local catalog observation time is invalid") from None
-    if instant.tzinfo is None or instant.utcoffset() is None:
-        raise CatalogImportError("local catalog observation time needs an offset")
 
     text: dict[str, str | None] = {}
     for key, limit in (("title", 200), ("description", 8000)):
@@ -125,7 +132,7 @@ def _snapshot(row: object) -> AdSnapshot:
 
     return AdSnapshot(
         ad_id=ad_id,
-        observed_at=instant.astimezone(timezone.utc),
+        observed_at=normalized_time,
         source=_SOURCE,
         lifecycle_state=LifecycleState.UNKNOWN,
         title=text["title"],

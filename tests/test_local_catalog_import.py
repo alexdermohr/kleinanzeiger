@@ -7,11 +7,13 @@ import sqlite3
 import sys
 import tempfile
 import threading
+from datetime import datetime, timezone
+from unittest.mock import patch
 import unittest
 from contextlib import closing
 from pathlib import Path
 
-from mark_api.domain import LifecycleState
+from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.local_catalog_import import (
     CatalogImportError, import_local_catalog_files,
 )
@@ -83,6 +85,95 @@ class LocalCatalogImportTests(unittest.TestCase):
         self.assertEqual(view[1].watch_count, 0)
         self.assertEqual(view[1].reply_count, 4)
         self.assertEqual(self.store.sync_status()["state"], "never_attempted")
+
+    def test_future_manual_catalog_cannot_demote_or_spoof_authoritative_owner(self):
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="1234567890",
+            observed_at=datetime(2026, 10, 20, tzinfo=timezone.utc),
+            source="synthetic-authenticated-owner-read",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Known owner title",
+            views=17,
+        ))
+        forged_future = self.catalog("unverified-future.json", [
+            entry(
+                title="Unverified and future title",
+                observed_at="2027-10-22T02:01:00+00:00",
+                views=9999,
+            ),
+        ])
+        import_local_catalog_files(self.store, (forged_future,))
+        projected = MarkQueryService(self.store).latest_ads()[0]
+        self.assertTrue(projected.present)
+        self.assertEqual(projected.lifecycle_state, LifecycleState.ACTIVE)
+        self.assertEqual(projected.source, "synthetic-authenticated-owner-read")
+        self.assertEqual(projected.title, "Known owner title")
+        self.assertEqual(projected.views, 17)
+        self.assertEqual(
+            projected.metric_evidence["views"].source,
+            "synthetic-authenticated-owner-read",
+        )
+        self.assertEqual(MarkQueryService(self.store).summary().current_ads, 1)
+
+    def test_unverified_title_does_not_inherit_verified_source(self):
+        manual = self.catalog("local-content.json", [
+            entry(title="Attacker controlled local title", views=40),
+        ])
+        import_local_catalog_files(self.store, (manual,))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="1234567890",
+            observed_at=datetime(2026, 10, 22, 7, tzinfo=timezone.utc),
+            source="synthetic-owner-observation",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title=None,
+            views=None,
+        ))
+        projected = MarkQueryService(self.store).latest_ads()[0]
+        self.assertTrue(projected.present)
+        self.assertEqual(projected.source, "synthetic-owner-observation")
+        self.assertIsNone(
+            projected.title,
+            "owner source cannot attribute a local title to owner evidence",
+        )
+        self.assertEqual(projected.views, 40)
+        self.assertEqual(
+            projected.metric_evidence["views"].source,
+            "user-supplied-local-catalog",
+        )
+
+    def test_even_tampered_local_state_cannot_claim_owner_presence(self):
+        manual = self.catalog("tampered-state.json", [entry()])
+        import_local_catalog_files(self.store, (manual,))
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute(
+                "UPDATE ad_snapshots SET lifecycle_state='active' "
+                "WHERE source='user-supplied-local-catalog'"
+            )
+        projected = MarkQueryService(self.store).latest_ads()[0]
+        self.assertFalse(projected.present)
+        self.assertEqual(projected.lifecycle_state, LifecycleState.UNKNOWN)
+
+    def test_overflowing_utc_instants_fail_before_any_insert(self):
+        for i, value in enumerate((
+            "0001-01-01T00:00:00+23:59",
+            "9999-12-31T23:59:59-23:59",
+        )):
+            with self.subTest(value=value):
+                catalog = self.catalog(f"utc-overflow-{i}.json", [
+                    entry(observed_at=value),
+                ])
+                with self.assertRaises(CatalogImportError):
+                    import_local_catalog_files(self.store, (catalog,))
+                self.assertEqual(self.store.tracked_ad_ids(), ())
+
+    def test_missing_secure_open_flags_are_never_silently_disabled(self):
+        catalog = self.catalog("guarded-open.json", [entry()])
+        for flag in ("O_NOFOLLOW", "O_NONBLOCK"):
+            with self.subTest(flag=flag):
+                with patch.object(os, flag, 0):
+                    with self.assertRaises(CatalogImportError):
+                        import_local_catalog_files(self.store, (catalog,))
+        self.assertEqual(self.store.tracked_ad_ids(), ())
 
     def test_all_files_stage_before_any_database_write(self):
         good = self.catalog("good.json", [entry()])
