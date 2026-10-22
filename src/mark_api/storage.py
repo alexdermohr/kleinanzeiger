@@ -48,6 +48,18 @@ _HISTORY_BINARY_KEY_DDL = {
     )
 }
 
+# Partial BINARY indexes contain ONLY whitespace-only IDs. SQLite's own
+# trim-with-character-set matches Python str.strip() for these Unicode code
+# points, including all control whitespace and U+3000. No full-table scan
+# is permitted on history read.
+_HISTORY_AD_ID_WHITESPACE_HEX = "".join(chr(codepoint) for codepoint in (
+    9, 10, 11, 12, 13, 28, 29, 30, 31, 32, 133, 160, 5760,
+    *range(8192, 8203), 8232, 8233, 8239, 8287, 12288,
+)).encode("utf-8").hex().upper()
+_HISTORY_BLANK_AD_ID_PREDICATE = (
+    f"trim(ad_id, CAST(X'{_HISTORY_AD_ID_WHITESPACE_HEX}' AS TEXT)) COLLATE BINARY = ''"
+)
+
 _SYNC_ERROR_KINDS = frozenset({
     "unauthenticated", "http_error", "transport_error", "parse_error",
     "reader_exception", "runtime_unavailable", "invalid_inventory",
@@ -349,10 +361,12 @@ class SnapshotStore:
         if not isinstance(create_if_missing, bool):
             raise TypeError("create_if_missing must be bool")
         self.path = Path(path)
+        # Same construction-time absolute path for URI and inode comparison.
+        self._identity_path = self.path.absolute()
         # Each post-start connection must refuse to create a replacement file
         # if the original store is unlinked or temporarily unavailable.
         self._existing_uri = (
-            "file:" + quote(str(self.path.absolute()), safe="/") + "?mode=rw"
+            "file:" + quote(str(self._identity_path), safe="/") + "?mode=rw"
         )
         created_new = False
         if create_if_missing:
@@ -429,6 +443,70 @@ class SnapshotStore:
             raise sqlite3.DatabaseError("invalid history key index")
 
     @staticmethod
+    def _blank_history_index_sql(table: str) -> str:
+        if table not in _HISTORY_BINARY_KEY_DDL:
+            raise ValueError("unsupported historical ad ID table")
+        return (
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_blank_ad_id "
+            f"ON {table}(ad_id) WHERE {_HISTORY_BLANK_AD_ID_PREDICATE}"
+        )
+
+    @classmethod
+    def _assert_blank_history_key_index(
+        cls, connection: sqlite3.Connection, table: str,
+        *, allow_missing: bool = False,
+    ) -> None:
+        """Only a canonical, truly partial BINARY index can prove absence."""
+        # SQLite removes IF NOT EXISTS from sqlite_master.sql on creation.
+        expected_sql = cls._blank_history_index_sql(table).replace(
+            "CREATE INDEX IF NOT EXISTS ", "CREATE INDEX ", 1
+        )
+        name = f"idx_{table}_blank_ad_id"
+        matches = [
+            row for row in connection.execute(f"PRAGMA index_list({table})")
+            if row["name"] == name
+        ]
+        if not matches and allow_missing:
+            return  # Prevalidated additive migration; validate after creation.
+        if (
+            len(matches) != 1
+            or matches[0]["origin"] != "c"
+            or matches[0]["unique"] != 0
+            or matches[0]["partial"] != 1
+        ):
+            raise sqlite3.DatabaseError("invalid history blank-key index")
+        definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND tbl_name=? AND name=?", (table, name),
+        ).fetchone()
+        if (
+            definition is None or type(definition["sql"]) is not str
+            or definition["sql"] != expected_sql
+        ):
+            raise sqlite3.DatabaseError("invalid history blank-key index")
+        columns = [
+            (row["name"], row["coll"], row["desc"])
+            for row in connection.execute(f"PRAGMA index_xinfo({name})")
+            if row["key"] == 1
+        ]
+        if columns != [("ad_id", "BINARY", 0)]:
+            raise sqlite3.DatabaseError("invalid history blank-key index")
+
+    @staticmethod
+    def _assert_no_blank_history_keys(
+        connection: sqlite3.Connection, table: str,
+    ) -> None:
+        if table not in _HISTORY_BINARY_KEY_DDL:
+            raise ValueError("unsupported historical ad ID table")
+        # INDEXED BY makes a missing index fail closed; no unbounded fallback.
+        invalid = connection.execute(
+            f"SELECT 1 FROM {table} INDEXED BY idx_{table}_blank_ad_id "
+            f"WHERE {_HISTORY_BLANK_AD_ID_PREDICATE} LIMIT 1"
+        ).fetchone()
+        if invalid is not None:
+            raise sqlite3.DatabaseError("invalid stored history ad ID")
+
+    @staticmethod
     def _validate_store_schema(
         connection: sqlite3.Connection, *, allow_additive_migrations: bool = False
     ) -> None:
@@ -457,6 +535,11 @@ class SnapshotStore:
                 raise sqlite3.DatabaseError("database schema is incomplete")
             if table in _HISTORY_BINARY_KEY_DDL:
                 SnapshotStore._assert_binary_history_key_schema(connection, table)
+                SnapshotStore._assert_blank_history_key_index(
+                    connection, table, allow_missing=allow_additive_migrations,
+                )
+                if not allow_additive_migrations:
+                    SnapshotStore._assert_no_blank_history_keys(connection, table)
 
             if table in _REQUIRED_SINGLE_COLUMN_UNIQUES:
                 unique_columns: set[str] = set()
@@ -725,6 +808,8 @@ class SnapshotStore:
                 );
                 """
             )
+            for table in _HISTORY_BINARY_KEY_DDL:
+                connection.execute(self._blank_history_index_sql(table))
             connection.execute("BEGIN IMMEDIATE")
             # Existing stores are pre-validated, including write-recovery fences,
             # before this strictly additive data-only column upgrade.
@@ -2034,6 +2119,7 @@ class SnapshotStore:
                 for field in ("ad_id", "observed_at", "source", "lifecycle_state"):
                     if type(row[field]) is not str:
                         raise sqlite3.DatabaseError("invalid ad snapshot data")
+                SnapshotStore._required_observation_ad_id(row["ad_id"])
                 for field in ("metric_source", "title", "description"):
                     value = row[field]
                     if value is not None and type(value) is not str:
@@ -2095,7 +2181,7 @@ class SnapshotStore:
         """
         def _file_identity() -> tuple[int, int]:
             try:
-                info = self.path.stat()
+                info = self._identity_path.stat()
             except OSError:
                 raise sqlite3.DatabaseError(
                     "history database identity unavailable"
@@ -2117,6 +2203,25 @@ class SnapshotStore:
                 # Schema validation and keyset lookup share one read snapshot.
                 connection.execute("BEGIN")
                 self._assert_binary_history_key_schema(connection, "ad_snapshots")
+                # Global indexed certificate before the first generator yield:
+                # a corrupt key on a later page must not expose early groups.
+                self._assert_blank_history_key_index(connection, "ad_snapshots")
+                self._assert_no_blank_history_keys(connection, "ad_snapshots")
+                # Validate native key storage classes globally within this
+                # page's read snapshot: BLOB/numeric rows can be on later
+                # keyset pages and must not leak early valid history groups.
+                for direction in ("ASC", "DESC"):
+                    boundary = connection.execute(
+                        f"SELECT ad_id FROM ad_snapshots "
+                        f"ORDER BY ad_id {direction} LIMIT 1"
+                    ).fetchone()
+                    if boundary is not None and (
+                        type(boundary["ad_id"]) is not str
+                        or not boundary["ad_id"].strip()
+                    ):
+                        raise sqlite3.DatabaseError(
+                            "invalid ad snapshot key storage class"
+                        )
                 version_row = connection.execute(
                     "PRAGMA schema_version"
                 ).fetchone()
@@ -2184,6 +2289,7 @@ class SnapshotStore:
             for row in page:
                 if (
                     type(row["ad_id"]) is not str
+                    or not row["ad_id"].strip()
                     or type(row["observed_at"]) is not str
                     or type(row["id"]) is not int
                     or row["id"] < 1
@@ -2221,7 +2327,7 @@ class SnapshotStore:
                 ORDER BY ad_id ASC
                 """
             ).fetchall()
-        return tuple(self._required_observation_text(row["ad_id"]) for row in rows)
+        return tuple(self._required_observation_ad_id(row["ad_id"]) for row in rows)
 
 
     @classmethod
@@ -2231,8 +2337,8 @@ class SnapshotStore:
         """Fail closed on rows that a typed WHERE ad_id=? could silently hide.
 
         SQLite sorts NULL/numeric values before native TEXT and BLOB values
-        after TEXT. Both extrema therefore prove every stored ad_id is TEXT;
-        the existing (ad_id, observed_at, id) indexes bound each probe.
+        after TEXT. Both extrema prove native TEXT. A verified partial
+        index additionally finds blank TEXT anywhere among valid ad IDs.
         Never coerce a native BLOB into a synthetic ad ID.
         """
         if table not in (
@@ -2245,12 +2351,20 @@ class SnapshotStore:
         # same read snapshot, even while a WAL writer commits concurrently.
         connection.execute("BEGIN")
         cls._assert_binary_history_key_schema(connection, table)
+        cls._assert_blank_history_key_index(connection, table)
+        cls._assert_no_blank_history_keys(connection, table)
         for direction in ("ASC", "DESC"):
             row = connection.execute(
                 f"SELECT ad_id FROM {table} ORDER BY ad_id {direction} LIMIT 1"
             ).fetchone()
             if row is not None:
-                cls._required_observation_text(row["ad_id"])
+                cls._required_observation_ad_id(row["ad_id"])
+
+    @staticmethod
+    def _required_observation_ad_id(value: object) -> str:
+        if type(value) is not str or not value.strip():
+            raise sqlite3.DatabaseError("invalid history ad ID")
+        return value
 
     @staticmethod
     def _required_observation_text(value: object) -> str:
@@ -2302,7 +2416,7 @@ class SnapshotStore:
         try:
             return tuple(
                 ReactionSnapshot(
-                    ad_id=self._required_observation_text(row["ad_id"]),
+                    ad_id=self._required_observation_ad_id(row["ad_id"]),
                     observed_at=self._observed_history_time(row["observed_at"]),
                     source=self._required_observation_text(row["source"]),
                     conversation_count=self._history_nonnegative_count(
@@ -2350,7 +2464,7 @@ class SnapshotStore:
             )
             return tuple(
                 InboundMessageEvent(
-                    ad_id=self._required_observation_text(row["ad_id"]),
+                    ad_id=self._required_observation_ad_id(row["ad_id"]),
                     conversation_id=self._required_observation_text(
                         row["conversation_id"]
                     ),
@@ -2377,7 +2491,7 @@ class SnapshotStore:
                 ORDER BY ad_id ASC
                 """
             ).fetchall()
-        return tuple(self._required_observation_text(row["ad_id"]) for row in rows)
+        return tuple(self._required_observation_ad_id(row["ad_id"]) for row in rows)
 
     def inbound_message_counts(self, ad_id: str) -> tuple[int, int]:
         """Return (conversation_count, inbound_message_count) for one ad."""
@@ -2424,7 +2538,7 @@ class SnapshotStore:
             )
             return tuple(
                 AdClassification(
-                    ad_id=self._required_observation_text(row["ad_id"]),
+                    ad_id=self._required_observation_ad_id(row["ad_id"]),
                     observed_at=observed_at,
                     source=self._required_observation_text(row["source"]),
                     image_type=self._optional_observation_text(row["image_type"]),

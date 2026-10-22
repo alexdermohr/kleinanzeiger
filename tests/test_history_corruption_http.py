@@ -19,7 +19,10 @@ from mark_api.domain import (
     AdSnapshot, AdClassification, InboundMessageEvent,
     ReactionSnapshot, LifecycleState,
 )
-from mark_api.storage import SnapshotStore
+from mark_api.storage import (
+    SnapshotStore, _HISTORY_BLANK_AD_ID_PREDICATE,
+    _HISTORY_AD_ID_WHITESPACE_HEX,
+)
 
 
 class HistoryCorruptionHttpTests(unittest.TestCase):
@@ -131,6 +134,212 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
                     table, "ad_id", path, sqlite3.Binary(b"native-blob-ad-id"),
                 )
 
+    def test_native_blank_text_keys_never_silently_disappear_from_http(self):
+        """Issue #180: exact native SQLite TEXT must not hide empty owner keys."""
+        paths = (
+            ("reaction_snapshots", "/api/analytics/ads?metric=conversation_count"),
+            ("inbound_message_events", "/api/email-reactions"),
+            ("ad_classifications", "/api/analytics/groups?dimension=city&metric=views"),
+        )
+        for invalid in ("", "   ", "\t", "\u2003", " \t\u2003 "):
+            for table, path in paths:
+                with self.subTest(table=table, invalid=repr(invalid)):
+                    self._assert_sanitized_503(table, "ad_id", path, invalid)
+
+    def test_native_text_nul_prefix_is_not_a_blank_id(self):
+        """SQLite length(TEXT) ends at NUL; an ID with a NUL is nonblank."""
+        paths = (
+            ("ad_snapshots", "ad_history"),
+            ("reaction_snapshots", "reaction_history"),
+            ("inbound_message_events", "inbound_message_history"),
+            ("ad_classifications", "classification_history"),
+        )
+        for key in ("\x00A", " \x00A", "\x00", " \x00"):
+            for table, reader_name in paths:
+                with self.subTest(table=table, key=repr(key)):
+                    original = self._replace(table, "ad_id", key)
+                    try:
+                        self.assertTrue(
+                            self.store.is_ready(),
+                            "nonblank NUL-prefixed TEXT must remain readable",
+                        )
+                        rows = getattr(self.store, reader_name)(key)
+                        self.assertEqual(len(rows), 1)
+                        self.assertEqual(rows[0].ad_id, key)
+                    finally:
+                        self._replace(table, "ad_id", original)
+        self.assertEqual(self._get("/readyz")[0], 200)
+
+    def test_later_page_native_blob_id_refuses_first_history_yield(self):
+        """A corrupt BLOB after >256 valid rows must not leak an early group."""
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute("UPDATE ad_snapshots SET ad_id='A' WHERE id=1")
+            db.executemany(
+                "INSERT INTO ad_snapshots "
+                "(ad_id, observed_at, source, lifecycle_state) VALUES (?,?,?,?)",
+                [
+                    ("B", (self.instant + timedelta(seconds=i)).isoformat(),
+                     "synthetic", "active")
+                    for i in range(300)
+                ],
+            )
+            db.execute(
+                "INSERT INTO ad_snapshots "
+                "(ad_id, observed_at, source, lifecycle_state) VALUES (?,?,?,?)",
+                (sqlite3.Binary(b"\xffinvalid"), self.instant.isoformat(),
+                 "synthetic", "active"),
+            )
+        pages = self.store.ad_histories()
+        try:
+            with self.assertRaises(sqlite3.DatabaseError):
+                next(pages)
+        finally:
+            pages.close()
+
+    def test_blank_unicode_id_between_valid_binary_extrema_is_detected(self):
+        """An indexed probe must catch whitespace even in the middle of IDs."""
+        self.store.append_classification(AdClassification(
+            ad_id="A", observed_at=self.instant, source="synthetic",
+            city="Berlin",
+        ))
+        self.store.append_classification(AdClassification(
+            ad_id="\u4000", observed_at=self.instant, source="synthetic",
+            city="Berlin",
+        ))
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute(
+                "UPDATE ad_classifications SET ad_id=? WHERE id=1",
+                ("\u2003",),
+            )
+            keys = [
+                row[0] for row in db.execute(
+                    "SELECT ad_id FROM ad_classifications ORDER BY ad_id"
+                )
+            ]
+        self.assertEqual(keys, ["A", "\u2003", "\u4000"])
+        self.assertFalse(self.store.is_ready())
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.store.classification_history("A")
+        status, body = self._get("/api/analytics/groups?dimension=city&metric=views")
+        self.assertEqual((status, json.loads(body)),
+                         (503, {"error": "database_unavailable"}))
+
+    def test_blank_key_index_is_bounded_and_unicode_semantics_match_python(self):
+        """No hidden str.strip() codepoint or fallback full-table read."""
+        characters = "".join(
+            chr(codepoint) for codepoint in range(0x110000)
+            if chr(codepoint).isspace()
+        )
+        self.assertEqual(
+            characters.encode("utf-8").hex().upper(),
+            _HISTORY_AD_ID_WHITESPACE_HEX,
+        )
+        with closing(sqlite3.connect(self.store.path)) as db:
+            for table in (
+                "ad_snapshots", "reaction_snapshots",
+                "inbound_message_events", "ad_classifications",
+            ):
+                with self.subTest(table=table):
+                    name = f"idx_{table}_blank_ad_id"
+                    statement = (
+                        f"SELECT 1 FROM {table} INDEXED BY {name} "
+                        f"WHERE {_HISTORY_BLANK_AD_ID_PREDICATE} LIMIT 1"
+                    )
+                    planner = " ".join(
+                        str(row[3]) for row in db.execute(
+                            "EXPLAIN QUERY PLAN " + statement
+                        )
+                    )
+                    self.assertIn(name, planner)
+                    self.assertIsNone(db.execute(statement).fetchone())
+
+    def test_later_page_blank_id_refuses_first_history_yield(self):
+        """An invalid key after >256 B rows must reject before yielding A."""
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute(
+                "UPDATE ad_snapshots SET ad_id=? WHERE id=1",
+                ("\u2003",),
+            )
+            db.execute(
+                "INSERT INTO ad_snapshots (ad_id, observed_at, source, lifecycle_state) "
+                "VALUES (?,?,?,?)",
+                ("A", self.instant.isoformat(), "synthetic", "active"),
+            )
+            db.executemany(
+                "INSERT INTO ad_snapshots (ad_id, observed_at, source, lifecycle_state) "
+                "VALUES (?,?,?,?)",
+                [
+                    ("B", (self.instant + timedelta(seconds=i)).isoformat(),
+                     "synthetic", "active")
+                    for i in range(300)
+                ],
+            )
+        pages = self.store.ad_histories()
+        try:
+            with self.assertRaises(sqlite3.DatabaseError):
+                next(pages)
+        finally:
+            pages.close()
+
+    def test_missing_or_forged_blank_key_index_does_not_certify_health(self):
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute("DROP INDEX idx_reaction_snapshots_blank_ad_id")
+            db.execute(
+                "CREATE INDEX idx_reaction_snapshots_blank_ad_id "
+                "ON reaction_snapshots(ad_id) WHERE ad_id = 'impossible'"
+            )
+        self.assertFalse(self.store.is_ready())
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.store.reaction_history("1234567890")
+        self.assertEqual(
+            self._get("/api/analytics/ads?metric=conversation_count")[0], 503,
+        )
+
+    def test_existing_canonical_store_adds_only_missing_blank_key_indexes(self):
+        tables = ("ad_snapshots", "reaction_snapshots",
+                  "inbound_message_events", "ad_classifications")
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            for table in tables:
+                db.execute(f"DROP INDEX idx_{table}_blank_ad_id")
+        self.assertFalse(self.store.is_ready())
+        reopened = SnapshotStore(self.store.path, create_if_missing=False)
+        self.assertTrue(reopened.is_ready())
+        self.assertEqual(reopened.ad_history("1234567890")[0].views, 7)
+        self.assertEqual(reopened.reaction_history("1234567890")[0].conversation_count, 3)
+
+    def test_relative_store_history_pagination_keeps_construction_path(self):
+        """The connection and per-page inode checks must identify one file."""
+        import os
+        seeded = self._yield_paged_history_with_pending_rows()
+        seeded.close()
+        original_cwd = Path.cwd()
+        os.chdir(self.temp.name)
+        try:
+            relative_store = SnapshotStore(Path("mark.sqlite"), create_if_missing=False)
+        except BaseException:
+            os.chdir(original_cwd)
+            raise
+        stream = relative_store.ad_histories()
+        try:
+            first, rows = next(stream)
+            self.assertEqual((first, len(rows)), ("1234567890", 1))
+            moved = Path(self.temp.name) / "different-cwd"
+            moved.mkdir()
+            os.chdir(moved)
+            # A fresh generator and a suspended page continuation both
+            # refer to the file the store actually connected at creation.
+            self.assertEqual(
+                [(key, len(items)) for key, items in relative_store.ad_histories()],
+                [("1234567890", 1), ("A", 200), ("B", 200), ("C", 200)],
+            )
+            self.assertEqual(
+                [(key, len(items)) for key, items in stream],
+                [("A", 200), ("B", 200), ("C", 200)],
+            )
+        finally:
+            os.chdir(original_cwd)
+            stream.close()
+
     def test_blob_optional_classification_label_and_reaction_counter(self):
         self._assert_sanitized_503(
             "ad_classifications", "city",
@@ -226,6 +435,9 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
                 f"CREATE INDEX idx_{table}_ad_id_observed "
                 f"ON {table}({index_key or 'ad_id'}, observed_at, id)"
             )
+            # Preserve the new independently validated blank-key index:
+            # a NOCASE rejection must not be a false-positive missing index.
+            db.execute(self.store._blank_history_index_sql(table))
 
     def _assert_history_schema_denied(
         self, *, reader="ad_history", path="/api/ads",
@@ -387,6 +599,7 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
                     "CREATE INDEX idx_ad_snapshots_ad_id_observed "
                     "ON ad_snapshots(ad_id, observed_at, id)"
                 )
+                db.execute(self.store._blank_history_index_sql("ad_snapshots"))
                 new_version = db.execute(
                     "PRAGMA schema_version",
                 ).fetchone()[0]

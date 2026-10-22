@@ -118,6 +118,17 @@ class LegacyMigrationTests(unittest.TestCase):
                 )
             for name in sorted(ALL_TABLES - stage):
                 connection.execute(f"DROP TABLE {name}")
+            # This fixture deliberately models PRE-upgrade, unversioned
+            # historical files. A modern SnapshotStore supplies only the
+            # original table layout: its newer corruption guard indexes
+            # must not falsely authenticate historical provenance or mask
+            # the migrator's strict rejection of genuinely unknown indexes.
+            for table in (
+                "ad_snapshots", "reaction_snapshots",
+                "ad_classifications", "inbound_message_events",
+            ):
+                if table in stage:
+                    connection.execute(f"DROP INDEX idx_{table}_blank_ad_id")
             # Historical stores predate the new sync-attempt journal/version.
             # The test fixture starts from a modern SnapshotStore only to
             # obtain the older schema layouts; remove newer data-only objects.
