@@ -25,6 +25,8 @@ from .domain import (
 from .results import ReadResult, ReadStatus
 
 _SYNC_SCHEMA_VERSION = 1
+# Unverified observations never establish independently confirmed account ownership.
+LOCAL_CATALOG_SOURCE = "user-supplied-local-catalog"
 _AD_HISTORY_PAGE_ROWS = 256  # Close read connection before projection.
 
 # Historical ad IDs must have SQLite BINARY identity in every keyed history
@@ -2081,9 +2083,22 @@ class SnapshotStore:
             raise ValueError("inconsistent owner inventory")
         present_ids = {snapshot.ad_id for snapshot in snapshots}
         tracked_ids = {ad_id for ad_id in tracked_ad_ids if ad_id.strip()}
-        absent_ids = sorted(tracked_ids - present_ids)
 
         with self._connect() as connection:
+            # Bind evidence validation and history writes to the same
+            # serialized transaction. A local catalog is never owner proof.
+            connection.execute("BEGIN IMMEDIATE")
+            owned_ids: set[str] = set()
+            if tracked_ids:
+                owned_ids = {
+                    row["ad_id"]
+                    for row in connection.execute(
+                        "SELECT DISTINCT ad_id FROM ad_snapshots "
+                        "WHERE source != ? AND lifecycle_state != ?",
+                        (LOCAL_CATALOG_SOURCE, LifecycleState.ABSENT.value),
+                    ).fetchall()
+                }
+            absent_ids = sorted((tracked_ids & owned_ids) - present_ids)
             for snapshot in snapshots:
                 self._insert_ad_snapshot(connection, snapshot)
             for ad_id in absent_ids:

@@ -6,7 +6,7 @@ from typing import Mapping
 from datetime import datetime
 
 from .domain import AdSnapshot, LifecycleState, ReactionSnapshot
-from .storage import SnapshotStore
+from .storage import LOCAL_CATALOG_SOURCE, SnapshotStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,11 +105,11 @@ class MarkQueryService:
                     continue
                 owner_history = tuple(
                     item for item in history
-                    if item.source != "user-supplied-local-catalog"
+                    if item.source != LOCAL_CATALOG_SOURCE
                 )
                 catalog_history = tuple(
                     item for item in history
-                    if item.source == "user-supplied-local-catalog"
+                    if item.source == LOCAL_CATALOG_SOURCE
                 )
                 owner = owner_history[-1] if owner_history else None
                 latest = owner if owner is not None else history[-1]
