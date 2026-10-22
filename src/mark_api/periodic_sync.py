@@ -203,7 +203,12 @@ class PeriodicOwnerSync:
                 # Fail before opening the runtime OR creating a sync journal.
                 if (
                     type(ordinal) is not int or ordinal <= 0
-                    or type(ad_id) is not str or not ad_id.strip()
+                    or type(ad_id) is not str
+                    or not ad_id.strip()
+                    # Owner browser input strips IDs. A stored padded ID
+                    # would be falsely inferred ABSENT after an empty read.
+                    # Never normalize a persisted identity silently.
+                    or ad_id != ad_id.strip()
                     or type(observed_at) is not str
                     or type(lifecycle) is not str
                 ):

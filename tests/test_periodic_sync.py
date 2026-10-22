@@ -220,6 +220,7 @@ class PeriodicReadTests(unittest.TestCase):
             ("ad_id", sqlite3.Binary(b"forged-native-blob")),
             ("ad_id", ""),
             ("ad_id", " \t\u2003 "),
+            ("ad_id", " 1234567890 "),
             ("observed_at", sqlite3.Binary(b"2026-10-19T10:00:00+00:00")),
             ("observed_at", "not-an-iso-timestamp"),
             ("observed_at", "2026-10-19T10:00:00"),
