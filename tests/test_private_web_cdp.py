@@ -2439,7 +2439,7 @@ class CdpPrivateWebPageTests(unittest.TestCase):
                 "ws://127.0.0.1:19938/devtools/page/inventory-two",
         }
         socket = FakeSocket([
-            {"id": 1, "result": {"result": {"type": "object", "value": "ok"}}},
+            {"id": 1, "result": {"result": {"type": "object", "value": {"readyState": "complete"}}}},
         ])
         client = _LoopbackCdpClient(
             endpoint, timeout_seconds=1,
@@ -2471,6 +2471,56 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             self.assertFalse(client._unresolved_call)
         finally:
             client.close()
+
+    def test_unverified_inventory_cdp_result_keeps_target_quarantined(self) -> None:
+        """Exception/missing remote value is not a verified inventory read."""
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX target required")
+        from mark_api.private_web_inventory_cdp import _INVENTORY_TAB_PROBE
+        from mark_api.private_web_cdp import _ACTIVE_CDP_TARGET_CLAIMS
+
+        cases = (
+            (19939, {"id": 1, "result": {
+                "exceptionDetails": {"text": "synthetic evaluation error"},
+                "result": {"type": "object", "value": {"readyState": "complete"}},
+            }}),
+            (19940, {"id": 1, "result": {"result": {"type": "object"}}}),
+            (19941, {"id": 1, "result": {"result": {"type": "string", "value": "ok"}}}),
+        )
+        for port, response in cases:
+            with self.subTest(port=port):
+                endpoint = f"http://127.0.0.1:{port}"
+                target = {
+                    "type": "page",
+                    "webSocketDebuggerUrl":
+                        f"ws://127.0.0.1:{port}/devtools/page/inventory-error",
+                }
+
+                def new_client():
+                    return _LoopbackCdpClient(
+                        endpoint, timeout_seconds=1,
+                        opener=lambda url, **kw: FakeResponse([target], url=url),
+                        websocket_factory=lambda *args, **kw: FakeSocket([response]),
+                        tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+                    )
+
+                client = new_client()
+                claim = client._target_reservation
+                claim_id = id(claim)
+                with self.assertRaises(PrivateWebCdpError):
+                    client.call("Runtime.evaluate", {
+                        "expression": _INVENTORY_TAB_PROBE,
+                        "returnByValue": True,
+                        "awaitPromise": False,
+                    })
+                self.assertTrue(client._unresolved_call)
+                with self.assertRaises(PrivateWebCdpError):
+                    client.close()
+                self.assertIn(claim_id, _ACTIVE_CDP_TARGET_CLAIMS)
+                self.assertGreaterEqual(claim.fileno(), 0)
+                with self.assertRaises(PrivateWebCdpError) as blocked:
+                    new_client()
+                self.assertEqual(blocked.exception.stage, "target_busy")
 
     def test_nonmedia_ack_cannot_release_target_via_explicit_close(self) -> None:
         """Only platform settlement, never a CDP transport ACK, permits release."""

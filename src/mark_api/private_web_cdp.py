@@ -853,6 +853,18 @@ class _LoopbackCdpClient:
                     # The original pinned WebSocket target must actually
                     # acknowledge the exact DOM read as "confirmed".
                     remote = result.get("result")
+                    if inventory_read and (
+                        "exceptionDetails" in result
+                        or not isinstance(remote, dict)
+                        or remote.get("type") != "object"
+                        or not isinstance(remote.get("value"), dict)
+                    ):
+                        # A matching transport ACK with a missing/malformed
+                        # evaluation result does NOT settle a read. Keep the
+                        # in-flight fence for close() to quarantine this
+                        # target; never admit another writer on uncertainty.
+                        self._possible_browser_side_effect = True
+                        raise PrivateWebCdpError("call")
                     if (
                         observing_submit
                         and "exceptionDetails" not in result
