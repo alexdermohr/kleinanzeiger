@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -148,7 +149,7 @@ class SyncAttemptJournalTests(unittest.TestCase):
 
     def test_malformed_persisted_attempt_rejected_by_readyz_and_projection(self) -> None:
         started = self.store.begin_sync_attempt(source="owner", started_at=NOW)
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute(
                 "UPDATE sync_attempts SET started_at='not-a-timestamp' WHERE id=?",
                 (started,),
@@ -161,14 +162,14 @@ class SyncAttemptJournalTests(unittest.TestCase):
 
     def test_additive_upgrade_after_existing_recovery_tables_validated(self) -> None:
         self.store.append_ad_snapshot(self.ad())
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute("DROP TABLE sync_attempts")
             connection.execute("PRAGMA user_version = 0")
         reopened = SnapshotStore(self.db, create_if_missing=False)
         self.assertTrue(reopened.is_ready())
         self.assertEqual(reopened.latest_ad_snapshot("123"), self.ad())
         self.assertEqual(reopened.sync_status()["state"], "never_attempted")
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
             self.assertIsNotNone(connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='write_api_requests'"
@@ -176,26 +177,26 @@ class SyncAttemptJournalTests(unittest.TestCase):
 
     def test_lost_versioned_journal_is_not_silently_regenerated(self) -> None:
         self.store.begin_sync_attempt(source="owner", started_at=NOW)
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute("DROP TABLE sync_attempts")
         self.assertFalse(self.store.is_ready())
         for initialize in (False, True):
             with self.subTest(initialize=initialize):
                 with self.assertRaises(sqlite3.DatabaseError):
                     SnapshotStore(self.db, create_if_missing=initialize)
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             self.assertIsNone(connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='sync_attempts'"
             ).fetchone())
 
     def test_missing_write_recovery_fence_blocks_additive_journal_upgrade(self) -> None:
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute("DROP TABLE sync_attempts")
             connection.execute("DROP TABLE write_api_requests")
             connection.execute("PRAGMA user_version = 0")
         with self.assertRaises(sqlite3.DatabaseError):
             SnapshotStore(self.db, create_if_missing=False)
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             self.assertIsNone(connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='sync_attempts'"
             ).fetchone())

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, closing
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Iterable, Mapping
+from typing import Iterable, Iterator, Mapping
 from urllib.parse import quote
 
 from .domain import (
@@ -24,6 +25,29 @@ from .domain import (
 from .results import ReadResult, ReadStatus
 
 _SYNC_SCHEMA_VERSION = 1
+_AD_HISTORY_PAGE_ROWS = 256  # Close read connection before projection.
+
+# Historical ad IDs must have SQLite BINARY identity in every keyed history
+# table: SQL WHERE identity and Python projection grouping must not disagree.
+# A deliberately conservative DDL prefix rejects unrecognized manually
+# altered/quoted/commented schemas rather than guessing at SQL collation syntax.
+_HISTORY_BINARY_KEY_DDL = {
+    table: re.compile(
+        r"\ACREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?" + table
+        + r"\s*\(\s*id\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\s*,"
+        + (
+            r"\s*provider_message_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE\s*,"
+            if table == "inbound_message_events" else ""
+        )
+        + r"\s*ad_id\s+TEXT\s+NOT\s+NULL\s*,",
+        re.IGNORECASE,
+    )
+    for table in (
+        "ad_snapshots", "reaction_snapshots", "inbound_message_events",
+        "ad_classifications",
+    )
+}
+
 _SYNC_ERROR_KINDS = frozenset({
     "unauthenticated", "http_error", "transport_error", "parse_error",
     "reader_exception", "runtime_unavailable", "invalid_inventory",
@@ -362,6 +386,49 @@ class SnapshotStore:
         return connection
 
     @staticmethod
+    def _assert_binary_history_key_schema(
+        connection: sqlite3.Connection, table: str,
+    ) -> None:
+        """Fail closed when SQLite identity and Python exact IDs diverge.
+
+        PRAGMA table_info omits native column collation. Verify an anchored
+        canonical unquoted DDL prefix, then validate actual index collations
+        via SQLite's index_xinfo. The table is always from a fixed whitelist.
+        """
+        rule = _HISTORY_BINARY_KEY_DDL.get(table)
+        if rule is None:
+            raise ValueError("unsupported historical ad ID table")
+        record = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if (
+            record is None
+            or type(record["sql"]) is not str
+            or rule.match(record["sql"]) is None
+        ):
+            raise sqlite3.DatabaseError("invalid history key collation")
+
+        index_name = f"idx_{table}_ad_id_observed"
+        index = next((
+            row for row in connection.execute(f"PRAGMA index_list({table})")
+            if row["name"] == index_name
+        ), None)
+        if index is None or index["partial"] or index["origin"] != "c":
+            raise sqlite3.DatabaseError("invalid history key index")
+        key_columns = [
+            (row["name"], row["coll"], row["desc"])
+            for row in connection.execute(f"PRAGMA index_xinfo({index_name})")
+            if row["key"]
+        ]
+        if key_columns != [
+            ("ad_id", "BINARY", 0),
+            ("observed_at", "BINARY", 0),
+            ("id", "BINARY", 0),
+        ]:
+            raise sqlite3.DatabaseError("invalid history key index")
+
+    @staticmethod
     def _validate_store_schema(
         connection: sqlite3.Connection, *, allow_additive_migrations: bool = False
     ) -> None:
@@ -388,6 +455,8 @@ class SnapshotStore:
             )
             if not (set(expected) - migratable).issubset(columns):
                 raise sqlite3.DatabaseError("database schema is incomplete")
+            if table in _HISTORY_BINARY_KEY_DDL:
+                SnapshotStore._assert_binary_history_key_schema(connection, table)
 
             if table in _REQUIRED_SINGLE_COLUMN_UNIQUES:
                 unique_columns: set[str] = set()
@@ -1950,10 +2019,52 @@ class SnapshotStore:
                 )
         return len(snapshots) + len(absent_ids)
 
+    @staticmethod
+    def _decode_ad_history(
+        rows: Iterable[sqlite3.Row],
+    ) -> tuple[AdSnapshot, ...]:
+        """Order actual instants, then insertion IDs; preserve field evidence."""
+
+        try:
+            parsed = []
+            for row in rows:
+                # SQLite TEXT affinity still admits native BLOB values.
+                # AdSnapshot accepts bytes for source/title/description, but
+                # JSON serialization would abort the HTTP connection.
+                for field in ("ad_id", "observed_at", "source", "lifecycle_state"):
+                    if type(row[field]) is not str:
+                        raise sqlite3.DatabaseError("invalid ad snapshot data")
+                for field in ("metric_source", "title", "description"):
+                    value = row[field]
+                    if value is not None and type(value) is not str:
+                        raise sqlite3.DatabaseError("invalid ad snapshot data")
+                parsed.append(
+                    (datetime.fromisoformat(row["observed_at"]), int(row["id"]), row)
+                )
+            parsed.sort(key=lambda item: (item[0], item[1]))
+            return tuple(
+                AdSnapshot(
+                    ad_id=row["ad_id"],
+                    observed_at=observed_at,
+                    source=row["source"],
+                    metric_source=row["metric_source"],
+                    lifecycle_state=LifecycleState(row["lifecycle_state"]),
+                    title=row["title"],
+                    description=row["description"],
+                    views=row["views"],
+                    watch_count=row["watch_count"],
+                    reply_count=row["reply_count"],
+                )
+                for observed_at, _, row in parsed
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise sqlite3.DatabaseError("invalid ad snapshot data") from exc
+
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
         """Return observations by actual instant, then insertion ID for ties."""
 
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "ad_snapshots")
             rows = connection.execute(
                 """
                 SELECT id, ad_id, observed_at, source, lifecycle_state, title,
@@ -1963,28 +2074,137 @@ class SnapshotStore:
                 """,
                 (ad_id,),
             ).fetchall()
-        ordered_rows = sorted(
-            rows,
-            key=lambda row: (
-                datetime.fromisoformat(row["observed_at"]),
-                int(row["id"]),
-            ),
-        )
-        return tuple(
-            AdSnapshot(
-                ad_id=row["ad_id"],
-                observed_at=datetime.fromisoformat(row["observed_at"]),
-                source=row["source"],
-                metric_source=row["metric_source"],
-                lifecycle_state=LifecycleState(row["lifecycle_state"]),
-                title=row["title"],
-                description=row["description"],
-                views=row["views"],
-                watch_count=row["watch_count"],
-                reply_count=row["reply_count"],
-            )
-            for row in ordered_rows
-        )
+        return self._decode_ad_history(rows)
+
+    def ad_histories(self) -> Iterator[tuple[str, tuple[AdSnapshot, ...]]]:
+        """Page a high-water-mark snapshot without holding reader locks on yield.
+
+        IDs are AUTOINCREMENT and snapshots append-only: the captured maximum
+        ID excludes later inserts from every page. Each page is fully fetched
+        and its connection CLOSED before CPU-heavy decoding or yielding.
+        Unlike a live SELECT iterator, this cannot hold a rollback-journal
+        shared lock while a slow dashboard request blocks concurrent writes.
+
+        Keyset pagination uses the existing (ad_id, observed_at, id) index
+        without temp sorting. The largest single history plus one fixed page
+        bounds memory; actual UTC instants are sorted within every group.
+        Arbitrary external updates/deletes are outside the append-only model.
+        A replacement DB inode or changed schema version while the generator
+        is paused is *not* an append: fail closed rather than return a
+        partial/cross-generation analytics view.
+        """
+        def _file_identity() -> tuple[int, int]:
+            try:
+                info = self.path.stat()
+            except OSError:
+                raise sqlite3.DatabaseError(
+                    "history database identity unavailable"
+                ) from None
+            return info.st_dev, info.st_ino
+
+        expected_generation: tuple[int, int, int] | None = None
+        high_water_id: int | None = None
+        last_key: tuple[str, str, int] | None = None
+        pending_ad_id: str | None = None
+        pending_rows: list[sqlite3.Row] = []
+        while True:
+            # Inspect before connect and again before closing each page read:
+            # an atomic file swap cannot silently splice histories from two
+            # different SQLite files even if both use identical schema DDL.
+            file_identity = _file_identity()
+            with closing(self._connect()) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                # Schema validation and keyset lookup share one read snapshot.
+                connection.execute("BEGIN")
+                self._assert_binary_history_key_schema(connection, "ad_snapshots")
+                version_row = connection.execute(
+                    "PRAGMA schema_version"
+                ).fetchone()
+                if (
+                    version_row is None
+                    or type(version_row[0]) is not int
+                    or version_row[0] < 0
+                ):
+                    raise sqlite3.DatabaseError(
+                        "invalid history schema generation"
+                    )
+                generation = (*file_identity, version_row[0])
+                if expected_generation is None:
+                    expected_generation = generation
+                elif generation != expected_generation:
+                    raise sqlite3.DatabaseError(
+                        "history schema generation changed during pagination"
+                    )
+                if high_water_id is None:
+                    maximum = connection.execute(
+                        "SELECT MAX(id) AS max_id FROM ad_snapshots"
+                    ).fetchone()
+                    if maximum is None or maximum["max_id"] is None:
+                        return
+                    high_water_id = int(maximum["max_id"])
+                if last_key is None:
+                    page = connection.execute(
+                        """
+                        SELECT id, ad_id, observed_at, source, lifecycle_state,
+                               title, description, views, watch_count,
+                               reply_count, metric_source
+                        FROM ad_snapshots
+                        WHERE id <= ?
+                        ORDER BY ad_id ASC, observed_at ASC, id ASC
+                        LIMIT ?
+                        """,
+                        (high_water_id, _AD_HISTORY_PAGE_ROWS),
+                    ).fetchall()
+                else:
+                    page = connection.execute(
+                        """
+                        SELECT id, ad_id, observed_at, source, lifecycle_state,
+                               title, description, views, watch_count,
+                               reply_count, metric_source
+                        FROM ad_snapshots
+                        WHERE id <= ?
+                          AND (ad_id, observed_at, id) > (?, ?, ?)
+                        ORDER BY ad_id ASC, observed_at ASC, id ASC
+                        LIMIT ?
+                        """,
+                        (high_water_id, *last_key, _AD_HISTORY_PAGE_ROWS),
+                    ).fetchall()
+                if _file_identity() != file_identity:
+                    raise sqlite3.DatabaseError(
+                        "history database identity changed during pagination"
+                    )
+
+            # Every yield below runs AFTER SQLite has released the read lock.
+            if not page:
+                break
+            # SQLite uses dynamic value types even in TEXT columns. A BLOB
+            # key must not be stringified into a TEXT keyset cursor: SQLite
+            # would compare the changed storage class and repeat this page.
+            # Validate the whole page before yielding any of its groups.
+            for row in page:
+                if (
+                    type(row["ad_id"]) is not str
+                    or type(row["observed_at"]) is not str
+                    or type(row["id"]) is not int
+                    or row["id"] < 1
+                ):
+                    raise sqlite3.DatabaseError("invalid ad snapshot key storage class")
+            for row in page:
+                ad_id = row["ad_id"]
+                if pending_ad_id is None:
+                    pending_ad_id = ad_id
+                elif ad_id != pending_ad_id:
+                    yield pending_ad_id, self._decode_ad_history(pending_rows)
+                    pending_rows = []
+                    pending_ad_id = ad_id
+                pending_rows.append(row)
+            tail = page[-1]
+            last_key = (tail["ad_id"], tail["observed_at"], tail["id"])
+            if len(page) < _AD_HISTORY_PAGE_ROWS:
+                break
+
+        if pending_ad_id is not None:
+            yield pending_ad_id, self._decode_ad_history(pending_rows)
 
     def latest_ad_snapshot(self, ad_id: str) -> AdSnapshot | None:
         history = self.ad_history(ad_id)
@@ -1993,6 +2213,7 @@ class SnapshotStore:
     def tracked_ad_ids(self) -> tuple[str, ...]:
         """Return every ad ID ever observed by this store."""
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "ad_snapshots")
             rows = connection.execute(
                 """
                 SELECT DISTINCT ad_id
@@ -2000,10 +2221,73 @@ class SnapshotStore:
                 ORDER BY ad_id ASC
                 """
             ).fetchall()
-        return tuple(str(row["ad_id"]) for row in rows)
+        return tuple(self._required_observation_text(row["ad_id"]) for row in rows)
+
+
+    @classmethod
+    def _assert_native_history_ad_ids(
+        cls, connection: sqlite3.Connection, table: str,
+    ) -> None:
+        """Fail closed on rows that a typed WHERE ad_id=? could silently hide.
+
+        SQLite sorts NULL/numeric values before native TEXT and BLOB values
+        after TEXT. Both extrema therefore prove every stored ad_id is TEXT;
+        the existing (ad_id, observed_at, id) indexes bound each probe.
+        Never coerce a native BLOB into a synthetic ad ID.
+        """
+        if table not in (
+            "ad_snapshots", "reaction_snapshots",
+            "inbound_message_events", "ad_classifications",
+        ):
+            raise ValueError("unsupported historical ad ID table")
+        # sqlite3 SELECT alone does not pin a transaction across statements.
+        # Bind both validation probes and the following keyed SELECT to the
+        # same read snapshot, even while a WAL writer commits concurrently.
+        connection.execute("BEGIN")
+        cls._assert_binary_history_key_schema(connection, table)
+        for direction in ("ASC", "DESC"):
+            row = connection.execute(
+                f"SELECT ad_id FROM {table} ORDER BY ad_id {direction} LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                cls._required_observation_text(row["ad_id"])
+
+    @staticmethod
+    def _required_observation_text(value: object) -> str:
+        # SQLite TEXT affinity does not prohibit BLOB/INTEGER/FLOAT storage.
+        if type(value) is not str:
+            raise sqlite3.DatabaseError("invalid observation text")
+        return value
+
+    @staticmethod
+    def _optional_observation_text(value: object) -> str | None:
+        if value is None:
+            return None
+        return SnapshotStore._required_observation_text(value)
+
+    @staticmethod
+    def _observed_history_time(value: object) -> datetime:
+        text = SnapshotStore._required_observation_text(value)
+        try:
+            return datetime.fromisoformat(text)
+        except (ValueError, TypeError, OverflowError):
+            raise sqlite3.DatabaseError("invalid observation timestamp") from None
+
+    @staticmethod
+    def _history_row_id(value: object) -> int:
+        if type(value) is not int or value <= 0:
+            raise sqlite3.DatabaseError("invalid observation row id")
+        return value
+
+    @staticmethod
+    def _history_nonnegative_count(value: object) -> int:
+        if type(value) is not int or value < 0:
+            raise sqlite3.DatabaseError("invalid observation counter")
+        return value
 
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "reaction_snapshots")
             rows = connection.execute(
                 """
                 SELECT ad_id, observed_at, source, conversation_count,
@@ -2014,23 +2298,34 @@ class SnapshotStore:
                 """,
                 (ad_id,),
             ).fetchall()
-        return tuple(
-            ReactionSnapshot(
-                ad_id=row["ad_id"],
-                observed_at=datetime.fromisoformat(row["observed_at"]),
-                source=row["source"],
-                conversation_count=row["conversation_count"],
-                unique_buyer_count=row["unique_buyer_count"],
-                inbound_message_count=row["inbound_message_count"],
+
+        try:
+            return tuple(
+                ReactionSnapshot(
+                    ad_id=self._required_observation_text(row["ad_id"]),
+                    observed_at=self._observed_history_time(row["observed_at"]),
+                    source=self._required_observation_text(row["source"]),
+                    conversation_count=self._history_nonnegative_count(
+                        row["conversation_count"]
+                    ),
+                    unique_buyer_count=self._history_nonnegative_count(
+                        row["unique_buyer_count"]
+                    ),
+                    inbound_message_count=self._history_nonnegative_count(
+                        row["inbound_message_count"]
+                    ),
+                )
+                for row in rows
             )
-            for row in rows
-        )
+        except (ValueError, TypeError, OverflowError):
+            raise sqlite3.DatabaseError("invalid reaction history") from None
 
     def inbound_message_history(
         self,
         ad_id: str,
     ) -> tuple[InboundMessageEvent, ...]:
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
             rows = connection.execute(
                 """
                 SELECT id, ad_id, conversation_id, provider_message_id,
@@ -2041,28 +2336,40 @@ class SnapshotStore:
                 (ad_id,),
             ).fetchall()
 
-        ordered_rows = sorted(
-            rows,
-            key=lambda row: (
-                datetime.fromisoformat(row["observed_at"]),
-                int(row["id"]),
-            ),
-        )
-        return tuple(
-            InboundMessageEvent(
-                ad_id=row["ad_id"],
-                conversation_id=row["conversation_id"],
-                provider_message_id=row["provider_message_id"],
-                observed_at=datetime.fromisoformat(row["observed_at"]),
-                source=row["source"],
+        try:
+            ordered_rows = sorted(
+                (
+                    (
+                        self._observed_history_time(row["observed_at"]),
+                        self._history_row_id(row["id"]),
+                        row,
+                    )
+                    for row in rows
+                ),
+                key=lambda item: (item[0], item[1]),
             )
-            for row in ordered_rows
-        )
+            return tuple(
+                InboundMessageEvent(
+                    ad_id=self._required_observation_text(row["ad_id"]),
+                    conversation_id=self._required_observation_text(
+                        row["conversation_id"]
+                    ),
+                    provider_message_id=self._required_observation_text(
+                        row["provider_message_id"]
+                    ),
+                    observed_at=observed_at,
+                    source=self._required_observation_text(row["source"]),
+                )
+                for observed_at, _, row in ordered_rows
+            )
+        except (ValueError, TypeError, OverflowError):
+            raise sqlite3.DatabaseError("invalid inbound message history") from None
 
     def inbound_message_ad_ids(self) -> tuple[str, ...]:
         """Return every ad ID represented by imported inbound-message events."""
 
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
             rows = connection.execute(
                 """
                 SELECT DISTINCT ad_id
@@ -2070,12 +2377,13 @@ class SnapshotStore:
                 ORDER BY ad_id ASC
                 """
             ).fetchall()
-        return tuple(str(row["ad_id"]) for row in rows)
+        return tuple(self._required_observation_text(row["ad_id"]) for row in rows)
 
     def inbound_message_counts(self, ad_id: str) -> tuple[int, int]:
         """Return (conversation_count, inbound_message_count) for one ad."""
 
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
             row = connection.execute(
                 """
                 SELECT COUNT(DISTINCT conversation_id) AS conversations,
@@ -2090,6 +2398,7 @@ class SnapshotStore:
 
     def classification_history(self, ad_id: str) -> tuple[AdClassification, ...]:
         with self._connect() as connection:
+            self._assert_native_history_ad_ids(connection, "ad_classifications")
             rows = connection.execute(
                 """
                 SELECT id, ad_id, observed_at, source, image_type, city,
@@ -2101,25 +2410,32 @@ class SnapshotStore:
                 (ad_id,),
             ).fetchall()
 
-        ordered_rows = sorted(
-            rows,
-            key=lambda row: (
-                datetime.fromisoformat(row["observed_at"]),
-                int(row["id"]),
-            ),
-        )
-        return tuple(
-            AdClassification(
-                ad_id=row["ad_id"],
-                observed_at=datetime.fromisoformat(row["observed_at"]),
-                source=row["source"],
-                image_type=row["image_type"],
-                city=row["city"],
-                text_type=row["text_type"],
-                title_type=row["title_type"],
+        try:
+            ordered_rows = sorted(
+                (
+                    (
+                        self._observed_history_time(row["observed_at"]),
+                        self._history_row_id(row["id"]),
+                        row,
+                    )
+                    for row in rows
+                ),
+                key=lambda item: (item[0], item[1]),
             )
-            for row in ordered_rows
-        )
+            return tuple(
+                AdClassification(
+                    ad_id=self._required_observation_text(row["ad_id"]),
+                    observed_at=observed_at,
+                    source=self._required_observation_text(row["source"]),
+                    image_type=self._optional_observation_text(row["image_type"]),
+                    city=self._optional_observation_text(row["city"]),
+                    text_type=self._optional_observation_text(row["text_type"]),
+                    title_type=self._optional_observation_text(row["title_type"]),
+                )
+                for observed_at, _, row in ordered_rows
+            )
+        except (ValueError, TypeError, OverflowError):
+            raise sqlite3.DatabaseError("invalid classification history") from None
 
     def latest_classification(self, ad_id: str) -> AdClassification | None:
         history = self.classification_history(ad_id)

@@ -9,7 +9,7 @@ import stat
 import tempfile
 import tomllib
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -73,7 +73,7 @@ def table_names(connection: sqlite3.Connection) -> set[str]:
 class LegacyMigrationTests(unittest.TestCase):
     def build_stage(self, path: Path, stage: frozenset[str]) -> None:
         SnapshotStore(path)
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection, connection:
             connection.execute(
                 "INSERT INTO ad_snapshots "
                 "(ad_id,observed_at,source,lifecycle_state,title,views) "
@@ -134,7 +134,7 @@ class LegacyMigrationTests(unittest.TestCase):
             backup = root / "backup.sqlite"
             target = root / "target.sqlite"
             self.build_stage(source, STAGES[0])
-            with sqlite3.connect(source) as connection:
+            with closing(sqlite3.connect(source)) as connection, connection:
                 connection.execute("PRAGMA user_version = 1")
             before = hashlib.sha256(source.read_bytes()).hexdigest()
             with self.assertRaisesRegex(LegacyMigrationError, "versioned"):
@@ -180,11 +180,11 @@ class LegacyMigrationTests(unittest.TestCase):
                         original_hash,
                     )
 
-                    with sqlite3.connect(source) as conn:
+                    with closing(sqlite3.connect(source)) as conn, conn:
                         self.assertEqual(table_names(conn), stage)
-                    with sqlite3.connect(backup) as conn:
+                    with closing(sqlite3.connect(backup)) as conn, conn:
                         self.assertEqual(table_names(conn), stage)
-                    with sqlite3.connect(target) as conn:
+                    with closing(sqlite3.connect(target)) as conn, conn:
                         self.assertTrue(ALL_TABLES.issubset(table_names(conn)))
                         preserved = conn.execute(
                             "SELECT backup_sha256, source_table_count "
@@ -217,7 +217,7 @@ class LegacyMigrationTests(unittest.TestCase):
                 root / "modern.sqlite",
             )
             self.build_stage(source, STAGES[4])
-            with sqlite3.connect(source) as conn:
+            with closing(sqlite3.connect(source)) as conn, conn:
                 conn.execute("DROP TABLE write_api_requests")
                 conn.execute(
                     """
@@ -296,7 +296,7 @@ class LegacyMigrationTests(unittest.TestCase):
             self.assertEqual(
                 result.record.response_json, '{"already_completed":true}'
             )
-            with sqlite3.connect(target) as conn:
+            with closing(sqlite3.connect(target)) as conn, conn:
                 self.assertEqual(
                     conn.execute(
                         "SELECT COUNT(*) FROM create_operation_receipts"
@@ -316,7 +316,7 @@ class LegacyMigrationTests(unittest.TestCase):
                 root / "old.sqlite", root / "archived.sqlite", root / "new.sqlite"
             )
             self.build_stage(source, STAGES[0])
-            with sqlite3.connect(source) as connection:
+            with closing(sqlite3.connect(source)) as connection, connection:
                 connection.execute(
                     "INSERT INTO ad_snapshots "
                     "(id,ad_id,observed_at,source,lifecycle_state) "
@@ -335,7 +335,7 @@ class LegacyMigrationTests(unittest.TestCase):
                 source, backup_db=backup, output_db=output,
                 confirm_no_unresolved_writes=True,
             )
-            with sqlite3.connect(output) as connection:
+            with closing(sqlite3.connect(output)) as connection, connection:
                 self.assertEqual(
                     connection.execute(
                         "SELECT seq FROM sqlite_sequence WHERE name='ad_snapshots'"
@@ -379,7 +379,7 @@ class LegacyMigrationTests(unittest.TestCase):
                     out = root / f"{case}.new.sqlite"
                     stage = STAGES[4] if case == "in_progress" else STAGES[0]
                     self.build_stage(src, stage)
-                    with sqlite3.connect(src) as conn:
+                    with closing(sqlite3.connect(src)) as conn, conn:
                         if case == "in_progress":
                             conn.execute(
                                 "INSERT INTO write_api_requests "
@@ -422,7 +422,7 @@ class LegacyMigrationTests(unittest.TestCase):
                     root / "upgraded.sqlite",
                 )
                 self.build_stage(source, stage)
-                with sqlite3.connect(source) as connection:
+                with closing(sqlite3.connect(source)) as connection, connection:
                     original_ddl = connection.execute(
                         "SELECT sql FROM sqlite_master "
                         "WHERE type='table' AND name=?", (table,)
@@ -475,7 +475,7 @@ class LegacyMigrationTests(unittest.TestCase):
                 root / "old.sqlite", root / "backup.sqlite", root / "modern.sqlite"
             )
             self.build_stage(src, STAGES[5])
-            with sqlite3.connect(src) as conn:
+            with closing(sqlite3.connect(src)) as conn, conn:
                 conn.execute(
                     "INSERT INTO create_operation_checkpoints "
                     "(checkpoint_kind,operation,created_ad_id,started_at,"
@@ -502,7 +502,7 @@ class LegacyMigrationTests(unittest.TestCase):
                 root / "old.sqlite", root / "backup.sqlite", root / "modern.sqlite"
             )
             self.build_stage(src, STAGES[0])
-            with sqlite3.connect(src) as conn:
+            with closing(sqlite3.connect(src)) as conn, conn:
                 conn.execute(
                     "CREATE INDEX unknown_custom_state ON ad_snapshots(ad_id)"
                 )
@@ -512,7 +512,7 @@ class LegacyMigrationTests(unittest.TestCase):
                     confirm_no_unresolved_writes=True,
                 )
             self.assertFalse(backup.exists())
-            with sqlite3.connect(src) as conn:
+            with closing(sqlite3.connect(src)) as conn, conn:
                 conn.execute("DROP INDEX unknown_custom_state")
                 conn.execute("DROP TABLE operation_receipts")
                 conn.execute(
@@ -545,7 +545,7 @@ class LegacyMigrationTests(unittest.TestCase):
 
             # A modern DB missing a non-suffix recovery table does not match
             # any historical stage; keep this damaged input blocked.
-            with sqlite3.connect(modern) as conn:
+            with closing(sqlite3.connect(modern)) as conn, conn:
                 conn.execute("DROP TABLE write_api_requests")
             with self.assertRaisesRegex(LegacyMigrationError, "historical schema"):
                 migrate_legacy_store(
@@ -626,7 +626,7 @@ class LegacyMigrationTests(unittest.TestCase):
                     )
             self.assertFalse(backup.exists())
             self.assertFalse(out.exists())
-            with sqlite3.connect(source) as conn:
+            with closing(sqlite3.connect(source)) as conn, conn:
                 self.assertEqual(table_names(conn), STAGES[0])
 
     def test_source_write_during_copy_is_blocked_by_sqlite_fence(self) -> None:
@@ -644,7 +644,7 @@ class LegacyMigrationTests(unittest.TestCase):
             def competing_writer(*args, **kwargs):
                 copy_actual(*args, **kwargs)
                 try:
-                    with sqlite3.connect(source, timeout=0.05) as connection:
+                    with closing(sqlite3.connect(source, timeout=0.05)) as connection, connection:
                         connection.execute(
                             "INSERT INTO ad_snapshots "
                             "(ad_id,observed_at,source,lifecycle_state) "
@@ -671,7 +671,7 @@ class LegacyMigrationTests(unittest.TestCase):
             self.assertTrue(backup.exists())
             self.assertTrue(out.exists())
             for path in (source, backup, out):
-                with sqlite3.connect(path) as connection:
+                with closing(sqlite3.connect(path)) as connection, connection:
                     self.assertEqual(
                         connection.execute("SELECT COUNT(*) FROM ad_snapshots").fetchone()[0],
                         1,
@@ -687,7 +687,7 @@ class LegacyMigrationTests(unittest.TestCase):
                     root / "old.sqlite", root / "backup.sqlite", root / "new.sqlite"
                 )
                 self.build_stage(source, STAGES[0])
-                with sqlite3.connect(source) as connection:
+                with closing(sqlite3.connect(source)) as connection, connection:
                     self.assertEqual(
                         connection.execute(
                             "PRAGMA journal_mode=" + journal_mode
@@ -701,7 +701,7 @@ class LegacyMigrationTests(unittest.TestCase):
                     if target != output:
                         real_link(stage, target)
                         return
-                    with sqlite3.connect(source, timeout=0.05) as other:
+                    with closing(sqlite3.connect(source, timeout=0.05)) as other, other:
                         try:
                             other.execute(
                                 "INSERT INTO ad_snapshots "
@@ -726,12 +726,12 @@ class LegacyMigrationTests(unittest.TestCase):
                         confirm_no_unresolved_writes=True,
                     )
                 self.assertEqual(attempted, ["blocked"])
-                with sqlite3.connect(output) as connection:
+                with closing(sqlite3.connect(output)) as connection, connection:
                     self.assertEqual(
                         connection.execute("SELECT COUNT(*) FROM ad_snapshots").fetchone()[0],
                         1,
                     )
-                with sqlite3.connect(source) as connection:
+                with closing(sqlite3.connect(source)) as connection, connection:
                     self.assertEqual(
                         connection.execute("SELECT COUNT(*) FROM ad_snapshots").fetchone()[0],
                         1,
@@ -854,7 +854,7 @@ class LegacyMigrationTests(unittest.TestCase):
 
             def probe_sync(path: Path) -> None:
                 if path == output_parent:
-                    with sqlite3.connect(source, timeout=0.05) as other:
+                    with closing(sqlite3.connect(source, timeout=0.05)) as other, other:
                         with self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
                             other.execute(
                                 "INSERT INTO ad_snapshots "
@@ -924,7 +924,7 @@ class LegacyMigrationTests(unittest.TestCase):
             )
             self.build_stage(source, STAGES[0])
             self.build_stage(replacement, STAGES[0])
-            with sqlite3.connect(replacement) as conn:
+            with closing(sqlite3.connect(replacement)) as conn, conn:
                 conn.execute(
                     "INSERT INTO ad_snapshots "
                     "(ad_id,observed_at,source,lifecycle_state) "
@@ -951,7 +951,7 @@ class LegacyMigrationTests(unittest.TestCase):
                     )
             self.assertTrue(backup.exists())
             self.assertFalse(output.exists())
-            with sqlite3.connect(source) as conn:
+            with closing(sqlite3.connect(source)) as conn, conn:
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM ad_snapshots").fetchone()[0], 2
                 )
@@ -1007,7 +1007,7 @@ class LegacyMigrationTests(unittest.TestCase):
             self.assertEqual(during_copy, [False])
             self.assertTrue(backup.is_file())
             self.assertTrue(output.is_file())
-            with sqlite3.connect(output) as connection:
+            with closing(sqlite3.connect(output)) as connection, connection:
                 self.assertEqual(
                     connection.execute(
                         "SELECT views FROM ad_snapshots WHERE ad_id='42'"

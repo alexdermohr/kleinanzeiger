@@ -66,7 +66,7 @@ class BackupCliTests(unittest.TestCase):
         pending = self.store.begin_sync_attempt(
             source="owner-management", started_at=NOW + timedelta(minutes=2),
         )
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute(
                 "INSERT INTO write_api_requests "
@@ -114,7 +114,7 @@ class BackupCliTests(unittest.TestCase):
         self.assertTrue(restored.is_ready())
         self.assertEqual(restored.latest_ad_snapshot("1234567890").views, 0)
         self.assertEqual(restored.sync_status(), self.store.sync_status())
-        with sqlite3.connect(restored_path) as db:
+        with closing(sqlite3.connect(restored_path)) as db, db:
             rows = db.execute(
                 "SELECT id, outcome FROM sync_attempts ORDER BY id"
             ).fetchall()
@@ -753,12 +753,12 @@ with closing(sqlite3.connect(sys.argv[1])) as writer:
         self.assertFalse(self.backup.exists())
 
     def test_missing_write_recovery_table_is_never_implicitly_repaired(self) -> None:
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             db.execute("DROP TABLE write_api_requests")
         with self.assertRaises(BackupError):
             backup_store(self.source, backup_db=self.backup)
         self.assertFalse(self.backup.exists())
-        with sqlite3.connect(self.source) as db:
+        with closing(sqlite3.connect(self.source)) as db, db:
             self.assertIsNone(
                 db.execute(
                     "SELECT 1 FROM sqlite_master "
@@ -817,7 +817,7 @@ os._exit(7)
         copied = self.root / "broken.sqlite"
         shutil.copyfile(self.backup, copied)
         os.chmod(copied, 0o600)
-        with sqlite3.connect(copied) as db:
+        with closing(sqlite3.connect(copied)) as db, db:
             db.execute("DROP TABLE sync_attempts")
         with self.assertRaises(sqlite3.DatabaseError):
             SnapshotStore(copied, create_if_missing=False)
@@ -855,7 +855,7 @@ os._exit(7)
         # A valid substitute database can be connected while the public path
         # is temporarily replaced, then the original pathname restored. A
         # later lstat(path) is NOT proof of what the SQLite handle opened.
-        with sqlite3.connect(self.source) as connection:
+        with closing(sqlite3.connect(self.source)) as connection, connection:
             connection.execute(
                 "INSERT INTO write_api_requests "
                 "(idempotency_key, request_sha256, state, requested_at) "
@@ -898,7 +898,7 @@ os._exit(7)
         self.assertTrue(swapped)
         self.assertFalse(self.backup.exists())
         self.assertEqual(self.source.stat().st_ino, starting_inode)
-        with sqlite3.connect(self.source) as connection:
+        with closing(sqlite3.connect(self.source)) as connection, connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM write_api_requests "
@@ -914,7 +914,7 @@ os._exit(7)
         # accepting a plausible but misattributed fd delta.
         other = self.root / "another.sqlite"
         SnapshotStore(other)
-        with sqlite3.connect(other) as outside:
+        with closing(sqlite3.connect(other)) as outside, outside:
             outside.execute("PRAGMA schema_version").fetchone()
             self.assertTrue(backup_cli._sqlite_main_fds())
             with self.assertRaisesRegex(BackupError, "unrelated open SQLite files"):
@@ -925,7 +925,7 @@ os._exit(7)
     def test_existing_real_source_connection_still_allows_wal_backup(self) -> None:
         # Online backup must work while a legitimate handle holds the same
         # validated inode; only unrelated preexisting SQLite files are unsafe.
-        with sqlite3.connect(self.source) as live:
+        with closing(sqlite3.connect(self.source)) as live, live:
             live.execute("PRAGMA schema_version").fetchone()
             receipt = backup_store(self.source, backup_db=self.backup)
             self.assertEqual(receipt.pending_api_writes, 0)
@@ -1496,7 +1496,7 @@ with closing(sqlite3.connect(db)) as c:
         store = SnapshotStore(restored, create_if_missing=False)
         self.assertTrue(store.is_ready())
         self.assertEqual(store.sync_status()["state"], "in_progress")
-        with sqlite3.connect(restored) as connection:
+        with closing(sqlite3.connect(restored)) as connection, connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM write_api_requests "
