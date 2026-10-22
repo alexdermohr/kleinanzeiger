@@ -19,6 +19,7 @@ from mark_api.local_catalog_import import (
 )
 from mark_api.query import MarkQueryService
 from mark_api.storage import SnapshotStore
+from mark_api.results import ReadResult
 
 _TIME = "2026-10-22T04:01:00+02:00"
 
@@ -140,6 +141,79 @@ class LocalCatalogImportTests(unittest.TestCase):
             projected.metric_evidence["views"].source,
             "user-supplied-local-catalog",
         )
+
+    def test_catalog_only_id_never_becomes_authenticated_owner_absent(self):
+        local = self.catalog("unowned.json", [entry()])
+        import_local_catalog_files(self.store, (local,))
+        tracked = self.store.tracked_ad_ids()
+        self.assertEqual(tracked, ("1234567890",))
+
+        appended = self.store.append_inventory_result(
+            ReadResult.success_empty(()),
+            tracked_ad_ids=tracked,
+            observed_at=datetime(2026, 10, 23, tzinfo=timezone.utc),
+            source="synthetic-authenticated-owner-read",
+        )
+        self.assertEqual(appended, 0)
+        snapshots = self.store.ad_history("1234567890")
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].source, "user-supplied-local-catalog")
+        self.assertEqual(snapshots[0].lifecycle_state, LifecycleState.UNKNOWN)
+        projected = MarkQueryService(self.store).latest_ads()[0]
+        self.assertFalse(projected.present)
+        self.assertEqual(projected.source, "user-supplied-local-catalog")
+
+    def test_previously_confirmed_owner_absence_is_preserved(self):
+        local = self.catalog("mixed-ids.json", [
+            entry("1234567890"), entry("1234567891"),
+        ])
+        import_local_catalog_files(self.store, (local,))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="1234567891",
+            observed_at=datetime(2026, 10, 22, 8, tzinfo=timezone.utc),
+            source="synthetic-authenticated-owner-read",
+            lifecycle_state=LifecycleState.ACTIVE,
+            views=4,
+        ))
+
+        appended = self.store.append_inventory_result(
+            ReadResult.success_empty(()),
+            tracked_ad_ids=self.store.tracked_ad_ids(),
+            observed_at=datetime(2026, 10, 24, tzinfo=timezone.utc),
+            source="synthetic-authenticated-owner-read",
+        )
+        self.assertEqual(appended, 1)
+        self.assertEqual(len(self.store.ad_history("1234567890")), 1)
+        owned = self.store.ad_history("1234567891")
+        self.assertEqual(owned[-1].lifecycle_state, LifecycleState.ABSENT)
+        self.assertEqual(owned[-1].source, "synthetic-authenticated-owner-read")
+        summary = MarkQueryService(self.store).summary()
+        self.assertEqual(summary.current_ads, 0)
+        self.assertEqual(summary.absent_ads, 1)
+        self.assertEqual(summary.unknown_state_ads, 1)
+
+    def test_local_fallback_metric_is_last_known_after_owner_status(self):
+        local = self.catalog("stale.json", [entry(views=40, watch_count=2)])
+        import_local_catalog_files(self.store, (local,))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="1234567890",
+            observed_at=datetime(2026, 10, 23, tzinfo=timezone.utc),
+            source="synthetic-authenticated-owner-read",
+            lifecycle_state=LifecycleState.ACTIVE,
+            views=None, watch_count=None,
+        ))
+        projected = MarkQueryService(self.store).latest_ads()[0]
+        self.assertTrue(projected.present)
+        for metric, amount in (("views", 40), ("watch_count", 2)):
+            self.assertEqual(getattr(projected, metric), amount)
+            evidence = projected.metric_evidence[metric]
+            self.assertEqual(evidence.source, "user-supplied-local-catalog")
+            self.assertTrue(
+                evidence.last_known,
+                "a preceding unverified measurement is not current owner data",
+            )
+        self.assertEqual(projected.observed_at,
+                         datetime(2026, 10, 23, tzinfo=timezone.utc))
 
     def test_even_tampered_local_state_cannot_claim_owner_presence(self):
         manual = self.catalog("tampered-state.json", [entry()])

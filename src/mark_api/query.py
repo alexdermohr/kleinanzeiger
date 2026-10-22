@@ -5,7 +5,7 @@ from typing import Mapping
 from datetime import datetime
 
 from .domain import AdSnapshot, LifecycleState, ReactionSnapshot
-from .storage import SnapshotStore
+from .storage import LOCAL_CATALOG_SOURCE, SnapshotStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,11 +107,11 @@ class MarkQueryService:
             # unchanged for databases that contain no local catalog entries.
             owner_history = tuple(
                 item for item in history
-                if item.source != "user-supplied-local-catalog"
+                if item.source != LOCAL_CATALOG_SOURCE
             )
             catalog_history = tuple(
                 item for item in history
-                if item.source == "user-supplied-local-catalog"
+                if item.source == LOCAL_CATALOG_SOURCE
             )
             owner = owner_history[-1] if owner_history else None
             latest = owner if owner is not None else history[-1]
@@ -124,6 +124,15 @@ class MarkQueryService:
                     value, evidence = _last_metric_with_evidence(
                         catalog_history, field_name,
                     )
+                    if evidence is not None:
+                        # The latest owner observation lacked this metric.
+                        # Unverified catalog fallback is last-known evidence,
+                        # never a directly observed current owner measurement.
+                        evidence = MetricEvidence(
+                            observed_at=evidence.observed_at,
+                            source=evidence.source,
+                            last_known=True,
+                        )
                 metrics[field_name] = value, evidence
             rows.append(
                 AdView(

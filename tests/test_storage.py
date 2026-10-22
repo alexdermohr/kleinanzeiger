@@ -476,8 +476,14 @@ class SnapshotStoreTests(unittest.TestCase):
         self.assertIsNone(history[1].views)
         self.assertEqual(store.latest_ad_snapshot("3521676801"), history[-1])
 
-    def test_nonempty_inventory_marks_other_tracked_ids_absent(self) -> None:
+    def test_nonempty_inventory_marks_previously_owned_ids_absent(self) -> None:
         store = self.make_store()
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="1",
+            observed_at=NOW - timedelta(minutes=1),
+            source="management",
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
         present = AdSnapshot(
             ad_id="2",
             observed_at=NOW,

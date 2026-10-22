@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from contextlib import closing, contextmanager
@@ -421,6 +422,101 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                     connection.execute("SELECT COUNT(*) FROM ad_snapshots").fetchone()[0], 1,
                     "repeated installed catalog start duplicated the observation",
                 )
+            # This is a second, independent database. The installed wheel
+            # (not the checkout) must keep catalog-only IDs unverified, retain
+            # real prior-owner ABSENT transitions and label fallback metrics
+            # last-known after a newer owner status omitted them.
+            owner_db = root / "synthetic-owner-and-catalog.sqlite"
+            owner_catalog = root / "synthetic-owner-catalog.json"
+            owner_catalog.write_text(json.dumps({
+                "schema": "mark-local-catalog-v1",
+                "ads": [
+                    {"ad_id": ad_id, "observed_at": "2026-10-22T02:01:00Z",
+                     "views": 23}
+                    for ad_id in ("1234567890", "1234567891", "1234567892")
+                ],
+            }), encoding="utf-8")
+            synthetic_owner_setup = textwrap.dedent("""
+                import sys
+                from pathlib import Path
+                from datetime import datetime, timezone
+                from mark_api.domain import AdSnapshot, LifecycleState
+                from mark_api.local_catalog_import import import_local_catalog_files
+                from mark_api.results import ReadResult
+                from mark_api.storage import SnapshotStore
+
+                db = SnapshotStore(Path(sys.argv[1]))
+                import_local_catalog_files(db, (Path(sys.argv[2]),))
+                db.append_ad_snapshot(AdSnapshot(
+                    ad_id="1234567892",
+                    observed_at=datetime(2026, 10, 23, tzinfo=timezone.utc),
+                    source="synthetic-confirmed-owner",
+                    lifecycle_state=LifecycleState.ACTIVE,
+                    title="Confirmed owner title",
+                ))
+                current = AdSnapshot(
+                    ad_id="1234567891",
+                    observed_at=datetime(2026, 10, 24, tzinfo=timezone.utc),
+                    source="synthetic-confirmed-owner",
+                    lifecycle_state=LifecycleState.ACTIVE,
+                )
+                count = db.append_inventory_result(
+                    ReadResult.success_nonempty((current,)),
+                    tracked_ad_ids=db.tracked_ad_ids(),
+                    observed_at=datetime(2026, 10, 24, tzinfo=timezone.utc),
+                    source="synthetic-confirmed-owner",
+                )
+                assert count == 2, "catalog-only ID acquired forged ABSENT"
+                assert len(db.ad_history("1234567890")) == 1
+                assert db.ad_history("1234567892")[-1].lifecycle_state is LifecycleState.ABSENT
+            """)
+            owner_prepared = _command(
+                str(python), "-I", "-c", synthetic_owner_setup,
+                str(owner_db), str(owner_catalog), cwd=root, env=env,
+            )
+            self.assertEqual(owner_prepared.returncode, 0, owner_prepared.stderr)
+            with _offline_server(python, root, env, owner_db, ()) as owner_address:
+                code, _, payload = _request(owner_address, "/api/ads")
+                self.assertEqual(code, 200)
+                owner_rows = {item["ad_id"]: item for item in json.loads(payload)}
+                self.assertEqual(len(owner_rows), 3)
+                catalog_only = owner_rows["1234567890"]
+                self.assertEqual(catalog_only["lifecycle_state"], "unknown")
+                self.assertFalse(catalog_only["present"])
+                self.assertEqual(catalog_only["source"], "user-supplied-local-catalog")
+                owner_current = owner_rows["1234567891"]
+                self.assertTrue(owner_current["present"])
+                self.assertEqual(owner_current["lifecycle_state"], "active")
+                self.assertEqual(owner_current["source"], "synthetic-confirmed-owner")
+                self.assertEqual(owner_current["views"], 23)
+                self.assertEqual(
+                    owner_current["metric_evidence"]["views"]["source"],
+                    "user-supplied-local-catalog",
+                )
+                self.assertTrue(owner_current["metric_evidence"]["views"]["last_known"])
+                owner_absent = owner_rows["1234567892"]
+                self.assertFalse(owner_absent["present"])
+                self.assertEqual(owner_absent["lifecycle_state"], "absent")
+                self.assertEqual(owner_absent["source"], "synthetic-confirmed-owner")
+                code, _, payload = _request(owner_address, "/api/summary")
+                self.assertEqual(code, 200)
+                summary = json.loads(payload)
+                self.assertEqual(
+                    (summary["tracked_ads"], summary["current_ads"],
+                     summary["absent_ads"], summary["unknown_state_ads"]),
+                    (3, 1, 1, 1),
+                )
+            with closing(sqlite3.connect(owner_db)) as owner_connection:
+                local_rows = owner_connection.execute(
+                    "SELECT source, lifecycle_state FROM ad_snapshots WHERE ad_id=?",
+                    ("1234567890",),
+                ).fetchall()
+                self.assertEqual(
+                    local_rows,
+                    [("user-supplied-local-catalog", "unknown")],
+                    "unverified catalog must not generate a sourced owner absence",
+                )
+
             malformed_catalog = root / "malformed-catalog.json"
             malformed_catalog.write_text(json.dumps({
                 "schema": "mark-local-catalog-v1",
@@ -517,6 +613,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "backup_scope": "create-only-offline-not-a6",
             "backup_sha256": backup_sha256,
             "offline_restore_checked": True,
+            "synthetic_owner_absence_and_provenance": True,
             "network_isolation": "linux-non-escalating-loopback-netns",
         }, sort_keys=True))
 
