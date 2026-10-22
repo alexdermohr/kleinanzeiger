@@ -1736,11 +1736,11 @@ class CdpPrivateWebPageTests(unittest.TestCase):
 
         self.assertEqual(tcp_calls, [(("127.0.0.1", 19610), 1)])
         self.assertIs(websocket_kwargs["socket"], raw_socket)
-        self.assertEqual(client.call("Runtime.one"), {"value": 1})
-        self.assertEqual(client.call("Runtime.two"), {"value": 2})
+        self.assertEqual(client.call("Network.getCookies"), {"value": 1})
+        self.assertEqual(client.call("Network.getCookies"), {"value": 2})
         self.assertEqual(
             [message["method"] for message in socket.sent],
-            ["Runtime.one", "Runtime.two"],
+            ["Network.getCookies", "Network.getCookies"],
         )
         self.assertEqual([message["id"] for message in socket.sent], [1, 2])
         client.close()
@@ -1998,6 +1998,11 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         )
         page._client_instance = owner
         page._media_submit_unsettled = True
+        # Exercise real low-level settlement ownership, not just a page flag.
+        page._media_unknown_client = owner
+        owner.arm_unknown_submit(
+            settlement_expression=page._media_submit_settlement_expression(),
+        )
         try:
             page._discard_media_submit_client()
             self.assertIs(page._client_instance, owner)
@@ -2075,7 +2080,10 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             self.assertEqual(owner.call("Runtime.evaluate"), {"value": 3})
             self.assertEqual(discovery_calls, 3)
         finally:
-            owner.close()
+            # Reconnected Runtime.evaluate ACK still does not prove read-only JS.
+            with self.assertRaises(PrivateWebCdpError) as fenced:
+                owner.close()
+            self.assertEqual(fenced.exception.stage, "close")
 
 
     def test_inflight_call_close_cannot_release_target_ownership(self) -> None:
@@ -2369,6 +2377,107 @@ class CdpPrivateWebPageTests(unittest.TestCase):
                         claim.close()
                     _ACTIVE_CDP_TARGET_CLAIMS.pop(claim_id, None)
 
+    def test_nonmedia_ack_cannot_release_target_via_explicit_close(self) -> None:
+        """Only platform settlement, never a CDP transport ACK, permits release."""
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX target claim required")
+        from mark_api.private_web_cdp import _ACTIVE_CDP_TARGET_CLAIMS
+
+        cases = (
+            (19921, "Input.dispatchMouseEvent", {
+                "type": "mousePressed", "x": 12.0, "y": 22.0,
+                "button": "left", "buttons": 1, "clickCount": 1,
+            }),
+            (19922, "Runtime.evaluate", {
+                "expression": "(() => document.querySelector('button')?.click())()",
+                "returnByValue": True, "awaitPromise": False,
+            }),
+            (19923, "DOM.setFileInputFiles", {"files": ["/synthetic/nonexistent"]}),
+        )
+        for port, method, params in cases:
+            with self.subTest(method=method):
+                endpoint = f"http://127.0.0.1:{port}"
+                target = {
+                    "type": "page",
+                    "webSocketDebuggerUrl":
+                        f"ws://127.0.0.1:{port}/devtools/page/nonmedia",
+                }
+
+                def new_client():
+                    return _LoopbackCdpClient(
+                        endpoint, timeout_seconds=1,
+                        opener=lambda url, **kw: FakeResponse([target], url=url),
+                        websocket_factory=lambda *args, **kw:
+                            FakeSocket([{"id": 1, "result": {}}]),
+                        tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+                    )
+
+                client = new_client()
+                claim = client._target_reservation
+                claim_id = id(claim)
+                client.call(method, params)
+                try:
+                    with self.assertRaises(PrivateWebCdpError) as raised:
+                        client.close()
+                    self.assertEqual(raised.exception.stage, "close")
+                    self.assertIn(claim_id, _ACTIVE_CDP_TARGET_CLAIMS)
+                    self.assertGreaterEqual(claim.fileno(), 0)
+                    with self.assertRaises(PrivateWebCdpError) as busy:
+                        new_client()
+                    self.assertEqual(busy.exception.stage, "target_busy")
+                finally:
+                    # On the parent RED code this closes a falsely freed
+                    # synthetic claim. On GREEN keep the real UNKNOWN claim.
+                    if claim.fileno() >= 0 and (
+                        claim_id not in _ACTIVE_CDP_TARGET_CLAIMS
+                    ):
+                        claim.close()
+
+    def test_settling_one_submit_cannot_clear_prior_unresolved_browser_input(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux exclusive CDP target required")
+        from mark_api.private_web_cdp import _ACTIVE_CDP_TARGET_CLAIMS
+
+        port = 19924
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                f"ws://127.0.0.1:{port}/devtools/page/one",
+        }
+        expression = "(() => 'confirmed')()"
+        sock = FakeSocket([
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {
+                "result": {"type": "string", "value": "confirmed"},
+            }},
+        ])
+        client = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *args, **kw: sock,
+            tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+        )
+        claim = client._target_reservation
+        claim_id = id(claim)
+        client.call("Runtime.evaluate", {
+            "expression": "document.querySelector('button')?.click()",
+            "returnByValue": True, "awaitPromise": False,
+        })
+        # A different pinned operation is confirmed. This is not evidence
+        # that the earlier possible page-side click reached platform settlement.
+        client.arm_unknown_submit(settlement_expression=expression)
+        client.call("Runtime.evaluate", {
+            "expression": expression,
+            "returnByValue": True, "awaitPromise": False,
+        })
+        client.settle_unknown_submit()
+        with self.assertRaises(PrivateWebCdpError) as fenced:
+            client.close()
+        self.assertEqual(fenced.exception.stage, "close")
+        self.assertIn(claim_id, _ACTIVE_CDP_TARGET_CLAIMS)
+        self.assertGreaterEqual(claim.fileno(), 0)
+
     def test_abandoned_cookie_read_can_release_clean_kernel_claim(self) -> None:
         if sys.platform != "linux":
             self.skipTest("Linux exclusive target claim required")
@@ -2586,7 +2695,10 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             self.assertEqual(owner.call("Runtime.evaluate"), {"value": 7})
         finally:
             os.close(reader)
-            owner.close()
+            # A CDP Runtime.evaluate ACK cannot certify no page-side effect.
+            with self.assertRaises(PrivateWebCdpError) as fenced:
+                owner.close()
+            self.assertEqual(fenced.exception.stage, "close")
 
 
     def test_owned_client_cannot_open_second_transport_by_direct_connect(self) -> None:
@@ -3358,7 +3470,10 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         self.assertEqual(
             [item["method"] for item in sock.sent], ["Runtime.first"],
         )
-        owner.close()
+        # No platform settlement can be inferred from a synthetic Runtime.first ACK.
+        with self.assertRaises(PrivateWebCdpError) as fenced:
+            owner.close()
+        self.assertEqual(fenced.exception.stage, "close")
 
 
     def test_ambiguous_call_send_exception_retains_cdp_target(self) -> None:

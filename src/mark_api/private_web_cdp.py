@@ -196,6 +196,7 @@ class _LoopbackCdpClient:
         # settled. The destructor may only free an untouched or cookie-only
         # client; all other methods can execute page-side effects.
         self._possible_browser_side_effect = False
+        self._submit_preexisting_side_effect = False
         self._submit_settlement_expression: str | None = None
         self._submit_mouse_press: dict[str, object] | None = None
         self._submit_mouse_release: dict[str, object] | None = None
@@ -398,6 +399,9 @@ class _LoopbackCdpClient:
                 # A cancellable inventory's caller-controlled stop predicate
                 # must never run before a one-shot submit phase is consumed.
                 raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+            # Preserve earlier unverified effects. Settlement of this single
+            # one-shot submit never proves a preceding browser write safe.
+            self._submit_preexisting_side_effect = self._possible_browser_side_effect
             # Pin exactly the two permitted one-shot mouse frames and the
             # final observation before *any* possible browser input.
             self._submit_settlement_expression = settlement_expression
@@ -424,6 +428,11 @@ class _LoopbackCdpClient:
                 raise PrivateWebCdpError("submit_unsettled")
             self._unresolved_submit = False
             self._unresolved_call = False
+            # The pinned exact-target observation confirmed the one-shot
+            # platform submission, not merely the earlier CDP transport ACK.
+            # Clearing this operation may never clear prior unverified effects.
+            self._possible_browser_side_effect = self._submit_preexisting_side_effect
+            self._submit_preexisting_side_effect = False
             self._verified_submit_settlement = False
             self._submit_settlement_expression = None
             self._submit_mouse_press = None
@@ -850,6 +859,7 @@ class _LoopbackCdpClient:
                 or self._unresolved_submit
                 or self._transport_construction_pending
                 or self._close_unknown
+                or getattr(self, "_possible_browser_side_effect", True)
             ):
                 # In-flight/UNKNOWN operations may have touched the page.
                 # Quarantine without waiting for unsafe injected close hooks.
