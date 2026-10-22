@@ -277,9 +277,9 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             self.assertEqual(refused.returncode, 2)
             self.assertFalse(missing.exists(), "missing database was created without --init-db")
 
-            # A local switch or a browser login is never an official,
-            # account-bound Kleinanzeigen entitlement. Exercise the actual
-            # installed legacy CLI before any database or CDP side effect.
+            # When the installed wheel lacks the optional Private-Web
+            # dependencies, the full product launcher must fail before any
+            # browser/CDP or SQLite side effect, regardless of env switches.
             forbidden_db = root / "denied-platform" / "must-not-create.sqlite"
             pretend_entitlement = {
                 **env,
@@ -295,7 +295,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 cwd=root, env=pretend_entitlement,
             )
             self.assertEqual(denied_launcher.returncode, 2, denied_launcher.stderr)
-            self.assertIn("not authorized", denied_launcher.stderr)
+            self.assertIn("private Web runtime requires the private-web optional dependency set", denied_launcher.stderr)
             self.assertEqual(denied_launcher.stdout, "")
             self.assertFalse(forbidden_db.parent.exists())
             self.assertFalse(forbidden_db.exists())
