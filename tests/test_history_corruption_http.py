@@ -146,6 +146,56 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
                 with self.subTest(table=table, invalid=repr(invalid)):
                     self._assert_sanitized_503(table, "ad_id", path, invalid)
 
+    def test_native_text_nul_prefix_is_not_a_blank_id(self):
+        """SQLite length(TEXT) ends at NUL; an ID with a NUL is nonblank."""
+        paths = (
+            ("ad_snapshots", "ad_history"),
+            ("reaction_snapshots", "reaction_history"),
+            ("inbound_message_events", "inbound_message_history"),
+            ("ad_classifications", "classification_history"),
+        )
+        for key in ("\x00A", " \x00A", "\x00", " \x00"):
+            for table, reader_name in paths:
+                with self.subTest(table=table, key=repr(key)):
+                    original = self._replace(table, "ad_id", key)
+                    try:
+                        self.assertTrue(
+                            self.store.is_ready(),
+                            "nonblank NUL-prefixed TEXT must remain readable",
+                        )
+                        rows = getattr(self.store, reader_name)(key)
+                        self.assertEqual(len(rows), 1)
+                        self.assertEqual(rows[0].ad_id, key)
+                    finally:
+                        self._replace(table, "ad_id", original)
+        self.assertEqual(self._get("/readyz")[0], 200)
+
+    def test_later_page_native_blob_id_refuses_first_history_yield(self):
+        """A corrupt BLOB after >256 valid rows must not leak an early group."""
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute("UPDATE ad_snapshots SET ad_id='A' WHERE id=1")
+            db.executemany(
+                "INSERT INTO ad_snapshots "
+                "(ad_id, observed_at, source, lifecycle_state) VALUES (?,?,?,?)",
+                [
+                    ("B", (self.instant + timedelta(seconds=i)).isoformat(),
+                     "synthetic", "active")
+                    for i in range(300)
+                ],
+            )
+            db.execute(
+                "INSERT INTO ad_snapshots "
+                "(ad_id, observed_at, source, lifecycle_state) VALUES (?,?,?,?)",
+                (sqlite3.Binary(b"\xffinvalid"), self.instant.isoformat(),
+                 "synthetic", "active"),
+            )
+        pages = self.store.ad_histories()
+        try:
+            with self.assertRaises(sqlite3.DatabaseError):
+                next(pages)
+        finally:
+            pages.close()
+
     def test_blank_unicode_id_between_valid_binary_extrema_is_detected(self):
         """An indexed probe must catch whitespace even in the middle of IDs."""
         self.store.append_classification(AdClassification(

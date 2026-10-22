@@ -57,7 +57,7 @@ _HISTORY_AD_ID_WHITESPACE_HEX = "".join(chr(codepoint) for codepoint in (
     *range(8192, 8203), 8232, 8233, 8239, 8287, 12288,
 )).encode("utf-8").hex().upper()
 _HISTORY_BLANK_AD_ID_PREDICATE = (
-    f"length(trim(ad_id, CAST(X'{_HISTORY_AD_ID_WHITESPACE_HEX}' AS TEXT))) = 0"
+    f"trim(ad_id, CAST(X'{_HISTORY_AD_ID_WHITESPACE_HEX}' AS TEXT)) COLLATE BINARY = ''"
 )
 
 _SYNC_ERROR_KINDS = frozenset({
@@ -2207,6 +2207,21 @@ class SnapshotStore:
                 # a corrupt key on a later page must not expose early groups.
                 self._assert_blank_history_key_index(connection, "ad_snapshots")
                 self._assert_no_blank_history_keys(connection, "ad_snapshots")
+                # Validate native key storage classes globally within this
+                # page's read snapshot: BLOB/numeric rows can be on later
+                # keyset pages and must not leak early valid history groups.
+                for direction in ("ASC", "DESC"):
+                    boundary = connection.execute(
+                        f"SELECT ad_id FROM ad_snapshots "
+                        f"ORDER BY ad_id {direction} LIMIT 1"
+                    ).fetchone()
+                    if boundary is not None and (
+                        type(boundary["ad_id"]) is not str
+                        or not boundary["ad_id"].strip()
+                    ):
+                        raise sqlite3.DatabaseError(
+                            "invalid ad snapshot key storage class"
+                        )
                 version_row = connection.execute(
                     "PRAGMA schema_version"
                 ).fetchone()
