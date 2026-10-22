@@ -642,7 +642,13 @@ function() {{
             # Arm at the actual kernel claim BEFORE the first possible
             # browser-input effect. GC and direct close must not free it while
             # settlement of this one-shot publish remains UNKNOWN.
-            client.arm_unknown_submit()
+            # Couple reservation release to this exact read-only settlement
+            # expression, observed on the same original CDP target. Direct
+            # settle_unknown_submit() cannot invent a successful publish.
+            client.arm_unknown_submit(
+                settlement_expression=self._media_submit_settlement_expression(),
+                click_point=(point[0], point[1]),
+            )
             self._media_unknown_client = client
         self._media_submit_unsettled = True
         try:

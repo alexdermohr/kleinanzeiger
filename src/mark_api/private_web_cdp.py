@@ -183,6 +183,11 @@ class _LoopbackCdpClient:
         self._close_unknown = False
         self._unresolved_submit = False
         self._unresolved_call = False
+        self._submit_settlement_expression: str | None = None
+        self._submit_mouse_press: dict[str, object] | None = None
+        self._submit_mouse_release: dict[str, object] | None = None
+        self._submit_phase = "idle"
+        self._verified_submit_settlement = False
         # Short-lived state lock: never wait for browser I/O while holding it.
         self._lifecycle_lock = RLock()
         self._active_calls = 0
@@ -254,6 +259,10 @@ class _LoopbackCdpClient:
                 or self._transport_construction_pending
                 or self._close_unknown
                 or (self._unresolved_call and not self._unresolved_submit)
+                or (
+                    self._unresolved_submit
+                    and self._submit_phase in ("press", "release")
+                )
             ):
                 # A prior unknown factory/WS outcome retains the original
                 # browser claim, but may not create a second observer socket.
@@ -290,9 +299,43 @@ class _LoopbackCdpClient:
             with self._lifecycle_lock:
                 self._reconnecting = False
 
-    def arm_unknown_submit(self) -> None:
-        """Pin a one-shot submit before any possibly effective browser input."""
+    def arm_unknown_submit(
+        self,
+        *,
+        settlement_expression: str | None = None,
+        click_point: tuple[float, float] | None = None,
+    ) -> None:
+        """Pin a one-shot submit and its exact permitted observation."""
         _require_private_web_cdp_authority()
+        if settlement_expression is not None and (
+            not isinstance(settlement_expression, str)
+            or not settlement_expression.strip()
+            or len(settlement_expression) > _MAX_TARGET_BYTES
+        ):
+            raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+        if click_point is not None:
+            if (
+                type(click_point) is not tuple
+                or len(click_point) != 2
+                or any(
+                    type(value) not in (int, float)
+                    or not math.isfinite(float(value))
+                    or float(value) < 0
+                    for value in click_point
+                )
+            ):
+                raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+            x, y = (float(value) for value in click_point)
+            press: dict[str, object] | None = {
+                "type": "mousePressed", "x": x, "y": y,
+                "button": "left", "buttons": 1, "clickCount": 1,
+            }
+            release: dict[str, object] | None = {
+                "type": "mouseReleased", "x": x, "y": y,
+                "button": "left", "buttons": 0, "clickCount": 1,
+            }
+        else:
+            press, release = None, None
         with self._lifecycle_lock:
             self._assert_live_target_reservation()
             if (
@@ -303,10 +346,17 @@ class _LoopbackCdpClient:
                 or self._unresolved_submit
             ):
                 raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+            # Pin exactly the two permitted one-shot mouse frames and the
+            # final observation before *any* possible browser input.
+            self._submit_settlement_expression = settlement_expression
+            self._submit_mouse_press = press
+            self._submit_mouse_release = release
+            self._submit_phase = "press" if press is not None else "observe"
+            self._verified_submit_settlement = False
             self._unresolved_submit = True
 
     def settle_unknown_submit(self) -> None:
-        """Release the logical UNKNOWN fence only after verified settlement."""
+        """Release a media UNKNOWN only after CDP confirmed its pinned page."""
         _require_private_web_cdp_authority()
         with self._lifecycle_lock:
             self._assert_live_target_reservation()
@@ -314,11 +364,19 @@ class _LoopbackCdpClient:
                 self._closing
                 or self._reconnecting
                 or self._close_unknown
+                or self._active_calls
                 or not self._unresolved_submit
+                or not self._verified_submit_settlement
+                or self._unresolved_call
             ):
                 raise PrivateWebCdpError("submit_unsettled")
             self._unresolved_submit = False
             self._unresolved_call = False
+            self._verified_submit_settlement = False
+            self._submit_settlement_expression = None
+            self._submit_mouse_press = None
+            self._submit_mouse_release = None
+            self._submit_phase = "idle"
 
     def _connect(self):
         # Only construction and explicit observation-only reconnect may create
@@ -486,13 +544,69 @@ class _LoopbackCdpClient:
                 # consume/drop this call's reply, then falsely report UNKNOWN.
                 # Reject before dispatch rather than interleaving CDP frames.
                 raise PrivateWebCdpWriteNotAttemptedError("target_busy")
-            if self._unresolved_call and not self._unresolved_submit:
-                # A previous CDP request may have caused a browser effect
-                # without an acknowledgement. No second write may follow.
-                raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
             transport = self._socket
             if transport is None:
                 raise PrivateWebCdpError("call")
+            expected_expression = self._submit_settlement_expression
+            observing_submit = bool(
+                self._unresolved_submit
+                and self._submit_phase == "observe"
+                and isinstance(expected_expression, str)
+                and method == "Runtime.evaluate"
+                and type(params) is dict
+                and len(params) == 3
+                and params.get("expression") == expected_expression
+                and params.get("returnByValue") is True
+                and params.get("awaitPromise") is False
+            )
+            click_phase: str | None = None
+            if self._unresolved_submit:
+                if (
+                    method == "Input.dispatchMouseEvent"
+                    and type(params) is dict
+                    and self._submit_phase == "press"
+                    and params == self._submit_mouse_press
+                ):
+                    click_phase = "press"
+                elif (
+                    method == "Input.dispatchMouseEvent"
+                    and type(params) is dict
+                    and self._submit_phase == "release"
+                    and params == self._submit_mouse_release
+                ):
+                    click_phase = "release"
+                elif not observing_submit:
+                    # Never turn an unresolved media click into a generic
+                    # second CDP writer. Only the exact remaining mouse
+                    # continuation or pinned DOM observation is admissible.
+                    raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+                if self._unresolved_call and click_phase is not None:
+                    raise PrivateWebCdpWriteNotAttemptedError("submit_unowned")
+                if click_phase is not None:
+                    # Pessimistically consume the step *before* send(). If
+                    # send or recv fails, the mouse action is UNKNOWN and
+                    # only read-only observation remains possible.
+                    self._submit_phase = "observe"
+                elif observing_submit:
+                    self._verified_submit_settlement = False
+            elif self._unresolved_call:
+                # A prior CDP send could have affected the page. It cannot
+                # be followed by an unrelated write without reconciliation.
+                raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
+            # Freeze every submit-fenced payload while holding the admission
+            # lock. An injected serializer or another thread can mutate the
+            # caller's dict after this block, but never the approved frame.
+            bound_params: dict[str, object] | None = None
+            if click_phase == "press":
+                bound_params = dict(self._submit_mouse_press or {})
+            elif click_phase == "release":
+                bound_params = dict(self._submit_mouse_release or {})
+            elif observing_submit:
+                bound_params = {
+                    "expression": expected_expression,
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                }
             # Pin uncertainty BEFORE any send(), encoding or scheduling
             # effect. Exception and BaseException cannot later lose the
             # browser claim merely because the call stack unwound.
@@ -504,7 +618,9 @@ class _LoopbackCdpClient:
             "id": message_id,
             "method": method,
         }
-        if params:
+        if bound_params is not None:
+            request["params"] = bound_params
+        elif params:
             request["params"] = params
         try:
             transport.send(
@@ -524,6 +640,21 @@ class _LoopbackCdpClient:
                         # A competing close quarantined this target while the
                         # browser outcome was in flight. Never claim success.
                         raise PrivateWebCdpError("call")
+                    # The original pinned WebSocket target must actually
+                    # acknowledge the exact DOM read as "confirmed".
+                    remote = result.get("result")
+                    if (
+                        observing_submit
+                        and "exceptionDetails" not in result
+                        and isinstance(remote, dict)
+                        and remote.get("type") == "string"
+                        and remote.get("value") == "confirmed"
+                        and self._unresolved_submit
+                        and self._submit_settlement_expression == expected_expression
+                    ):
+                        self._verified_submit_settlement = True
+                    if click_phase == "press":
+                        self._submit_phase = "release"
                     self._unresolved_call = False
                 return result
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.

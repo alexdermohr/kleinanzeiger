@@ -2459,6 +2459,337 @@ class CdpPrivateWebPageTests(unittest.TestCase):
 
 
 
+
+    def test_submit_mouse_sequence_forbids_reconnect_before_release(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target reservation required")
+        port = 19660
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {"type": "page", "webSocketDebuggerUrl":
+                  f"ws://127.0.0.1:{port}/devtools/page/original"}
+        expression = "(() => 'confirmed')()"
+        pressed = {"type": "mousePressed", "x": 12.0, "y": 20.0,
+                   "button": "left", "buttons": 1, "clickCount": 1}
+        released = {"type": "mouseReleased", "x": 12.0, "y": 20.0,
+                    "button": "left", "buttons": 0, "clickCount": 1}
+        opened = []
+        sock = FakeSocket([
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {}},
+            {"id": 3, "result": {
+                "result": {"type": "string", "value": "confirmed"},
+            }},
+        ])
+        def make_socket(*args, **kwargs):
+            opened.append("new_ws")
+            return sock if len(opened) == 1 else FakeSocket([])
+
+        owner = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=make_socket,
+            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+        )
+        owner.arm_unknown_submit(
+            settlement_expression=expression, click_point=(12.0, 20.0),
+        )
+        with self.assertRaises(PrivateWebCdpError) as before_press:
+            owner.reconnect_for_observation()
+        self.assertEqual(before_press.exception.stage, "reconnect")
+        owner.call("Input.dispatchMouseEvent", pressed)
+        with self.assertRaises(PrivateWebCdpError) as before_release:
+            owner.reconnect_for_observation()
+        self.assertEqual(before_release.exception.stage, "reconnect")
+        self.assertEqual(len(opened), 1)
+        owner.call("Input.dispatchMouseEvent", released)
+        owner.call("Runtime.evaluate", {
+            "expression": expression,
+            "returnByValue": True,
+            "awaitPromise": False,
+        })
+        owner.settle_unknown_submit()
+        owner.close()
+        self.assertEqual(len(opened), 1)
+
+    def test_armed_click_params_are_frozen_before_mutating_serializer_hook(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target reservation required")
+        import mark_api.private_web_cdp as cdp_module
+
+        port = 19659
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {"type": "page", "webSocketDebuggerUrl":
+                  f"ws://127.0.0.1:{port}/devtools/page/original"}
+        sock = FakeSocket([{"id": 1, "result": {}}])
+        owner = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *a, **kw: sock,
+            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+        )
+        expression = "(() => 'confirmed')()"
+        pressed = {"type": "mousePressed", "x": 12.0, "y": 20.0,
+                   "button": "left", "buttons": 1, "clickCount": 1}
+        owner.arm_unknown_submit(
+            settlement_expression=expression, click_point=(12.0, 20.0),
+        )
+        original = json.dumps
+
+        def mutate_before_json_encoding(request, *args, **kwargs):
+            pressed["type"] = "mouseReleased"
+            pressed["x"] = 999.0
+            return original(request, *args, **kwargs)
+
+        with patch.object(cdp_module.json, "dumps", mutate_before_json_encoding):
+            owner.call("Input.dispatchMouseEvent", pressed)
+        self.assertEqual(sock.sent[0]["params"]["type"], "mousePressed")
+        self.assertEqual(sock.sent[0]["params"]["x"], 12.0)
+        with self.assertRaises(PrivateWebCdpError):
+            owner.close()
+
+    def test_armed_unknown_click_after_ambiguous_send_rejects_direct_navigation(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target reservation required")
+        endpoint = "http://127.0.0.1:19657"
+        target = {"type": "page", "webSocketDebuggerUrl":
+                  "ws://127.0.0.1:19657/devtools/page/original"}
+        class AmbiguousSend(FakeSocket):
+            def send(self, payload):
+                super().send(payload)
+                if len(self.sent) == 1:
+                    raise OSError("mouse press might have reached Chrome")
+        sock = AmbiguousSend([])
+        owner = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *a, **kw: sock,
+            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+        )
+        owner.arm_unknown_submit(
+            settlement_expression="(() => 'confirmed')()",
+            click_point=(12.0, 20.0),
+        )
+        with self.assertRaises(PrivateWebCdpError):
+            owner.call("Input.dispatchMouseEvent", {
+                "type": "mousePressed", "x": 12.0, "y": 20.0,
+                "button": "left", "buttons": 1, "clickCount": 1,
+            })
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+            owner.call("Page.navigate", {"url": "https://example.invalid/"})
+        self.assertEqual([x["method"] for x in sock.sent], ["Input.dispatchMouseEvent"])
+        with self.assertRaises(PrivateWebCdpError):
+            owner.close()
+
+    def test_armed_unknown_between_pressed_and_release_denies_other_writes(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target reservation required")
+        endpoint = "http://127.0.0.1:19658"
+        target = {"type": "page", "webSocketDebuggerUrl":
+                  "ws://127.0.0.1:19658/devtools/page/original"}
+        expression = "(() => 'confirmed')()"
+        pressed = {"type": "mousePressed", "x": 12.0, "y": 20.0,
+                   "button": "left", "buttons": 1, "clickCount": 1}
+        released = {"type": "mouseReleased", "x": 12.0, "y": 20.0,
+                    "button": "left", "buttons": 0, "clickCount": 1}
+        sock = FakeSocket([
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {}},
+            {"id": 3, "result": {
+                "result": {"type": "string", "value": "confirmed"},
+            }},
+        ])
+        owner = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *a, **kw: sock,
+            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+        )
+        owner.arm_unknown_submit(
+            settlement_expression=expression, click_point=(12.0, 20.0),
+        )
+        owner.call("Input.dispatchMouseEvent", pressed)
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+            owner.call("Page.navigate", {"url": "https://example.invalid/"})
+        self.assertEqual(len(sock.sent), 1)
+        owner.call("Input.dispatchMouseEvent", released)
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+            owner.call("Input.dispatchMouseEvent", pressed)
+        owner.call("Runtime.evaluate", {
+            "expression": expression,
+            "returnByValue": True,
+            "awaitPromise": False,
+        })
+        owner.settle_unknown_submit()
+        owner.close()
+        self.assertEqual(
+            [x["method"] for x in sock.sent],
+            ["Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.evaluate"],
+        )
+
+    def test_direct_unknown_settle_cannot_clear_failed_one_shot_input(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract UNIX target reservation required")
+        port = 19651
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/original",
+        }
+
+        class AmbiguousSend(FakeSocket):
+            def send(self, payload):
+                super().send(payload)
+                raise OSError("response lost after possibly effective browser input")
+
+        def build(sock):
+            return _LoopbackCdpClient(
+                endpoint, timeout_seconds=1,
+                opener=lambda u, **kw: FakeResponse([target], url=u),
+                websocket_factory=lambda *a, **kw: sock,
+                tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+            )
+
+        socket = AmbiguousSend([])
+        owner = build(socket)
+        owner.arm_unknown_submit(click_point=(1.0, 1.0))
+        with self.assertRaises(PrivateWebCdpError):
+            owner.call("Input.dispatchMouseEvent", {
+                "type": "mousePressed", "x": 1.0, "y": 1.0,
+                "button": "left", "buttons": 1, "clickCount": 1,
+            })
+        self.assertEqual(len(socket.sent), 1)
+        with self.assertRaises(PrivateWebCdpError) as denied:
+            owner.settle_unknown_submit()
+        self.assertEqual(denied.exception.stage, "submit_unsettled")
+        with self.assertRaises(PrivateWebCdpError) as blocked:
+            owner.close()
+        self.assertEqual(blocked.exception.stage, "close")
+        with self.assertRaises(PrivateWebCdpError) as busy:
+            build(FakeSocket([]))
+        self.assertEqual(busy.exception.stage, "target_busy")
+
+
+    def test_native_submit_settlement_requires_original_confirmed_read(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux kernel abstract target reservation required")
+        expression = "(() => location.pathname === '/p/success' ? 'confirmed' : 'pending')()"
+        for port, value, match_expression, exception_details in (
+            (19652, "confirmed", True, False),
+            (19653, "confirmed", False, False),
+            (19654, "pending", True, False),
+            (19655, "confirmed", True, True),
+        ):
+            with self.subTest(port=port):
+                endpoint = f"http://127.0.0.1:{port}"
+                target = {
+                    "type": "page",
+                    "webSocketDebuggerUrl":
+                        f"ws://127.0.0.1:{port}/devtools/page/original",
+                }
+                result = {"result": {"type": "string", "value": value}}
+                if exception_details:
+                    result["exceptionDetails"] = {"text": "synthetic error"}
+                sock = FakeSocket([
+                    {"id": 1, "result": {}},
+                    {"id": 2, "result": {}},
+                    {"id": 3, "result": result},
+                ])
+                client = _LoopbackCdpClient(
+                    endpoint, timeout_seconds=1,
+                    opener=lambda url, **kw: FakeResponse([target], url=url),
+                    websocket_factory=lambda *args, **kw: sock,
+                    tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+                )
+                client.arm_unknown_submit(
+                    settlement_expression=expression,
+                    click_point=(12.0, 20.0),
+                )
+                client.call("Input.dispatchMouseEvent", {
+                    "type": "mousePressed", "x": 12.0, "y": 20.0,
+                    "button": "left", "buttons": 1, "clickCount": 1,
+                })
+                client.call("Input.dispatchMouseEvent", {
+                    "type": "mouseReleased", "x": 12.0, "y": 20.0,
+                    "button": "left", "buttons": 0, "clickCount": 1,
+                })
+                actual_expression = (
+                    expression if match_expression else "(() => 'confirmed')()"
+                )
+                params = {
+                    "expression": actual_expression,
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                }
+                if match_expression:
+                    client.call("Runtime.evaluate", params)
+                else:
+                    with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+                        client.call("Runtime.evaluate", params)
+                if port == 19652:
+                    client.settle_unknown_submit()
+                    client.close()
+                    self.assertTrue(sock.closed)
+                else:
+                    with self.assertRaises(PrivateWebCdpError) as denied:
+                        client.settle_unknown_submit()
+                    self.assertEqual(denied.exception.stage, "submit_unsettled")
+                    with self.assertRaises(PrivateWebCdpError):
+                        client.close()
+                    with self.assertRaises(PrivateWebCdpError) as busy:
+                        _LoopbackCdpClient(
+                            endpoint, timeout_seconds=1,
+                            opener=lambda url, **kw: FakeResponse(
+                                [target], url=url,
+                            ),
+                            websocket_factory=lambda *a, **kw: FakeSocket([]),
+                            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+                        )
+                    self.assertEqual(busy.exception.stage, "target_busy")
+
+    def test_media_native_reconcile_uses_exact_pinned_confirmation(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux kernel abstract target reservation required")
+        from mark_api.private_web_cdp_media import CdpPrivateWebMediaPage
+
+        port = 19656
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                f"ws://127.0.0.1:{port}/devtools/page/original",
+        }
+        sock = FakeSocket([{
+            "id": 1,
+            "result": {
+                "result": {"type": "string", "value": "confirmed"},
+            },
+        }])
+        client = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *args, **kw: sock,
+            tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+        )
+        page = CdpPrivateWebMediaPage(
+            endpoint, client_factory=lambda: client,
+            monotonic=lambda: 0.0, sleep=lambda _: None,
+        )
+        page._client_instance = client
+        page._media_unknown_client = client
+        page._media_submit_unsettled = True
+        expected_expression = page._media_submit_settlement_expression()
+        client.arm_unknown_submit(settlement_expression=expected_expression)
+        try:
+            page.reconcile_create_media_submit()
+            self.assertFalse(page._media_submit_unsettled)
+            self.assertFalse(client._unresolved_submit)
+            self.assertEqual(sock.sent[0]["method"], "Runtime.evaluate")
+            self.assertEqual(
+                sock.sent[0]["params"]["expression"], expected_expression,
+            )
+        finally:
+            page.close()
+
     def test_close_during_discovery_cannot_free_target_or_start_websocket(self) -> None:
         if sys.platform != "linux":
             self.skipTest("Linux abstract UNIX target reservation required")
