@@ -2082,7 +2082,16 @@ class SnapshotStore:
         ):
             raise ValueError("inconsistent owner inventory")
         present_ids = {snapshot.ad_id for snapshot in snapshots}
-        tracked_ids = {ad_id for ad_id in tracked_ad_ids if ad_id.strip()}
+        # Never turn an untrusted BLOB/whitespace/NUL ID into owner evidence.
+        # Validate before any possible SQLite journal or snapshot mutation.
+        tracked_ids: set[str] = set()
+        for ad_id in tracked_ad_ids:
+            if (
+                type(ad_id) is not str or not ad_id.strip()
+                or ad_id != ad_id.strip() or "\x00" in ad_id
+            ):
+                raise sqlite3.DatabaseError("invalid tracked owner ID")
+            tracked_ids.add(ad_id)
 
         with self._connect() as connection:
             # Bind evidence validation and history writes to the same
@@ -2090,14 +2099,18 @@ class SnapshotStore:
             connection.execute("BEGIN IMMEDIATE")
             owned_ids: set[str] = set()
             if tracked_ids:
-                owned_ids = {
-                    row["ad_id"]
-                    for row in connection.execute(
-                        "SELECT DISTINCT ad_id FROM ad_snapshots "
-                        "WHERE source != ? AND lifecycle_state != ?",
-                        (LOCAL_CATALOG_SOURCE, LifecycleState.ABSENT.value),
-                    ).fetchall()
-                }
+                for row in connection.execute(
+                    "SELECT DISTINCT ad_id FROM ad_snapshots "
+                    "WHERE source != ? AND lifecycle_state != ?",
+                    (LOCAL_CATALOG_SOURCE, LifecycleState.ABSENT.value),
+                ):
+                    owned_id = row["ad_id"]
+                    if (
+                        type(owned_id) is not str or not owned_id.strip()
+                        or owned_id != owned_id.strip() or "\x00" in owned_id
+                    ):
+                        raise sqlite3.DatabaseError("invalid stored owner ID")
+                    owned_ids.add(owned_id)
             absent_ids = sorted((tracked_ids & owned_ids) - present_ids)
             for snapshot in snapshots:
                 self._insert_ad_snapshot(connection, snapshot)
@@ -2140,7 +2153,7 @@ class SnapshotStore:
                     if value is not None and type(value) is not str:
                         raise sqlite3.DatabaseError("invalid ad snapshot data")
                 parsed.append(
-                    (datetime.fromisoformat(row["observed_at"]), int(row["id"]), row)
+                    (datetime.fromisoformat(row["observed_at"]), SnapshotStore._history_row_id(row["id"]), row)
                 )
             parsed.sort(key=lambda item: (item[0], item[1]))
             return tuple(
