@@ -2,7 +2,7 @@
 
 Öffentliche Projektdokumentation für die mit Mark besprochene Kleinanzeigen-Agent-/API-Integration.
 
-## Freigabestatus und Offline-Modus (17.10.2026)
+## Freigabestatus und Offline-Modus (22.10.2026)
 
 **Vollprodukt: NO-GO.** Der bisherige Einstieg `mark-api-launch` verwendet
 automatisierte Private-Web-/CDP-Zugriffe einschließlich standardmäßig
@@ -35,6 +35,58 @@ mark-api-offline --db /pfad/mark.sqlite --email /pfad/weitere-nachricht.eml
 # Ohne neue Nachrichten nur das bestehende Offline-Dashboard anzeigen:
 mark-api-offline --db /pfad/mark.sqlite
 ```
+
+### Expliziter lokaler Anzeigenkatalog (keine Plattformbeobachtung)
+
+Zusätzlich kann der **rein lokale, read-only** Produktstart ausdrücklich
+übergebene JSON-Dateien mit bereits selbst notierten Anzeigen und Kennzahlen
+anzeigen. Mark ruft dafür keinerlei Kleinanzeigen-Webseite oder API auf.
+Die Eingaben sind nicht signiert und begründen **keinen verifizierten
+Eigentümerbestand, keine aktive Anzeige und keine Write-Berechtigung**.
+Die Lebenszyklus-Anzeige bleibt deshalb \`unknown\`, und die Datenquelle
+lautet \`user-supplied-local-catalog\`. Die Uhrzeit stammt ausschließlich
+aus der vom Nutzer angegebenen Beobachtung und benötigt einen UTC-Offset.
+
+Beispiel \`mein-katalog.json\` (nur ausdrücklich übergebene Dateien):
+
+\`\`\`json
+{
+  "schema": "mark-local-catalog-v1",
+  "ads": [
+    {
+      "ad_id": "1234567890",
+      "observed_at": "2026-10-22T03:10:00+02:00",
+      "title": "Lokal notierter Anzeigentitel",
+      "views": 23,
+      "watch_count": 0
+    }
+  ]
+}
+\`\`\`
+
+\`\`\`bash
+mark-api-offline --db /pfad/mark.sqlite --init-db --catalog /pfad/mein-katalog.json
+# Wiederholung oder zusätzlicher manueller Datenstand:
+mark-api-offline --db /pfad/mark.sqlite --catalog /pfad/mein-katalog.json
+# E-Mail-Evidenz kann zusätzlich explizit und unabhängig importiert werden:
+mark-api-offline --db /pfad/mark.sqlite --email /pfad/nachricht.eml --catalog /pfad/mein-katalog.json
+\`\`\`
+
+Zulässige Felder je Eintrag: \`ad_id\` (5–20 ASCII-Ziffern),
+\`observed_at\` (ISO-8601 mit Offset), optional \`title\`, \`description\`,
+\`views\`, \`watch_count\` und \`reply_count\`. Eigene Angaben über
+\`source\`, \`lifecycle_state\` oder ein angeblich bestätigtes Konto
+werden verweigert. Dateien und Anzahl sind begrenzt; Symbolic Links,
+Pipes und mehrdeutige JSON-Felder werden abgelehnt. Ein vollständiger
+Katalogbatch wird vor dem Schreiben validiert und in einer einzigen
+SQLite-Transaktion eingefügt. Identische Wiederholungen erzeugen
+**keine** doppelten Beobachtungen; widersprüchliche Beobachtungen mit
+gleicher Anzeigen-ID und UTC-Beobachtungszeit brechen den ganzen
+Katalogbatch ab, ohne vorherige Evidenz zu überschreiben. Katalog- und
+EML-Import sind **jeweils** separat atomare, idempotente Batches;
+über beide Datenquellen besteht ausdrücklich keine gemeinsame
+Transaktionsgarantie. Sichtbare Zahlen sind manuell gelieferte Evidenz
+und keine aktuelle automatisierte Plattform-Synchronisation.
 
 Der Import ist batch-atomar und idempotent. Für den Offline-Pfad sind keine
 Kleinanzeigen-Zugangsdaten oder `private-web`-Extras erforderlich.
