@@ -2026,7 +2026,7 @@ class DashboardHttpTests(SeededStoreMixin, unittest.TestCase):
     def test_dashboard_assets_are_local_and_javascript_is_not_escaped(self) -> None:
         _, _, html_body = self.get("/")
         html = html_body.decode("utf-8")
-        self.assertIn("Mark Dashboard", html)
+        self.assertIn("Kleinanzeiger", html)
         self.assertIn('src="/dashboard.js"', html)
         self.assertIn('id="metric-select"', html)
         self.assertIn('id="groups-body"', html)

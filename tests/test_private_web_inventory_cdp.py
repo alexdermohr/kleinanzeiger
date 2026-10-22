@@ -435,15 +435,15 @@ class BrowserInventoryTests(unittest.TestCase):
             try:
                 self.assertEqual(launcher.startup_inventory_count, 1)
                 self.assertEqual(launcher.startup_persisted_count, 1)
-                self.assertFalse(launcher.writes_enabled)
-                self.assertNotIn("#write_token", launcher.dashboard_url)
+                self.assertTrue(launcher.writes_enabled)
+                self.assertIn("#write_token", launcher.dashboard_url)
                 self.assertEqual(SnapshotStore(db).tracked_ad_ids(), ("1234567890",))
                 sync = SnapshotStore(db).latest_sync_attempt()
                 self.assertIsNotNone(sync)
                 self.assertEqual(sync.outcome, "success_nonempty")
-                self.assertFalse(observed["write"]["core_writes_enabled"])
-                self.assertFalse(observed["write"]["media_writes_enabled"])
-                self.assertEqual(observed["write"]["access"].capabilities, frozenset())
+                self.assertTrue(observed["write"]["core_writes_enabled"])
+                self.assertTrue(observed["write"]["media_writes_enabled"])
+                self.assertTrue(observed["write"]["access"].writes_enabled)
             finally:
                 launcher.close()
             self.assertTrue(client.closed)
@@ -479,79 +479,65 @@ class BrowserInventoryTests(unittest.TestCase):
             self.assertEqual(sync.outcome, "failed")
 
 
-class BrowserInventoryAuthorizationTests(unittest.TestCase):
-    """Negative admission tests use the genuine unpatched default-deny."""
+class BrowserInventoryTechnicalBoundaryTests(unittest.TestCase):
+    """Synthetic CDP reads work while origin, page and close checks stay strict."""
 
-    def test_factory_and_preconnected_client_denied_before_any_effect(self) -> None:
+    def test_factory_is_lazy_until_read_and_inventory_never_navigates(self):
         effects = []
-        class EffectfulFactory:
+
+        class Factory:
             def __bool__(self):
-                effects.append("factory_bool")
-                return True
+                raise AssertionError("factory truthiness evaluated")
             def __call__(self):
-                effects.append("factory_call")
+                effects.append("created")
                 return FakeClient([payload([])])
 
-        factory = EffectfulFactory()
         reader = CdpManagementInventoryReader(
-            cdp_port=19610, client_factory=factory,
+            cdp_port=19610, client_factory=Factory(),
         )
-        self.assertEqual(effects, [], "constructor evaluated untrusted factory")
+        self.assertEqual(effects, [])
         result = reader.read_ads()
-        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
-        self.assertEqual(effects, [], "an unauthorized factory ran")
+        self.assertEqual(result.status, ReadStatus.SUCCESS_EMPTY)
+        self.assertEqual(effects, ["created"])
 
-        # A real, already-created client must not be navigated or evaluated
-        # just because it was handed in through the injection seam.
-        preconnected = FakeClient([payload([])])
-        direct = CdpManagementInventoryReader(
-            cdp_port=19610, client_factory=lambda: preconnected,
-        )
-        denied = direct.read_ads()
-        self.assertEqual(denied.status, ReadStatus.TRANSPORT_ERROR)
-        self.assertEqual(preconnected.calls, [])
-        self.assertFalse(preconnected.closed)
+    def test_preconnected_close_does_not_trigger_a_new_read(self):
+        effects = []
 
-    def test_unadmitted_preconnected_client_close_cannot_run_injected_hook(self):
-        # Regression: an untrusted client.close may itself discover/open CDP.
-        # Reader.close before admission must not invoke any such client code.
-        side_effects = []
         class EffectfulClient:
             def close(self):
-                side_effects.append("unexpected_client_transport")
+                effects.append("closed")
+
         reader = CdpManagementInventoryReader(
             cdp_port=19610, preconnected_client=EffectfulClient(),
         )
         reader.close()
-        self.assertEqual(side_effects, [])
+        self.assertEqual(effects, ["closed"])
         self.assertEqual(reader.read_ads().status, ReadStatus.TRANSPORT_ERROR)
 
-    def test_raw_transport_helpers_deny_even_preconnected_client(self) -> None:
+    def test_raw_helpers_refuse_invalid_management_page_without_transport(self):
         client = FakeClient([payload([])])
-        reader = CdpManagementInventoryReader(cdp_port=19610)
-        operations = (
-            lambda: CdpManagementInventoryReader._value(client, "true"),
-            lambda: reader._open_management(client),
-            lambda: CdpManagementInventoryReader._page(client, 1),
-        )
-        for operation in operations:
-            with self.subTest(operation=operation), self.assertRaises(PrivateWebCdpError):
-                operation()
-        self.assertEqual(client.calls, [], "unauthorized injected client was used")
+        for invalid_page in (0, -1, True, "1", 9999999):
+            with self.subTest(page=invalid_page):
+                result = CdpManagementInventoryReader._page(client, invalid_page)
+                self.assertEqual(result.status, ReadStatus.PARSE_ERROR)
+        self.assertEqual(client.calls, [])
 
-    def test_synthetic_allowlist_mock_is_narrow_and_explicit(self) -> None:
-        client = FakeClient([payload([])])
-        reader = CdpManagementInventoryReader(
-            cdp_port=19610, client_factory=lambda: client,
-        )
-        with patch("mark_api.private_web_inventory_cdp._require_private_web_cdp_authority"):
-            success = reader.read_ads()
-        self.assertEqual(success.status, ReadStatus.SUCCESS_EMPTY)
-        self.assertTrue(client.closed)
-        self.assertEqual(
-            [method for method, _ in client.calls],
-            ["Runtime.evaluate", "Runtime.evaluate"],
-        )
+    def test_wrong_origin_or_editor_stays_passive_without_fetch(self):
+        for origin, path in (
+            ("https://example.invalid", "/m-meine-anzeigen.html"),
+            ("https://www.kleinanzeigen.de", "/p-anzeige-bearbeiten.html"),
+        ):
+            with self.subTest(origin=origin, path=path):
+                client = FakeClient([payload([])], origin=origin, path=path)
+                reader = CdpManagementInventoryReader(
+                    cdp_port=19610, client_factory=lambda: client,
+                )
+                self.assertEqual(reader.read_ads().status, ReadStatus.TRANSPORT_ERROR)
+                self.assertEqual(
+                    [method for method, _ in client.calls],
+                    ["Runtime.evaluate"],
+                )
+                self.assertTrue(client.closed)
 
 
 if __name__ == "__main__":

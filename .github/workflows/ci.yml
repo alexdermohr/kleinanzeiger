@@ -81,7 +81,7 @@ jobs:
 
           python -m pip wheel --no-deps --wheel-dir "$artifact_dir/wheels" .
           python -m venv "$artifact_dir/venv"
-          "$artifact_dir/venv/bin/python" -m pip install --no-deps "$artifact_dir"/wheels/mark_api-*.whl
+          "$artifact_dir/venv/bin/python" -m pip install --no-deps "$artifact_dir"/wheels/kleinanzeiger-*.whl
 
           # Installed entrypoint must exist without private-web dependencies,
           # and must refuse an uninitialized/typo SQLite path before binding.

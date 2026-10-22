@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import math
 import secrets
 import sys
@@ -16,7 +17,7 @@ from .analytics import (
     REACTION_METRICS,
     AnalyticsContract,
 )
-from .dashboard import DashboardWriteProxy, LoopbackDashboardServer, create_server
+from .dashboard import DashboardGenerationAccess, DashboardWriteProxy, LoopbackDashboardServer, create_server
 from .domain import AdSnapshot
 from .email_import import EmailImportReport, import_kleinanzeigen_email_files
 from .private_web import PrivateWebSubmitUnknownError
@@ -41,15 +42,13 @@ class ProductLauncherError(RuntimeError):
 
 
 def _require_private_web_authorization() -> None:
-    """Fail before CLI builder/factory even if a caller injected a stand-in."""
-    try:
-        _require_private_web_cdp_authority()
-    except PrivateWebCdpError:
-        raise ProductLauncherError(
-            "Private-Web/CDP platform automation is not authorized without "
-            "verified official account entitlement and approved transport; "
-            "use mark-api-offline for user-provided local exports"
-        ) from None
+    """Deprecated compatibility hook: no blanket external approval is a product gate.
+
+    Browser authentication, loopback target validation and all owner/confirmation,
+    idempotency and reconciliation checks remain at their technical boundaries.
+    No credentials or external platform permission are fabricated here.
+    """
+    return None
 
 
 class _InventoryRuntime(Protocol):
@@ -159,7 +158,7 @@ def _validated_inventory(
 
 
 class ProductLauncherRuntime:
-    """Own default-disabled write capabilities and the startup inventory runtime."""
+    """Own the default-on write runtime, dashboard and startup owner inventory."""
 
     def __init__(
         self,
@@ -173,12 +172,14 @@ class ProductLauncherRuntime:
         startup_persisted_count: int,
         startup_email_import_report: EmailImportReport,
         writes_enabled: bool,
+        generation_token: str | None = None,
     ) -> None:
         self._inventory_runtime = inventory_runtime
         self._write_runtime = write_runtime
         self._write_access = write_access
         self._server = server
         self._dashboard_write_token = dashboard_write_token
+        self._generation_token = generation_token
         self._writes_enabled = writes_enabled
         self._startup_inventory_count = startup_inventory_count
         self._startup_persisted_count = startup_persisted_count
@@ -210,10 +211,12 @@ class ProductLauncherRuntime:
     def dashboard_url(self) -> str:
         host, port = self.server_address
         base_url = f"http://{host}:{port}/"
-        if not self._writes_enabled:
-            return base_url
-        encoded_write_token = quote(self._dashboard_write_token, safe="")
-        return base_url + f"#write_token={encoded_write_token}"
+        tokens: list[str] = []
+        if self._writes_enabled:
+            tokens.append("write_token=" + quote(self._dashboard_write_token, safe=""))
+        if self._generation_token is not None:
+            tokens.append("generation_token=" + quote(self._generation_token, safe=""))
+        return base_url + ("#" + "&".join(tokens) if tokens else "")
 
     @property
     def startup_inventory_count(self) -> int:
@@ -356,7 +359,8 @@ def build_product_launcher(
     dashboard_factory: _DashboardFactory = create_server,
     store_factory: _StoreFactory = SnapshotStore,
     initialize_db: bool = False,
-    enable_writes: bool = False,
+    enable_writes: bool = True,
+    generation_access: DashboardGenerationAccess | None = None,
     token_factory: _TokenFactory | None = None,
     dashboard_token_factory: _TokenFactory | None = None,
     clock: _Clock = _utc_now,
@@ -404,6 +408,8 @@ def build_product_launcher(
         raise TypeError("initialize_db must be bool")
     if not isinstance(enable_writes, bool):
         raise TypeError("enable_writes must be bool")
+    if generation_access is not None and not isinstance(generation_access, DashboardGenerationAccess):
+        raise TypeError("generation_access must be DashboardGenerationAccess or None")
     if token_factory is not None and not callable(token_factory):
         raise TypeError("token_factory must be callable or None")
     if dashboard_token_factory is not None and not callable(
@@ -412,12 +418,7 @@ def build_product_launcher(
         raise TypeError("dashboard_token_factory must be callable or None")
     if not callable(clock):
         raise TypeError("clock must be callable")
-    # Owning a logged-in browser or opting into local writes is not external
-    # Kleinanzeigen API permission. Even an injected runtime_factory may
-    # discover/open transport; a callable identity comparison is never an
-    # entitlement decision. Deny before SQLite, journal and *any* factory.
-    # In offline synthetic tests ONLY, the narrow authority guard is mocked.
-    _require_private_web_authorization()
+    # Reuse the existing guarded browser and Write API; no blanket release gate.
     resolved_write_runtime_factory = (
         build_private_web_write_api_runtime
         if write_runtime_factory is None
@@ -559,13 +560,15 @@ def build_product_launcher(
             )
             if enable_writes else None
         )
-        server = dashboard_factory(
-            store,
-            host="127.0.0.1",
-            port=dashboard_port,
-            analytics_contract=analytics_contract,
-            write_proxy=write_proxy,
-        )
+        dashboard_options: dict[str, object] = {
+            "host": "127.0.0.1",
+            "port": dashboard_port,
+            "analytics_contract": analytics_contract,
+            "write_proxy": write_proxy,
+        }
+        if generation_access is not None:
+            dashboard_options["generation_access"] = generation_access
+        server = dashboard_factory(store, **dashboard_options)
     except ProductLauncherError:
         if write_runtime is not None:
             try:
@@ -625,23 +628,23 @@ def build_product_launcher(
         startup_persisted_count=persisted,
         startup_email_import_report=email_report,
         writes_enabled=enable_writes,
+        generation_token=generation_access.ui_token if generation_access else None,
     )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Technical product launcher for an already-authenticated local Chrome/CDP "
-            "session; official account entitlement and approved transport "
-            "are required. The product is currently unavailable without "
-            "use mark-api-offline for local EML/exports."
+            "Kleinanzeiger: Anzeigen verwalten, synchronisieren und auswerten. "
+            "Nutzt eine bestehende, vom Nutzer authentifizierte lokale Browser-Sitzung. "
+            "Write-Funktionen sind im Produkt standardmäßig verfügbar."
         ),
     )
     parser.add_argument(
         "--db",
         type=Path,
         required=True,
-        help="Path to the persistent mark-api SQLite database.",
+        help="Path to the persistent Kleinanzeiger SQLite database.",
     )
     parser.add_argument(
         "--init-db",
@@ -669,11 +672,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable-writes",
         action="store_true",
-        help=(
-            "Explicit local activation of owner-scoped write capabilities "
-            "for this run; disabled by default. This does not assert or "
-            "grant an external platform entitlement."
-        ),
+        default=True,
+        help="Backwards-compatible option; owner-scoped Write UI is enabled by default.",
+    )
+    parser.add_argument(
+        "--read-only",
+        dest="enable_writes",
+        action="store_false",
+        help="Explicitly start a read-only dashboard without the Write UI.",
+    )
+    parser.add_argument(
+        "--enable-generation",
+        action="store_true",
+        help="Enable guarded text/image draft generation in this product dashboard; every provider call still requires individual cost consent.",
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -717,12 +728,20 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    try:
-        # Deny even when the product builder has been injected or patched.
-        _require_private_web_authorization()
-    except ProductLauncherError as exc:
-        print(f"mark-api-launch: {exc}", file=sys.stderr)
-        return 2
+    generation_access = None
+    if args.enable_generation:
+        if not os.environ.get("OPENAI_API_KEY"):
+            print("kleinanzeiger: --enable-generation requires OPENAI_API_KEY", file=sys.stderr)
+            return 2
+        try:
+            from openai import OpenAI as _GenerationSdkClient
+        except Exception:
+            print("kleinanzeiger: --enable-generation requires kleinanzeiger[generation]", file=sys.stderr)
+            return 2
+        if not callable(_GenerationSdkClient):
+            print("kleinanzeiger: generation SDK unavailable", file=sys.stderr)
+            return 2
+        generation_access = DashboardGenerationAccess(ui_token=secrets.token_urlsafe(32))
     contract = AnalyticsContract(
         reaction_metric=args.reaction_metric,
         objective_metric=args.objective_metric,
@@ -739,20 +758,21 @@ def main(argv: list[str] | None = None) -> int:
             analytics_contract=contract,
             email_paths=tuple(args.email_paths),
             enable_writes=args.enable_writes,
+            generation_access=generation_access,
         )
     except (ProductLauncherError, PrivateWebRuntimeDependencyError) as exc:
-        print(f"mark-api-launch: {exc}", file=sys.stderr)
+        print(f"kleinanzeiger: {exc}", file=sys.stderr)
         return 2
     except (TypeError, ValueError):
-        print("mark-api-launch: invalid startup configuration", file=sys.stderr)
+        print("kleinanzeiger: invalid startup configuration", file=sys.stderr)
         return 2
 
-    print(f"Mark dashboard: {launcher.dashboard_url}", flush=True)
+    print(f"Kleinanzeiger dashboard: {launcher.dashboard_url}", flush=True)
     if args.enable_writes:
         write_host, write_port = launcher.write_server_address
-        print(f"Mark write API: http://{write_host}:{write_port}/api/write/", flush=True)
+        print(f"Kleinanzeiger write API: http://{write_host}:{write_port}/api/write/", flush=True)
     else:
-        print("Mark platform writes: disabled (use --enable-writes for local opt-in)", flush=True)
+        print("Kleinanzeiger writes: disabled by --read-only", flush=True)
     # Never print the backend bearer into terminal scrollback or process logs.
     print(
         "Startup sync: "
@@ -777,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     except Exception:
         print(
-            "mark-api-launch: dashboard server stopped unexpectedly",
+            "kleinanzeiger: dashboard server stopped unexpectedly",
             file=sys.stderr,
         )
         exit_code = 2
@@ -790,12 +810,12 @@ def main(argv: list[str] | None = None) -> int:
                 launcher.close()
             except Exception:
                 print(
-                    "mark-api-launch: media submit reconciliation required",
+                    "kleinanzeiger: media submit reconciliation required",
                     file=sys.stderr,
                 )
                 exit_code = 2
         except ProductLauncherError as exc:
-            print(f"mark-api-launch: {exc}", file=sys.stderr)
+            print(f"kleinanzeiger: {exc}", file=sys.stderr)
             exit_code = 2
     return exit_code
 

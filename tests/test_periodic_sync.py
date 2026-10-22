@@ -481,16 +481,14 @@ class PeriodicReadTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(self.store.latest_sync_attempt().error_kind, status.value)
 
-    def test_default_library_runtime_denies_private_cdp(self):
-        # A caller cannot grant permission simply by leaving the runtime
-        # factory unspecified or possessing an authenticated CDP browser.
-        with self.assertRaisesRegex(
-            PeriodicSyncError, "verified official platform entitlement"
-        ):
-            PeriodicOwnerSync(store=self.store, cdp_port=19610)
+    def test_default_library_runtime_is_configurable_but_signal_stops_before_browser(self):
+        sync = PeriodicOwnerSync(store=self.store, cdp_port=19610)
+        sync.request_stop_from_signal()
+        with self.assertRaises(PeriodicSyncStopped):
+            sync.run_once()
         self.assertIsNone(self.store.latest_sync_attempt())
 
-    def test_public_cli_denies_before_database_or_browser_access(self):
+    def test_public_cli_wires_existing_store_to_synthetic_sync_without_browser_access(self):
         for args in (
             ["--once"],
             ["--immediate"],
@@ -498,18 +496,26 @@ class PeriodicReadTests(unittest.TestCase):
         ):
             with (
                 self.subTest(args=args),
-                patch("mark_api.periodic_sync.SnapshotStore") as store,
                 patch("mark_api.periodic_sync.PeriodicOwnerSync") as factory,
                 patch("mark_api.periodic_sync.build_private_web_inventory_runtime") as cdp,
-                contextlib.redirect_stderr(io.StringIO()) as errors,
+                contextlib.redirect_stderr(io.StringIO()),
+                contextlib.redirect_stdout(io.StringIO()),
             ):
+                synthetic = factory.return_value
+                synthetic.run_once.return_value = ReadResult.success_empty(())
+                synthetic.run_loop.return_value = 1
                 self.assertEqual(main([
                     "--db", str(self.path), "--cdp-port", "19610", *args
-                ]), 2)
-                self.assertIn("automatic Kleinanzeigen/CDP reads are disabled", errors.getvalue())
-                self.assertIn("verified official platform entitlement", errors.getvalue())
-                store.assert_not_called()
-                factory.assert_not_called()
+                ]), 0)
+                self.assertIsInstance(factory.call_args.kwargs["store"], SnapshotStore)
+                self.assertEqual(factory.call_args.kwargs["cdp_port"], 19610)
+                if "--once" in args:
+                    synthetic.run_once.assert_called_once()
+                    synthetic.run_loop.assert_not_called()
+                else:
+                    synthetic.run_loop.assert_called_once_with(
+                        immediate=("--immediate" in args)
+                    )
                 cdp.assert_not_called()
 
     def test_invalid_period_and_port_fail_before_network_or_journal(self):
@@ -530,7 +536,7 @@ class PeriodicReadTests(unittest.TestCase):
                 "--db", str(missing), "--cdp-port", "19610", "--once"
             ]), 2)
         self.assertFalse(missing.exists())
-        self.assertIn("reads are disabled", errors.getvalue())
+        self.assertIn("existing SQLite store", errors.getvalue())
 
     def test_cli_does_not_accept_forgeable_entitlement_flag(self):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -806,22 +812,25 @@ print("SIGTERM under Event condition lock returned safely")
         self.assertLessEqual(observed[0], 0.25)
         self.assertIsNone(self.store.latest_sync_attempt())
 
-    def test_denied_public_cli_does_not_install_signal_handlers(self):
-        # Signal handling remains covered by synthetic run_once / run_loop
-        # tests, but no public CDP CLI may initialize a session or handler.
+    def test_periodic_cli_installs_then_restores_signal_handlers(self):
+        previous = lambda _sig, _frame: None
         with (
             patch("signal.signal") as install,
+            patch("signal.getsignal", return_value=previous) as get_handler,
             patch("mark_api.periodic_sync.PeriodicOwnerSync") as builder,
-            patch("mark_api.periodic_sync.SnapshotStore") as storage,
-            contextlib.redirect_stderr(io.StringIO()) as errors,
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
+            builder.return_value.run_loop.return_value = 0
             self.assertEqual(main([
                 "--db", str(self.path), "--cdp-port", "19610",
-            ]), 2)
-            self.assertIn("reads are disabled", errors.getvalue())
-            install.assert_not_called()
-            builder.assert_not_called()
-            storage.assert_not_called()
+            ]), 0)
+            builder.return_value.run_loop.assert_called_once_with(immediate=False)
+            self.assertEqual(get_handler.call_count, 2)
+            self.assertEqual(install.call_count, 4)
+            self.assertEqual(install.call_args.args, (signal.SIGINT, previous))
+
+
 
 
 if __name__ == "__main__":

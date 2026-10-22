@@ -19,6 +19,7 @@ kleinanzeiger-dashboard = "mark_api.dashboard:main"
 kleinanzeiger-offline = "mark_api.offline_launcher:main"
 kleinanzeiger-generate = "mark_api.generation_cli:main"
 kleinanzeiger-backup = "mark_api.backup_cli:main"
+kleinanzeiger-sync = "mark_api.periodic_sync:main"
 kleinanzeiger-import-mail = "mark_api.email_import_cli:main"
 kleinanzeiger-local-smoke = "mark_api.local_smoke:main"
 kleinanzeiger-classify = "mark_api.classification_cli:main"
@@ -32,6 +33,7 @@ mark-api-launch = "mark_api.launcher:main"
 mark-api-migrate-legacy = "mark_api.legacy_migration:main"
 mark-api-generate = "mark_api.generation_cli:main"
 mark-api-backup = "mark_api.backup_cli:main"
+mark-api-sync = "mark_api.periodic_sync:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -16,7 +16,7 @@ from unittest.mock import patch
 from urllib.request import ProxyHandler, build_opener
 
 from mark_api.analytics import AnalyticsContract
-from mark_api.dashboard import DashboardWriteProxy
+from mark_api.dashboard import DashboardGenerationAccess, DashboardWriteProxy
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.email_import import EmailImportReport
 from mark_api.launcher import (
@@ -34,7 +34,7 @@ NOW = datetime(2026, 10, 4, 15, 0, tzinfo=timezone.utc)
 
 
 def _writes_enabled_launcher(**kwargs):
-    # Existing lifecycle fixtures intentionally exercise the opt-in write path.
+    # Existing lifecycle fixtures explicitly exercise the full customer Write path.
     return build_product_launcher(enable_writes=True, **kwargs)
 
 
@@ -376,6 +376,42 @@ class ProductLauncherTests(unittest.TestCase):
             "http://127.0.0.1:18765/"
             f"#write_token={self.DASHBOARD_TOKEN}",
         )
+
+    def test_product_starts_default_on_write_and_generation_in_one_session(self) -> None:
+        _tmp, db = self.make_db()
+        inventory = InventoryRuntime(ReadResult.success_empty(()))
+        server = DashboardServer()
+        seen = {}
+        provider_started = []
+
+        def dashboard_factory(*args, **kwargs):
+            seen.update(kwargs)
+            return server
+
+        generation = DashboardGenerationAccess(
+            ui_token="synthetic-generation-0123456789",
+            generator_factory=lambda: provider_started.append("called"),
+        )
+        launcher = build_product_launcher(
+            db_path=db,
+            cdp_port=9222,
+            runtime_factory=lambda **kwargs: inventory,
+            dashboard_factory=dashboard_factory,
+            generation_access=generation,
+            clock=lambda: NOW,
+        )
+        self.addCleanup(launcher.close)
+        self.assertTrue(launcher.writes_enabled)
+        self.assertIsInstance(seen["write_proxy"], DashboardWriteProxy)
+        self.assertIs(seen["generation_access"], generation)
+        self.assertEqual(
+            launcher.dashboard_url,
+            "http://127.0.0.1:18765/"
+            f"#write_token={self.DASHBOARD_TOKEN}&generation_token={generation.ui_token}",
+        )
+        self.assertNotIn(self.TOKEN, launcher.dashboard_url)
+        self.assertEqual(provider_started, [])
+        self.assertEqual(self.write_runtime.start_calls, 1)
 
     def test_dashboard_url_percent_encodes_write_token_fragment(self) -> None:
         _tmp, db = self.make_db()
@@ -1116,12 +1152,12 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertTrue(launcher.closed)
         self.assertEqual(stderr.getvalue(), "")
         self.assertIn(
-            "Mark dashboard: http://127.0.0.1:18765/"
+            "Kleinanzeiger dashboard: http://127.0.0.1:18765/"
             "#write_token=fake-dashboard-write-token-0001",
             stdout.getvalue(),
         )
         self.assertIn(
-            "Mark write API: http://127.0.0.1:18766/api/write/",
+            "Kleinanzeiger write API: http://127.0.0.1:18766/api/write/",
             stdout.getvalue(),
         )
         self.assertNotIn(self.TOKEN, stdout.getvalue())
@@ -1219,7 +1255,7 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertEqual(
             stderr.getvalue(),
-            "mark-api-launch: inventory unavailable\n",
+            "kleinanzeiger: inventory unavailable\n",
         )
 
 

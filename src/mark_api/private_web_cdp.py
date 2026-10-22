@@ -80,10 +80,14 @@ class PrivateWebCdpWriteNotAttemptedError(
 
 
 def _require_private_web_cdp_authority() -> None:
-    # This legacy Private-Web transport is never admitted by a caller flag or
-    # an existing browser login. Only a separate official API integration may
-    # act with independently verified account-scoped platform permissions.
-    raise PrivateWebCdpError("not_authorized")
+    """No blanket external release gate at this technical transport boundary.
+
+    Real CDP clients still require validated loopback targets, the user's
+    already-authenticated browser session and all existing owner, origin,
+    confirmation, idempotency and unknown-outcome safeguards. This function
+    cannot grant credentials or rights, and must never initiate a write.
+    """
+    return None
 
 
 class _CdpClient(Protocol):

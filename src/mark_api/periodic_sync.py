@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import signal
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -89,13 +90,8 @@ class PeriodicOwnerSync:
             raise ValueError("timeout_seconds must be finite and in (0, 30]")
         if not callable(runtime_factory) or (clock is not None and not callable(clock)):
             raise TypeError("runtime_factory and clock must be callable")
-        # No official transport or account entitlement is composed. An
-        # authenticated private Chrome session is NOT a platform read license.
-        # Injected synthetic runtimes are reserved for offline tests.
-        if runtime_factory is build_private_web_inventory_runtime:
-            raise PeriodicSyncError(
-                "automatic Kleinanzeigen/CDP reads require verified official platform entitlement"
-            )
+        # The runtime enforces its own loopback CDP, browser-session and
+        # read-only inventory safety checks. No blanket external release gate.
         if stop_event is not None and not isinstance(stop_event, Event):
             raise TypeError("stop_event must be Event")
         self._store = store
@@ -349,36 +345,68 @@ class PeriodicOwnerSync:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Synthetically tested periodic owner inventory journal. "
-            "Automated private Kleinanzeigen/CDP reads are disabled until "
-            "an independently verified official entitlement and transport exist."
+            "Kleinanzeiger: journalisierte read-only Besitzerbestand-Synchronisation "
+            "mit einem vom Nutzer bereits authentifizierten lokalen Browser."
         ),
     )
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--cdp-port", type=int, required=True)
     parser.add_argument(
         "--interval-seconds", type=float, default=300.0,
-        help="Read-only interval after previous cycle completes (60..86400).",
+        help="Intervall nach dem vorigen Zyklus (60..86400 Sekunden).",
     )
     parser.add_argument("--timeout-seconds", type=float, default=5.0)
-    parser.add_argument("--once", action="store_true", help="One explicit read now.")
+    parser.add_argument("--once", action="store_true", help="Genau einen Bestandsread jetzt ausführen.")
     parser.add_argument(
         "--immediate", action="store_true",
-        help="Begin with a read, then repeat after the chosen interval.",
+        help="Beim Start lesen und danach in sicheren Intervallen wiederholen.",
     )
     args = parser.parse_args(argv)
     if args.once and args.immediate:
         parser.error("--once and --immediate are mutually exclusive")
-    # No official entitlement-bound Kleinanzeigen transport is installed.
-    # Fail closed before opening SQLite or connecting to any Chrome/CDP,
-    # including --once and --immediate; do not offer a forgeable flag.
-    print(
-        "mark-api-sync: automatic Kleinanzeigen/CDP reads are disabled; "
-        "verified official platform entitlement and an approved transport "
-        "are required. Import user-provided exports or EML offline instead.",
-        file=sys.stderr,
-    )
-    return 2
+    try:
+        # Never create or silently reset an existing customer's database.
+        store = SnapshotStore(args.db, create_if_missing=False)
+        sync = PeriodicOwnerSync(
+            store=store,
+            cdp_port=args.cdp_port,
+            interval_seconds=args.interval_seconds,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except Exception:
+        print("kleinanzeiger-sync: existing SQLite store or configuration invalid", file=sys.stderr)
+        return 2
+
+    if args.once:
+        try:
+            result = sync.run_once()
+            if not result.is_success:
+                print("kleinanzeiger-sync: inventory read unavailable", file=sys.stderr)
+                return 2
+            print(f"kleinanzeiger-sync: {len(result.value)} current ad(s) observed.", flush=True)
+            return 0
+        except Exception:
+            print("kleinanzeiger-sync: inventory read or journal failed", file=sys.stderr)
+            return 2
+
+    previous_handlers: list[tuple[signal.Signals, object]] = []
+    try:
+        # Never acquire an Event/SQLite/browser lock from a signal handler.
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers.append((sig, signal.getsignal(sig)))
+            signal.signal(sig, lambda _sig, _frame: sync.request_stop_from_signal())
+        count = sync.run_loop(immediate=args.immediate)
+        print(f"kleinanzeiger-sync: {count} successful cycle(s).", flush=True)
+        return 0
+    except KeyboardInterrupt:
+        sync.request_stop_from_signal()
+        return 0
+    except Exception:
+        print("kleinanzeiger-sync: polling stopped after an unknown or failed read", file=sys.stderr)
+        return 2
+    finally:
+        for sig, handler in reversed(previous_handlers):
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":
