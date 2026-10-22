@@ -309,5 +309,65 @@ class OfflineLauncherTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
 
 
+    def test_local_catalog_startup_is_idempotent_and_default_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "mark.sqlite"
+            catalog = root / "catalog.json"
+            catalog.write_text(json.dumps({
+                "schema": "mark-local-catalog-v1",
+                "ads": [{
+                    "ad_id": "1234567890",
+                    "observed_at": "2026-10-22T02:00:00+00:00",
+                    "title": "Locally supplied title",
+                    "views": 21,
+                }],
+            }), encoding="utf-8")
+            outputs = []
+            for run in range(2):
+                output = io.StringIO()
+                with (
+                    patch.object(offline, "create_server", return_value=ImmediateServer()),
+                    redirect_stdout(output),
+                ):
+                    self.assertEqual(offline.main([
+                        "--db", str(db), "--port", "0", "--catalog", str(catalog),
+                        *(["--init-db"] if run == 0 else []),
+                    ]), 0)
+                outputs.append(output.getvalue())
+            self.assertIn("1 new observation(s)", outputs[0])
+            self.assertIn("0 new observation(s)", outputs[1])
+            self.assertIn("unverified", outputs[0])
+            store = SnapshotStore(db, create_if_missing=False)
+            self.assertEqual(len(store.ad_history("1234567890")), 1)
+            self.assertEqual(store.latest_ad_snapshot("1234567890").views, 21)
+            self.assertEqual(store.sync_status()["state"], "never_attempted")
+
+    def test_invalid_local_catalog_blocks_dashboard_with_sanitized_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "mark.sqlite"
+            store = SnapshotStore(db)
+            catalog = root / "catalog.json"
+            catalog.write_text(json.dumps({
+                "schema": "mark-local-catalog-v1",
+                "ads": [{
+                    "ad_id": "1234567890",
+                    "observed_at": "not-a-date",
+                }],
+            }), encoding="utf-8")
+            error = io.StringIO()
+            with (
+                patch.object(offline, "create_server",
+                             side_effect=AssertionError("server must not start")),
+                redirect_stderr(error),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                offline.main(["--db", str(db), "--catalog", str(catalog)])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("local catalog import failed", error.getvalue())
+            self.assertNotIn("not-a-date", error.getvalue())
+            self.assertEqual(store.tracked_ad_ids(), ())
+
 if __name__ == "__main__":
     unittest.main()
