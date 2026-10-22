@@ -2208,6 +2208,110 @@ class CdpPrivateWebPageTests(unittest.TestCase):
                         claim.close()
                     _ACTIVE_CDP_TARGET_CLAIMS.pop(claim_id, None)
 
+    def test_abandoned_clean_client_gc_close_failure_quarantines_target(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux abstract target claim required")
+        import gc
+        import weakref
+        from mark_api.private_web_cdp import _ACTIVE_CDP_TARGET_CLAIMS
+
+        port = 19914
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                f"ws://127.0.0.1:{port}/devtools/page/close-failure",
+        }
+
+        class UncertainSocket(FakeSocket):
+            def __init__(self):
+                super().__init__([])
+                self.close_attempted = False
+
+            def close(self):
+                self.close_attempted = True
+                raise OSError("synthetic websocket close unknown")
+
+        sock = UncertainSocket()
+        client = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *a, **kw: sock,
+            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+        )
+        claim_id = id(client._target_reservation)
+        ref = weakref.ref(client)
+        del client
+        gc.collect()
+        self.assertIsNone(ref())
+        self.assertTrue(sock.close_attempted)
+        self.assertIn(claim_id, _ACTIVE_CDP_TARGET_CLAIMS)
+        self.assertGreaterEqual(_ACTIVE_CDP_TARGET_CLAIMS[claim_id].fileno(), 0)
+        with self.assertRaises(PrivateWebCdpError) as blocked:
+            _LoopbackCdpClient(
+                endpoint, timeout_seconds=1,
+                opener=lambda url, **kw: FakeResponse([target], url=url),
+                websocket_factory=lambda *a, **kw: FakeSocket([]),
+                tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+            )
+        self.assertEqual(blocked.exception.stage, "target_busy")
+        # Failed close is UNKNOWN; retain its claim for process lifetime.
+
+    def test_fork_child_gc_never_releases_parent_target_reservation(self) -> None:
+        if sys.platform != "linux" or not hasattr(os, "fork"):
+            self.skipTest("Linux fork and AF_UNIX are required")
+        import gc
+        import signal
+        from mark_api.private_web_cdp import _ACTIVE_CDP_TARGET_CLAIMS
+
+        port = 19915
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                f"ws://127.0.0.1:{port}/devtools/page/fork-original",
+        }
+        def build():
+            return _LoopbackCdpClient(
+                endpoint, timeout_seconds=1,
+                opener=lambda url, **kw: FakeResponse([target], url=url),
+                websocket_factory=lambda *a, **kw: FakeSocket([]),
+                tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+            )
+        client = build()
+        claim_id = id(client._target_reservation)
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(read_fd)
+                signal.alarm(5)
+                del client
+                gc.collect()
+                preserved = (
+                    claim_id in _ACTIVE_CDP_TARGET_CLAIMS
+                    and _ACTIVE_CDP_TARGET_CLAIMS[claim_id].fileno() >= 0
+                )
+                os.write(write_fd, b"1" if preserved else b"0")
+            except BaseException:
+                try:
+                    os.write(write_fd, b"E")
+                except OSError:
+                    pass
+            finally:
+                os._exit(0)
+        os.close(write_fd)
+        try:
+            child_result = os.read(read_fd, 1)
+            child_status = os.waitpid(pid, 0)[1]
+            self.assertTrue(os.WIFEXITED(child_status))
+            self.assertEqual(child_result, b"1")
+        finally:
+            os.close(read_fd)
+            client.close()
+        replacement = build()
+        replacement.close()
+
     def test_unknown_media_page_gc_cannot_release_kernel_claim(self) -> None:
         if sys.platform != "linux":
             self.skipTest("Linux AF_UNIX claim required")
