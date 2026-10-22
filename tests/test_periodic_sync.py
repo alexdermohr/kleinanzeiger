@@ -211,6 +211,83 @@ class PeriodicReadTests(unittest.TestCase):
         self.controller(lambda **_: Runtime(ReadResult.success_empty(()))).run_once()
         self.assertEqual(len(self.store.ad_history("1234567890")), 3)
 
+    def test_corrupt_sqlite_owner_history_never_journals_or_opens_browser(self):
+        # Native TEXT affinity still permits BLOB values. Coercing bytes
+        # to str invents a fake owner identity and a false successful
+        # ABSENT observation. Each corrupt case uses its own temporary
+        # source to keep actual RED writes from masking later failures.
+        cases = (
+            ("ad_id", sqlite3.Binary(b"forged-native-blob")),
+            ("ad_id", ""),
+            ("ad_id", " \t\u2003 "),
+            ("ad_id", " 1234567890 "),
+            ("observed_at", sqlite3.Binary(b"2026-10-19T10:00:00+00:00")),
+            ("observed_at", "not-an-iso-timestamp"),
+            ("observed_at", "2026-10-19T10:00:00"),
+            ("lifecycle_state", sqlite3.Binary(b"active")),
+            ("lifecycle_state", "unrecognized-state"),
+        )
+        for column, invalid in cases:
+            with (
+                self.subTest(column=column, native=type(invalid).__name__, value=repr(invalid)),
+                tempfile.TemporaryDirectory(prefix="mark-sync-corrupt-") as temp,
+            ):
+                path = Path(temp) / "synthetic.sqlite"
+                store = SnapshotStore(path, create_if_missing=True)
+                store.append_ad_snapshot(snapshot())
+                with contextlib.closing(sqlite3.connect(path)) as db, db:
+                    db.execute(
+                        f"UPDATE ad_snapshots SET {column} = ? WHERE id = 1",
+                        (invalid,),
+                    )
+                calls = []
+                controller = PeriodicOwnerSync(
+                    store=store,
+                    cdp_port=19610,
+                    interval_seconds=60,
+                    clock=lambda: _NOW,
+                    runtime_factory=lambda **kw: calls.append(kw) or Runtime(
+                        ReadResult.success_empty(())
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    PeriodicSyncError, "local sync journal unavailable"
+                ) as failed:
+                    controller.run_once()
+                self.assertNotIn("forged-native-blob", str(failed.exception))
+                self.assertEqual(calls, [], "browser factory ran on corrupt source")
+                self.assertIsNone(
+                    store.latest_sync_attempt(),
+                    "corrupt owner source created misleading sync journal",
+                )
+                with contextlib.closing(sqlite3.connect(path)) as db:
+                    self.assertEqual(
+                        db.execute("SELECT COUNT(*) FROM ad_snapshots").fetchone(),
+                        (1,),
+                    )
+
+    def test_native_known_owner_states_keep_existing_semantics(self):
+        # Type/enum corruption checks must not collapse legitimately
+        # recorded UNKNOWN, PAUSED or ABSENT states into a failure.
+        for state in LifecycleState:
+            with (
+                self.subTest(state=state.value),
+                tempfile.TemporaryDirectory(prefix="mark-sync-valid-") as temp,
+            ):
+                store = SnapshotStore(Path(temp) / "synthetic.sqlite")
+                store.append_ad_snapshot(replace(
+                    snapshot(), lifecycle_state=state,
+                ))
+                sync = PeriodicOwnerSync(
+                    store=store, cdp_port=19610,
+                    runtime_factory=lambda **_: Runtime(ReadResult.success_empty(())),
+                )
+                self.assertEqual(
+                    sync._tracked_present_ids(),
+                    () if state is LifecycleState.ABSENT else ("1234567890",),
+                )
+                self.assertIsNone(store.latest_sync_attempt())
+
     def test_failure_settlement_sqlite_loss_preserves_bounded_error_and_unknown_outcome(self):
         # A storage failure after the attempt starts can prevent its failure
         # CAS too. A raw sqlite exception must never replace the safe error,
@@ -503,7 +580,7 @@ class PeriodicReadTests(unittest.TestCase):
     def test_real_sigterm_during_cdp_call_aborts_without_next_navigation(self):
         if not hasattr(signal, "pthread_sigmask"):
             self.skipTest("Linux/POSIX signal mask required")
-        from mark_api.private_web_runtime import build_private_web_inventory_runtime
+        from mark_api.private_web_inventory_cdp import CdpManagementInventoryReader
         calls = []
         class FakeCdp:
             def __init__(self):
@@ -518,22 +595,34 @@ class PeriodicReadTests(unittest.TestCase):
                     calls.append(method)
                     if len(calls) == 1:
                         signal.raise_signal(signal.SIGTERM)
-                        return {"result": {"value": True}}
+                        # The owner checks an already-open management tab,
+                        # never navigates the browser under a running writer.
+                        return {"result": {"value": {
+                            "readyState": "complete",
+                            "origin": "https://www.kleinanzeigen.de",
+                            "path": "/m-meine-anzeigen.html",
+                        }}}
                     raise AssertionError("no CDP call allowed after SIGTERM")
             def close(self):
                 self.closed = True
         cdp = FakeCdp()
-        sync = self.controller(
-            lambda **kw: build_private_web_inventory_runtime(**kw),
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610,
+            preconnected_client=cdp,
+            client_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("lazy CDP connect forbidden on stop-aware read")
+            ),
         )
+        runtime = PrivateWebInventoryRuntime(
+            owner_reader=reader, close_runtime=reader.close,
+        )
+        sync = self.controller(lambda **_: runtime)
         original = signal.signal(
             signal.SIGTERM,
             lambda *_: sync.request_stop_from_signal(),
         )
         try:
             with (
-                patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
-                patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient", return_value=cdp),
                 patch("mark_api.private_web_inventory_cdp._require_private_web_cdp_authority"),
             ):
                 with self.assertRaises(PeriodicSyncStopped):

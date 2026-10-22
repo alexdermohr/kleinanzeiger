@@ -85,6 +85,7 @@ class CdpManagementInventoryReader:
         source: str = DEFAULT_SOURCE,
         clock: Callable[[], datetime] | None = None,
         client_factory: Callable[[], _CdpClient] | None = None,
+        preconnected_client: _CdpClient | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -109,6 +110,10 @@ class CdpManagementInventoryReader:
                 timeout_seconds=self._timeout,
             )
         )
+        # A stop-aware read cannot invoke an effectful lazy client factory
+        # before it installs the cancellation binder. A preconnected client
+        # is an isolated test seam, not an entitlement for a real transport.
+        self._preconnected_client = preconnected_client
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._sleep = sleep
@@ -135,44 +140,27 @@ class CdpManagementInventoryReader:
         return remote["value"]
 
     def _open_management(self, client: _CdpClient) -> None:
-        # Do not create a probe or navigate through a preconnected client
-        # before the account/transport authority has been independently proven.
+        """Admit ONLY an already-open management tab; never navigate an editor.
+
+        Opening the inventory page through Page.navigate could replace a
+        writer's unsaved editor tab even if its CDP WebSocket is separate.
+        This passive probe does not set DOM/global state, create a tab or send
+        a navigation command. The subsequent _page() checks its origin and
+        path again before its read-only fetch.
+        """
         _require_private_web_cdp_authority()
-        marker = json.dumps(f"__mark_inventory_probe_{secrets.token_hex(8)}__")
-        armed = self._value(
+        current = self._value(
             client,
-            "(() => { const key = " + marker
-            + "; globalThis[key] = true; return globalThis[key] === true; })()",
-        )
-        if armed is not True:
-            raise PrivateWebCdpError("inventory_navigate")
-        result = client.call(
-            "Page.navigate", {"url": _ORIGIN + _MANAGER_PATH},
-        )
-        if result.get("errorText"):
-            raise PrivateWebCdpError("inventory_navigate")
-        expression = (
             "(() => ({readyState: document.readyState,"
-            "origin: location.origin, path: location.pathname,"
-            "oldDocument: globalThis[" + marker + "] === true}))()"
+            "origin: location.origin, path: location.pathname}))()",
         )
-        deadline = self._monotonic() + self._timeout
-        while True:
-            try:
-                ready = self._value(client, expression)
-            except PrivateWebCdpError:
-                ready = None
-            if (
-                isinstance(ready, dict)
-                and ready.get("readyState") == "complete"
-                and ready.get("origin") == _ORIGIN
-                and ready.get("path") == _MANAGER_PATH
-                and ready.get("oldDocument") is False
-            ):
-                return
-            if self._monotonic() >= deadline:
-                raise PrivateWebCdpError("inventory_navigate")
-            self._sleep(0.05)
+        if not (
+            isinstance(current, dict)
+            and current.get("readyState") == "complete"
+            and current.get("origin") == _ORIGIN
+            and current.get("path") == _MANAGER_PATH
+        ):
+            raise PrivateWebCdpError("inventory_wrong_target")
 
     @staticmethod
     def _page(client: _CdpClient, page: int) -> ReadResult[dict[str, Any]]:
@@ -269,8 +257,15 @@ class CdpManagementInventoryReader:
                 # An injected factory can itself open external transport.
                 # Admission must happen before ANY client factory call.
                 _require_private_web_cdp_authority()
-                client = self._client_factory()
-                if stop_requested is not None:
+                if stop_requested is None:
+                    client = self._client_factory()
+                else:
+                    if self._preconnected_client is None:
+                        raise PrivateWebInventoryReadSetupError(
+                            "cancellable CDP connection not composed"
+                        )
+                    client = self._preconnected_client
+                    self._preconnected_client = None
                     binder = getattr(client, "bind_cancellable_reads", None)
                     if not callable(binder):
                         raise PrivateWebInventoryReadSetupError(
@@ -349,3 +344,16 @@ class CdpManagementInventoryReader:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            pending = self._preconnected_client
+            self._preconnected_client = None
+            if pending is not None:
+                # A never-admitted injected client may implement an effectful
+                # close(). Refuse ALL such operations without true authority.
+                try:
+                    _require_private_web_cdp_authority()
+                except PrivateWebCdpError:
+                    return
+                try:
+                    pending.close()
+                except Exception:
+                    pass

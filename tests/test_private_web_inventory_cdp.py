@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import signal
 import threading
 import unittest
@@ -40,7 +41,7 @@ class FakeClient:
         params = dict(params or {})
         self.calls.append((method, params))
         if method == "Page.navigate":
-            return {"frameId": "synthetic"}
+            raise AssertionError("owner inventory must NEVER navigate any CDP target")
         if method != "Runtime.evaluate":
             raise AssertionError(method)
         if params.get("awaitPromise"):
@@ -50,13 +51,10 @@ class FakeClient:
             if isinstance(payload, Exception):
                 raise payload
             return {"result": {"value": payload}}
-        if len([m for m, _ in self.calls if m == "Runtime.evaluate" and not _.get("awaitPromise")]) == 1:
-            return {"result": {"value": True}}
         return {"result": {"value": {
             "readyState": "complete",
             "origin": self.origin,
             "path": self.path,
-            "oldDocument": False,
         }}}
 
     def close(self):
@@ -82,6 +80,7 @@ class BrowserInventoryTests(unittest.TestCase):
             cdp_port=19610, timeout_seconds=0.2,
             clock=lambda: datetime(2026, 10, 19, tzinfo=timezone.utc),
             client_factory=lambda: client,
+            preconnected_client=client,
             sleep=lambda _: None,
             monotonic=lambda: 2.0,
             **kwargs,
@@ -98,7 +97,7 @@ class BrowserInventoryTests(unittest.TestCase):
         self.assertEqual(result.value[0].views, 5)
         self.assertTrue(client.closed)
         navigations = [p for method, p in client.calls if method == "Page.navigate"]
-        self.assertEqual(navigations, [{"url": "https://www.kleinanzeigen.de/m-meine-anzeigen.html"}])
+        self.assertEqual(navigations, [], "owner inventory must never navigate an editor target")
         fetches = [p for method, p in client.calls if method == "Runtime.evaluate" and p.get("awaitPromise")]
         self.assertEqual(len(fetches), 2)
         for page, request in enumerate(fetches, start=1):
@@ -143,6 +142,104 @@ class BrowserInventoryTests(unittest.TestCase):
                 self.assertEqual(result.status, status)
                 self.assertTrue(client.closed)
 
+    def test_already_open_editor_target_denied_without_navigation(self):
+        # The owner reader may attach to a target currently owned by writer.
+        # It must not navigate or issue any management-page fetch from it.
+        editor = FakeClient([payload([])], path="/p-anzeige-bearbeiten.html")
+        refused = self.reader(editor).read_ads()
+        self.assertEqual(refused.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual([name for name, _ in editor.calls], ["Runtime.evaluate"])
+        self.assertFalse(any(
+            params.get("awaitPromise") or name == "Page.navigate"
+            for name, params in editor.calls
+        ))
+        self.assertTrue(editor.closed)
+
+    def test_editor_switch_between_probe_and_fetch_stays_read_only(self):
+        # A writer may change the target after the passive management check.
+        # The browser-side fetch expression must recheck page+origin itself.
+        class RacingTarget(FakeClient):
+            def _synthetic_send(self, method, params=None):
+                params = dict(params or {})
+                if method == "Runtime.evaluate" and params.get("awaitPromise"):
+                    self.calls.append((method, params))
+                    self_outer.assertEqual(
+                        self.path, "/p-anzeige-bearbeiten.html",
+                    )
+                    self_outer.assertLess(
+                        params["expression"].index("location.origin !=="),
+                        params["expression"].index("const response = await fetch"),
+                    )
+                    return {"result": {"value": {"error": "wrong_origin_or_page"}}}
+                reply = super()._synthetic_send(method, params)
+                if method == "Runtime.evaluate":
+                    self.path = "/p-anzeige-bearbeiten.html"
+                return reply
+
+        self_outer = self
+        client = RacingTarget([payload([])])
+        result = self.reader(client).read_ads()
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(
+            [method for method, _ in client.calls],
+            ["Runtime.evaluate", "Runtime.evaluate"],
+        )
+        self.assertTrue(client.closed)
+        self.assertEqual(len(client.pages), 1, "editor switch must not fetch inbox")
+
+    def test_second_process_editor_is_never_navigated_by_inventory(self):
+        """An unrelated worker may own the same Chrome target as our reader."""
+        if "fork" not in multiprocessing.get_all_start_methods():
+            self.skipTest("requires POSIX fork-capable synthetic worker")
+        ctx = multiprocessing.get_context("fork")
+        editor_open = ctx.Event()
+        editor_release = ctx.Event()
+        target_is_editor = ctx.Value("i", 0)
+        navigations = ctx.Value("i", 0)
+
+        def writer_worker():
+            with target_is_editor.get_lock():
+                target_is_editor.value = 1
+            editor_open.set()
+            editor_release.wait(timeout=7)
+            with target_is_editor.get_lock():
+                target_is_editor.value = 0
+
+        class SameTargetClient(FakeClient):
+            def _synthetic_send(self, method, params=None):
+                if method == "Page.navigate":
+                    with navigations.get_lock():
+                        navigations.value += 1
+                    with target_is_editor.get_lock():
+                        target_is_editor.value = 0
+                    self.calls.append((method, dict(params or {})))
+                    return {"frameId": "unwanted-navigation"}
+                self.path = (
+                    "/p-anzeige-bearbeiten.html" if target_is_editor.value
+                    else "/m-meine-anzeigen.html"
+                )
+                return super()._synthetic_send(method, params)
+
+        worker = ctx.Process(target=writer_worker)
+        worker.start()
+        try:
+            self.assertTrue(editor_open.wait(timeout=3))
+            client = SameTargetClient([payload([])])
+            result = self.reader(client).read_ads()
+            self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+            self.assertEqual([name for name, _ in client.calls], ["Runtime.evaluate"])
+            self.assertEqual(navigations.value, 0)
+            self.assertEqual(target_is_editor.value, 1)
+            self.assertTrue(worker.is_alive())
+            self.assertTrue(client.closed)
+        finally:
+            editor_release.set()
+            worker.join(timeout=4)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=4)
+        self.assertFalse(worker.is_alive())
+
     def test_wrong_browser_origin_or_path_never_fetches(self):
         for origin, path in (("https://attacker.example", "/m-meine-anzeigen.html"),
                              ("https://www.kleinanzeigen.de", "/m-einloggen.html")):
@@ -173,6 +270,22 @@ class BrowserInventoryTests(unittest.TestCase):
         for port in (0, -1, 65536, True, "19610"):
             with self.subTest(port=port), self.assertRaises(ValueError):
                 CdpManagementInventoryReader(cdp_port=port)
+
+    def test_stop_aware_reader_never_calls_lazy_client_factory(self):
+        invoked = []
+        def factory():
+            invoked.append("uncontrolled_connect")
+            return FakeClient([payload([])])
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610, client_factory=factory,
+        )
+        with self.assertRaisesRegex(
+            PrivateWebInventoryReadSetupError,
+            "cancellable CDP connection not composed",
+        ):
+            reader.read_ads(stop_requested=lambda: False)
+        self.assertEqual(invoked, [])
+        reader.close()
 
     def test_real_sigterm_during_last_admission_predicate_never_starts_cdp(self):
         if not hasattr(signal, "pthread_sigmask"):
@@ -399,6 +512,20 @@ class BrowserInventoryAuthorizationTests(unittest.TestCase):
         self.assertEqual(preconnected.calls, [])
         self.assertFalse(preconnected.closed)
 
+    def test_unadmitted_preconnected_client_close_cannot_run_injected_hook(self):
+        # Regression: an untrusted client.close may itself discover/open CDP.
+        # Reader.close before admission must not invoke any such client code.
+        side_effects = []
+        class EffectfulClient:
+            def close(self):
+                side_effects.append("unexpected_client_transport")
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610, preconnected_client=EffectfulClient(),
+        )
+        reader.close()
+        self.assertEqual(side_effects, [])
+        self.assertEqual(reader.read_ads().status, ReadStatus.TRANSPORT_ERROR)
+
     def test_raw_transport_helpers_deny_even_preconnected_client(self) -> None:
         client = FakeClient([payload([])])
         reader = CdpManagementInventoryReader(cdp_port=19610)
@@ -423,7 +550,7 @@ class BrowserInventoryAuthorizationTests(unittest.TestCase):
         self.assertTrue(client.closed)
         self.assertEqual(
             [method for method, _ in client.calls],
-            ["Runtime.evaluate", "Page.navigate", "Runtime.evaluate", "Runtime.evaluate"],
+            ["Runtime.evaluate", "Runtime.evaluate"],
         )
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import sqlite3
 import sys
 from collections.abc import Callable
 from contextlib import closing
@@ -184,26 +185,49 @@ class PeriodicOwnerSync:
         # (UTC instant, row ID, state) per ad. Exact datetime comparisons
         # match SnapshotStore.ad_history's timeline ordering, without one
         # separate connection/history sort per ad. Memory is O(unique ads).
-        newest: dict[str, tuple[datetime, int, str]] = {}
+        newest: dict[str, tuple[datetime, int, LifecycleState]] = {}
         with closing(self._store._connect()) as connection:
             connection.execute("PRAGMA query_only=ON")
             cursor = connection.execute(
                 "SELECT id, ad_id, observed_at, lifecycle_state FROM ad_snapshots"
             )
             for row in cursor:
-                observed = datetime.fromisoformat(str(row["observed_at"]))
-                if observed.tzinfo is None or observed.utcoffset() is None:
-                    raise ValueError("invalid stored observation timezone")
-                instant = observed.astimezone(timezone.utc)
-                ad_id = str(row["ad_id"])
-                ordinal = int(row["id"])
+                ordinal = row["id"]
+                ad_id = row["ad_id"]
+                observed_at = row["observed_at"]
+                lifecycle = row["lifecycle_state"]
+                # SQLite's TEXT affinity does not guarantee that stored rows
+                # contain native TEXT. Coercing BLOB or malformed values to
+                # str() could invent an owner ID and persist a false ABSENT
+                # transition following an apparently successful empty read.
+                # Fail before opening the runtime OR creating a sync journal.
+                if (
+                    type(ordinal) is not int or ordinal <= 0
+                    or type(ad_id) is not str
+                    or not ad_id.strip()
+                    # Owner browser input strips IDs. A stored padded ID
+                    # would be falsely inferred ABSENT after an empty read.
+                    # Never normalize a persisted identity silently.
+                    or ad_id != ad_id.strip()
+                    or type(observed_at) is not str
+                    or type(lifecycle) is not str
+                ):
+                    raise sqlite3.DatabaseError("invalid stored owner observation")
+                try:
+                    observed = datetime.fromisoformat(observed_at)
+                    state = LifecycleState(lifecycle)
+                    if observed.tzinfo is None or observed.utcoffset() is None:
+                        raise ValueError("owner observation must be timezone-aware")
+                    instant = observed.astimezone(timezone.utc)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise sqlite3.DatabaseError("invalid stored owner observation") from exc
                 former = newest.get(ad_id)
                 if former is None or (instant, ordinal) > (former[0], former[1]):
-                    newest[ad_id] = (instant, ordinal, str(row["lifecycle_state"]))
+                    newest[ad_id] = (instant, ordinal, state)
         return tuple(
             sorted(
                 ad_id for ad_id, (_, _, state) in newest.items()
-                if state != LifecycleState.ABSENT.value
+                if state is not LifecycleState.ABSENT
             )
         )
 
