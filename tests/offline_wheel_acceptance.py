@@ -955,6 +955,21 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 "synthetic_platform_only": True,
             })
 
+            # Run the actual full-CRUD/restart HTTP test against this wheel,
+            # not checkout imports. This netns exposes loopback only and every
+            # platform write is consumed by its stateful synthetic owner.
+            crud_result = _command(
+                str(python), "-I", "-m", "unittest", "discover",
+                "-s", str(Path(__file__).resolve().parent),
+                "-p", "test_dashboard_full_lifecycle_e2e.py", "-v",
+                cwd=root, env=env, timeout=95,
+            )
+            self.assertEqual(crud_result.returncode, 0, crud_result.stderr[-2500:])
+            self.assertRegex(
+                crud_result.stderr, r"Ran [1-9][0-9]* tests? in [0-9.]+s",
+            )
+            self.assertIn("OK", crud_result.stderr)
+
             # This is a create-only, same-user *offline* backup, NOT hostile
             # service-UID A6 recovery. Test installed CLI, receipt and manual
             # copy-to-new-path recovery; never overwrite the source or backup.
@@ -1014,6 +1029,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "provider_consent_default_deny": True,
             "installed_synthetic_text_and_image_drafts": True,
             "installed_synthetic_dashboard_write_end_to_end": True,
+            "installed_synthetic_full_crud_restart_e2e": True,
             "image_draft_private_and_create_only": True,
             "backup_scope": "create-only-offline-not-a6",
             "backup_sha256": backup_sha256,

@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mark_api.launcher import _parser, build_product_launcher, main
+from mark_api.private_web_runtime import PrivateWebRuntimeDependencyError
 
 
 class ProductStartupAdmissionTests(unittest.TestCase):
@@ -27,6 +28,19 @@ class ProductStartupAdmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cdp_port"):
                 build_product_launcher(db_path=db, cdp_port=0, initialize_db=True)
             self.assertFalse(db.exists())
+
+    def test_new_store_requires_browser_dependencies_before_any_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "missing" / "state.sqlite"
+            with patch(
+                "mark_api.launcher.require_private_web_runtime_dependency",
+                side_effect=PrivateWebRuntimeDependencyError("missing private-web extra"),
+            ):
+                with self.assertRaises(PrivateWebRuntimeDependencyError):
+                    build_product_launcher(
+                        db_path=db, cdp_port=9222, initialize_db=True,
+                    )
+            self.assertFalse(db.parent.exists())
 
     def test_missing_store_fails_before_browser_access_or_write(self):
         with tempfile.TemporaryDirectory() as tmp:

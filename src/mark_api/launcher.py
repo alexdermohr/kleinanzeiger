@@ -24,6 +24,7 @@ from .private_web import PrivateWebSubmitUnknownError
 from .private_web_cdp import PrivateWebCdpError, _require_private_web_cdp_authority
 from .private_web_runtime import (
     PrivateWebRuntimeDependencyError,
+    require_private_web_runtime_dependency,
     build_private_web_inventory_runtime,
     build_private_web_write_api_runtime,
 )
@@ -418,6 +419,10 @@ def build_product_launcher(
         raise TypeError("dashboard_token_factory must be callable or None")
     if not callable(clock):
         raise TypeError("clock must be callable")
+    # A new store must not be created just to discover missing browser extras.
+    # Explicit synthetic factories remain independent of those dependencies.
+    if initialize_db and runtime_factory is _DEFAULT_INVENTORY_RUNTIME:
+        require_private_web_runtime_dependency()
     # Reuse the existing guarded browser and Write API; no blanket release gate.
     resolved_write_runtime_factory = (
         build_private_web_write_api_runtime
