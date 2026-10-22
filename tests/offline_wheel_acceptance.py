@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from contextlib import closing, contextmanager
@@ -133,6 +134,7 @@ def _command(*args: str, cwd: Path, env: dict[str, str], timeout: int = 45):
 def _offline_server(
     python: Path, directory: Path, env: dict[str, str], database: Path,
     emails: tuple[Path, ...], *, initialize: bool = False,
+    catalogs: tuple[Path, ...] = (),
 ):
     argv = [
         str(python), "-u", "-I", "-m", "mark_api", "--db", str(database),
@@ -142,6 +144,8 @@ def _offline_server(
         argv.append("--init-db")
     for email in emails:
         argv.extend(["--email", str(email)])
+    for catalog in catalogs:
+        argv.extend(["--catalog", str(catalog)])
     stderr_path = directory / "offline-stderr.log"
     with stderr_path.open("ab") as error_output:
         process = subprocess.Popen(
@@ -301,8 +305,22 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             email_a.write_bytes(_notification("wheel-msg-1", "Thu, 24 Sep 2026 10:37:48 +0000"))
             email_b.write_bytes(_notification("wheel-msg-2", "Thu, 24 Sep 2026 10:38:48 +0000"))
             email_files = (email_a, email_b)
+            catalog = root / "explicit-local-catalog.json"
+            catalog.write_text(json.dumps({
+                "schema": "mark-local-catalog-v1",
+                "ads": [{
+                    "ad_id": "1234567890",
+                    "observed_at": "2026-10-22T02:01:00Z",
+                    "title": "Locally supplied, unverified listing",
+                    "views": 23,
+                    "watch_count": 0,
+                }],
+            }), encoding="utf-8")
 
-            with _offline_server(python, root, env, database, email_files, initialize=True) as address:
+            with _offline_server(
+                python, root, env, database, email_files,
+                initialize=True, catalogs=(catalog,),
+            ) as address:
                 code, _, payload = _request(address, "/healthz")
                 self.assertEqual((code, json.loads(payload)), (200, {"status": "ok"}))
                 code, _, payload = _request(address, "/readyz")
@@ -312,6 +330,28 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 code, _, payload = _request(address, "/")
                 self.assertEqual(code, 200)
                 self.assertIn(b"dashboard.js", payload)
+
+                code, _, payload = _request(address, "/api/ads")
+                self.assertEqual(code, 200)
+                ads = json.loads(payload)
+                self.assertEqual(len(ads), 1)
+                self.assertEqual(ads[0]["ad_id"], "1234567890")
+                self.assertEqual(ads[0]["views"], 23)
+                self.assertEqual(ads[0]["lifecycle_state"], "unknown")
+                self.assertFalse(ads[0]["present"], "unverified catalog cannot claim current owner")
+                self.assertEqual(ads[0]["source"], "user-supplied-local-catalog")
+                code, _, payload = _request(address, "/api/summary")
+                self.assertEqual(code, 200)
+                summary = json.loads(payload)
+                self.assertEqual(summary["tracked_ads"], 1)
+                self.assertEqual(summary["current_ads"], 0)
+                self.assertEqual(summary["unknown_state_ads"], 1)
+                code, _, payload = _request(address, "/api/analytics/ads?metric=views")
+                self.assertEqual(code, 200)
+                self.assertEqual(
+                    [(row["ad_id"], row["value"]) for row in json.loads(payload)],
+                    [("1234567890", 23)],
+                )
 
                 code, _, payload = _request(address, "/api/email-reactions")
                 reactions = json.loads(payload)
@@ -355,10 +395,15 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             self.assertEqual(classified.returncode, 0, classified.stderr)
 
             # Reimporting the same local files must not double-count messages.
-            with _offline_server(python, root, env, database, email_files) as address:
+            with _offline_server(
+                python, root, env, database, email_files, catalogs=(catalog,),
+            ) as address:
                 code, _, payload = _request(address, "/api/email-reactions")
                 self.assertEqual(code, 200)
                 self.assertEqual(json.loads(payload)[0]["inbound_message_count"], 2)
+                code, _, payload = _request(address, "/api/ads")
+                self.assertEqual(code, 200)
+                self.assertEqual(json.loads(payload)[0]["views"], 23)
                 groups_path = (
                     "/api/analytics/groups.csv?"
                     "dimension=city&metric=email_inbound_message_count"
@@ -371,6 +416,125 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 self.assertEqual(groups[0]["metric_sum"], "2")
                 code, _, payload = _request(address, "/api/dashboard/config")
                 self.assertEqual((code, json.loads(payload)), (200, {"write_ui_available": False}))
+
+            with closing(sqlite3.connect(database)) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM ad_snapshots").fetchone()[0], 1,
+                    "repeated installed catalog start duplicated the observation",
+                )
+            # This is a second, independent database. The installed wheel
+            # (not the checkout) must keep catalog-only IDs unverified, retain
+            # real prior-owner ABSENT transitions and label fallback metrics
+            # last-known after a newer owner status omitted them.
+            owner_db = root / "synthetic-owner-and-catalog.sqlite"
+            owner_catalog = root / "synthetic-owner-catalog.json"
+            owner_catalog.write_text(json.dumps({
+                "schema": "mark-local-catalog-v1",
+                "ads": [
+                    {"ad_id": ad_id, "observed_at": "2026-10-22T02:01:00Z",
+                     "views": 23}
+                    for ad_id in ("1234567890", "1234567891", "1234567892")
+                ],
+            }), encoding="utf-8")
+            synthetic_owner_setup = textwrap.dedent("""
+                import sys
+                from pathlib import Path
+                from datetime import datetime, timezone
+                from mark_api.domain import AdSnapshot, LifecycleState
+                from mark_api.local_catalog_import import import_local_catalog_files
+                from mark_api.results import ReadResult
+                from mark_api.storage import SnapshotStore
+
+                db = SnapshotStore(Path(sys.argv[1]))
+                import_local_catalog_files(db, (Path(sys.argv[2]),))
+                db.append_ad_snapshot(AdSnapshot(
+                    ad_id="1234567892",
+                    observed_at=datetime(2026, 10, 23, tzinfo=timezone.utc),
+                    source="synthetic-confirmed-owner",
+                    lifecycle_state=LifecycleState.ACTIVE,
+                    title="Confirmed owner title",
+                ))
+                current = AdSnapshot(
+                    ad_id="1234567891",
+                    observed_at=datetime(2026, 10, 24, tzinfo=timezone.utc),
+                    source="synthetic-confirmed-owner",
+                    lifecycle_state=LifecycleState.ACTIVE,
+                )
+                count = db.append_inventory_result(
+                    ReadResult.success_nonempty((current,)),
+                    tracked_ad_ids=db.tracked_ad_ids(),
+                    observed_at=datetime(2026, 10, 24, tzinfo=timezone.utc),
+                    source="synthetic-confirmed-owner",
+                )
+                assert count == 2, "catalog-only ID acquired forged ABSENT"
+                assert len(db.ad_history("1234567890")) == 1
+                assert db.ad_history("1234567892")[-1].lifecycle_state is LifecycleState.ABSENT
+            """)
+            owner_prepared = _command(
+                str(python), "-I", "-c", synthetic_owner_setup,
+                str(owner_db), str(owner_catalog), cwd=root, env=env,
+            )
+            self.assertEqual(owner_prepared.returncode, 0, owner_prepared.stderr)
+            with _offline_server(python, root, env, owner_db, ()) as owner_address:
+                code, _, payload = _request(owner_address, "/api/ads")
+                self.assertEqual(code, 200)
+                owner_rows = {item["ad_id"]: item for item in json.loads(payload)}
+                self.assertEqual(len(owner_rows), 3)
+                catalog_only = owner_rows["1234567890"]
+                self.assertEqual(catalog_only["lifecycle_state"], "unknown")
+                self.assertFalse(catalog_only["present"])
+                self.assertEqual(catalog_only["source"], "user-supplied-local-catalog")
+                owner_current = owner_rows["1234567891"]
+                self.assertTrue(owner_current["present"])
+                self.assertEqual(owner_current["lifecycle_state"], "active")
+                self.assertEqual(owner_current["source"], "synthetic-confirmed-owner")
+                self.assertEqual(owner_current["views"], 23)
+                self.assertEqual(
+                    owner_current["metric_evidence"]["views"]["source"],
+                    "user-supplied-local-catalog",
+                )
+                self.assertTrue(owner_current["metric_evidence"]["views"]["last_known"])
+                owner_absent = owner_rows["1234567892"]
+                self.assertFalse(owner_absent["present"])
+                self.assertEqual(owner_absent["lifecycle_state"], "absent")
+                self.assertEqual(owner_absent["source"], "synthetic-confirmed-owner")
+                code, _, payload = _request(owner_address, "/api/summary")
+                self.assertEqual(code, 200)
+                summary = json.loads(payload)
+                self.assertEqual(
+                    (summary["tracked_ads"], summary["current_ads"],
+                     summary["absent_ads"], summary["unknown_state_ads"]),
+                    (3, 1, 1, 1),
+                )
+            with closing(sqlite3.connect(owner_db)) as owner_connection:
+                local_rows = owner_connection.execute(
+                    "SELECT source, lifecycle_state FROM ad_snapshots WHERE ad_id=?",
+                    ("1234567890",),
+                ).fetchall()
+                self.assertEqual(
+                    local_rows,
+                    [("user-supplied-local-catalog", "unknown")],
+                    "unverified catalog must not generate a sourced owner absence",
+                )
+
+            malformed_catalog = root / "malformed-catalog.json"
+            malformed_catalog.write_text(json.dumps({
+                "schema": "mark-local-catalog-v1",
+                "ads": [{"ad_id": "1234567890", "observed_at": "no-offset"}],
+            }), encoding="utf-8")
+            denied_catalog = _command(
+                str(venv / "bin" / "mark-api-offline"),
+                "--db", str(database), "--port", "0",
+                "--catalog", str(malformed_catalog),
+                cwd=root, env=env,
+            )
+            self.assertEqual(denied_catalog.returncode, 2)
+            self.assertIn("local catalog import failed", denied_catalog.stderr)
+            self.assertNotIn("no-offset", denied_catalog.stderr)
+            with closing(sqlite3.connect(database)) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM ad_snapshots").fetchone()[0], 1,
+                )
 
             # Optional generation is still a local draft-only capability. No
             # paid provider call may start in either mode without per-call consent.
@@ -425,6 +589,9 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             shutil.copyfile(backup, restored)
             os.chmod(restored, 0o600)
             with _offline_server(python, root, env, restored, ()) as address:
+                code, _, payload = _request(address, "/api/ads")
+                self.assertEqual(code, 200)
+                self.assertEqual(json.loads(payload)[0]["views"], 23)
                 code, _, payload = _request(address, "/api/email-reactions")
                 self.assertEqual(code, 200)
                 self.assertEqual(json.loads(payload)[0]["inbound_message_count"], 2)
@@ -438,13 +605,15 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
         print(json.dumps({
             "result": "PASS", "scope": "installed-offline-wheel",
             "wheel_sha256": wheel_hash, "platform_access": False,
-            "local_eml_events": 2, "sqlite_quick_check": "ok",
+            "local_eml_events": 2, "local_catalog_snapshots": 1,
+            "sqlite_quick_check": "ok",
             "loopback_http": True, "csv": True, "denied_writes": True,
             "restart_deduplication": True,
             "provider_consent_default_deny": True,
             "backup_scope": "create-only-offline-not-a6",
             "backup_sha256": backup_sha256,
             "offline_restore_checked": True,
+            "synthetic_owner_absence_and_provenance": True,
             "network_isolation": "linux-non-escalating-loopback-netns",
         }, sort_keys=True))
 

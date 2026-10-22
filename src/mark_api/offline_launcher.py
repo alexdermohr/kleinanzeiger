@@ -10,6 +10,7 @@ from urllib.parse import quote
 from .analytics import ANALYTICS_METRICS, REACTION_METRICS, AnalyticsContract
 from .dashboard import DashboardGenerationAccess, create_server
 from .email_import import import_kleinanzeigen_email_files
+from .local_catalog_import import import_local_catalog_files
 from .storage import SnapshotStore
 
 
@@ -34,6 +35,15 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="FILE",
         help="Import an explicitly supplied local RFC822/.eml notification.",
+    )
+    parser.add_argument(
+        "--catalog",
+        dest="catalogs",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="Import explicitly supplied, unverified local catalog JSON v1 (repeatable).",
     )
     parser.add_argument(
         "--port",
@@ -102,6 +112,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         import_report = None
 
+    # Catalog and EML files are separate, independently atomic local batches.
+    # Catalog rows never imply authenticated owner or platform Write authority.
+    if args.catalogs:
+        try:
+            catalog_report = import_local_catalog_files(store, args.catalogs)
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            parser.error("local catalog import failed (check schema, conflicts and file type)")
+    else:
+        catalog_report = None
+
     try:
         # Omit write_proxy deliberately: no write routes, CDP, browser
         # inventory, bearer tokens, or platform network clients are constructed.
@@ -126,6 +146,19 @@ def main(argv: list[str] | None = None) -> int:
     print("Platform sync and writes: disabled (local files only).", flush=True)
     if generation_access is not None:
         print("Draft generation: opt-in, separate consent and possible provider costs per request.", flush=True)
+    if catalog_report is not None:
+        print(
+            "Local catalog import: "
+            f"{catalog_report.parsed_files} file(s), "
+            f"{catalog_report.inserted_snapshots} new observation(s), "
+            f"{catalog_report.duplicate_snapshots} duplicate(s).",
+            flush=True,
+        )
+        print(
+            "Catalog provenance: user-supplied / unverified; "
+            "no platform owner or write authority inferred.",
+            flush=True,
+        )
     if import_report is not None:
         print(
             "Local email import: "

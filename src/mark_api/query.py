@@ -97,26 +97,58 @@ class MarkQueryService:
 
     def latest_ads(self) -> tuple[AdView, ...]:
         rows: list[AdView] = []
-        # The generator owns one SQLite read cursor; close it even when a
-        # malformed snapshot raises during the projection.
+        # Close each paginated SQLite iterator even when projection rejects
+        # a corrupted native value; manual catalog never grants owner status.
         with closing(self._store.ad_histories()) as histories:
             for ad_id, history in histories:
                 if not history:
                     continue
-                latest = history[-1]
-                metrics = {
-                    field_name: _last_metric_with_evidence(history, field_name)
-                    for field_name in ("views", "watch_count", "reply_count")
-                }
+                owner_history = tuple(
+                    item for item in history
+                    if item.source != "user-supplied-local-catalog"
+                )
+                catalog_history = tuple(
+                    item for item in history
+                    if item.source == "user-supplied-local-catalog"
+                )
+                owner = owner_history[-1] if owner_history else None
+                latest = owner if owner is not None else history[-1]
+                metrics: dict[str, tuple[int | None, MetricEvidence | None]] = {}
+                for field_name in ("views", "watch_count", "reply_count"):
+                    value, evidence = _last_metric_with_evidence(
+                        owner_history if owner_history else history,
+                        field_name,
+                    )
+                    if value is None and owner_history:
+                        value, evidence = _last_metric_with_evidence(
+                            catalog_history, field_name,
+                        )
+                        if evidence is not None:
+                            evidence = MetricEvidence(
+                                observed_at=evidence.observed_at,
+                                source=evidence.source,
+                                last_known=True,
+                            )
+                    metrics[field_name] = value, evidence
                 rows.append(
                     AdView(
                         ad_id=ad_id,
-                        lifecycle_state=latest.lifecycle_state,
-                        present=latest.lifecycle_state is not LifecycleState.ABSENT,
+                        lifecycle_state=(
+                            owner.lifecycle_state if owner is not None
+                            else LifecycleState.UNKNOWN
+                        ),
+                        present=(
+                            owner is not None
+                            and owner.lifecycle_state is not LifecycleState.ABSENT
+                        ),
                         observed_at=latest.observed_at,
                         source=latest.source,
-                        title=_last_not_none(history, "title"),
-                        description=_last_not_none(history, "description"),
+                        title=_last_not_none(
+                            owner_history if owner_history else history, "title",
+                        ),
+                        description=_last_not_none(
+                            owner_history if owner_history else history, "description",
+                        ),
                         views=metrics["views"][0],
                         watch_count=metrics["watch_count"][0],
                         reply_count=metrics["reply_count"][0],
