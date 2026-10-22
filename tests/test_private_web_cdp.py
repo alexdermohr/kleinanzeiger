@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import unittest
@@ -25,11 +26,14 @@ from mark_api.private_web_cdp import (
     CdpPrivateWebOwnerReader,
     CdpPrivateWebPage,
     PrivateWebCdpError,
+    PrivateWebCdpReadCancelled,
+    PrivateWebCdpReadSetupError,
     PrivateWebCdpWriteNotAttemptedError,
     _LoopbackCdpClient,
     _proxy_free_loopback_opener,
     _validated_loopback_endpoint,
 )
+from mark_api.private_web_inventory_cdp import _cancellable_transport_entry
 from mark_api.results import ReadResult, ReadStatus
 
 
@@ -79,6 +83,12 @@ class FakeSocket:
         self.responses = list(responses)
         self.sent: list[dict[str, object]] = []
         self.closed = False
+        self.timeout = 1.0
+        self.timeout_changes = []
+
+    def settimeout(self, value) -> None:
+        self.timeout = value
+        self.timeout_changes.append(value)
 
     def send(self, text: str) -> None:
         self.sent.append(json.loads(text))
@@ -1654,6 +1664,261 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         self.assertEqual([message["id"] for message in socket.sent], [1, 2])
         client.close()
         self.assertTrue(socket.closed)
+
+    def test_cancellable_cdp_send_defers_term_only_during_socket_send(self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal mask required")
+        stopped = []
+        class Socket:
+            def __init__(self):
+                self.sent = 0
+                self.received = 0
+                self.timeout = 1.0
+                self.timeouts = []
+            def settimeout(self, value):
+                self.timeout = value
+                self.timeouts.append(value)
+            def send(self, message):
+                self_outer.assertEqual(self.timeout, 0.0)
+                self.sent += 1
+                signal.raise_signal(signal.SIGTERM)
+                self_outer.assertEqual(stopped, [])
+            def recv(self):
+                self.received += 1
+                raise AssertionError("no recv after signal")
+        self_outer = self
+        socket = Socket()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        client._timeout_seconds = 5.0
+        predicate = lambda: bool(stopped)
+        client.bind_cancellable_reads(
+            stop_requested=predicate,
+            send_guard=lambda: _cancellable_transport_entry(predicate),
+        )
+        original = signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
+        try:
+            with self.assertRaises(PrivateWebCdpReadCancelled):
+                client.call("Runtime.evaluate")
+        finally:
+            signal.signal(signal.SIGTERM, original)
+        self.assertEqual(stopped, [True])
+        self.assertEqual(socket.sent, 1)
+        self.assertEqual(socket.received, 0)
+        self.assertEqual(socket.timeouts, [0.0, 0.25])
+
+    def test_default_sigint_interrupts_unbounded_cdp_recv_after_one_frame(self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal mask required")
+        class EventFlood:
+            def __init__(self):
+                self.receives = 0
+                self.timeouts = []
+            def settimeout(self, value):
+                self.timeouts.append(value)
+            def send(self, message):
+                pass
+            def recv(self):
+                self.receives += 1
+                signal.raise_signal(signal.SIGINT)
+                return json.dumps({"method": "Page.event"})
+        socket = EventFlood()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        client._timeout_seconds = 5.0
+        client.bind_cancellable_reads(
+            stop_requested=lambda: False,
+            send_guard=lambda: _cancellable_transport_entry(lambda: False),
+        )
+        original = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                client.call("Runtime.evaluate")
+        finally:
+            signal.signal(signal.SIGINT, original)
+        self.assertEqual(socket.receives, 1)
+        self.assertEqual(socket.timeouts, [0.0, 0.25, 0.25])
+
+    def test_cancellable_send_is_nonblocking_while_sigterm_is_masked(self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal mask required")
+        class WouldBlock:
+            def __init__(self):
+                self.timeout = 1.0
+                self.attempted = 0
+                self.received = 0
+            def settimeout(self, value):
+                self.timeout = value
+            def send(self, message):
+                self.attempted += 1
+                self_outer.assertEqual(self.timeout, 0.0)
+                # Emulate full kernel send-buffer. Must not wait under mask.
+                raise BlockingIOError("synthetic full socket send buffer")
+            def recv(self):
+                self.received += 1
+                raise AssertionError("no read after an unsent CDP frame")
+        self_outer = self
+        socket = WouldBlock()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        client._timeout_seconds = 5.0
+        predicate = lambda: False
+        client.bind_cancellable_reads(
+            stop_requested=predicate,
+            send_guard=lambda: _cancellable_transport_entry(predicate),
+        )
+        with self.assertRaises(PrivateWebCdpError) as caught:
+            client.call("Runtime.evaluate")
+        self.assertEqual(caught.exception.stage, "call")
+        self.assertEqual(socket.attempted, 1)
+        self.assertEqual(socket.received, 0)
+        self.assertEqual(socket.timeout, 0.25)
+
+    def test_cancellable_recv_timeout_observes_flag_only_sigterm(self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal mask required")
+        stopped = []
+        class QuietSocket:
+            def __init__(self):
+                self.timeout = 1.0
+                self.received = 0
+                self.sent = 0
+            def settimeout(self, value):
+                self.timeout = value
+            def send(self, message):
+                self_outer.assertEqual(self.timeout, 0.0)
+                self.sent += 1
+            def recv(self):
+                self_outer.assertEqual(self.timeout, 0.25)
+                self.received += 1
+                # A signal alone produces no CDP response. The bounded
+                # socket timeout must still let the stop flag end the call.
+                signal.raise_signal(signal.SIGTERM)
+                raise TimeoutError("quiet local CDP reader")
+        self_outer = self
+        socket = QuietSocket()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        client._timeout_seconds = 5.0
+        original = signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
+        try:
+            client.bind_cancellable_reads(
+                stop_requested=lambda: bool(stopped),
+                send_guard=lambda: _cancellable_transport_entry(lambda: bool(stopped)),
+            )
+            with self.assertRaises(PrivateWebCdpReadCancelled):
+                client.call("Runtime.evaluate")
+        finally:
+            signal.signal(signal.SIGTERM, original)
+        self.assertEqual(stopped, [True])
+        self.assertEqual(socket.sent, 1)
+        self.assertEqual(socket.received, 1)
+
+    def test_cancellable_event_flood_has_absolute_call_deadline(self) -> None:
+        class EventFlood:
+            def __init__(self):
+                self.timeouts = []
+                self.received = 0
+            def settimeout(self, value):
+                self.timeouts.append(value)
+            def send(self, message):
+                pass
+            def recv(self):
+                self.received += 1
+                return json.dumps({"method": "Page.event"})
+        socket = EventFlood()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        client._timeout_seconds = 0.02
+        client.bind_cancellable_reads(
+            stop_requested=lambda: False,
+            send_guard=lambda: _cancellable_transport_entry(lambda: False),
+        )
+        with patch(
+            "mark_api.private_web_cdp.time.monotonic",
+            side_effect=[0.0, 0.005, 0.006, 0.01, 0.02],
+        ):
+            with self.assertRaises(PrivateWebCdpError) as caught:
+                client.call("Runtime.evaluate")
+        self.assertEqual(caught.exception.stage, "call")
+        self.assertEqual(socket.received, 2)
+        self.assertEqual(socket.timeouts[:2], [0.0, 0.25])
+        self.assertTrue(all(0 < timeout <= 0.02 for timeout in socket.timeouts[2:]))
+
+    def test_cancellable_short_budget_rejects_late_response(self) -> None:
+        # Regression: the original .25s recv poll expanded a caller's .02s
+        # budget, accepting a result returned at .08s after the deadline.
+        class TimedReply:
+            def __init__(self):
+                self.timeouts = []
+                self.received = 0
+            def settimeout(self, value):
+                self.timeouts.append(value)
+            def send(self, message):
+                pass
+            def recv(self):
+                self.received += 1
+                return json.dumps({"id": 1, "result": {"ok": True}})
+        socket = TimedReply()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        client._timeout_seconds = 0.02
+        client.bind_cancellable_reads(
+            stop_requested=lambda: False,
+            send_guard=lambda: _cancellable_transport_entry(lambda: False),
+        )
+        with patch("mark_api.private_web_cdp.time.monotonic",
+                   side_effect=[0.0, 0.0, 0.08]):
+            with self.assertRaises(PrivateWebCdpError) as caught:
+                client.call("Runtime.evaluate")
+        self.assertEqual(caught.exception.stage, "call")
+        self.assertEqual(socket.received, 1)
+        self.assertTrue(0 < socket.timeouts[-1] <= 0.02)
+
+    def test_cancellable_short_budget_allows_timely_response(self) -> None:
+        class TimedReply:
+            def __init__(self):
+                self.timeouts = []
+            def settimeout(self, value):
+                self.timeouts.append(value)
+            def send(self, message):
+                pass
+            def recv(self):
+                return json.dumps({"id": 1, "result": {"ok": True}})
+        socket = TimedReply()
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = socket
+        client._timeout_seconds = 0.02
+        client.bind_cancellable_reads(
+            stop_requested=lambda: False,
+            send_guard=lambda: _cancellable_transport_entry(lambda: False),
+        )
+        with patch("mark_api.private_web_cdp.time.monotonic",
+                   side_effect=[0.0, 0.0, 0.01]):
+            result = client.call("Runtime.evaluate")
+        self.assertEqual(result, {"ok": True})
+        self.assertTrue(0 < socket.timeouts[-1] <= 0.02)
+
+    def test_cancellable_transport_requires_socket_timeout_control(self) -> None:
+        class UnsupportedSocket:
+            def send(self, message):
+                raise AssertionError("must not call unsupported socket")
+        client = object.__new__(_LoopbackCdpClient)
+        client._next_id = 0
+        client._socket = UnsupportedSocket()
+        client._timeout_seconds = 5.0
+        with self.assertRaises(PrivateWebCdpReadSetupError):
+            client.bind_cancellable_reads(
+                stop_requested=lambda: False,
+                send_guard=lambda: _cancellable_transport_entry(lambda: False),
+            )
 
     def test_loopback_client_closes_direct_socket_on_websocket_failure(self) -> None:
         good_target = {

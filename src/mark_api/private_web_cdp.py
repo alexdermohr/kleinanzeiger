@@ -33,6 +33,9 @@ _MANAGEMENT_PATH = "/m-meine-anzeigen.html"
 _MANAGEMENT_MAX_PAGES = 100
 _POST_SUBMIT_PATH = _MANAGEMENT_PATH
 _MAX_TARGET_BYTES = 64 * 1024
+# Cancellable inventory CDP only. Keep signal delivery prompt even when
+# Chrome stops responding, without changing ordinary write/owner clients.
+_CDP_CANCEL_RECV_POLL_SECONDS = 0.25
 
 
 class _RejectRedirectHandler(HTTPRedirectHandler):
@@ -50,6 +53,14 @@ class PrivateWebCdpError(RuntimeError):
     def __init__(self, stage: str) -> None:
         self.stage = stage
         super().__init__(f"private web cdp failed at {stage}")
+
+
+class PrivateWebCdpReadCancelled(RuntimeError):
+    """An inventory CDP read was cancelled before another command."""
+
+
+class PrivateWebCdpReadSetupError(RuntimeError):
+    """No safe cancellation admission is available for this inventory read."""
 
 
 class PrivateWebCdpWriteNotAttemptedError(
@@ -140,6 +151,8 @@ class _LoopbackCdpClient:
         self._websocket_factory = websocket_factory
         self._tcp_socket_factory = tcp_socket_factory
         self._next_id = 0
+        self._read_stop_check = None
+        self._read_send_guard = None
         self._socket = self._connect()
 
     def _connect(self):
@@ -209,6 +222,23 @@ class _LoopbackCdpClient:
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.
             raise PrivateWebCdpError("connect") from None
 
+    def bind_cancellable_reads(
+        self, *, stop_requested: Callable[[], bool],
+        send_guard: Callable[[], Any],
+    ) -> None:
+        if (
+            self._next_id != 0 or getattr(self, "_read_stop_check", None) is not None
+            or not callable(stop_requested) or not callable(send_guard)
+            or not callable(getattr(self._socket, "settimeout", None))
+            or isinstance(self._timeout_seconds, bool)
+            or not isinstance(self._timeout_seconds, (int, float))
+            or not math.isfinite(float(self._timeout_seconds))
+            or not 0 < self._timeout_seconds <= 30
+        ):
+            raise PrivateWebCdpReadSetupError("invalid cancellable CDP binding")
+        self._read_stop_check = stop_requested
+        self._read_send_guard = send_guard
+
     def call(
         self,
         method: str,
@@ -216,6 +246,15 @@ class _LoopbackCdpClient:
     ) -> dict[str, Any]:
         # Even a caller-supplied cached socket cannot send unadmitted CDP data.
         _require_private_web_cdp_authority()
+        stop_requested = getattr(self, "_read_stop_check", None)
+        if stop_requested is not None and stop_requested():
+            raise PrivateWebCdpReadCancelled("inventory read cancelled")
+        # The total call deadline also bounds a stream of unrelated CDP
+        # event frames that would otherwise reset per-recv socket timeouts.
+        deadline = (
+            time.monotonic() + self._timeout_seconds
+            if stop_requested is not None else None
+        )
         self._next_id += 1
         message_id = self._next_id
         request: dict[str, object] = {
@@ -225,11 +264,64 @@ class _LoopbackCdpClient:
         if params:
             request["params"] = params
         try:
-            self._socket.send(
-                json.dumps(request, separators=(",", ":"), ensure_ascii=False)
-            )
+            serialized = json.dumps(request, separators=(",", ":"), ensure_ascii=False)
+            send_guard = getattr(self, "_read_send_guard", None)
+            if send_guard is None:
+                self._socket.send(serialized)
+            else:
+                # websocket-client's send_frame loops on partial writes.
+                # Set the socket NONBLOCKING before masking signals so every
+                # partial send either progresses or fails on EAGAIN, rather
+                # than indefinitely waiting while SIGTERM is blocked. A
+                # partial frame failure is unknown, NEVER retried.
+                self._socket.settimeout(0.0)
+                try:
+                    with send_guard():
+                        self._socket.send(serialized)
+                finally:
+                    # The response wait is never signal-masked. Poll at a
+                    # short bounded socket timeout so a flag-only SIGTERM
+                    # can cancel even when Chrome sends no more frames.
+                    self._socket.settimeout(_CDP_CANCEL_RECV_POLL_SECONDS)
             while True:
-                response = json.loads(self._socket.recv())
+                if stop_requested is not None:
+                    if stop_requested():
+                        raise PrivateWebCdpReadCancelled("inventory read cancelled")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise PrivateWebCdpError("call")
+                    # Never enlarge caller-configured timeout (which may be
+                    # shorter than our normal cancellation-poll interval).
+                    self._socket.settimeout(
+                        min(_CDP_CANCEL_RECV_POLL_SECONDS, remaining)
+                    )
+                try:
+                    response = json.loads(self._socket.recv())
+                except Exception as exc:
+                    # websocket-client wraps socket.timeout in its own
+                    # WebSocketTimeoutException. No retries of a platform
+                    # request: only the SAME already-sent CDP reply is polled.
+                    is_poll_timeout = (
+                        isinstance(exc, TimeoutError)
+                        or (
+                            type(exc).__module__ == "websocket._exceptions"
+                            and type(exc).__name__ == "WebSocketTimeoutException"
+                        )
+                    )
+                    if stop_requested is None or not is_poll_timeout:
+                        raise
+                    if stop_requested():
+                        raise PrivateWebCdpReadCancelled("inventory read cancelled") from None
+                    if time.monotonic() >= deadline:
+                        raise PrivateWebCdpError("call") from None
+                    continue
+                if stop_requested is not None:
+                    # A response arriving after the deadline is not a valid
+                    # success just because socket.recv() returned a frame.
+                    if stop_requested():
+                        raise PrivateWebCdpReadCancelled("inventory read cancelled")
+                    if time.monotonic() >= deadline:
+                        raise PrivateWebCdpError("call")
                 if response.get("id") != message_id:
                     continue
                 if "error" in response:
@@ -238,6 +330,8 @@ class _LoopbackCdpClient:
                 if not isinstance(result, dict):
                     raise ValueError("cdp returned an invalid result")
                 return result
+        except (PrivateWebCdpReadCancelled, PrivateWebCdpReadSetupError):
+            raise
         except Exception:  # noqa: BLE001 - never expose browser/provider detail.
             raise PrivateWebCdpError("call") from None
 
