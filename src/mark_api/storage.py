@@ -407,7 +407,16 @@ class SnapshotStore:
         if (
             definition is None
             or type(definition["sql"]) is not str
-            or re.search(r"\bCOLLATE\b", definition["sql"], re.IGNORECASE)
+            or re.search(
+                r"\bCOLLATE\b",
+                # The fixed table/index/column names are verified below;
+                # SQL comments do not alter effective index collations.
+                re.sub(
+                    r"/\*.*?\*/|--[^\r\n]*", " ", definition["sql"],
+                    flags=re.DOTALL,
+                ),
+                re.IGNORECASE,
+            )
         ):
             # Do not trust an index's BINARY override if its table column
             # may still use NOCASE for WHERE or SELECT DISTINCT.
@@ -2088,6 +2097,7 @@ class SnapshotStore:
         Arbitrary external updates/deletes are outside the append-only model.
         """
         high_water_id: int | None = None
+        initial_schema_version: int | None = None
         last_key: tuple[str, str, int] | None = None
         pending_ad_id: str | None = None
         pending_rows: list[sqlite3.Row] = []
@@ -2098,6 +2108,19 @@ class SnapshotStore:
                 # Keep the read transaction only until this page is fetched;
                 # it is released before every generator yield.
                 connection.execute("BEGIN")
+                # A table can be dropped and recreated with the same valid
+                # index name between pages. Validate its schema generation
+                # within each short-lived page transaction; yield remains
+                # lock-free for other writers.
+                version_row = connection.execute(
+                    "PRAGMA schema_version"
+                ).fetchone()
+                if version_row is None or type(version_row[0]) is not int:
+                    raise sqlite3.DatabaseError("history schema identity unavailable")
+                if initial_schema_version is None:
+                    initial_schema_version = version_row[0]
+                elif version_row[0] != initial_schema_version:
+                    raise sqlite3.DatabaseError("history schema changed during read")
                 self._validate_history_index_collation(
                     connection, "ad_snapshots"
                 )

@@ -181,5 +181,55 @@ class HistoryCollationContractTests(unittest.TestCase):
             stream.close()
 
 
+    def test_sql_comments_do_not_masquerade_as_explicit_collation(self) -> None:
+        for label, first_column in (
+            ("block", "ad_id /* COLLATE NOCASE is only a comment */"),
+            ("line", "ad_id -- COLLATE NOCASE is only a comment\n"),
+        ):
+            with self.subTest(label=label):
+                store = self._store("collate-comment-" + label)
+                with closing(sqlite3.connect(store.path)) as db, db:
+                    db.execute("DROP INDEX idx_ad_snapshots_ad_id_observed")
+                    db.execute(
+                        "CREATE INDEX idx_ad_snapshots_ad_id_observed "
+                        f"ON ad_snapshots({first_column}, observed_at, id)"
+                    )
+                # PRAGMA index_xinfo still proves BINARY for all three
+                # keys; explanatory SQL comments change no key semantics.
+                self.assertTrue(store.is_ready())
+                reopened = SnapshotStore(store.path, create_if_missing=False)
+                self.assertEqual(tuple(reopened.ad_histories()), ())
+
+    def test_paged_reader_refuses_recreated_canonical_table(self) -> None:
+        store = self._store("paged-valid-rebuild")
+        t0 = datetime(2026, 10, 21, 10, 0, tzinfo=timezone.utc)
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.executemany(
+                "INSERT INTO ad_snapshots "
+                "(ad_id, observed_at, source, lifecycle_state) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    (ad_id, (t0 + timedelta(seconds=step)).isoformat(),
+                     "synthetic", LifecycleState.ACTIVE.value)
+                    for ad_id in ("A", "B", "C")
+                    for step in range(300)
+                ],
+            )
+        stream = store.ad_histories()
+        try:
+            first_id, group = next(stream)
+            self.assertEqual((first_id, len(group)), ("A", 300))
+            # The replacement is semantically valid BINARY with the same
+            # index identity, but no longer the table of the first page.
+            self._rewrite_history_table(
+                store, "ad_snapshots", column_collation="BINARY",
+            )
+            self.assertTrue(store.is_ready())
+            with self.assertRaisesRegex(sqlite3.DatabaseError, "schema"):
+                tuple(stream)
+        finally:
+            stream.close()
+
+
 if __name__ == "__main__":
     unittest.main()
