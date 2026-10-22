@@ -108,7 +108,7 @@ def _client() -> Any:
         from openai import OpenAI
     except ImportError as exc:
         raise GenerationError(
-            "optional generation dependency missing; install mark-api[generation]"
+            "optional generation dependency missing; install kleinanzeiger[generation]"
         ) from exc
     # Generations cost money; an uncertain failure must never prompt an
     # automatic second generation. Explicit user retry is a new request.

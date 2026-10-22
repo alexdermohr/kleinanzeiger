@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import threading
 import tomllib
@@ -15,7 +16,7 @@ from unittest.mock import patch
 from urllib.request import ProxyHandler, build_opener
 
 from mark_api.analytics import AnalyticsContract
-from mark_api.dashboard import DashboardWriteProxy
+from mark_api.dashboard import DashboardGenerationAccess, DashboardWriteProxy
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.email_import import EmailImportReport
 from mark_api.launcher import (
@@ -30,6 +31,11 @@ from mark_api.write_api import WriteCapability
 
 
 NOW = datetime(2026, 10, 4, 15, 0, tzinfo=timezone.utc)
+
+
+def _writes_enabled_launcher(**kwargs):
+    # Existing lifecycle fixtures explicitly exercise the full customer Write path.
+    return build_product_launcher(enable_writes=True, **kwargs)
 
 
 def reaction_email(
@@ -156,13 +162,11 @@ class ProductLauncherTests(unittest.TestCase):
     DASHBOARD_TOKEN = "fake-dashboard-write-token-0001"
 
     def setUp(self) -> None:
-        # Historical lifecycle tests use synthetic runtimes only. They mock
-        # the admission check without authorizing real CDP or platform writes.
-        admission_patch = patch(
-            "mark_api.launcher._require_private_web_authorization",
-        )
-        admission_patch.start()
-        self.addCleanup(admission_patch.stop)
+        # These tests supply synthetic owner and write runtimes. Never
+        # relax the production guard outside this one fixture class.
+        admission = patch("mark_api.launcher._require_private_web_cdp_authority")
+        admission.start()
+        self.addCleanup(admission.stop)
         self.write_runtime = WriteRuntime()
         write_patch = patch(
             "mark_api.launcher.build_private_web_write_api_runtime",
@@ -206,7 +210,7 @@ class ProductLauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ProductLauncherError, "local snapshot store startup failed"
             ):
-                build_product_launcher(
+                _writes_enabled_launcher(
                     db_path=missing,
                     cdp_port=9222,
                     runtime_factory=runtime_factory,
@@ -218,7 +222,7 @@ class ProductLauncherTests(unittest.TestCase):
 
     def test_missing_write_request_table_prevents_launch_and_recreation(self) -> None:
         _tmp, db = self.make_db()
-        with sqlite3.connect(db) as connection:
+        with closing(sqlite3.connect(db)) as connection, connection:
             connection.execute("DROP TABLE write_api_requests")
         inventory_called = False
 
@@ -232,7 +236,7 @@ class ProductLauncherTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ProductLauncherError, "local snapshot store startup failed"
                 ):
-                    build_product_launcher(
+                    _writes_enabled_launcher(
                         db_path=db,
                         cdp_port=9222,
                         initialize_db=initialize_db,
@@ -240,7 +244,7 @@ class ProductLauncherTests(unittest.TestCase):
                     )
         self.assertFalse(inventory_called)
         self.assertEqual(self.write_runtime.start_calls, 0)
-        with sqlite3.connect(db) as connection:
+        with closing(sqlite3.connect(db)) as connection, connection:
             self.assertIsNone(
                 connection.execute(
                     "SELECT name FROM sqlite_master "
@@ -261,7 +265,7 @@ class ProductLauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ProductLauncherError, "local snapshot store startup failed"
         ):
-            build_product_launcher(
+            _writes_enabled_launcher(
                 db_path=db,
                 cdp_port=9222,
                 runtime_factory=runtime_factory,
@@ -273,7 +277,7 @@ class ProductLauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "new" / "mark.sqlite"
             inventory = InventoryRuntime(ReadResult.success_empty(()))
-            launcher = build_product_launcher(
+            launcher = _writes_enabled_launcher(
                 db_path=db,
                 cdp_port=9222,
                 initialize_db=True,
@@ -283,7 +287,7 @@ class ProductLauncherTests(unittest.TestCase):
             launcher.close()
             self.assertTrue(db.is_file())
             self.assertTrue(SnapshotStore(db, create_if_missing=False).is_ready())
-            reopened = build_product_launcher(
+            reopened = _writes_enabled_launcher(
                 db_path=db,
                 cdp_port=9222,
                 runtime_factory=lambda **kwargs: InventoryRuntime(
@@ -323,7 +327,7 @@ class ProductLauncherTests(unittest.TestCase):
             dashboard_calls.append((args, kwargs))
             return server
 
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             dashboard_port=0,
@@ -373,6 +377,42 @@ class ProductLauncherTests(unittest.TestCase):
             f"#write_token={self.DASHBOARD_TOKEN}",
         )
 
+    def test_product_starts_default_on_write_and_generation_in_one_session(self) -> None:
+        _tmp, db = self.make_db()
+        inventory = InventoryRuntime(ReadResult.success_empty(()))
+        server = DashboardServer()
+        seen = {}
+        provider_started = []
+
+        def dashboard_factory(*args, **kwargs):
+            seen.update(kwargs)
+            return server
+
+        generation = DashboardGenerationAccess(
+            ui_token="synthetic-generation-0123456789",
+            generator_factory=lambda: provider_started.append("called"),
+        )
+        launcher = build_product_launcher(
+            db_path=db,
+            cdp_port=9222,
+            runtime_factory=lambda **kwargs: inventory,
+            dashboard_factory=dashboard_factory,
+            generation_access=generation,
+            clock=lambda: NOW,
+        )
+        self.addCleanup(launcher.close)
+        self.assertTrue(launcher.writes_enabled)
+        self.assertIsInstance(seen["write_proxy"], DashboardWriteProxy)
+        self.assertIs(seen["generation_access"], generation)
+        self.assertEqual(
+            launcher.dashboard_url,
+            "http://127.0.0.1:18765/"
+            f"#write_token={self.DASHBOARD_TOKEN}&generation_token={generation.ui_token}",
+        )
+        self.assertNotIn(self.TOKEN, launcher.dashboard_url)
+        self.assertEqual(provider_started, [])
+        self.assertEqual(self.write_runtime.start_calls, 1)
+
     def test_dashboard_url_percent_encodes_write_token_fragment(self) -> None:
         _tmp, db = self.make_db()
         inventory = InventoryRuntime(ReadResult.success_empty(()))
@@ -384,7 +424,7 @@ class ProductLauncherTests(unittest.TestCase):
             captured["write_proxy"] = kwargs["write_proxy"]
             return server
 
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             dashboard_port=0,
@@ -404,7 +444,6 @@ class ProductLauncherTests(unittest.TestCase):
             "http://127.0.0.1:18765/"
             "#write_token=abcdefghijklmnop%26x%3Dy%23z",
         )
-
     def test_build_syncs_inventory_marks_missing_tracked_ads_absent(self) -> None:
         _tmp, db = self.make_db()
         store = SnapshotStore(db)
@@ -439,7 +478,7 @@ class ProductLauncherTests(unittest.TestCase):
             captured["store"] = store_arg
             return server
 
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             dashboard_port=0,
@@ -495,7 +534,7 @@ class ProductLauncherTests(unittest.TestCase):
             )
             return server
 
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             email_paths=(email_path,),
@@ -525,7 +564,7 @@ class ProductLauncherTests(unittest.TestCase):
         email_path = Path(tmp.name) / "reaction.eml"
         email_path.write_bytes(reaction_email())
         inventory = InventoryRuntime(ReadResult.success_empty(()))
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             dashboard_port=0,
@@ -573,7 +612,7 @@ class ProductLauncherTests(unittest.TestCase):
         email_path.write_bytes(reaction_email())
 
         first_write = WriteRuntime()
-        first = build_product_launcher(
+        first = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             email_paths=(email_path,),
@@ -588,7 +627,7 @@ class ProductLauncherTests(unittest.TestCase):
         first.close()
 
         second_write = WriteRuntime()
-        second = build_product_launcher(
+        second = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             email_paths=(email_path,),
@@ -633,7 +672,7 @@ class ProductLauncherTests(unittest.TestCase):
             ProductLauncherError,
             "local reaction email import failed",
         ):
-            build_product_launcher(
+            _writes_enabled_launcher(
                 db_path=db,
                 cdp_port=9222,
                 email_paths=(email_path,),
@@ -669,7 +708,7 @@ class ProductLauncherTests(unittest.TestCase):
         inventory = InventoryRuntime(ReadResult.success_empty(()))
         server = DashboardServer()
 
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             runtime_factory=lambda **kwargs: inventory,
@@ -695,7 +734,7 @@ class ProductLauncherTests(unittest.TestCase):
             raise OSError("private browser configuration")
 
         with self.assertRaisesRegex(ProductLauncherError, "runtime startup failed"):
-            build_product_launcher(
+            _writes_enabled_launcher(
                 db_path=db, cdp_port=9222,
                 runtime_factory=broken_runtime, clock=lambda: NOW,
             )
@@ -734,7 +773,7 @@ class ProductLauncherTests(unittest.TestCase):
             ProductLauncherError,
             "private Web inventory read failed: http_error",
         ):
-            build_product_launcher(
+            _writes_enabled_launcher(
                 db_path=db,
                 cdp_port=9222,
                 runtime_factory=lambda **kwargs: inventory,
@@ -773,7 +812,7 @@ class ProductLauncherTests(unittest.TestCase):
             ProductLauncherError,
             "duplicate ad IDs",
         ):
-            build_product_launcher(
+            _writes_enabled_launcher(
                 db_path=db,
                 cdp_port=9222,
                 runtime_factory=lambda **kwargs: inventory,
@@ -800,7 +839,7 @@ class ProductLauncherTests(unittest.TestCase):
             ProductLauncherError,
             "product launcher startup failed",
         ):
-            build_product_launcher(
+            _writes_enabled_launcher(
                 db_path=db,
                 cdp_port=9222,
                 runtime_factory=lambda **kwargs: inventory,
@@ -828,7 +867,7 @@ class ProductLauncherTests(unittest.TestCase):
             ProductLauncherError,
             "product launcher startup failed",
         ):
-            build_product_launcher(
+            _writes_enabled_launcher(
                 db_path=db,
                 cdp_port=9222,
                 runtime_factory=lambda **kwargs: inventory,
@@ -845,7 +884,7 @@ class ProductLauncherTests(unittest.TestCase):
         _tmp, db = self.make_db()
         inventory = InventoryRuntime(ReadResult.success_empty(()))
         server = BlockingDashboardServer()
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             runtime_factory=lambda **kwargs: inventory,
@@ -870,7 +909,7 @@ class ProductLauncherTests(unittest.TestCase):
     def test_close_stops_real_dashboard_server_thread(self) -> None:
         _tmp, db = self.make_db()
         inventory = InventoryRuntime(ReadResult.success_empty(()))
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             dashboard_port=0,
@@ -897,7 +936,7 @@ class ProductLauncherTests(unittest.TestCase):
         _tmp, db = self.make_db()
         inventory = InventoryRuntime(ReadResult.success_empty(()))
         server = DashboardServer()
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             runtime_factory=lambda **kwargs: inventory,
@@ -916,7 +955,7 @@ class ProductLauncherTests(unittest.TestCase):
         _tmp, db = self.make_db()
         inventory = InventoryRuntime(ReadResult.success_empty(()))
         server = BlockingDashboardServer(shutdown_failures=1)
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             runtime_factory=lambda **kwargs: inventory,
@@ -951,7 +990,7 @@ class ProductLauncherTests(unittest.TestCase):
         _tmp, db = self.make_db()
         inventory = InventoryRuntime(ReadResult.success_empty(()))
         server = DashboardServer(close_failures=1)
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             runtime_factory=lambda **kwargs: inventory,
@@ -990,7 +1029,7 @@ class ProductLauncherTests(unittest.TestCase):
             close_failures=1,
         )
         server = DashboardServer()
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             runtime_factory=lambda **kwargs: inventory,
@@ -1018,7 +1057,7 @@ class ProductLauncherTests(unittest.TestCase):
         _tmp, db = self.make_db()
         inventory = InventoryRuntime(ReadResult.success_empty(()))
         server = DashboardServer()
-        launcher = build_product_launcher(
+        launcher = _writes_enabled_launcher(
             db_path=db,
             cdp_port=9222,
             runtime_factory=lambda **kwargs: inventory,
@@ -1099,6 +1138,7 @@ class ProductLauncherTests(unittest.TestCase):
                     "0",
                     "--write-port",
                     "0",
+                    "--enable-writes",
                     "--email",
                     "/tmp/reaction.eml",
                     "--reaction-metric",
@@ -1112,18 +1152,16 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertTrue(launcher.closed)
         self.assertEqual(stderr.getvalue(), "")
         self.assertIn(
-            "Mark dashboard: http://127.0.0.1:18765/"
+            "Kleinanzeiger dashboard: http://127.0.0.1:18765/"
             "#write_token=fake-dashboard-write-token-0001",
             stdout.getvalue(),
         )
         self.assertIn(
-            "Mark write API: http://127.0.0.1:18766/api/write/",
+            "Kleinanzeiger write API: http://127.0.0.1:18766/api/write/",
             stdout.getvalue(),
         )
-        self.assertIn(
-            f"Mark write bearer token: {self.TOKEN}",
-            stdout.getvalue(),
-        )
+        self.assertNotIn(self.TOKEN, stdout.getvalue())
+        self.assertNotIn("Mark write bearer token", stdout.getvalue())
         self.assertIn(
             "Startup sync: 2 current ad(s), 3 observation(s) persisted.",
             stdout.getvalue(),
@@ -1134,6 +1172,7 @@ class ProductLauncherTests(unittest.TestCase):
             stdout.getvalue(),
         )
         self.assertEqual(build.call_args.kwargs["write_port"], 0)
+        self.assertTrue(build.call_args.kwargs["enable_writes"])
         self.assertEqual(
             build.call_args.kwargs["email_paths"],
             (Path("/tmp/reaction.eml"),),
@@ -1216,7 +1255,7 @@ class ProductLauncherTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertEqual(
             stderr.getvalue(),
-            "mark-api-launch: inventory unavailable\n",
+            "kleinanzeiger: inventory unavailable\n",
         )
 
 
