@@ -2089,18 +2089,52 @@ class SnapshotStore:
         without temp sorting. The largest single history plus one fixed page
         bounds memory; actual UTC instants are sorted within every group.
         Arbitrary external updates/deletes are outside the append-only model.
+        A replacement DB inode or changed schema version while the generator
+        is paused is *not* an append: fail closed rather than return a
+        partial/cross-generation analytics view.
         """
+        def _file_identity() -> tuple[int, int]:
+            try:
+                info = self.path.stat()
+            except OSError:
+                raise sqlite3.DatabaseError(
+                    "history database identity unavailable"
+                ) from None
+            return info.st_dev, info.st_ino
+
+        expected_generation: tuple[int, int, int] | None = None
         high_water_id: int | None = None
         last_key: tuple[str, str, int] | None = None
         pending_ad_id: str | None = None
         pending_rows: list[sqlite3.Row] = []
         while True:
+            # Inspect before connect and again before closing each page read:
+            # an atomic file swap cannot silently splice histories from two
+            # different SQLite files even if both use identical schema DDL.
+            file_identity = _file_identity()
             with closing(self._connect()) as connection:
                 connection.execute("PRAGMA query_only=ON")
-                # Schema validation and keyset lookup share one read snapshot,
-                # including if a hostile WAL writer replaces the schema.
+                # Schema validation and keyset lookup share one read snapshot.
                 connection.execute("BEGIN")
                 self._assert_binary_history_key_schema(connection, "ad_snapshots")
+                version_row = connection.execute(
+                    "PRAGMA schema_version"
+                ).fetchone()
+                if (
+                    version_row is None
+                    or type(version_row[0]) is not int
+                    or version_row[0] < 0
+                ):
+                    raise sqlite3.DatabaseError(
+                        "invalid history schema generation"
+                    )
+                generation = (*file_identity, version_row[0])
+                if expected_generation is None:
+                    expected_generation = generation
+                elif generation != expected_generation:
+                    raise sqlite3.DatabaseError(
+                        "history schema generation changed during pagination"
+                    )
                 if high_water_id is None:
                     maximum = connection.execute(
                         "SELECT MAX(id) AS max_id FROM ad_snapshots"
@@ -2135,6 +2169,10 @@ class SnapshotStore:
                         """,
                         (high_water_id, *last_key, _AD_HISTORY_PAGE_ROWS),
                     ).fetchall()
+                if _file_identity() != file_identity:
+                    raise sqlite3.DatabaseError(
+                        "history database identity changed during pagination"
+                    )
 
             # Every yield below runs AFTER SQLite has released the read lock.
             if not page:

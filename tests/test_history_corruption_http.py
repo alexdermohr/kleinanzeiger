@@ -346,6 +346,86 @@ class HistoryCorruptionHttpTests(unittest.TestCase):
             ad_snapshot=False,
         )
 
+    def _yield_paged_history_with_pending_rows(self):
+        # Synthetic 601-row source, with >1 SQLite keyset page. The first
+        # generator yield occurs after the first SQLite connection is closed.
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            self.assertEqual(
+                db.execute("PRAGMA journal_mode").fetchone()[0], "delete",
+            )
+            rows = [
+                (letter, (self.instant + timedelta(seconds=i)).isoformat(),
+                 "synthetic", "active")
+                for letter in ("A", "B", "C") for i in range(200)
+            ]
+            db.executemany(
+                "INSERT INTO ad_snapshots "
+                "(ad_id, observed_at, source, lifecycle_state) "
+                "VALUES (?,?,?,?)",
+                rows,
+            )
+        stream = self.store.ad_histories()
+        first, history = next(stream)
+        self.assertEqual(first, "1234567890")
+        self.assertEqual(len(history), 1)
+        return stream
+
+    def test_paged_ad_history_refuses_same_inode_ddl_replacement(self):
+        stream = self._yield_paged_history_with_pending_rows()
+        try:
+            with closing(sqlite3.connect(self.store.path)) as db, db:
+                original_ddl = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' "
+                    "AND name='ad_snapshots'"
+                ).fetchone()[0]
+                original_version = db.execute(
+                    "PRAGMA schema_version",
+                ).fetchone()[0]
+                db.execute("DROP TABLE ad_snapshots")
+                db.execute(original_ddl)
+                db.execute(
+                    "CREATE INDEX idx_ad_snapshots_ad_id_observed "
+                    "ON ad_snapshots(ad_id, observed_at, id)"
+                )
+                new_version = db.execute(
+                    "PRAGMA schema_version",
+                ).fetchone()[0]
+            self.assertNotEqual(new_version, original_version)
+            self.assertTrue(self.store.is_ready())
+            # Without per-page identity validation this silently yields a
+            # truncated B and discards C, falsely completing the generator.
+            with self.assertRaises(sqlite3.DatabaseError):
+                list(stream)
+        finally:
+            stream.close()
+
+    def test_paged_ad_history_refuses_replaced_database_inode(self):
+        stream = self._yield_paged_history_with_pending_rows()
+        try:
+            replacement_path = Path(self.temp.name) / "replacement.sqlite"
+            SnapshotStore(replacement_path)
+            with closing(sqlite3.connect(self.store.path)) as prior:
+                old_version = prior.execute(
+                    "PRAGMA schema_version",
+                ).fetchone()[0]
+            with closing(sqlite3.connect(replacement_path)) as replacement:
+                next_version = replacement.execute(
+                    "PRAGMA schema_version",
+                ).fetchone()[0]
+            self.assertEqual(old_version, next_version)
+            old_stat = self.store.path.stat()
+            replacement_path.replace(self.store.path)
+            new_stat = self.store.path.stat()
+            self.assertNotEqual(
+                (old_stat.st_dev, old_stat.st_ino),
+                (new_stat.st_dev, new_stat.st_ino),
+            )
+            self.assertTrue(self.store.is_ready())
+            with self.assertRaises(sqlite3.DatabaseError):
+                list(stream)
+        finally:
+            stream.close()
+
     def test_inbound_history_actual_instants_and_id_ties_remain_ordered(self):
         first = InboundMessageEvent(
             ad_id="1234567890", conversation_id="synthetic-chat",
