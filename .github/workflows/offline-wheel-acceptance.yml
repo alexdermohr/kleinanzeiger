@@ -38,9 +38,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          wheels=( "$RUNNER_TEMP"/mark-wheels/mark_api-*.whl )
+          wheels=( "$RUNNER_TEMP"/mark-wheels/kleinanzeiger-*.whl )
           if [[ ${#wheels[@]} -ne 1 ]]; then
-            echo "Exactly one mark-api wheel required" >&2
+            echo "Exactly one kleinanzeiger wheel required" >&2
             exit 1
           fi
           # GitHub hosted runners may deny unprivileged userns uid_map writes.

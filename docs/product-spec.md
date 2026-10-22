@@ -8,9 +8,11 @@ Quelle: `docs/requirements-source-2026-09-23.md`
 
 ## Verbindlicher Liefer- und Arbeitsmodus (D-028/D-029)
 
-**Kundenerfolg ist der Maßstab:** Mark wird als **installierbares Gesamtprodukt mit vollständigen Write-Funktionen** geliefert. Das umfasst Create/Publish, Medien-/Bildvorbereitung und Media-Create, Titel-/Beschreibungspflege, Pause, Reaktivierung, Delete sowie Bestandssynchronisation, Analytics, Prompt-basierte Text-/Bildgenerierung und sichere Datenwiederherstellung. Ein Offline-Dashboard oder nur isoliert getestete Adapter erfüllen diesen Vertrag nicht.
+**Produktidentität:** **Kleinanzeiger**, kanonisches Repository `alexdermohr/kleinanzeiger`, Distributionsname `kleinanzeiger`, Bedienstart `kleinanzeiger`. Die internen Python-Module `mark_api` und bisherige CLI-Aliase werden zur Kompatibilität erhalten.
 
-**Plattformfreigabe ist kein Entwicklungsauftrag und kein pauschales technisches Gate.** Die fehlende generelle externe Kleinanzeigen-Freigabe blockiert weder die Implementierung noch die technische Abnahme dieser Funktionalität. End-to-End-Tests verwenden eine frisch installierte Mark-Distribution samt echter UI, API, Persistenz und zustandsbehafteten synthetischen Plattformgegenstellen, einschließlich der positiven und unklaren Write-Ausgänge. Die tatsächliche Berechtigung zum späteren externen Einsatz ist getrennt vom Kunden/Betreiber je konkretem Zugriffsweg zu klären und wird weder erfunden noch durch lokale Schalter ersetzt. Bestehende Transport-, Konto-, Login-, CSRF-, Ownership-, Idempotenz- und Recovery-Schranken bleiben unverändert; keine unberechtigten Live-Writes oder bezahlten Provideraufrufe zu Testzwecken.
+**Kundenerfolg ist der Maßstab:** Kleinanzeiger wird als **installierbares Gesamtprodukt mit vollständigen Write-Funktionen** geliefert. Das umfasst Create/Publish, Medien-/Bildvorbereitung und Media-Create, Titel-/Beschreibungspflege, Pause, Reaktivierung, Delete sowie Bestandssynchronisation, Analytics, Prompt-basierte Text-/Bildgenerierung und sichere Datenwiederherstellung. Ein Offline-Dashboard oder nur isoliert getestete Adapter erfüllen diesen Vertrag nicht.
+
+**Plattformfreigabe ist kein Entwicklungsauftrag und kein pauschales technisches Gate.** Die fehlende generelle externe Kleinanzeigen-Freigabe blockiert weder die Implementierung noch die technische Abnahme dieser Funktionalität. End-to-End-Tests verwenden eine frisch installierte Kleinanzeiger-Distribution samt echter UI, API, Persistenz und zustandsbehafteten synthetischen Plattformgegenstellen, einschließlich der positiven und unklaren Write-Ausgänge. Die tatsächliche Berechtigung zum späteren externen Einsatz ist getrennt vom Kunden/Betreiber je konkretem Zugriffsweg zu klären und wird weder erfunden noch durch lokale Schalter ersetzt. Bestehende Transport-, Konto-, Login-, CSRF-, Ownership-, Idempotenz- und Recovery-Schranken bleiben unverändert; keine unberechtigten Live-Writes oder bezahlten Provideraufrufe zu Testzwecken.
 
 **Ein gemeinsamer Lieferkandidat statt Prozessschleifen:** Bestehende relevante PRs sicher konvergieren, bestätigte Produkt-/P1-/P2-Fehler beheben, die komplette installierte Benutzerkette auf dem exakten Kandidaten testen und risikogerecht unabhängig prüfen. Zusätzliche Entwicklungszweige, Review-Ebenen oder Architektur entstehen nur bei belegtem Nutzen. Der Abschluss trennt technisch fertig und synthetisch belegt von tatsächlich autorisiertem Live-Einsatz.
 
@@ -31,7 +33,7 @@ Die vorhandenen technischen Authentifizierungs-, Owner-/ID-, CSRF-/Origin-, Capa
 
 ## 1. Ziel
 
-Für Marks Kleinanzeigen-Account soll eine Lösung entstehen, die Anzeigen verwaltet und Leistungsdaten in einem Dashboard auswertet. Aus den gesammelten Daten sollen Vergleiche, Ranglisten und Optimierungsvorschläge entstehen.
+Für den Kleinanzeigen-Account des Kunden soll eine Lösung entstehen, die Anzeigen verwaltet und Leistungsdaten in einem Dashboard auswertet. Aus den gesammelten Daten sollen Vergleiche, Ranglisten und Optimierungsvorschläge entstehen.
 
 Die ursprüngliche MVP-Reihenfolge vom 24.09.2026 war nur ein Zwischenziel. **Für das verbindliche Endprodukt sind Text- und Bildgenerierung einschließlich Übernahme in die Anzeigenverwaltung Pflichtumfang** (D-028/D-029). Implementierung, Integration und nutzbare Funktion sind auf dem späteren Liefercommit nachzuweisen.
 

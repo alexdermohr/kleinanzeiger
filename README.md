@@ -1,50 +1,23 @@
-# mark-api
+# Kleinanzeiger
 
 Öffentliche Projektdokumentation für die mit Mark besprochene Kleinanzeigen-Agent-/API-Integration.
 
-## Freigabestatus und Offline-Modus (17.10.2026)
+## Vollständiges Kundenprodukt (Stand 22.10.2026)
 
-**Vollprodukt: NO-GO.** Der bisherige Einstieg `mark-api-launch` verwendet
-automatisierte Private-Web-/CDP-Zugriffe einschließlich standardmäßig
-aktivierter Write-Komposition. Ohne gesondert nachgewiesene Berechtigung
-ist dieser Pfad **nicht zur Nutzung freigegeben**; ein eingeloggter Browser
-oder technische Idempotenz-/Recovery-Gates sind keine Plattformberechtigung.
-**Der bisherige normale mark-api-launch und der programmatische
-build_product_launcher() verweigern nun jeden Private-Web-Start bereits vor
-SQLite-Initialisierung, Browser/CDP und Write-API.** Browseranmeldung,
-CLI-Parameter oder Umgebungsvariablen erteilen keine Berechtigung.
-Die früheren Lifecycle-Tests verwenden nur synthetische Runtimes und
-eine ausdrücklich gemockte Berechtigungsgrenze. Der zulässige lokale
-Produktstart ist mark-api-offline. Ein künftiger offizieller API-Transport
-muss eigenständig nachgewiesenes Konto-Entitlement und Scopes besitzen.
-Siehe [Release-Blocker #111](https://github.com/alexdermohr/mark-api/issues/111)
-und [Kleinanzeigen-Nutzungsbedingungen, § 5](https://themen.kleinanzeigen.de/nutzungsbedingungen/).
+**Verbindliches Lieferziel:** Kleinanzeiger wird als installierbare Anwendung mit Anzeigen-Create/Publish, Media, Änderung, Pause, Reaktivierung, Delete, Synchronisation, Dashboard, Text-/Bildgenerierung sowie Backup/Recovery bereitgestellt. Sämtliche Write-Funktionen werden technisch auch ohne echtes Plattformkonto mit zustandsbehafteten synthetischen Gegenstellen geprüft. Der zusätzliche Offline-Modus ersetzt nicht das Gesamtprodukt.
 
-Der neue **rein lokale** Einstieg `mark-api-offline` verwendet ausschließlich
-explizit übergebene lokale RFC822-/EML-Dateien und die bestehende
-SQLite-/Analytics-Implementierung. Er kontaktiert Kleinanzeigen nicht,
-startet keine CDP-Sitzung, liest keinen Plattformbestand und stellt
-keine Plattform-Write-API bereit. Das Dashboard ist nur auf
-`127.0.0.1` erreichbar und GET-only.
+**Nachweisstand:** Eine vollständige installierte End-to-End-Abnahme ist noch ausstehend. Teilprüfungen und ein grüner CI-Lauf gelten nicht automatisch als technische Produktfreigabe. Der externe Live-Betrieb setzt eine jeweils berechtigte Konto-/Transportsitzung voraus; es werden keine realen unberechtigten Plattformwrites vorgenommen. Bestehende Login-, MFA-, Origin-, Eigentums-, Idempotenz- und Recovery-Sicherungen bleiben wirksam.
+
+**Installations- und Produktstart:** Die Python-Distribution und die neue CLI heißen `kleinanzeiger`; bestehende `mark-api-*`-Kommandos und das interne Importpaket `mark_api` bleiben aus Kompatibilitätsgründen verfügbar. Der reguläre Start benötigt einen bereits vom Nutzer authentifizierten lokalen Browser, legt eine neue SQLite-Datei nur nach ausdrücklichem `--init-db` an und bietet die vollständige Dashboard-Write-Oberfläche.
 
 ```bash
-python -m pip install .
-mark-api-offline --db /pfad/mark.sqlite --init-db --email /pfad/nachricht.eml
-# Danach ohne --init-db:
-mark-api-offline --db /pfad/mark.sqlite --email /pfad/weitere-nachricht.eml
-# Ohne neue Nachrichten nur das bestehende Offline-Dashboard anzeigen:
-mark-api-offline --db /pfad/mark.sqlite
+python -m pip install '.[private-web,generation]'
+kleinanzeiger --db /pfad/kleinanzeiger.sqlite --init-db --cdp-port 9222
+# Wiederanlauf mit vorhandenen Daten: kein --init-db
+kleinanzeiger --db /pfad/kleinanzeiger.sqlite --cdp-port 9222
 ```
 
-Der Import ist batch-atomar und idempotent. Für den Offline-Pfad sind keine
-Kleinanzeigen-Zugangsdaten oder `private-web`-Extras erforderlich.
-Daten aus E-Mails gelten **nicht** als aktueller Plattformbestand,
-automatische Synchronisation oder bestätigte Eigentümerdaten. Der
-Offline-Einstieg gibt weder die technische A6-/Recovery-Abnahme noch
-einen späteren autorisierten offiziellen API-Betrieb frei.
-
-Die nachstehenden historischen Private-Web-/Launcher-Beschreibungen
-dokumentieren Implementierungen, **keine Nutzungsfreigabe**.
+Für lokale E-Mail-Analysen ohne Plattformverbindung steht zusätzlich `kleinanzeiger-offline --db /pfad/kleinanzeiger.sqlite --init-db --email /pfad/nachricht.eml` bereit. Dieser Zusatzweg führt keine Anzeigenoperationen aus.
 
 ## Prompt-basierte Text- und Bildentwürfe (20.10.2026)
 
@@ -311,7 +284,7 @@ Das read-only Dashboard exponiert den aktuellen Contract unter `GET /api/analyti
 
 ## Zulässige Betriebswege
 
-[Issue #2](https://github.com/alexdermohr/mark-api/issues/2) ist abgeschlossen und trennt den erfolgreichen technischen PoC vom zulässigen Produktbetrieb:
+[Issue #2](https://github.com/alexdermohr/kleinanzeiger/issues/2) ist abgeschlossen und trennt den erfolgreichen technischen PoC vom zulässigen Produktbetrieb:
 
 - Private/mobile Reverse-Engineering-HTTP und der historische `BrowserBotAdapter` bleiben technische PoC-Evidenz und werden nicht als automatische Produkt-Fallbacks aktiviert.
 - Für private Konten ist der getrennte lokale `PrivateWebWriter` der vorgesehene Write-Backendpfad: normale Weboberfläche, eigene nutzer-authentifizierte Sitzung, exakte eigene Anzeigen-ID und Challenge-Stop ohne Auth-/CAPTCHA-Umgehung.

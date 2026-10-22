@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mark-api"
+name = "kleinanzeiger"
 version = "0.1.0"
-description = "Thin Kleinanzeigen orchestration core for Mark"
+description = "Kleinanzeiger: Anzeigenverwaltung, Synchronisation, Auswertung und KI-Unterstützung"
 requires-python = ">=3.12"
 dependencies = []
 
@@ -14,6 +14,15 @@ private-web = ["websocket-client>=1.8,<2", "Pillow>=10.4,<13"]
 generation = ["openai>=2.11,<3"]
 
 [project.scripts]
+kleinanzeiger = "mark_api.launcher:main"
+kleinanzeiger-dashboard = "mark_api.dashboard:main"
+kleinanzeiger-offline = "mark_api.offline_launcher:main"
+kleinanzeiger-generate = "mark_api.generation_cli:main"
+kleinanzeiger-backup = "mark_api.backup_cli:main"
+kleinanzeiger-import-mail = "mark_api.email_import_cli:main"
+kleinanzeiger-local-smoke = "mark_api.local_smoke:main"
+kleinanzeiger-classify = "mark_api.classification_cli:main"
+kleinanzeiger-migrate-legacy = "mark_api.legacy_migration:main"
 mark-api-dashboard = "mark_api.dashboard:main"
 mark-api-offline = "mark_api.offline_launcher:main"
 mark-api-classify = "mark_api.classification_cli:main"

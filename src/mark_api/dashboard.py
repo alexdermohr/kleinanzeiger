@@ -205,14 +205,14 @@ _DASHBOARD_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mark Dashboard</title>
+  <title>Kleinanzeiger</title>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
   <main>
     <header>
       <div>
-        <h1>Mark Dashboard</h1>
+        <h1>Kleinanzeiger</h1>
         <p>Lokale Sicht auf Historie, Analytics und sichere Produktaktionen.</p>
       </div>
       <button id="reload" type="button">Neu laden</button>
@@ -3292,7 +3292,7 @@ def main(argv: list[str] | None = None) -> int:
     if generation_access is not None:
         host, port = server.server_address
         print(
-            f"Mark dashboard: http://{host}:{port}/"
+            f"Kleinanzeiger: http://{host}:{port}/"
             f"#generation_token={quote(generation_access.ui_token, safe='')}",
             flush=True,
         )

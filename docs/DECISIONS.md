@@ -2,7 +2,7 @@
 
 ## D-001 — Projektregistratur
 
-**Entscheidung:** `alexdermohr/mark-api` ist die kanonische Registratur für dieses Projekt.
+**Entscheidung:** `alexdermohr/kleinanzeiger` ist die kanonische Registratur für dieses Projekt.
 
 **Folgen:**
 - Aufgaben und offene Arbeit werden als GitHub Issues hier geführt.
@@ -431,6 +431,8 @@ Der Dashboard-Server exponiert bei aktivierter Produktkomposition einen eng allo
 **Revisionsgebundene Abnahme statt Aussagen über Freigabestatus:** Ein Feature ist erst fertig, wenn es über einen installierten Endnutzerpfad nachweislich erreichbar ist und seine Positiv-, Fehler-, Neustart- und Reconciliation-Fälle auf dem **gleichen geprüften Commit** bestehen. Automatisierte Tests verwenden isolierte oder synthetische Plattformadapter und keine unbeabsichtigten echten Anzeigenaktionen. Bestehende offene A6-/Host-/Recovery-Befunde bleiben konkrete technische Fehler, aber keine unbegründete generische „NO-GO“-Formulierung. Fehlende periodische Aktualisierung, unabhängige Reconciliation, Bedienung und vollständige Installations-/Recovery-E2E-Kette sind als echte Lieferlücken zu schließen statt durch eine Offline-Scope-Reduktion zu umgehen.
 
 **Folge:** Neue Implementierungsarbeiten priorisieren den kürzesten prüfbaren Weg zum Endnutzen; pauschale Plattformfreigabe-Textgates dürfen nicht die einzige Begründung für nicht startbare Produktfunktionen sein. Nicht belegte Produktreife, Testergebnisse oder Einsatzberechtigungen werden weiterhin nicht behauptet.
+
+**Verbindliche Produktidentität (22.10.2026):** Produktname und kanonisches GitHub-Repository lauten **kleinanzeiger** (`alexdermohr/kleinanzeiger`). Bestehende interne Python-Importpfade und alte CLI-Aliase dürfen aus Migrations- und Kompatibilitätsgründen erhalten bleiben; Installationspaket, Startkommando, sichtbare Oberfläche und neue Dokumentation verwenden „Kleinanzeiger“. Der Kundenauftrag verlangt die **vollständige technische Funktionsfähigkeit inklusive aller Write-Operationen**. Eine allgemeine externe Plattformgenehmigung ist weder Entwicklungsaufgabe noch Grund, eine Produktfunktion unimplementiert zu lassen. Synthetische End-to-End-Tests sind pflichtgemäß; echte Plattformoperationen bleiben an Login, Berechtigung des jeweiligen Kontos, ausdrückliche Nutzeraktion und die technischen Sicherheitsschranken gebunden. Nicht geprüfte Funktionen werden nicht als bestanden ausgewiesen.
 
 ## D-029 — Lieferfokus: vollständiges Kundenprodukt einschließlich Write statt Prozess- und Freigabeschleifen (22.10.2026)
 
