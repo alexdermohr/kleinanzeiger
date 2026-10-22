@@ -2312,6 +2312,94 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         replacement = build()
         replacement.close()
 
+    def test_abandoned_nonmedia_browser_input_never_gc_releases_claim(self) -> None:
+        """A CDP ACK is not verified platform write settlement."""
+        if sys.platform != "linux":
+            self.skipTest("Linux exclusive target claim required")
+        import gc
+        import weakref
+        from mark_api.private_web_cdp import _ACTIVE_CDP_TARGET_CLAIMS
+
+        for port, method, params in (
+            (19916, "Input.dispatchMouseEvent", {
+                "type": "mousePressed", "x": 12.0, "y": 22.0,
+                "button": "left", "buttons": 1, "clickCount": 1,
+            }),
+            (19917, "Runtime.evaluate", {
+                "expression": "(() => document.querySelector('button')?.click())()",
+                "returnByValue": True, "awaitPromise": False,
+            }),
+            (19918, "DOM.setFileInputFiles", {
+                "files": ["/synthetic/nonexistent"],
+            }),
+        ):
+            with self.subTest(method=method):
+                endpoint = f"http://127.0.0.1:{port}"
+                target = {
+                    "type": "page",
+                    "webSocketDebuggerUrl":
+                        f"ws://127.0.0.1:{port}/devtools/page/nonmedia",
+                }
+                def build():
+                    return _LoopbackCdpClient(
+                        endpoint, timeout_seconds=1,
+                        opener=lambda url, **kw: FakeResponse([target], url=url),
+                        websocket_factory=lambda *args, **kw:
+                            FakeSocket([{"id": 1, "result": {}}]),
+                        tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+                    )
+
+                client = build()
+                claim = client._target_reservation
+                claim_id = id(claim)
+                ref = weakref.ref(client)
+                client.call(method, params)
+                del client
+                gc.collect()
+                try:
+                    self.assertIsNone(ref())
+                    self.assertIn(claim_id, _ACTIVE_CDP_TARGET_CLAIMS)
+                    self.assertGreaterEqual(claim.fileno(), 0)
+                    with self.assertRaises(PrivateWebCdpError) as blocked:
+                        build()
+                    self.assertEqual(blocked.exception.stage, "target_busy")
+                finally:
+                    # Clean up only the synthetic RED test's known claim.
+                    if claim.fileno() >= 0:
+                        claim.close()
+                    _ACTIVE_CDP_TARGET_CLAIMS.pop(claim_id, None)
+
+    def test_abandoned_cookie_read_can_release_clean_kernel_claim(self) -> None:
+        if sys.platform != "linux":
+            self.skipTest("Linux exclusive target claim required")
+        import gc
+        import weakref
+        from mark_api.private_web_cdp import _ACTIVE_CDP_TARGET_CLAIMS
+
+        port = 19919
+        endpoint = f"http://127.0.0.1:{port}"
+        target = {
+            "type": "page",
+            "webSocketDebuggerUrl":
+                f"ws://127.0.0.1:{port}/devtools/page/cookies",
+        }
+        client = _LoopbackCdpClient(
+            endpoint, timeout_seconds=1,
+            opener=lambda url, **kw: FakeResponse([target], url=url),
+            websocket_factory=lambda *args, **kw:
+                FakeSocket([{"id": 1, "result": {"cookies": []}}]),
+            tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+        )
+        claim = client._target_reservation
+        claim_id = id(claim)
+        ref = weakref.ref(client)
+        client.call("Network.getCookies", {"urls": ["https://www.kleinanzeigen.de"]})
+        del client
+        gc.collect()
+        self.assertIsNone(ref())
+        self.assertEqual(claim.fileno(), -1)
+        self.assertNotIn(claim_id, _ACTIVE_CDP_TARGET_CLAIMS)
+
     def test_unknown_media_page_gc_cannot_release_kernel_claim(self) -> None:
         if sys.platform != "linux":
             self.skipTest("Linux AF_UNIX claim required")
