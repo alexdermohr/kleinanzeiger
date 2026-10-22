@@ -2156,6 +2156,58 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         self.assertEqual(outcome, [("error", "call")])
 
 
+    def test_abandoned_clean_cdp_client_and_owners_release_kernel_claim(self) -> None:
+        """Only a definitely clean GC owner may release a stale target claim."""
+        if sys.platform != "linux":
+            self.skipTest("Linux AF_UNIX claim required")
+        import gc
+        import weakref
+        from mark_api.private_web_cdp import _ACTIVE_CDP_TARGET_CLAIMS
+
+        for mode, port in (("client", 19911), ("page", 19912), ("cookies", 19913)):
+            with self.subTest(mode=mode):
+                endpoint = f"http://127.0.0.1:{port}"
+                target = {
+                    "type": "page",
+                    "webSocketDebuggerUrl":
+                        f"ws://127.0.0.1:{port}/devtools/page/clean-synthetic",
+                }
+                websocket = FakeSocket([])
+                def build(ws):
+                    return _LoopbackCdpClient(
+                        endpoint, timeout_seconds=1,
+                        opener=lambda url, **kw: FakeResponse([target], url=url),
+                        websocket_factory=lambda *args, **kw: ws,
+                        tcp_socket_factory=lambda *args, **kw: FakeTcpSocket(),
+                    )
+
+                client = build(websocket)
+                claim = client._target_reservation
+                claim_id = id(claim)
+                client_ref = weakref.ref(client)
+                if mode == "page":
+                    owner = CdpPrivateWebPage(endpoint, client_factory=lambda: None)
+                    owner._client_instance = client
+                    del owner
+                elif mode == "cookies":
+                    owner = CdpCookieProvider(endpoint, client_factory=lambda: None)
+                    owner._client_instance = client
+                    del owner
+                del client
+                gc.collect()
+                try:
+                    self.assertIsNone(client_ref())
+                    self.assertTrue(websocket.closed)
+                    self.assertEqual(claim.fileno(), -1)
+                    self.assertNotIn(claim_id, _ACTIVE_CDP_TARGET_CLAIMS)
+                    fresh = build(FakeSocket([]))
+                    fresh.close()
+                finally:
+                    # Isolate a failing RED run from later kernel-target tests.
+                    if claim.fileno() >= 0:
+                        claim.close()
+                    _ACTIVE_CDP_TARGET_CLAIMS.pop(claim_id, None)
+
     def test_unknown_media_page_gc_cannot_release_kernel_claim(self) -> None:
         if sys.platform != "linux":
             self.skipTest("Linux AF_UNIX claim required")

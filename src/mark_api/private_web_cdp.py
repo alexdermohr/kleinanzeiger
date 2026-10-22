@@ -228,6 +228,37 @@ class _LoopbackCdpClient:
             raise
 
 
+    def __del__(self) -> None:
+        """Last-resort close for an abandoned, provably clean CDP client.
+
+        The kernel claim is otherwise strongly rooted for process lifetime.
+        Never GC-release an UNKNOWN submit, in-flight call/connection, failed
+        transport close, or a fork-inherited reservation. An explicit owner
+        close remains the primary cleanup mechanism.
+        """
+        try:
+            if (
+                getattr(self, "_target_reservation", None) is None
+                or getattr(self, "_owner_pid", None) != os.getpid()
+                or getattr(self, "_closing", True)
+                or getattr(self, "_close_in_progress", True)
+                or getattr(self, "_close_unknown", True)
+                or getattr(self, "_unresolved_call", True)
+                or getattr(self, "_unresolved_submit", True)
+                or getattr(self, "_transport_construction_pending", True)
+                or getattr(self, "_connect_in_progress", True)
+                or getattr(self, "_reconnecting", True)
+                or getattr(self, "_active_calls", 1)
+            ):
+                return
+            # Bypass an injected subclass override; close() itself keeps
+            # the kernel reservation on any uncertain WebSocket close.
+            _LoopbackCdpClient.close(self)
+        except BaseException:
+            # Destructors must not mask existing exceptions. Unknown cleanup
+            # retains the process-global kernel claim rather than freeing it.
+            pass
+
     def _assert_live_target_reservation(self) -> None:
         """Prevent calls on a cached socket without a live exclusive claim."""
         if getattr(self, "_owner_pid", None) != os.getpid():
