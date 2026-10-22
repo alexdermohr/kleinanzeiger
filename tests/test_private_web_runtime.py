@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import threading
 import unittest
@@ -787,7 +788,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
             [event[0] for event in events].count("media_submit"),
             1,
         )
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             persisted = connection.execute(
                 "SELECT COUNT(*) FROM create_operation_receipts"
             ).fetchone()
@@ -884,7 +885,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
             [event[0] for event in events].count("media_submit"),
             1,
         )
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             persisted = connection.execute(
                 "SELECT COUNT(*) FROM create_operation_receipts"
             ).fetchone()
@@ -953,7 +954,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], created_id)
         self.assertGreater(calls[0][1], 0)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             checkpoint = connection.execute(
                 """
                 SELECT checkpoint_kind, created_ad_id, outcome,
@@ -1033,7 +1034,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
         self.assertEqual(receipt.completed_at, NOW + timedelta(seconds=3))
         self.assertTrue(receipt.media_persistence_confirmed)
         self.assertEqual(len(verifier.calls), 1)
-        with sqlite3.connect(db_path) as connection:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
             persisted_completed_at = connection.execute(
                 "SELECT completed_at FROM create_operation_receipts"
             ).fetchone()
