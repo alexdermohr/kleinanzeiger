@@ -69,6 +69,12 @@ class LocalCatalogImportTests(unittest.TestCase):
                          [LifecycleState.UNKNOWN, LifecycleState.UNKNOWN])
         self.assertEqual(view[0].views, 12)
         self.assertEqual(view[0].source, "user-supplied-local-catalog")
+        self.assertFalse(view[0].present, "manual file cannot establish owner presence")
+        self.assertFalse(view[1].present, "second manual row is also unverified")
+        summary = MarkQueryService(self.store).summary()
+        self.assertEqual(summary.tracked_ads, 2)
+        self.assertEqual(summary.current_ads, 0)
+        self.assertEqual(summary.unknown_state_ads, 2)
         self.assertEqual(view[0].observed_at.isoformat(), "2026-10-22T02:01:00+00:00")
         self.assertEqual(
             view[0].metric_evidence["views"].source,

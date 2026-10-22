@@ -109,7 +109,13 @@ class MarkQueryService:
                 AdView(
                     ad_id=ad_id,
                     lifecycle_state=latest.lifecycle_state,
-                    present=latest.lifecycle_state is not LifecycleState.ABSENT,
+                    # User-supplied catalog observations are NOT authenticated
+                    # owner inventory. UNKNOWN on other sources may mean present;
+                    # explicit unverified local provenance never proves presence.
+                    present=(
+                        latest.lifecycle_state is not LifecycleState.ABSENT
+                        and latest.source != "user-supplied-local-catalog"
+                    ),
                     observed_at=latest.observed_at,
                     source=latest.source,
                     title=_last_not_none(history, "title"),

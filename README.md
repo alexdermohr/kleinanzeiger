@@ -44,7 +44,9 @@ anzeigen. Mark ruft dafür keinerlei Kleinanzeigen-Webseite oder API auf.
 Die Eingaben sind nicht signiert und begründen **keinen verifizierten
 Eigentümerbestand, keine aktive Anzeige und keine Write-Berechtigung**.
 Die Lebenszyklus-Anzeige bleibt deshalb \`unknown\`, und die Datenquelle
-lautet \`user-supplied-local-catalog\`. Die Uhrzeit stammt ausschließlich
+lautet \`user-supplied-local-catalog\`. Unverifizierte lokale Einträge erhalten ausdrücklich auch
+`present=false`; sie erhöhen nicht die aktuell als Owner-Bestand
+geführte Kennzahl `current_ads`. Die Uhrzeit stammt ausschließlich
 aus der vom Nutzer angegebenen Beobachtung und benötigt einen UTC-Offset.
 
 Beispiel \`mein-katalog.json\` (nur ausdrücklich übergebene Dateien):
