@@ -34,6 +34,61 @@ class SnapshotStoreTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return SnapshotStore(Path(tmp.name) / "mark.sqlite")
 
+    def test_nonpositive_native_history_row_ids_fail_closed(self) -> None:
+        # SQLite INTEGER PRIMARY KEY permits explicit zero and negatives.
+        # A direct history must reject them just like paginated histories.
+        for bad_id in (0, -1):
+            with self.subTest(bad_id=bad_id):
+                store = self.make_store()
+                store.append_ad_snapshot(AdSnapshot(
+                    ad_id="123", observed_at=NOW, source="synthetic-owner",
+                    lifecycle_state=LifecycleState.ACTIVE, views=7,
+                ))
+                with closing(sqlite3.connect(store.path)) as conn, conn:
+                    conn.execute(
+                        "UPDATE ad_snapshots SET id=? WHERE ad_id=?",
+                        (bad_id, "123"),
+                    )
+                with self.assertRaises(sqlite3.DatabaseError):
+                    store.ad_history("123")
+                with self.assertRaises(sqlite3.DatabaseError):
+                    list(store.ad_histories())
+
+    def test_invalid_tracked_ids_never_write_absent(self) -> None:
+        store = self.make_store()
+        store.append_ad_snapshot(AdSnapshot(
+            ad_id="123", observed_at=NOW, source="synthetic-owner",
+            lifecycle_state=LifecycleState.ACTIVE,
+        ))
+        for bad_id in (b"123", " 123 ", "123\x00"):
+            with self.subTest(bad_id=bad_id):
+                with self.assertRaises(sqlite3.DatabaseError):
+                    store.append_inventory_result(
+                        ReadResult.success_empty(()),
+                        tracked_ad_ids=(bad_id,), observed_at=NOW,
+                        source="synthetic-owner",
+                    )
+        self.assertEqual(len(store.ad_history("123")), 1)
+
+    def test_corrupt_blob_owner_evidence_never_accepted_during_empty_sync(self) -> None:
+        store = self.make_store()
+        with closing(sqlite3.connect(store.path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO ad_snapshots (ad_id, observed_at, source, lifecycle_state) "
+                "VALUES (?, ?, ?, ?)",
+                (sqlite3.Binary(b"123"), NOW.isoformat(), "synthetic-owner", "active"),
+            )
+        with self.assertRaises(sqlite3.DatabaseError):
+            store.append_inventory_result(
+                ReadResult.success_empty(()),
+                tracked_ad_ids=("123",), observed_at=NOW,
+                source="synthetic-owner",
+            )
+        with closing(sqlite3.connect(store.path)) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM ad_snapshots"
+            ).fetchone()[0], 1)
+
     def test_missing_store_is_rejected_without_creating_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "wrong" / "mark.sqlite"
