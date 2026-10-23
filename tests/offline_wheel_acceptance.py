@@ -1015,6 +1015,20 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             self.assertRegex(media_result.stderr, r"Ran 3 tests? in [0-9.]+s")
             self.assertIn("OK", media_result.stderr)
 
+            # Exercise the installed, not checkout-imported, fixed Owner
+            # paginated history decoders against invalid timestamps, BLOB
+            # source fields and hidden native BLOB ad IDs. This is not
+            # hostile-UID, FD or MAP_SHARED host-cutover acceptance.
+            owner_history = _command(
+                str(python), "-I", "-m", "unittest", "discover",
+                "-s", str(Path(__file__).resolve().parent),
+                "-p", "test_storage_owner_paged_history_corruption.py", "-v",
+                cwd=root, env=env, timeout=95,
+            )
+            self.assertEqual(owner_history.returncode, 0, owner_history.stderr[-2500:])
+            self.assertRegex(owner_history.stderr, r"Ran 3 tests? in [0-9.]+s")
+            self.assertIn("OK", owner_history.stderr)
+
             # This is a create-only, same-user *offline* backup, NOT hostile
             # service-UID A6 recovery. Test installed CLI, receipt and manual
             # copy-to-new-path recovery; never overwrite the source or backup.
@@ -1075,6 +1089,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "installed_synthetic_text_and_image_drafts": True,
             "installed_synthetic_dashboard_write_end_to_end": True,
             "installed_synthetic_media_write_end_to_end": True,
+            "installed_owner_paged_history_fail_closed": True,
             "installed_synthetic_full_crud_restart_e2e": True,
             "image_draft_private_and_create_only": True,
             "backup_scope": "create-only-offline-not-a6",

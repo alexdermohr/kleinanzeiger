@@ -236,3 +236,54 @@ SQLite-UID. Separat geschützte UID, verifizierte Completion-Evidenz,
 bestehende FDs/MAP_SHARED-Revocation, WAL/SHM und echte A6-Host-/Restore-
 Abnahme bleiben offen; keine generischen SQL-/Completion-/Clearance-RPCs
 und keine Aufhebung der Container-Hard-Stops.
+
+## Nachtrag: Native SQLite-Page-Reads des unabhängigen Owners, 23.10.2026
+
+Ein neuer Angriffstest `test_storage_owner_paged_history_corruption.py`
+reproduzierte auf dem aktuellen A6-Checkout **10 Fails** (2 Subtests
+bestanden): Die typisierten Owner-seitigen paginierten Reaktions-/Inbox-
+Reader und `classification_latest` setzten ungültiges natives SQLite-TEXT
+(`observed_at`) mit `ValueError` um, akzeptierten teilweise native BLOB-
+`source`-Felder stillschweigend und ließen fremde BLOB-`ad_id`-Zeilen
+über `WHERE ad_id=?` unsichtbar werden.
+
+Die vier Owner-Backing-Reader
+`reaction_history_page`, `inbound_message_page`,
+`inbound_message_ad_ids_page` und `latest_classification_bounded`
+verwenden jetzt die **bestehenden indexierten, BINARY-geprüften
+Native-/Blank-ID-Guards** in derselben SQLite-Lesetransaktion
+und die vorhandenen streng typisierten Beobachtungsdecoder.
+Korrupte persistierte Werte werden als `sqlite3.DatabaseError`
+statt Python-`ValueError`/stiller Datenunterdrückung behandelt.
+Die begrenzten Page-Kursoren, eingrenzenden SQL-Selektoren, die
+Connection-Schließung vor Resultatdekodierung sowie das
+`max_records`-API-Limit bleiben erhalten. Keine Completion-,
+SQL-, Arbitrary-Clearance- oder andere Owner-RPC wurden geöffnet.
+
+**RED:** `grabowski-job-0e869aa5cf37`, 10 Fails/2 PASS.
+**GREEN:** Unter Python 3.12 und 3.13 jeweils 131 PASS,
+189 Subtests PASS (Jobs `grabowski-job-507878b47cac` und
+`grabowski-job-34b1a77d6aa6`).
+Der frisch für diese Quelländerung gebaute Wheel-Digest
+`a8bc6c60052b4aded7513405cc82e53236e9d0bb351af02eea2eef25390f3358`
+hat auf beiden Versionen die vollständige getrennt installierte,
+netzisolierte Testreise einschließlich der drei neuen Owner-
+Korruptionsregressionen bestanden (Jobs `grabowski-job-7215eb2d17a0`,
+`grabowski-job-4a5329ef6e9d`), mit
+`installed_owner_paged_history_fail_closed=true`.
+
+**No-Go bleibt unverändert:** Der indexed SQLite-Proof sagt nichts über
+die unabhängige feindliche Dienst-UID, bereits existierende
+FD-/MAP_SHARED-Aliase, WAL-Rollback oder den fehlenden vertrauenswürdigen
+Browser-/Write-Completion-Akteur. Die Multi-UID-/Host-Cutover-Hard-Stops
+bleiben aktiv.
+
+**Abschließende vollständige Quellenmatrix nach diesem Owner-P2-Fix:**
+Python **3.12 und 3.13** jeweils **1.831 PASS, 21 SKIP,
+1.272 Subtests PASS, 2 `os.fork()`-DeprecationWarnings**, ohne
+Fehlschläge. Die beiden Gesamtsuiten liefen absichtlich nacheinander,
+weil CDP-Zielreservierungen auf demselben Host exklusiv bleiben müssen.
+Revisionsgebundene erfolgreich finalisierte Jobs:
+`grabowski-job-07091f2357dc` (3.12) und
+`grabowski-job-056a45cb0ef8` (3.13). Die 21 SKIPs sind keine
+hostile-UID-/MAP_SHARED-/Restore-Abnahme. WIP-PR #199 bleibt Draft.

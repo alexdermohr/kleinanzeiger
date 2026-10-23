@@ -3332,7 +3332,7 @@ class SnapshotStore:
                 ))):
             raise ValueError("reaction history page cursor is invalid")
         with closing(self._connect()) as conn:
-            conn.execute("BEGIN")
+            self._assert_native_history_ad_ids(conn, "reaction_snapshots")
             if watermark is None:
                 row = conn.execute(
                     "SELECT COALESCE(MAX(id), 0) AS bound "
@@ -3350,17 +3350,26 @@ class SnapshotStore:
                 (ad_id, after_id, watermark, limit + 1),
             ).fetchall()
         more = len(rows) > limit
-        page = tuple((
-            int(row["id"]),
-            ReactionSnapshot(
-                ad_id=row["ad_id"],
-                observed_at=datetime.fromisoformat(row["observed_at"]),
-                source=row["source"],
-                conversation_count=row["conversation_count"],
-                unique_buyer_count=row["unique_buyer_count"],
-                inbound_message_count=row["inbound_message_count"],
-            ),
-        ) for row in rows[:limit])
+        try:
+            page = tuple((
+                self._history_row_id(row["id"]),
+                ReactionSnapshot(
+                    ad_id=self._required_observation_ad_id(row["ad_id"]),
+                    observed_at=self._observed_history_time(row["observed_at"]),
+                    source=self._required_observation_text(row["source"]),
+                    conversation_count=self._history_nonnegative_count(
+                        row["conversation_count"]
+                    ),
+                    unique_buyer_count=self._history_nonnegative_count(
+                        row["unique_buyer_count"]
+                    ),
+                    inbound_message_count=self._history_nonnegative_count(
+                        row["inbound_message_count"]
+                    ),
+                ),
+            ) for row in rows[:limit])
+        except (TypeError, ValueError, OverflowError):
+            raise sqlite3.DatabaseError("invalid reaction history page") from None
         return watermark, page, more
 
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
@@ -3414,7 +3423,7 @@ class SnapshotStore:
                 ))):
             raise ValueError("inbound history page cursor is invalid")
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN")
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
             if watermark is None:
                 row = connection.execute(
                     "SELECT COALESCE(MAX(id), 0) AS bound "
@@ -3431,15 +3440,23 @@ class SnapshotStore:
                 (ad_id, after_id, watermark, limit + 1),
             ).fetchall()
         more = len(rows) > limit
-        page = tuple((
-            int(row["id"]),
-            InboundMessageEvent(
-                ad_id=row["ad_id"], conversation_id=row["conversation_id"],
-                provider_message_id=row["provider_message_id"],
-                observed_at=datetime.fromisoformat(row["observed_at"]),
-                source=row["source"],
-            ),
-        ) for row in rows[:limit])
+        try:
+            page = tuple((
+                self._history_row_id(row["id"]),
+                InboundMessageEvent(
+                    ad_id=self._required_observation_ad_id(row["ad_id"]),
+                    conversation_id=self._required_observation_text(
+                        row["conversation_id"]
+                    ),
+                    provider_message_id=self._required_observation_text(
+                        row["provider_message_id"]
+                    ),
+                    observed_at=self._observed_history_time(row["observed_at"]),
+                    source=self._required_observation_text(row["source"]),
+                ),
+            ) for row in rows[:limit])
+        except (TypeError, ValueError, OverflowError):
+            raise sqlite3.DatabaseError("invalid inbound history page") from None
         return watermark, page, more
 
     def inbound_message_ad_ids_page(
@@ -3456,7 +3473,7 @@ class SnapshotStore:
                 ))):
             raise ValueError("inbound ad-ID page cursor is invalid")
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN")
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
             if watermark is None:
                 row = connection.execute(
                     "SELECT COALESCE(MAX(id), 0) AS bound FROM inbound_message_events",
@@ -3470,7 +3487,10 @@ class SnapshotStore:
                    ORDER BY ad_id ASC LIMIT ?""",
                 (watermark, after, limit + 1),
             ).fetchall()
-        return watermark, tuple(row["ad_id"] for row in rows[:limit]), len(rows) > limit
+        return watermark, tuple(
+            self._required_observation_ad_id(row["ad_id"])
+            for row in rows[:limit]
+        ), len(rows) > limit
 
     def inbound_message_history(
         self,
@@ -3603,6 +3623,7 @@ class SnapshotStore:
         selected: sqlite3.Row | None = None
         selected_key: tuple[datetime, int] | None = None
         with closing(self._connect()) as connection:
+            self._assert_native_history_ad_ids(connection, "ad_classifications")
             cursor = connection.execute(
                 """SELECT id, ad_id, observed_at, source, image_type, city,
                           text_type, title_type
@@ -3612,21 +3633,27 @@ class SnapshotStore:
             for count, row in enumerate(cursor, start=1):
                 if count > max_records:
                     raise ValueError("classification history capacity exceeded")
-                when = datetime.fromisoformat(row["observed_at"])
-                key = when, int(row["id"])
-                if selected_key is None or key > selected_key:
-                    selected, selected_key = row, key
+                try:
+                    when = self._observed_history_time(row["observed_at"])
+                    key = when, self._history_row_id(row["id"])
+                    if selected_key is None or key > selected_key:
+                        selected, selected_key = row, key
+                except (TypeError, ValueError, OverflowError):
+                    raise sqlite3.DatabaseError("invalid classification history") from None
         if selected is None:
             return None
-        return AdClassification(
-            ad_id=selected["ad_id"],
-            observed_at=datetime.fromisoformat(selected["observed_at"]),
-            source=selected["source"],
-            image_type=selected["image_type"],
-            city=selected["city"],
-            text_type=selected["text_type"],
-            title_type=selected["title_type"],
-        )
+        try:
+            return AdClassification(
+                ad_id=self._required_observation_ad_id(selected["ad_id"]),
+                observed_at=self._observed_history_time(selected["observed_at"]),
+                source=self._required_observation_text(selected["source"]),
+                image_type=self._optional_observation_text(selected["image_type"]),
+                city=self._optional_observation_text(selected["city"]),
+                text_type=self._optional_observation_text(selected["text_type"]),
+                title_type=self._optional_observation_text(selected["title_type"]),
+            )
+        except (TypeError, ValueError, OverflowError):
+            raise sqlite3.DatabaseError("invalid classification history") from None
 
     def latest_classification(self, ad_id: str) -> AdClassification | None:
         history = self.classification_history(ad_id)
