@@ -369,7 +369,18 @@ class SyntheticMediaVerifier:
 
 
 def _child(role, config):
-    _drop(UIDS[role] if role in UIDS else UIDS["runtime"])
+    # One-shot trusted-owner test provisioning runs under the future SQLite
+    # owner UID in its OWN disposable process, never through the runtime UID
+    # and never during a normal or recovery restart.
+    _drop(UIDS["owner"] if role == "owner-bootstrap" else
+          (UIDS[role] if role in UIDS else UIDS["runtime"]))
+    if role == "owner-bootstrap":
+        db = Path(config["db"])
+        assert not db.exists(), "bootstrap must not overwrite an old SQLite identity"
+        SnapshotStore(db, create_if_missing=True)
+        assert db.is_file() and db.stat().st_uid == UIDS["owner"]
+        _emit({"ready": True, "uid": os.geteuid(), "schema_initialized": True})
+        return
     if role == "platform":
         _platform(config)
     elif role == "witness":
@@ -531,6 +542,12 @@ class Scenario:
             os.chown(path, uid, gid)
             os.chmod(path, mode)
         try:
+            bootstrap = self.spawn("owner-bootstrap", {"db": str(self.owner_db)})
+            ready = self.receive(bootstrap)
+            bootstrap.wait(5)
+            assert bootstrap.returncode == 0 and ready == {
+                "ready": True, "uid": UIDS["owner"], "schema_initialized": True,
+            }, ready
             self.platform_port = self.start("platform", {"platform_token": self.platform_token, "control_token": self.control_token})["port"]
             self.start("witness", {"db": str(self.witness_db), "owner_socket": str(self.owner_witness_socket),
                                    "actor_socket": str(self.actor_witness_socket), "drop_completion_key": "lost:pause" if lost_ack else None})
@@ -825,7 +842,11 @@ class Scenario:
             # interpreter teardown can change the observed exit status on 3.13.
             self.stop(role, already_signalled=True)
         else:
-            socket_identity = self.actor_socket.stat() if role == "actor" else None
+            # Pin exactly the disposable socket inode before SIGKILL.
+            # Only after waitpid proves its creator has exited may this
+            # synthetic supervisor retire a stale UDS pathname.
+            socket_path = self.actor_socket if role == "actor" else self.dashboard_socket
+            socket_identity = socket_path.stat()
             self.stop(role, kill=True)
             self.state("release")
             child.wait(10)
@@ -842,6 +863,14 @@ class Scenario:
                 self.start("actor", self.configs["actor"])
             else:
                 assert child.returncode != 0, "killed owner unexpectedly returned success"
+                current = self.dashboard_socket.lstat()
+                assert stat.S_ISSOCK(current.st_mode) and current.st_uid == UIDS["owner"]
+                assert (current.st_dev, current.st_ino) == (
+                    socket_identity.st_dev, socket_identity.st_ino,
+                )
+                # This is test-only after an exact child waitpid, never a
+                # production host-FD/MAP_SHARED/restore clearance.
+                self.dashboard_socket.unlink()
         self.restart_owner()
         replay = self.request("POST", path, key, payload)
         assert replay["body"]["platform_retry_authorized"] is False, replay
