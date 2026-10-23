@@ -108,7 +108,9 @@ class A6WitnessOfflineRecoveryTests(unittest.TestCase):
                 evidence = encode_evidence(self.intent, receipt)
                 ledger.authority_verified(self.intent, evidence)
                 if stage == "completed":
+                    self.completed_receipt = receipt
                     response = evidence_response(self.intent, evidence)
+                    self.completed_response = response
                     self.assertEqual(ledger.execution_completed(
                         session, key=self.key, sha=self.sha, response=response,
                     ), "confirmed")
@@ -261,6 +263,40 @@ class A6WitnessOfflineRecoveryTests(unittest.TestCase):
         self.assertEqual(checked["witness_unresolved_count"], 1)
         self.assertFalse(checked["restore_authorized"])
         self.assertFalse(checked["external_write_authorized"])
+
+    def test_completed_a6_sqlite_reply_and_actor_proof_remain_pair_bound(self):
+        from mark_api.paired_restore_preflight import inspect_offline_pair
+        from mark_api.storage import SnapshotStore
+
+        self.witness = self.root / "confirmed-witness.sqlite"
+        database = self.root / "confirmed-owner.sqlite"
+        store = SnapshotStore(database)
+        claim = store.claim_write_api_request(
+            idempotency_key=self.key, request_sha256=self.sha,
+            claim_owner="a6-cold-owner", requested_at=self.now,
+        )
+        self.assertTrue(claim.created)
+        store.begin_write_api_request(
+            idempotency_key=self.key, request_sha256=self.sha,
+            claim_owner="a6-cold-owner", execution_started_at=self.now,
+            strict_owner_fence=True,
+        )
+        self._record(stage="completed")
+        store.append_operation_receipt(self.completed_receipt)
+        store.complete_write_api_request(
+            idempotency_key=self.key, request_sha256=self.sha,
+            claim_owner="a6-cold-owner", response_status=200,
+            response_json=json.dumps(
+                self.completed_response, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            ), completed_at=self.now,
+        )
+        observed = inspect_offline_pair(database, self.witness)
+        self.assertEqual(observed["fences"]["sqlite_started"], [[self.key, self.sha]])
+        # Both sides agree on a completed response, but without an operator-
+        # attested host cutover this scanner cannot clear old write authority.
+        self.assertEqual(observed["fences"]["witness_unresolved"], [[self.key, self.sha]])
+        self.assertEqual(observed["fences"]["sqlite_unverified_replay"], [])
 
     def test_legacy_four_index_witness_stays_compatible(self):
         with FenceLedger(self.witness, initialize=True) as ledger:
