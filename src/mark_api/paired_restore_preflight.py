@@ -1170,6 +1170,30 @@ def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
             "BEGIN SELECT RAISE(ABORT,'append-only events'); END"
         ),
     }
+    # The real CompletionWitnessLedger extends the same v2 append-only
+    # schema with BOTH actor-authentication UNIQUE indexes.  An isolated
+    # single index, a modified definition or an extra schema object is never
+    # a valid restore candidate.  Historical four-index ledgers remain
+    # readable without silently promoting them to A6 authority.
+    a6_sql = {
+        ("index", "one_authority_begin_per_key"):
+            "CREATE UNIQUE INDEX one_authority_begin_per_key "
+            "ON events(request_key) WHERE kind='authority_begun'",
+        ("index", "one_authority_verification_per_key"):
+            "CREATE UNIQUE INDEX one_authority_verification_per_key "
+            "ON events(request_key) WHERE kind='authority_verified'",
+    }
+    present_a6 = {
+        name for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name IN ('one_authority_begin_per_key',"
+            "'one_authority_verification_per_key')"
+        )
+    }
+    if present_a6:
+        if present_a6 != {name for _, name in a6_sql}:
+            raise PairPreflightError("incomplete A6 Witness actor index pair")
+        expected_sql.update(a6_sql)
     expected = {
         (kind, name, name if kind == "table" else "events"):
             _witness_ddl_tokens(ddl)
@@ -1231,12 +1255,18 @@ def _verify_witness_security_schema(conn: sqlite3.Connection) -> None:
         str(row[1]): (int(row[2]), str(row[3]), int(row[4]))
         for row in conn.execute("PRAGMA index_list('events')")
     }
-    if indexes != {
+    required_indexes = {
         "one_start_per_key": (1, "c", 1),
         "one_completion_per_key": (1, "c", 1),
         "one_runtime_clearance_per_key": (1, "c", 1),
         "one_operator_clearance_per_key": (1, "c", 1),
-    }:
+    }
+    if present_a6:
+        required_indexes.update({
+            "one_authority_begin_per_key": (1, "c", 1),
+            "one_authority_verification_per_key": (1, "c", 1),
+        })
+    if indexes != required_indexes:
         raise PairPreflightError("witness partial UNIQUE index properties invalid")
 
 
@@ -1271,6 +1301,17 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
     sealed: set[str] = set()
     active: str | None = None
     starts: dict[str, dict[str, object]] = {}
+    # Prior schema verification has already checked each UNIQUE index's
+    # canonical DDL and exact partial-index flags. Legacy four-index ledgers
+    # are readable, but cannot carry actor authority proof events.
+    actor_indexes = {
+        row[1] for row in conn.execute("PRAGMA index_list('events')")
+        if row[1] in {
+            "one_authority_begin_per_key",
+            "one_authority_verification_per_key",
+        }
+    }
+    has_actor_indexes = len(actor_indexes) == 2
     history = _rows(
         conn,
         "SELECT seq,session_id,kind,request_key,request_sha256,action,"
@@ -1327,6 +1368,7 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
                 "session": sid, "sha": sha, "action": action,
                 "completed": False, "completion_outcome": "",
                 "runtime": False, "operator": False,
+                "authority_begun": None, "authority_verified": None,
             }
             continue
         start = starts.get(key)
@@ -1335,13 +1377,55 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
             or action
         ):
             raise PairPreflightError("witness event not bound to earlier start")
-        if kind == "completed":
+        if kind == "authority_begun":
+            if (
+                not has_actor_indexes or start["completed"] or start["operator"]
+                or start["authority_begun"] is not None
+                or start["authority_verified"] is not None
+                or outcome or response or _SHA.fullmatch(evidence) is None
+            ):
+                raise PairPreflightError("A6 witness actor reservation invalid")
+            start["authority_begun"] = (seq, evidence)
+        elif kind == "authority_verified":
+            begun = start["authority_begun"]
+            if (
+                not has_actor_indexes or begun is None
+                or start["authority_verified"] is not None
+                or start["completed"] or start["operator"]
+                or outcome not in (*_WITNESS_SAFE_OUTCOMES, "ambiguous")
+                or _SHA.fullmatch(response) is None
+                or len(evidence) != 129
+                or evidence[:64] != begun[1]
+                or evidence[64:65] != "."
+                or _SHA.fullmatch(evidence[65:]) is None
+                or seq <= begun[0]
+            ):
+                raise PairPreflightError("A6 witness actor verification invalid")
+            start["authority_verified"] = (seq, outcome, response)
+        elif kind == "completed":
             if (
                 start["completed"] or start["operator"]
                 or outcome not in (*_WITNESS_SAFE_OUTCOMES, "ambiguous")
                 or _SHA.fullmatch(response) is None or evidence
             ):
                 raise PairPreflightError("witness completion order invalid")
+            if start["authority_begun"] is not None:
+                proof = start["authority_verified"]
+                verified_safe = (
+                    proof is not None
+                    and proof[1] in _WITNESS_SAFE_OUTCOMES
+                    and proof[2] == response
+                )
+                # Owner may record ambiguous after a lost/mismatched ACK,
+                # but confirmed/precondition_failed requires the *same*
+                # Actor UID proof, response and sequence. A forged
+                # ambiguous event may not downgrade already-matching proof.
+                if (outcome in _WITNESS_SAFE_OUTCOMES) != verified_safe:
+                    raise PairPreflightError(
+                        "A6 Witness completion not supported by actor verification"
+                    )
+                if verified_safe and proof[1] != outcome:
+                    raise PairPreflightError("A6 Witness completion outcome mismatch")
             start["completed"] = True
             start["completion_outcome"] = outcome
         elif kind == "runtime_cleared":
