@@ -1072,6 +1072,21 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             self.assertRegex(scalar.stderr, r"Ran 3 tests? in [0-9.]+s")
             self.assertIn("\nOK\n", scalar.stderr)
 
+            # Inspect real Linux writable MAP_SHARED and old FD references
+            # against pinned synthetic main/WAL/SHM inodes. The independent
+            # installed detector remains negative-only: it cannot attest a
+            # frozen process universe or host cutover without operator proof.
+            host_refs = _command(
+                str(python), "-I", "-m", "unittest", "discover",
+                "-s", str(Path(__file__).resolve().parent),
+                "-p", "test_a6_host_preflight.py", "-v",
+                cwd=root, env=env, timeout=95,
+            )
+            self.assertEqual(host_refs.returncode, 0, host_refs.stderr[-2800:])
+            self.assertRegex(host_refs.stderr, r"Ran 11 tests? in [0-9.]+s")
+            self.assertIn("\nOK\n", host_refs.stderr)
+            self.assertNotIn("skipped=", host_refs.stderr)
+
             # This is a create-only, same-user *offline* backup, NOT hostile
             # service-UID A6 recovery. Test installed CLI, receipt and manual
             # copy-to-new-path recovery; never overwrite the source or backup.
@@ -1135,6 +1150,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "installed_owner_paged_history_fail_closed": True,
             "installed_dashboard_pending_corruption_fail_closed": True,
             "installed_unicode_scalar_json_rejection": True,
+            "installed_a6_old_fd_mmap_negative_scan": True,
             "installed_synthetic_full_crud_restart_e2e": True,
             "image_draft_private_and_create_only": True,
             "backup_scope": "create-only-offline-not-a6",
