@@ -1083,7 +1083,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 cwd=root, env=env, timeout=95,
             )
             self.assertEqual(host_refs.returncode, 0, host_refs.stderr[-2800:])
-            self.assertRegex(host_refs.stderr, r"Ran 11 tests? in [0-9.]+s")
+            self.assertRegex(host_refs.stderr, r"Ran 15 tests? in [0-9.]+s")
             self.assertIn("\nOK\n", host_refs.stderr)
             self.assertNotIn("skipped=", host_refs.stderr)
 
