@@ -58,7 +58,7 @@ class ProtectedFrontendTests(unittest.TestCase):
             result = main(["--config-fd", str(self._pipe(
                 (json.dumps(_CONFIG)+"\n").encode()))])
         self.assertEqual(result, 2)
-        self.assertIn("unavailable", buf.getvalue())
+        self.assertIn("unavailable (owner unavailable)", buf.getvalue())
         self.assertNotIn(_CONFIG["api_token"], buf.getvalue())
         self.assertNotIn(_CONFIG["ui_token"], buf.getvalue())
 

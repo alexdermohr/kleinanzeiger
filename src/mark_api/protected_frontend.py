@@ -74,10 +74,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config-fd", type=int, default=0,
                         help="Inherited private configuration FD (no secrets in argv)")
     args = parser.parse_args(argv)
+    # Only bounded, nonsensitive startup phases may be printed. Socket paths,
+    # configuration bytes, tokens and exception strings are never logged.
+    if container_draft_denied():
+        print("Kleinanzeiger: protected frontend unavailable (draft denied)",
+              file=sys.stderr)
+        return 2
     try:
-        if container_draft_denied():
-            raise ValueError("draft host not admitted")
         config = _read_private_config(args.config_fd)
+    except (ValueError, TypeError, OSError):
+        print("Kleinanzeiger: protected frontend unavailable (config rejected)",
+              file=sys.stderr)
+        return 2
+    try:
         server = create_protected_frontend_server(
             owner_socket=Path(config["owner_socket"]),
             owner_uid=config["owner_uid"], principal=config["principal"],
@@ -85,7 +94,8 @@ def main(argv: list[str] | None = None) -> int:
             ui_token=config["ui_token"], dashboard_port=config["dashboard_port"],
         )
     except (ValueError, TypeError, OSError, StorageOwnerError):
-        print("Kleinanzeiger: protected frontend unavailable", file=sys.stderr)
+        print("Kleinanzeiger: protected frontend unavailable (owner unavailable)",
+              file=sys.stderr)
         return 2
 
     def stop(_sig, _frame):
