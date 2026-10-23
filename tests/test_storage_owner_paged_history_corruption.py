@@ -133,5 +133,57 @@ class OwnerPagedCorruptHistoryTests(unittest.TestCase):
             self._mutate("ad_classifications", "city", "101", original)
 
 
+    def test_socket_rpc_denies_corruption_without_leaking_sqlite_details(self):
+        # Same-UID framing only. Real independent hostile UID needs the
+        # separately protected host/container test and is NOT certified here.
+        import os
+        if os.geteuid() == 0:
+            self.skipTest(
+                "AF_UNIX owner attestation requires a non-root storage UID; "
+                "the offline wheel netns maps its runner to UID 0"
+            )
+        from mark_api.storage_owner import (
+            StorageOwnerServer, StorageOwnerClient, StorageOwnerError,
+        )
+
+        rpc_dir = self.store.path.parent / "rpc"
+        rpc_dir.mkdir(mode=0o700)
+        rpc_dir.chmod(0o2710)
+        endpoint = rpc_dir / "owner.sock"
+        server = StorageOwnerServer(
+            database=self.store.path, socket_path=endpoint,
+            runtime_uid=os.geteuid() + 10001, runtime_gid=os.getegid(),
+        )
+        self.addCleanup(server.stop)
+        server.runtime_uid = os.geteuid()  # Framing-only test.
+        server.start()
+        client = StorageOwnerClient(endpoint, expected_owner_uid=os.geteuid())
+        routes = (
+            ("reaction_snapshots", lambda: client.reaction_history("101")),
+            ("inbound_message_events", lambda: client.inbound_message_history("101")),
+            ("ad_classifications", lambda: client.latest_classification("101")),
+        )
+        self.assertTrue(client.ready())
+        self.assertEqual(client.dashboard_pending_writes(), ())
+        for table, read in routes:
+            with self.subTest(table=table):
+                self.assertTrue(read())
+                original = self._mutate(table, "observed_at", "101", "secret-bad-clock")
+                try:
+                    with self.assertRaises(StorageOwnerError) as failure:
+                        read()
+                    self.assertNotIn("secret-bad-clock", str(failure.exception))
+                    self.assertNotIn(str(self.store.path), str(failure.exception))
+                    self.assertTrue(client.ready())
+                    self.assertEqual(client.dashboard_pending_writes(), ())
+                finally:
+                    self._mutate(table, "observed_at", "101", original)
+                self.assertTrue(read())
+        self.assertFalse(self.store.has_write_recovery_clearance(
+            idempotency_key="synthetic:never-settled",
+            request_sha256="a" * 64,
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

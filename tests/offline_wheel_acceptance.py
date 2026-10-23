@@ -1026,8 +1026,16 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 cwd=root, env=env, timeout=95,
             )
             self.assertEqual(owner_history.returncode, 0, owner_history.stderr[-2500:])
-            self.assertRegex(owner_history.stderr, r"Ran 3 tests? in [0-9.]+s")
-            self.assertIn("OK", owner_history.stderr)
+            self.assertRegex(owner_history.stderr, r"Ran 4 tests? in [0-9.]+s")
+            # Local userns tests may map the runner to UID 0; the
+            # storage-owner socket must then skip rather than weaken its
+            # non-root UID requirement. Official CI drops capabilities and
+            # executes this test under the actual unprivileged runner UID.
+            if os.geteuid() == 0:
+                self.assertIn("OK (skipped=1)", owner_history.stderr)
+            else:
+                self.assertIn("\nOK\n", owner_history.stderr)
+                self.assertNotIn("skipped=", owner_history.stderr)
 
             # This is a create-only, same-user *offline* backup, NOT hostile
             # service-UID A6 recovery. Test installed CLI, receipt and manual
