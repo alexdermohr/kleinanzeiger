@@ -249,7 +249,9 @@ def _child(role, config):
         adapter = PlatformAdapter(config["platform_port"], config["platform_token"])
         service = MarkService(owner_reader=adapter, management_reader=adapter, delete_confirmation_reader=adapter,
                               reaction_reader=adapter, state_writer=adapter, delete_writer=adapter, content_writer=adapter,
-                              create_writer=adapter, content_reader_factory=lambda _: adapter, store=None, writes_enabled=True)
+                              create_writer=adapter,
+                              content_reader_factory=lambda _: PlatformAdapter(config["platform_port"], config["platform_token"]),
+                              store=None, writes_enabled=True)
         witness = AuthorityWitnessClient(Path(config["witness_socket"]), expected_owner_uid=UIDS["witness"])
         server = CompletionAuthorityServer(socket_path=Path(config["socket"]), owner_uid=UIDS["owner"], owner_gid=UIDS["owner"],
                                            runtime_uid=UIDS["runtime"], principal=PRINCIPAL, service=service, witness_client=witness)
