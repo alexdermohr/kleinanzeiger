@@ -15,18 +15,20 @@ from threading import Thread
 
 from .completion_dashboard import CompletionDashboardClient
 from .container_draft import container_draft_denied
-from .dashboard import DashboardWriteProxy, create_server
+from .dashboard import DashboardGenerationAccess, DashboardWriteProxy, create_server
 from .storage_owner import StorageOwnerError
 from .strict_json import strict_json_object
 
 _FIELDS = frozenset(("owner_socket", "owner_uid", "principal", "owner_port",
                      "api_token", "ui_token", "dashboard_port"))
+_GENERATION_FIELDS = _FIELDS | {"generation_token"}
 _LIMIT = 8192
 
 
 def create_protected_frontend_server(
     *, owner_socket: Path, owner_uid: int, principal: str,
     owner_port: int, api_token: str, ui_token: str, dashboard_port: int = 8765,
+    generation_access: DashboardGenerationAccess | None = None,
 ):
     """Use the real strict owner/Witness-backed Write proxy, never a test seam."""
     if not isinstance(owner_socket, Path) or not owner_socket.is_absolute():
@@ -39,7 +41,10 @@ def create_protected_frontend_server(
         ui_token=ui_token, backend_principal=principal,
         owner_reconciliation_enabled=True,
     )
-    return create_server(client, port=dashboard_port, write_proxy=proxy)
+    return create_server(
+        client, port=dashboard_port, write_proxy=proxy,
+        generation_access=generation_access,
+    )
 
 
 def _read_private_config(fd: int) -> dict[str, object]:
@@ -58,13 +63,18 @@ def _read_private_config(fd: int) -> dict[str, object]:
             or not raw.endswith(b"\n") or raw.count(b"\n") != 1):
         raise ValueError("invalid protected frontend configuration")
     config = strict_json_object(raw[:-1])
-    if set(config) != _FIELDS or type(config["owner_socket"]) is not str:
+    if set(config) not in (_FIELDS, _GENERATION_FIELDS) or type(config["owner_socket"]) is not str:
         raise ValueError("invalid protected frontend configuration")
     if not config["owner_socket"].startswith("/"):
         raise ValueError("invalid protected frontend configuration")
     if any(type(config[field]) is not int
            for field in ("owner_uid", "owner_port", "dashboard_port")):
         raise ValueError("invalid protected frontend configuration")
+    if "generation_token" in config:
+        token = config["generation_token"]
+        if (type(token) is not str or not 16 <= len(token) <= 512
+                or any(not 0x21 <= ord(char) <= 0x7E for char in token)):
+            raise ValueError("invalid private generation token")
     return config
 
 
@@ -86,12 +96,31 @@ def main(argv: list[str] | None = None) -> int:
         print("Kleinanzeiger: protected frontend unavailable (config rejected)",
               file=sys.stderr)
         return 2
+    # Generation is opt-in, using the same per-session cost-consent gate as
+    # the normal customer launcher. Never construct a paid provider at start.
+    generation_access = None
+    generation_token = config.get("generation_token")
+    if generation_token is not None:
+        if not os.environ.get("OPENAI_API_KEY"):
+            print("Kleinanzeiger: protected frontend unavailable (generation credential missing)",
+                  file=sys.stderr)
+            return 2
+        try:
+            from openai import OpenAI as sdk
+            if not callable(sdk):
+                raise TypeError("generation SDK unavailable")
+        except Exception:
+            print("Kleinanzeiger: protected frontend unavailable (generation SDK missing)",
+                  file=sys.stderr)
+            return 2
+        generation_access = DashboardGenerationAccess(ui_token=generation_token)
     try:
         server = create_protected_frontend_server(
             owner_socket=Path(config["owner_socket"]),
             owner_uid=config["owner_uid"], principal=config["principal"],
             owner_port=config["owner_port"], api_token=config["api_token"],
             ui_token=config["ui_token"], dashboard_port=config["dashboard_port"],
+            generation_access=generation_access,
         )
     except (ValueError, TypeError, OSError, StorageOwnerError):
         print("Kleinanzeiger: protected frontend unavailable (owner unavailable)",
