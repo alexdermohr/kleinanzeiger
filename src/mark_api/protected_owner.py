@@ -95,3 +95,122 @@ def create_protected_owner_runtime(
         finally:
             witness.close()
         raise
+
+
+# An independent host supervisor must provide this service's private config
+# over an inherited pipe/FD. No untrusted process can select another UID.
+def _read_private_owner_config(fd: int) -> dict[str, object]:
+    import stat
+    from .strict_json import strict_json_object
+
+    if type(fd) is not int or fd < 0:
+        raise ValueError("private owner configuration FD required")
+    info = os.fstat(fd)
+    if stat.S_ISREG(info.st_mode):
+        if stat.S_IMODE(info.st_mode) & 0o077 or info.st_uid not in (0, os.geteuid()):
+            raise ValueError("unsafe private owner configuration FD")
+    elif not stat.S_ISFIFO(info.st_mode):
+        raise ValueError("private owner configuration must be a file or pipe")
+    with os.fdopen(os.dup(fd), "rb") as private:
+        raw = private.read(8193)
+    if len(raw) < 3 or len(raw) > 8192 or raw.count(b"\n") != 1 or not raw.endswith(b"\n"):
+        raise ValueError("invalid bounded private owner config frame")
+    config = strict_json_object(raw[:-1])
+    expected = {
+        "database", "dashboard_socket", "witness_socket", "actor_socket",
+        "witness_uid", "actor_uid", "runtime_uid", "runtime_gid",
+        "principal", "bearer_token", "media_enabled", "write_port",
+    }
+    if set(config) != expected:
+        raise ValueError("unexpected private owner config")
+    for key in ("database", "dashboard_socket", "witness_socket", "actor_socket"):
+        path = config[key]
+        if type(path) is not str or not path.startswith("/"):
+            raise ValueError("invalid owner path")
+    if any(type(config[key]) is not int
+           for key in ("witness_uid", "actor_uid", "runtime_uid", "runtime_gid", "write_port")):
+        raise ValueError("invalid owner UID/port")
+    if type(config["media_enabled"]) is not bool:
+        raise ValueError("invalid protected media gate")
+    for key in ("principal", "bearer_token"):
+        if type(config[key]) is not str or not config[key]:
+            raise ValueError("invalid protected principal/token")
+    return config
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Serve only a preprovisioned multi-UID product. No host cutover powers."""
+    import argparse
+    import json
+    import signal
+    import sys
+    from threading import Event, Thread
+
+    from .container_draft import container_draft_denied
+
+    parser = argparse.ArgumentParser(
+        description="Kleinanzeiger independent A6 SQLite owner and Write API")
+    parser.add_argument("--config-fd", type=int, default=0,
+                        help="inherited private pipe/file descriptor, never argv secrets")
+    args = parser.parse_args(argv)
+    if container_draft_denied():
+        print("Kleinanzeiger: protected owner unavailable (draft denied)", file=sys.stderr)
+        return 2
+    try:
+        config = _read_private_owner_config(args.config_fd)
+    except (ValueError, TypeError, OSError):
+        print("Kleinanzeiger: protected owner unavailable (config rejected)", file=sys.stderr)
+        return 2
+    try:
+        runtime = create_protected_owner_runtime(
+            database=Path(config["database"]),
+            dashboard_socket=Path(config["dashboard_socket"]),
+            witness_socket=Path(config["witness_socket"]),
+            actor_socket=Path(config["actor_socket"]),
+            witness_uid=config["witness_uid"], actor_uid=config["actor_uid"],
+            runtime_uid=config["runtime_uid"], runtime_gid=config["runtime_gid"],
+            principal=config["principal"], bearer_token=config["bearer_token"],
+            media_enabled=config["media_enabled"], write_port=config["write_port"],
+        )
+    except Exception:
+        # Never log a path, token, low-level host, kernel or SQLite exception.
+        print("Kleinanzeiger: protected owner unavailable (admission denied)", file=sys.stderr)
+        return 2
+
+    server = runtime.write_server
+    stopped = Event()
+    def stop(_signum, _frame) -> None:
+        stopped.set()
+    previous_term = signal.signal(signal.SIGTERM, stop)
+    previous_int = signal.signal(signal.SIGINT, stop)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05},
+                    daemon=True, name="kleinanzeiger-owner-write-api")
+    try:
+        thread.start()
+        print(json.dumps({"ready": True, "uid": os.geteuid(),
+                          "port": server.server_port}, separators=(",", ":")), flush=True)
+        stopped.wait()
+        server.shutdown()
+        if hasattr(server, "wait_for_active_handlers"):
+            if not server.wait_for_active_handlers(10):
+                # Keep witness/fences in the conservative unresolved state;
+                # a timeout is no proof that an external Write was quiescent.
+                return 2
+        server.server_close()
+        thread.join(3)
+        if thread.is_alive():
+            return 2
+        runtime.close()
+        return 0
+    except Exception:
+        # A host/SQLite/server error during SIGTERM is UNKNOWN, never a
+        # successful drain. Do not expose paths, tokens or low-level details.
+        print("Kleinanzeiger: protected owner unavailable (shutdown uncertain)", file=sys.stderr)
+        return 2
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -93,6 +93,7 @@ jobs:
           ' bash "$isolated" "$host_net" "$host_pid" 2>&1 | tee "$report"
           grep -Fq '"result":"PASS"' "$report"
           grep -Fq '"scope":"installed-a6-independent-media-nonmedia-uid-composition"' "$report"
+          grep -Fq '"installed_witness_cli":true' "$report"
           grep -Fq '"protected_media_create":true' "$report"
           grep -Fq '"protected_media_independent_postread":true' "$report"
           grep -Fq '"protected_media_unknown_fenced":true' "$report"

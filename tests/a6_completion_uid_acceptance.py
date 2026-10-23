@@ -373,6 +373,7 @@ def _child(role, config):
     # owner UID in its OWN disposable process, never through the runtime UID
     # and never during a normal or recovery restart.
     _drop(UIDS["owner"] if role == "owner-bootstrap" else
+          UIDS["witness"] if role == "witness-bootstrap" else
           (UIDS[role] if role in UIDS else UIDS["runtime"]))
     if role == "owner-bootstrap":
         db = Path(config["db"])
@@ -381,14 +382,32 @@ def _child(role, config):
         assert db.is_file() and db.stat().st_uid == UIDS["owner"]
         _emit({"ready": True, "uid": os.geteuid(), "schema_initialized": True})
         return
+    if role == "witness-bootstrap":
+        # Independent trusted one-shot provisioning: never on a normal
+        # restart, and never through the untrusted runtime UID.
+        db = Path(config["db"])
+        assert not db.exists(), "witness bootstrap must not overwrite a ledger"
+        ledger = CompletionWitnessLedger(db, principal=PRINCIPAL, initialize=True)
+        ledger.close()
+        assert db.is_file() and db.stat().st_uid == UIDS["witness"]
+        _emit({"ready": True, "uid": os.geteuid(), "schema_initialized": True})
+        return
     if role == "platform":
         _platform(config)
     elif role == "witness":
-        ledger = CompletionWitnessLedger(Path(config["db"]), principal=PRINCIPAL, initialize=not Path(config["db"]).exists())
-        server = CompletionWitnessServer(ledger=ledger, owner_socket=Path(config["owner_socket"]),
-                                        authority_socket=Path(config["actor_socket"]), owner_uid=UIDS["owner"], owner_gid=UIDS["owner"],
-                                        authority_uid=UIDS["actor"], authority_gid=UIDS["actor"], runtime_uid=UIDS["runtime"])
         if config.get("drop_completion_key"):
+            # Synthetic lost-ACK injection is test-only. In all ordinary
+            # scenarios the production installed Witness CLI is exercised.
+            ledger = CompletionWitnessLedger(
+                Path(config["db"]), principal=PRINCIPAL, initialize=False,
+            )
+            server = CompletionWitnessServer(
+                ledger=ledger, owner_socket=Path(config["owner_socket"]),
+                authority_socket=Path(config["actor_socket"]),
+                owner_uid=UIDS["owner"], owner_gid=UIDS["owner"],
+                authority_uid=UIDS["actor"], authority_gid=UIDS["actor"],
+                runtime_uid=UIDS["runtime"],
+            )
             class DropCompletionAck(_WitnessUnixHandler):
                 def _dispatch(self, request, target, session):
                     answer = super()._dispatch(request, target, session)
@@ -402,7 +421,29 @@ def _child(role, config):
                         raise ConnectionResetError("synthetic lost completion ACK")
                     super()._send(value)
             server._owner.RequestHandlerClass = DropCompletionAck
-        _wait_server(server, {}, close=ledger.close)
+            _wait_server(server, {}, close=ledger.close)
+        else:
+            config_bytes = _json({
+                "database": config["db"],
+                "owner_socket": config["owner_socket"],
+                "actor_socket": config["actor_socket"],
+                "owner_uid": UIDS["owner"], "owner_gid": UIDS["owner"],
+                "actor_uid": UIDS["actor"], "actor_gid": UIDS["actor"],
+                "runtime_uid": UIDS["runtime"], "principal": PRINCIPAL,
+            }).encode("utf-8") + b"\n"
+            read_fd, write_fd = os.pipe()
+            try:
+                os.write(write_fd, config_bytes)
+            finally:
+                os.close(write_fd)
+            try:
+                os.set_inheritable(read_fd, True)
+                cli = Path(sys.executable).with_name("kleinanzeiger-protected-witness")
+                assert cli.is_file() and os.access(cli, os.X_OK), "installed witness entry missing"
+                os.execv(str(cli), [str(cli), "--config-fd", str(read_fd)])
+                raise AssertionError("protected witness exec unexpectedly returned")
+            finally:
+                os.close(read_fd)
     elif role == "actor":
         adapter = PlatformAdapter(config["platform_port"], config["platform_token"])
         service = MarkService(owner_reader=adapter, management_reader=adapter, delete_confirmation_reader=adapter,
@@ -436,21 +477,32 @@ def _child(role, config):
                     handles.close()
         _wait_server(server, {}, close=close_actor)
     elif role == "owner":
-        # This packaged composition, not a weaker inline test adapter, owns
-        # SQLite history, dashboard proof and all standard Write capabilities.
-        from mark_api.protected_owner import create_protected_owner_runtime
-        runtime = create_protected_owner_runtime(
-            database=Path(config["db"]),
-            dashboard_socket=Path(config["dashboard_socket"]),
-            witness_socket=Path(config["witness_socket"]),
-            actor_socket=Path(config["actor_socket"]),
-            witness_uid=UIDS["witness"], actor_uid=UIDS["actor"],
-            runtime_uid=UIDS["runtime"], runtime_gid=UIDS["runtime"],
-            principal=PRINCIPAL, bearer_token=config["api_token"],
-            media_enabled=bool(config.get("media_enabled")),
-        )
-        server = runtime.write_server
-        _wait_server(server, {"port": server.server_port}, close=runtime.close)
+        # Exercise the installed wheel's real console entry under the owner UID.
+        # No test-only factory or implicit SQLite creation on restart.
+        config_bytes = _json({
+            "database": config["db"],
+            "dashboard_socket": config["dashboard_socket"],
+            "witness_socket": config["witness_socket"],
+            "actor_socket": config["actor_socket"],
+            "witness_uid": UIDS["witness"], "actor_uid": UIDS["actor"],
+            "runtime_uid": UIDS["runtime"], "runtime_gid": UIDS["runtime"],
+            "principal": PRINCIPAL, "bearer_token": config["api_token"],
+            "media_enabled": bool(config.get("media_enabled")), "write_port": 0,
+        }).encode("utf-8") + b"\n"
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, config_bytes)
+        finally:
+            os.close(write_fd)
+        try:
+            # This descriptor is the only deliberately inherited private input.
+            os.set_inheritable(read_fd, True)
+            cli = Path(sys.executable).with_name("kleinanzeiger-protected-owner")
+            assert cli.is_file() and os.access(cli, os.X_OK), "installed owner entry missing"
+            os.execv(str(cli), [str(cli), "--config-fd", str(read_fd)])
+            raise AssertionError("protected owner exec unexpectedly returned")
+        finally:
+            os.close(read_fd)
     elif role == "frontend":
         # Use the *installed* executable product path, not a test-only server
         # factory. Pass tokens via a disposable private pipe, never argv/logs.
@@ -520,6 +572,9 @@ class Scenario:
         self.platform_token = secrets.token_hex(24)
         self.control_token = secrets.token_hex(24)
         root.mkdir(mode=0o755)
+        # An enforcing supervisor may have umask 077. The disposable root
+        # must be traversable by the independent synthetic child UIDs.
+        os.chmod(root, 0o755)
         self.owner_db = root / "owner-data" / "snapshot.sqlite"
         self.witness_db = root / "witness-data" / "witness.sqlite"
         self.owner_witness_socket = root / "w-owner" / "w.sock"
@@ -548,6 +603,12 @@ class Scenario:
             assert bootstrap.returncode == 0 and ready == {
                 "ready": True, "uid": UIDS["owner"], "schema_initialized": True,
             }, ready
+            witness_bootstrap = self.spawn("witness-bootstrap", {"db": str(self.witness_db)})
+            witness_ready = self.receive(witness_bootstrap)
+            witness_bootstrap.wait(5)
+            assert witness_bootstrap.returncode == 0 and witness_ready == {
+                "ready": True, "uid": UIDS["witness"], "schema_initialized": True,
+            }, witness_ready
             self.platform_port = self.start("platform", {"platform_token": self.platform_token, "control_token": self.control_token})["port"]
             self.start("witness", {"db": str(self.witness_db), "owner_socket": str(self.owner_witness_socket),
                                    "actor_socket": str(self.actor_witness_socket), "drop_completion_key": "lost:pause" if lost_ack else None})
@@ -1009,6 +1070,7 @@ def _acceptance(host_net, host_pid):
     hashes = {name: hashlib.sha256((package.parent / name).read_bytes()).hexdigest()
               for name in ("completion_authority.py", "completion_witness.py", "fence_witness.py", "completion_dashboard.py", "dashboard.py")}
     _emit({"result": "PASS", "scope": "installed-a6-independent-media-nonmedia-uid-composition", "roles": UIDS,
+           "installed_witness_cli": True,
            "crud": True, "restart_replay": True, "lost_completion_ack": True, "unknown_fenced": True,
            "runtime_raw_db_wal_shm_denied": True, "forged_completion_clearance_denied": True,
            "kernel_peer_credentials": True, "loopback_only": True, "platform_access": False,
@@ -1037,5 +1099,3 @@ if __name__ == "__main__":
             arguments = parser.parse_args()
             _acceptance(arguments.host_net, arguments.host_pid)
     except BaseException:
-        traceback.print_exc()
-        raise SystemExit(1)

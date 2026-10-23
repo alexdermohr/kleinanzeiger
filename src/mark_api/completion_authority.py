@@ -765,6 +765,34 @@ class OwnerCompletionService:
         return self._execute("create", None, payload, authorization_by, authorization_reference)
 
 
+
+def _verify_nonmedia_actor(socket_path: Path, authority_uid: int) -> None:
+    """Require the real independent actor even when media writes are disabled.
+
+    The existing media_profile is an owner-only, side-effect-free probe. It
+    grants no execute, completion, retry or recovery authority.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+            peer.settimeout(3.0)
+            peer.connect(str(socket_path))
+            credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            if _linux_ucred_uid(credentials) != authority_uid:
+                raise _fail()
+            peer.sendall(b'{"op":"media_profile","version":1}\n')
+            with peer.makefile("rb") as reader:
+                frame = reader.readline(_MAX_FRAME + 2)
+        if not 1 < len(frame) <= _MAX_FRAME + 1 or not frame.endswith(b"\n"):
+            raise _fail()
+        answer = strict_json_object(frame[:-1])
+        if (set(answer) != {"version", "ok", "media_ready"}
+                or type(answer["version"]) is not int or answer["version"] != 1
+                or answer["ok"] is not True or answer["media_ready"] is not False):
+            raise _fail()
+    except (OSError, ValueError, UnicodeError):
+        raise _fail() from None
+
+
 def create_owner_write_api_server(*, store: SnapshotStore, access: WriteApiAccess,
                                   authority_socket: Path, authority_uid: int,
                                   runtime_uid: int, fence_witness: FenceWitnessClient,
@@ -791,6 +819,8 @@ def create_owner_write_api_server(*, store: SnapshotStore, access: WriteApiAcces
                 socket_path=authority_socket, authority_uid=authority_uid,
                 runtime_uid=runtime_uid,
             )
+        else:
+            _verify_nonmedia_actor(authority_socket, authority_uid)
         service = OwnerCompletionService(
             store=store, socket_path=authority_socket, authority_uid=authority_uid,
             runtime_uid=runtime_uid, principal=access.principal,

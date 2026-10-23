@@ -168,5 +168,55 @@ class CompletionAuthorityContractTests(unittest.TestCase):
                 )
 
 
+
+class NonMediaActorAdmissionTests(unittest.TestCase):
+    """Local protocol regressions, not a substitute for independent-UID E2E."""
+
+    def test_missing_nonmedia_actor_is_denied(self):
+        from mark_api.completion_authority import _verify_nonmedia_actor
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(CompletionAuthorityError):
+                _verify_nonmedia_actor(Path(temporary) / "absent.sock", os.geteuid() + 101)
+
+    @unittest.skipIf(os.geteuid() == 0, "same-UID protocol fixture requires nonroot")
+    def test_nonmedia_actor_profile_and_peer_are_strict(self):
+        import socketserver
+        from threading import Thread
+        from mark_api.completion_authority import _verify_nonmedia_actor
+
+        success = b'{"media_ready":false,"ok":true,"version":1}\n'
+        cases = (
+            ("valid_profile", success, 0, True),
+            ("wrong_peer_uid", success, 111, False),
+            ("media_mode_mismatch", b'{"media_ready":true,"ok":true,"version":1}\n', 0, False),
+            ("forged_bool_version", b'{"media_ready":false,"ok":true,"version":true}\n', 0, False),
+            ("extra_field", b'{"media_ready":false,"ok":true,"version":1,"clearance":true}\n', 0, False),
+            ("malformed", b'{"media_ready":false,"ok":true,"version":1}\ntrailing', 0, True),
+        )
+        for label, reply, uid_delta, allowed in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "actor.sock"
+
+                class Handler(socketserver.StreamRequestHandler):
+                    def handle(self):
+                        request = self.rfile.readline(256)
+                        if request:
+                            self.wfile.write(reply)
+                            self.wfile.flush()
+
+                with socketserver.UnixStreamServer(str(path), Handler) as server:
+                    thread = Thread(target=server.handle_request, daemon=True)
+                    thread.start()
+                    try:
+                        if allowed:
+                            self.assertIsNone(_verify_nonmedia_actor(path, os.geteuid() + uid_delta))
+                        else:
+                            with self.assertRaises(CompletionAuthorityError):
+                                _verify_nonmedia_actor(path, os.geteuid() + uid_delta)
+                    finally:
+                        thread.join(2)
+                        self.assertFalse(thread.is_alive(), "actor admission fixture did not finish")
+
+
 if __name__ == "__main__":
     unittest.main()

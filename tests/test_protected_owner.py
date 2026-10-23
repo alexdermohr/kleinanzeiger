@@ -115,5 +115,99 @@ class ProtectedOwnerAdmissionTests(unittest.TestCase):
             witness.close.assert_called_once_with()
 
 
+class ProtectedOwnerCliTests(unittest.TestCase):
+    def pipe(self, content: bytes) -> int:
+        fd, writer = os.pipe()
+        try:
+            os.write(writer, content)
+        finally:
+            os.close(writer)
+        self.addCleanup(os.close, fd)
+        return fd
+
+    def test_private_owner_config_is_exact_and_bounded(self):
+        import json
+        from mark_api.protected_owner import _read_private_owner_config
+        cfg = {**params(), **{
+            key: str(params()[key])
+            for key in ("database", "dashboard_socket", "witness_socket", "actor_socket")
+        }}
+        data = (json.dumps(cfg) + "\n").encode()
+        self.assertEqual(_read_private_owner_config(self.pipe(data)), cfg)
+
+    def test_malformed_foreign_or_config_escape_rejected(self):
+        import json
+        from mark_api.protected_owner import _read_private_owner_config
+        cfg = {**params(), **{
+            key: str(params()[key])
+            for key in ("database", "dashboard_socket", "witness_socket", "actor_socket")
+        }}
+        cases = (
+            b'{"actor_uid":1,"actor_uid":2}\n',
+            b'{"actor_uid":NaN}\n',
+            b"{}\n" + b"x" * 8200,
+            (json.dumps({**cfg, "sql": "DROP TABLE"}) + "\n").encode(),
+            (json.dumps({**cfg, "media_enabled": 1}) + "\n").encode(),
+            (json.dumps({**cfg, "database": "../owner.sqlite"}) + "\n").encode(),
+            (json.dumps({k: v for k, v in cfg.items() if k != "bearer_token"}) + "\n").encode(),
+        )
+        for data in cases:
+            with self.subTest(data=data[:25]), self.assertRaises(ValueError):
+                _read_private_owner_config(self.pipe(data))
+
+    def test_missing_witness_and_bootstrap_never_open_untrusted_sqlite(self):
+        import io
+        import json
+        from contextlib import redirect_stderr
+        from mark_api.protected_owner import main
+        cfg = {**params(), **{
+            key: str(params()[key])
+            for key in ("database", "dashboard_socket", "witness_socket", "actor_socket")
+        }}
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            status = main(["--config-fd", str(self.pipe((json.dumps(cfg) + "\n").encode()))])
+        self.assertEqual(status, 2)
+        self.assertIn("unavailable", buf.getvalue())
+        self.assertNotIn(cfg["bearer_token"], buf.getvalue())
+        self.assertNotIn(cfg["database"], buf.getvalue())
+
+
+    def test_shutdown_exception_is_fail_closed_and_never_logs_private_path(self):
+        import io
+        import signal
+        from contextlib import redirect_stderr
+        from mark_api.protected_owner import main
+
+        cfg = {**params(), **{
+            name: str(params()[name])
+            for name in ("database", "dashboard_socket", "witness_socket", "actor_socket")
+        }}
+        fake_runtime = MagicMock()
+        fake_runtime.write_server.server_port = 17721
+        fake_runtime.write_server.shutdown.side_effect = RuntimeError(
+            "synthetic database path " + cfg["database"] + " token " + cfg["bearer_token"]
+        )
+        stderr = io.StringIO()
+        with patch(
+            "mark_api.protected_owner._read_private_owner_config",
+            return_value=cfg,
+        ), patch(
+            "mark_api.protected_owner.create_protected_owner_runtime",
+            return_value=fake_runtime,
+        ), patch(
+            "threading.Event"
+        ), patch(
+            "threading.Thread"
+        ), patch(
+            "signal.signal", return_value=signal.SIG_DFL
+        ), redirect_stderr(stderr):
+            result = main(["--config-fd", "0"])
+        self.assertEqual(result, 2)
+        self.assertNotIn(cfg["database"], stderr.getvalue())
+        self.assertNotIn(cfg["bearer_token"], stderr.getvalue())
+        fake_runtime.close.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

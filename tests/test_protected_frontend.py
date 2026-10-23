@@ -7,6 +7,8 @@ import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
 from http.client import HTTPConnection
 from pathlib import Path
+import struct
+import zlib
 from threading import RLock, Thread
 from types import ModuleType
 from unittest.mock import MagicMock, patch
@@ -180,9 +182,17 @@ class ProtectedFrontendTests(unittest.TestCase):
         generator.generate_text.return_value = AdvertisementDraft(
             title="Fahrrad 28 Zoll", description="Ein eigener Artikel"
         )
+        def chunk(tag, payload):
+            return (struct.pack(">I", len(payload)) + tag + payload
+                    + struct.pack(">I", zlib.crc32(tag + payload) & 0xffffffff))
+        ihdr = struct.pack(">IIBBBBB", 1024, 1024, 8, 6, 0, 0, 0)
+        raster = (b"\x00" + b"\x00" * 4096) * 1024
+        png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+               + chunk(b"IDAT", zlib.compress(raster)) + chunk(b"IEND", b""))
+        generator.generate_image.return_value = png
         token = "synthetic-http-generation-token-123456"
         access = DashboardGenerationAccess(
-            ui_token=token, generator_factory=lambda: generator, max_requests=1
+            ui_token=token, generator_factory=lambda: generator, max_requests=2
         )
         with patch("mark_api.protected_frontend.CompletionDashboardClient",
                    return_value=owner):
@@ -197,6 +207,13 @@ class ProtectedFrontendTests(unittest.TestCase):
         worker.start()
         try:
             port = server.server_port
+            with closing(HTTPConnection("127.0.0.1", port, timeout=5)) as connection:
+                connection.request("GET", "/api/dashboard/config")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                config = json.loads(response.read())
+                self.assertIs(config["write_ui_available"], True)
+                self.assertIs(config["generation_ui_available"], True)
             headers = {
                 "Origin": f"http://127.0.0.1:{port}",
                 "Content-Type": "application/json",
@@ -205,9 +222,9 @@ class ProtectedFrontendTests(unittest.TestCase):
                 "Sec-Fetch-Site": "same-origin",
             }
 
-            def request(consent, *, session_token=token):
+            def request(consent, *, session_token=token, mode="text"):
                 body = json.dumps({
-                    "mode": "text", "prompt": "Ein Fahrrad",
+                    "mode": mode, "prompt": "Ein Fahrrad",
                     "acknowledge_provider_cost": consent,
                 }).encode()
                 with closing(HTTPConnection("127.0.0.1", port, timeout=5)) as connection:
@@ -216,6 +233,8 @@ class ProtectedFrontendTests(unittest.TestCase):
                         {**headers, "X-Mark-Generation-Token": session_token},
                     )
                     response = connection.getresponse()
+                    if mode == "image" and response.status == 200:
+                        return response.status, response.read(), response.getheader("Content-Type")
                     return response.status, json.loads(response.read())
 
             self.assertEqual(request(True, session_token="wrong")[0], 403)
@@ -226,8 +245,15 @@ class ProtectedFrontendTests(unittest.TestCase):
             self.assertEqual(payload["title"], "Fahrrad 28 Zoll")
             self.assertIs(payload["published"], False)
             generator.generate_text.assert_called_once_with("Ein Fahrrad")
+            image_response = request(True, mode="image")
+            self.assertEqual(image_response[0], 200, image_response)
+            image_status, received_png, content_type = image_response
+            self.assertEqual(content_type, "image/png")
+            self.assertEqual(received_png, png)
+            generator.generate_image.assert_called_once_with("Ein Fahrrad")
             self.assertEqual(request(True)[0], 429)
             generator.generate_text.assert_called_once()
+            generator.generate_image.assert_called_once()
         finally:
             server.shutdown()
             server.server_close()
