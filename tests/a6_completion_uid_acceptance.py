@@ -37,8 +37,7 @@ import mark_api
 from mark_api.application import MarkService
 from mark_api.completion_authority import CompletionAuthorityServer, create_owner_write_api_server
 from mark_api.completion_witness import AuthorityWitnessClient, CompletionWitnessLedger, CompletionWitnessServer
-from mark_api.completion_dashboard import CompletionDashboardClient, CompletionDashboardOwnerServer
-from mark_api.dashboard import DashboardWriteProxy, create_server as create_dashboard_server
+from mark_api.completion_dashboard import CompletionDashboardOwnerServer
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.private_web import PrivateWebCreateSnapshot, PrivateWebEditorState
 from mark_api.private_web_media import (
@@ -453,13 +452,24 @@ def _child(role, config):
                 witness.close()
         _wait_server(server, {"port": server.server_port}, close=close_owner)
     elif role == "frontend":
-        client = CompletionDashboardClient(Path(config["dashboard_socket"]),
-                                           expected_owner_uid=UIDS["owner"], expected_principal=PRINCIPAL)
-        proxy = DashboardWriteProxy(host="127.0.0.1", port=config["owner_port"], bearer_token=config["api_token"],
-                                    ui_token=config["ui_token"], backend_principal=PRINCIPAL,
-                                    owner_reconciliation_enabled=True)
-        server = create_dashboard_server(client, port=0, write_proxy=proxy)
-        _wait_server(server, {"port": server.server_port})
+        # Use the *installed* executable product path, not a test-only server
+        # factory. Pass tokens via a disposable private pipe, never argv/logs.
+        from mark_api.protected_frontend import main as frontend_main
+        private_config = {
+            "owner_socket": config["dashboard_socket"], "owner_uid": UIDS["owner"],
+            "principal": PRINCIPAL, "owner_port": config["owner_port"],
+            "api_token": config["api_token"], "ui_token": config["ui_token"],
+            "dashboard_port": 0,
+        }
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, (_json(private_config) + "\n").encode("utf-8"))
+        finally:
+            os.close(write_fd)
+        try:
+            assert frontend_main(["--config-fd", str(read_fd)]) == 0
+        finally:
+            os.close(read_fd)
     elif role == "request":
         result = _http(config["port"], config["method"], config["path"], token=config["api_token"],
                        payload=config.get("payload"), key=config.get("key"),

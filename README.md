@@ -26,6 +26,20 @@ Der Starter zeigt die lokale Dashboard-URL mit einem sitzungsgebundenen Zugriffs
 
 Der normale Starter verwendet weiterhin **direktes SQLite unter derselben lokalen UID**. Die vollständige lokale Create-/Media-/Update-/Pause-/Activate-/Delete-Reise einschließlich persistenter Write-Receipts, Restart-Replay und zweiphasigem Dashboard-Pending-ACK wurde mit echten lokalen HTTP-Handlern und synthetischen Plattformgegenstellen aus einem installierten Wheel geprüft. Ein unbekannter Plattform- oder Medienausgang bleibt dagegen offen und autorisiert weder erneuten Submit noch ACK. **Dies ist noch keine A6-Multi-UID-Kundenfreigabe:** Der getrennte `StorageOwnerClient` bietet absichtlich keine untrusted Write-/Completion-/Clearance-RPC. Es fehlen unabhängig verifizierter Owner-Postread, vollständige Write-/Media-Komposition über diese Grenze sowie geschützter Host-Cutover und feindliche UID-/Recovery-Tests. Konkrete Restarbeiten stehen im [A6-Integrationsbericht](docs/a6-integration-status.md).
 
+**Geschütztes A6-Frontend (separater installierter Einstieg):** Das Wheel
+stellt zusätzlich `kleinanzeiger-protected-frontend --config-fd FD` bereit.
+Diesen Prozess startet ausschließlich ein vertrauenswürdiger Supervisor mit
+einer eng begrenzten JSON-Konfiguration über einen privaten geerbten
+Dateideskriptor; sie enthält den UID-geprüften Storage-Owner-Socket, den
+bestehenden Owner-Write-API-Port, die Principal-Identität und die beiden
+Sitzungstokens. Der Prozess liest **keine** SQLite-Datei und nimmt keine
+Browseraktion selbst vor; vorhandene unabhängig attestierte Actor-, Witness-
+und Owner-Prozesse sind zwingende Voraussetzung. Der eingebaute Selbsttest
+verweigert fehlende/falsche Gegenstellen. Die installierte synthetische
+Mehr-UID-Abnahme benutzt dieselbe produktive Frontend-Komposition. **Dieser
+zusätzliche Einstieg ist kein eigenständiger Host-Bootstrap und gibt weder
+den Draft-Container-Cutover noch einen Host-Restore frei.**
+
 Unter `Anzeigen verwalten` kann der Anwender eine Anzeige mit Kategorie, Titel, Beschreibung, Festpreis und Bildern erstellen oder eine bestehende eigene Anzeige ändern, pausieren, aktivieren und löschen. Externe Aktionen benötigen eine ausdrückliche Benutzerentscheidung; Idempotenz, Write-Bestätigung und unklare Ausgänge bleiben konservativ behandelt. Bei einem unbekannten Ausgang ist zunächst die vorhandene Reconciliation zu verwenden – **kein blinder erneuter Publish oder Delete**.
 
 ## Text- und Bildentwürfe im selben Dashboard

@@ -16,6 +16,7 @@ generation = ["openai>=2.11,<3"]
 [project.scripts]
 kleinanzeiger = "mark_api.launcher:main"
 kleinanzeiger-dashboard = "mark_api.dashboard:main"
+kleinanzeiger-protected-frontend = "mark_api.protected_frontend:main"
 kleinanzeiger-offline = "mark_api.offline_launcher:main"
 kleinanzeiger-generate = "mark_api.generation_cli:main"
 kleinanzeiger-backup = "mark_api.backup_cli:main"
