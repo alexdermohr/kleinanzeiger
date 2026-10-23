@@ -1000,6 +1000,21 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             )
             self.assertIn("OK", crud_result.stderr)
 
+            # Exercise the installed media path, not checkout imports:
+            # actual loopback dashboard/upload proxy, private 0600 handle,
+            # confirmed vs UNKNOWN media proof, persisted Write API receipt,
+            # same-key restart replay and two-phase local ACK. The only
+            # platform actor is the deterministic in-memory synthetic double.
+            media_result = _command(
+                str(python), "-I", "-m", "unittest", "discover",
+                "-s", str(Path(__file__).resolve().parent),
+                "-p", "test_dashboard_media_full_lifecycle_e2e.py", "-v",
+                cwd=root, env=env, timeout=95,
+            )
+            self.assertEqual(media_result.returncode, 0, media_result.stderr[-2500:])
+            self.assertRegex(media_result.stderr, r"Ran 3 tests? in [0-9.]+s")
+            self.assertIn("OK", media_result.stderr)
+
             # This is a create-only, same-user *offline* backup, NOT hostile
             # service-UID A6 recovery. Test installed CLI, receipt and manual
             # copy-to-new-path recovery; never overwrite the source or backup.
@@ -1059,6 +1074,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "provider_consent_default_deny": True,
             "installed_synthetic_text_and_image_drafts": True,
             "installed_synthetic_dashboard_write_end_to_end": True,
+            "installed_synthetic_media_write_end_to_end": True,
             "installed_synthetic_full_crud_restart_e2e": True,
             "image_draft_private_and_create_only": True,
             "backup_scope": "create-only-offline-not-a6",

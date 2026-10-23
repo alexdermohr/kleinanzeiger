@@ -195,3 +195,44 @@ zu lockern**. Das ist keine Host-A6-Freigabe:
 Completion-Autorität, kein vollständig verifizierter Multi-UID-Host-Cutover
 mit alter FD-/MAP_SHARED-Revocation, kein reales A6-Backup/Restore.
 Kein untrusted SQL-/Completion-/Clearance-RPC wird freigeschaltet.
+
+## Nachtrag: verifizierter installierter Media-Write-/ACK-Pfad
+
+- Drei neue reale lokale HTTP-Tests in
+  `tests/test_dashboard_media_full_lifecycle_e2e.py` laufen unter
+  Python 3.12/3.13 erfolgreich. Sie durchlaufen private PNG-Media-Staging-
+  Handles (0600), Dashboard-Write-Proxy, SQL-Receipts, bestätigten
+  `create-media`-Status 200, HTTP-Replay nach Serverneustart ohne zweiten
+  synthetischen Plattformwrite und die zwei getrennten ACK-Phasen.
+- Der synthetische Media-Dienst legt vor der finalen Medienbestätigung
+  ein SQLite-Create-Checkpoint an und persistiert danach das exakte finale
+  Operations-Receipt. Ein unbestätigter Media-Write (202) bleibt bei
+  Restart und ACK blockiert. Ein nachträglich manipuliertes persistentes
+  Media-Receipt blockiert ebenfalls beide Pfade, ohne den Pending-Fence
+  zu löschen.
+- Gezielt: Python 3.12/3.13 jeweils **3 PASS** (Jobs
+  `grabowski-job-a5ee424b5657`,
+  `grabowski-job-6d8c7144f830`).
+  Das tatsächlich installierte Wheel wurde für beide Versionen in einer
+  ausgehenden-netzlosen User-/Network-Namespace gesondert getestet:
+  beide **PASS** (Jobs `grabowski-job-b250e6d43323`,
+  `grabowski-job-267ccfda570e`). Der neue Receipt-Indikator lautet
+  `installed_synthetic_media_write_end_to_end=true`; Wheel-Digest
+  `bd52b5304b5b341983e918f331f51f9231af9d2e64e74572d73fa0388f6db46c`.
+- Mit den drei Ergänzungen: Python-3.12-Vollsuite **1.828 PASS,
+  21 SKIP, 2 fork()-Warnungen, 1.263 Subtests PASS**
+  (`grabowski-job-d120133b13b6`). Die parallel gestartete 3.13-Suite
+  zeigte 33 Fail durch absichtlich exklusive CDP-Kernel-Flocks
+  (`target_busy`) gegen den zeitgleichen 3.12-Lauf. Eine neue
+  **isolierte** 3.13-Vollsuite ergab anschließend **1.828 PASS,
+  21 SKIP, 2 fork()-Warnungen, 1.263 Subtests PASS**
+  (`grabowski-job-4e4a22329cb3`). Der Fehllauf wurde durch
+  gleichzeitige CDP-Exklusiv-Tests auf demselben Kernel verursacht,
+  nicht durch den neuen Medienpfad.
+
+**Nicht als A6-Freigabe missverstehen:** Das lokale E2E-Szenario verwendet
+eine synthetische Media-Receipt-Quelle und dieselbe vertrauenswürdige
+SQLite-UID. Separat geschützte UID, verifizierte Completion-Evidenz,
+bestehende FDs/MAP_SHARED-Revocation, WAL/SHM und echte A6-Host-/Restore-
+Abnahme bleiben offen; keine generischen SQL-/Completion-/Clearance-RPCs
+und keine Aufhebung der Container-Hard-Stops.
