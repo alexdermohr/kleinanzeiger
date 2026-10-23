@@ -879,7 +879,21 @@ def _handler_factory(
                 self._error(408, "request_body_timeout")
                 return
             except ValueError as exc:
-                self._error(400, str(exc))
+                if str(exc) == "invalid_unicode_text":
+                    # The shared JSON decoder now rejects escaped lone
+                    # surrogates before domain normalization/fingerprinting.
+                    # Keep the existing per-operation HTTP error contract;
+                    # neither path can create an idempotency claim or Write.
+                    error = (
+                        "invalid_create_request"
+                        if action in {"create", "create_media"}
+                        else "invalid_unicode_text"
+                    )
+                    self._error(
+                        400, error, platform_retry_authorized=False,
+                    )
+                else:
+                    self._error(400, str(exc))
                 return
 
             if action not in {"create", "create_media"}:

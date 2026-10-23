@@ -24,6 +24,7 @@ from .domain import (
     ReactionSnapshot,
 )
 from .results import ReadResult, ReadStatus
+from .strict_json import strict_json_object
 
 _SYNC_SCHEMA_VERSION = 1
 _STORE_SCHEMA_VERSION = 2
@@ -2475,30 +2476,95 @@ class SnapshotStore:
             return self._write_api_request_record(row)
 
     @staticmethod
+    def _required_dashboard_pending_key(value: object) -> str:
+        if (
+            type(value) is not str or not 1 <= len(value) <= 128
+            or any(character.isspace() for character in value)
+        ):
+            raise sqlite3.DatabaseError("invalid dashboard pending key")
+        return value
+
+    @classmethod
+    def _assert_native_dashboard_pending_keys(
+        cls, connection: sqlite3.Connection,
+    ) -> None:
+        """Reject hidden native SQLite keys before any keyed read or ACK.
+
+        All three identities have canonical BINARY unique autoindexes. Native
+        NULL/numbers sort below TEXT, BLOB above. Their indexed extrema detect
+        type-class corruption even if WHERE or a page cursor hides the row.
+        The probes and following read/write share the same SQLite snapshot.
+        """
+        if not connection.in_transaction:
+            connection.execute("BEGIN")
+        for position, name in enumerate(
+            ("scope", "resource_key", "idempotency_key"), start=1,
+        ):
+            index = f"sqlite_autoindex_dashboard_pending_writes_{position}"
+            columns = [
+                (row["name"], row["coll"], row["desc"])
+                for row in connection.execute(f"PRAGMA index_xinfo({index})")
+                if row["key"]
+            ]
+            if columns != [(name, "BINARY", 0)]:
+                raise sqlite3.DatabaseError("invalid dashboard pending identity index")
+            for direction in ("ASC", "DESC"):
+                row = connection.execute(
+                    f"SELECT {name} FROM dashboard_pending_writes "
+                    f"INDEXED BY {index} ORDER BY {name} {direction} LIMIT 1"
+                ).fetchone()
+                if row is not None:
+                    cls._required_dashboard_pending_key(row[name])
+
+    @staticmethod
     def _dashboard_pending_write_record(
         row: sqlite3.Row,
     ) -> DashboardPendingWrite:
+        scope = SnapshotStore._required_dashboard_pending_key(row["scope"])
+        resource_key = SnapshotStore._required_dashboard_pending_key(
+            row["resource_key"]
+        )
+        key = SnapshotStore._required_dashboard_pending_key(
+            row["idempotency_key"]
+        )
+        method, path = row["method"], row["path"]
+        payload, ad_id, acknowledged = (
+            row["payload_json"], row["ad_id"], row["acknowledged"],
+        )
+        if type(method) is not str or method not in {"POST", "PATCH", "DELETE"}:
+            raise sqlite3.DatabaseError("invalid stored dashboard pending method")
+        if (
+            type(path) is not str or not 1 <= len(path) <= 512
+            or not path.startswith("/api/write/")
+            or any(character.isspace() for character in path)
+            or "?" in path or "#" in path
+        ):
+            raise sqlite3.DatabaseError("invalid stored dashboard pending path")
+        if payload is not None:
+            if type(payload) is not str or len(payload) > 64 * 1024:
+                raise sqlite3.DatabaseError("invalid stored dashboard pending body")
+            try:
+                strict_json_object(payload.encode("utf-8"))
+            except (UnicodeError, ValueError):
+                raise sqlite3.DatabaseError(
+                    "invalid stored dashboard pending body"
+                ) from None
+        if ad_id is not None and (
+            type(ad_id) is not str or not 1 <= len(ad_id) <= 32
+            or not ad_id.isascii() or not ad_id.isdigit()
+        ):
+            raise sqlite3.DatabaseError("invalid stored dashboard pending ad ID")
+        if type(acknowledged) is not int or acknowledged not in (0, 1):
+            raise sqlite3.DatabaseError("invalid stored dashboard pending ACK")
         return DashboardPendingWrite(
-            scope=str(row["scope"]),
-            resource_key=str(row["resource_key"]),
-            idempotency_key=str(row["idempotency_key"]),
-            method=str(row["method"]),
-            path=str(row["path"]),
-            payload_json=(
-                str(row["payload_json"])
-                if row["payload_json"] is not None
-                else None
-            ),
-            ad_id=(
-                str(row["ad_id"])
-                if row["ad_id"] is not None
-                else None
-            ),
-            acknowledged=bool(row["acknowledged"]),
+            scope=scope, resource_key=resource_key, idempotency_key=key,
+            method=method, path=path, payload_json=payload, ad_id=ad_id,
+            acknowledged=bool(acknowledged),
         )
 
     def dashboard_pending_writes(self) -> tuple[DashboardPendingWrite, ...]:
         with self._connect() as connection:
+            self._assert_native_dashboard_pending_keys(connection)
             rows = connection.execute(
                 """
                 SELECT scope, resource_key, idempotency_key, method, path,
@@ -2528,6 +2594,7 @@ class SnapshotStore:
         if type(limit) is not int or not 1 <= limit <= 16:
             raise ValueError("invalid pending-write page capacity")
         with self._connect() as connection:
+            self._assert_native_dashboard_pending_keys(connection)
             rows = connection.execute(
                 """
                 SELECT scope, resource_key, idempotency_key, method, path,
@@ -2574,42 +2641,15 @@ class SnapshotStore:
         if not path.startswith("/api/write/") or "?" in path or "#" in path:
             raise ValueError("path is invalid")
         if payload_json is not None:
-            if not isinstance(payload_json, str) or len(payload_json) > 64 * 1024:
+            if type(payload_json) is not str or len(payload_json) > 64 * 1024:
                 raise ValueError("payload_json is invalid")
-            def unique_members(
-                members: list[tuple[str, object]],
-            ) -> dict[str, object]:
-                # The owner readback rejects duplicate object members. Do not
-                # durably admit a pending fence that its reader cannot decode.
-                values: dict[str, object] = {}
-                for key, value in members:
-                    if key in values:
-                        raise ValueError("duplicate JSON member")
-                    values[key] = value
-                return values
-
-            def reject_nonfinite_constant(_literal: str) -> object:
-                raise ValueError("nonfinite JSON constant")
-
-            def finite_json_float(literal: str) -> float:
-                # JSON 1e999 is syntactically valid but CPython parses it
-                # as infinity without invoking parse_constant. Reject it
-                # before durable pending writes can poison UI readback.
-                value = float(literal)
-                if not math.isfinite(value):
-                    raise ValueError("nonfinite JSON number")
-                return value
-
             try:
-                payload = json.loads(
-                    payload_json, object_pairs_hook=unique_members,
-                    parse_constant=reject_nonfinite_constant,
-                    parse_float=finite_json_float,
-                )
-            except (ValueError, RecursionError) as exc:
-                raise ValueError("payload_json is invalid") from exc
-            if not isinstance(payload, dict):
-                raise ValueError("payload_json is invalid")
+                # Admit only payloads the recovery reader can independently
+                # decode: duplicate members, nonfinite values, surrogate
+                # codepoints and excess nesting cannot poison a durable fence.
+                strict_json_object(payload_json.encode("utf-8"))
+            except (UnicodeError, ValueError):
+                raise ValueError("payload_json is invalid") from None
         if ad_id is not None and (
             not isinstance(ad_id, str)
             or not ad_id
@@ -2632,6 +2672,7 @@ class SnapshotStore:
         with self.dashboard_pending_write_guard(), self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._validate_store_schema(connection)
+            self._assert_native_dashboard_pending_keys(connection)
             rows = connection.execute(
                 """
                 SELECT scope, resource_key, idempotency_key, method, path,
@@ -2683,9 +2724,11 @@ class SnapshotStore:
             raise ValueError("idempotency_key is invalid")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._assert_native_dashboard_pending_keys(connection)
             row = connection.execute(
                 """
-                SELECT idempotency_key, acknowledged
+                SELECT scope, resource_key, idempotency_key, method, path,
+                       payload_json, ad_id, acknowledged
                 FROM dashboard_pending_writes
                 WHERE scope = ?
                 """,
@@ -2693,11 +2736,12 @@ class SnapshotStore:
             ).fetchone()
             if row is None:
                 return "missing"
-            if str(row["idempotency_key"]) != idempotency_key:
+            record = self._dashboard_pending_write_record(row)
+            if record.idempotency_key != idempotency_key:
                 raise ValueError(
                     "dashboard pending write conflicts with existing recovery state"
                 )
-            if not bool(row["acknowledged"]):
+            if not record.acknowledged:
                 updated = connection.execute(
                     """
                     UPDATE dashboard_pending_writes

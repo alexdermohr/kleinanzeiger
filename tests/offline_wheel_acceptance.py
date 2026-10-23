@@ -1037,6 +1037,41 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 self.assertIn("\nOK\n", owner_history.stderr)
                 self.assertNotIn("skipped=", owner_history.stderr)
 
+            # A corrupted native pending-fence identity or ACK bit can
+            # silently hide an unresolved dashboard Write. Exercise the
+            # installed store directly and the owner AF_UNIX framing where a
+            # real non-root UID is available. These are not hostile UID tests.
+            pending_native = _command(
+                str(python), "-I", "-m", "unittest", "discover",
+                "-s", str(Path(__file__).resolve().parent),
+                "-p", "test_dashboard_pending_native_corruption.py", "-v",
+                cwd=root, env=env, timeout=95,
+            )
+            self.assertEqual(
+                pending_native.returncode, 0, pending_native.stderr[-2500:],
+            )
+            self.assertRegex(
+                pending_native.stderr, r"Ran 7 tests? in [0-9.]+s",
+            )
+            if os.geteuid() == 0:
+                self.assertIn("OK (skipped=1)", pending_native.stderr)
+            else:
+                self.assertIn("\nOK\n", pending_native.stderr)
+                self.assertNotIn("skipped=", pending_native.stderr)
+
+            # UTF-8 JSON contains only Unicode scalar values. Escaped
+            # unpaired surrogates must not cross the installed Write-intent
+            # boundary or become durable, including nested member names.
+            scalar = _command(
+                str(python), "-I", "-m", "unittest", "discover",
+                "-s", str(Path(__file__).resolve().parent),
+                "-p", "test_strict_json_unicode_scalars.py", "-v",
+                cwd=root, env=env, timeout=60,
+            )
+            self.assertEqual(scalar.returncode, 0, scalar.stderr[-2000:])
+            self.assertRegex(scalar.stderr, r"Ran 3 tests? in [0-9.]+s")
+            self.assertIn("\nOK\n", scalar.stderr)
+
             # This is a create-only, same-user *offline* backup, NOT hostile
             # service-UID A6 recovery. Test installed CLI, receipt and manual
             # copy-to-new-path recovery; never overwrite the source or backup.
@@ -1098,6 +1133,8 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             "installed_synthetic_dashboard_write_end_to_end": True,
             "installed_synthetic_media_write_end_to_end": True,
             "installed_owner_paged_history_fail_closed": True,
+            "installed_dashboard_pending_corruption_fail_closed": True,
+            "installed_unicode_scalar_json_rejection": True,
             "installed_synthetic_full_crud_restart_e2e": True,
             "image_draft_private_and_create_only": True,
             "backup_scope": "create-only-offline-not-a6",

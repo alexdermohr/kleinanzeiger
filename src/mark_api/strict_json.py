@@ -73,4 +73,23 @@ def strict_json_object(raw: bytes) -> dict[str, object]:
         raise ValueError("invalid_json") from exc
     if not isinstance(payload, dict):
         raise ValueError("json_body_must_be_object")
+    # Python's json decoder accepts a lone \\uD800/\\uDFFF escape. Those
+    # are not Unicode scalar values: their later UTF-8 encoding can fail
+    # after a durable pending Write has already been claimed. Validate every
+    # decoded value AND object key (also in nested arrays) before admission.
+    # The parser already bounds nesting; a worklist avoids recursion and
+    # preserves valid surrogate *pairs* decoded as one Unicode scalar.
+    remaining: list[object] = [payload]
+    while remaining:
+        item = remaining.pop()
+        if type(item) is str:
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("invalid_unicode_text") from exc
+        elif type(item) is dict:
+            remaining.extend(item.keys())
+            remaining.extend(item.values())
+        elif type(item) is list:
+            remaining.extend(item)
     return payload
