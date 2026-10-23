@@ -576,9 +576,10 @@ class Scenario:
         assert ready["ready"] is True and ready["uid"] == UIDS.get(role, UIDS["runtime"])
         return ready
 
-    def stop(self, role, *, kill=False):
+    def stop(self, role, *, kill=False, already_signalled=False):
+        assert not (kill and already_signalled)
         child = self.procs.pop(role)
-        if child.poll() is None:
+        if child.poll() is None and not already_signalled:
             child.send_signal(signal.SIGKILL if kill else signal.SIGTERM)
         try:
             child.wait(15)
@@ -587,7 +588,7 @@ class Scenario:
             child.wait(5)
             raise AssertionError("child shutdown did not drain")
         if not kill:
-            assert child.returncode == 0, child.stderr.read(8192)
+            assert child.returncode == 0, (role, child.returncode, child.stderr.read(8192))
 
     def restart_owner(self):
         if "frontend" in self.procs:
@@ -820,7 +821,9 @@ class Scenario:
             result = self.receive(child)
             child.wait(5)
             assert child.returncode == 0 and result["status"] in (200, 202, 503), result
-            self.stop(role)
+            # This owner already received SIGTERM. A second signal during
+            # interpreter teardown can change the observed exit status on 3.13.
+            self.stop(role, already_signalled=True)
         else:
             socket_identity = self.actor_socket.stat() if role == "actor" else None
             self.stop(role, kill=True)
