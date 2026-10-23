@@ -4,12 +4,16 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
+from http.client import HTTPConnection
 from pathlib import Path
+from threading import RLock, Thread
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+from mark_api.completion_dashboard import CompletionDashboardClient
 from mark_api.dashboard import DashboardGenerationAccess
+from mark_api.generation import AdvertisementDraft
 from mark_api.protected_frontend import _read_private_config, main, create_protected_frontend_server
 from mark_api.storage_owner import StorageOwnerError
 
@@ -161,6 +165,75 @@ class ProtectedFrontendTests(unittest.TestCase):
         sdk.OpenAI.assert_not_called()
         server.serve_forever.assert_called_once()
         server.server_close.assert_called_once()
+
+
+    def test_real_http_generation_via_protected_frontend(self):
+        # Actual HTTP route with the exact protected-client type. The genuine
+        # independent UID/socket admission is tested by the installed A6 suite.
+        owner = CompletionDashboardClient.__new__(CompletionDashboardClient)
+        owner._pid, owner._uid = os.getpid(), os.geteuid()
+        owner.expected_owner_uid = os.geteuid() + 101
+        owner.principal = _CONFIG["principal"]
+        owner._dashboard_guard = RLock()
+        owner.verify_completion_profile = lambda: None
+        generator = MagicMock()
+        generator.generate_text.return_value = AdvertisementDraft(
+            title="Fahrrad 28 Zoll", description="Ein eigener Artikel"
+        )
+        token = "synthetic-http-generation-token-123456"
+        access = DashboardGenerationAccess(
+            ui_token=token, generator_factory=lambda: generator, max_requests=1
+        )
+        with patch("mark_api.protected_frontend.CompletionDashboardClient",
+                   return_value=owner):
+            server = create_protected_frontend_server(
+                owner_socket=Path(_CONFIG["owner_socket"]),
+                owner_uid=owner.expected_owner_uid, principal=owner.principal,
+                owner_port=_CONFIG["owner_port"], api_token=_CONFIG["api_token"],
+                ui_token=_CONFIG["ui_token"], dashboard_port=0,
+                generation_access=access,
+            )
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            port = server.server_port
+            headers = {
+                "Origin": f"http://127.0.0.1:{port}",
+                "Content-Type": "application/json",
+                "X-Mark-Generation": "1",
+                "X-Mark-Generation-Token": token,
+                "Sec-Fetch-Site": "same-origin",
+            }
+
+            def request(consent, *, session_token=token):
+                body = json.dumps({
+                    "mode": "text", "prompt": "Ein Fahrrad",
+                    "acknowledge_provider_cost": consent,
+                }).encode()
+                with closing(HTTPConnection("127.0.0.1", port, timeout=5)) as connection:
+                    connection.request(
+                        "POST", "/api/dashboard/generate", body,
+                        {**headers, "X-Mark-Generation-Token": session_token},
+                    )
+                    response = connection.getresponse()
+                    return response.status, json.loads(response.read())
+
+            self.assertEqual(request(True, session_token="wrong")[0], 403)
+            self.assertEqual(request(False)[0], 400)
+            generator.generate_text.assert_not_called()
+            status, payload = request(True)
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["title"], "Fahrrad 28 Zoll")
+            self.assertIs(payload["published"], False)
+            generator.generate_text.assert_called_once_with("Ein Fahrrad")
+            self.assertEqual(request(True)[0], 429)
+            generator.generate_text.assert_called_once()
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(3)
+            self.assertFalse(worker.is_alive())
+
 
 
 if __name__ == "__main__":
