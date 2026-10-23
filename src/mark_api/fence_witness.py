@@ -69,6 +69,8 @@ _SAFE_OUTCOMES = frozenset({"confirmed", "precondition_failed"})
 _EVENT_KINDS = frozenset({
     "opened", "started", "completed", "runtime_cleared",
     "operator_cleared", "sealed",
+    # Only the separately authenticated trusted-actor socket can append these.
+    "authority_begun", "authority_verified",
 })
 
 

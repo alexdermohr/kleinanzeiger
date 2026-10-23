@@ -66,3 +66,31 @@ jobs:
           grep -Eq '^Ran 1 test in [0-9.]+' "$report"
           grep -Eq '^OK$' "$report"
           grep -Fq '"result": "PASS"' "$report"
+      - name: Installed independent A6 non-media UID acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=( "$RUNNER_TEMP"/mark-wheels/kleinanzeiger-*.whl )
+          test "${#wheels[@]}" -eq 1
+          python_bin="$(command -v python)"
+          host_net="$(readlink /proc/self/ns/net)"
+          host_pid="$(readlink /proc/self/ns/pid)"
+          # This directory is newly created on a disposable hosted runner.
+          # No users/accounts, shared Docker daemon or host services are changed.
+          isolated="$(sudo -n mktemp -d /tmp/kleinanzeiger-a6-wheel-XXXXXXXX)"
+          [[ "$isolated" == /tmp/kleinanzeiger-a6-wheel-* ]]
+          trap 'sudo -n rm -rf -- "$isolated"' EXIT
+          sudo -n chmod 0755 "$isolated"
+          sudo -n "$python_bin" -m venv "$isolated/venv"
+          sudo -n "$isolated/venv/bin/python" -m pip install --no-index --no-deps "${wheels[0]}"
+          sudo -n install -o root -g root -m 0444 tests/a6_completion_uid_acceptance.py "$isolated/acceptance.py"
+          report="$RUNNER_TEMP/kleinanzeiger-a6-uid-e2e.log"
+          sudo -n unshare --net --pid --fork --mount-proc -- bash -c '
+            set -euo pipefail
+            ip link set lo up
+            exec "$1/venv/bin/python" -I "$1/acceptance.py" --host-net "$2" --host-pid "$3"
+          ' bash "$isolated" "$host_net" "$host_pid" 2>&1 | tee "$report"
+          grep -Fq '"result":"PASS"' "$report"
+          grep -Fq '"scope":"installed-a6-independent-nonmedia-uid-composition"' "$report"
+          grep -Fq '"host_cutover_attested":false' "$report"
