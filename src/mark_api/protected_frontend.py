@@ -29,7 +29,7 @@ def create_protected_frontend_server(
     owner_port: int, api_token: str, ui_token: str, dashboard_port: int = 8765,
 ):
     """Use the real strict owner/Witness-backed Write proxy, never a test seam."""
-    if type(owner_socket) is not Path or not owner_socket.is_absolute():
+    if not isinstance(owner_socket, Path) or not owner_socket.is_absolute():
         raise ValueError("absolute independent owner socket required")
     client = CompletionDashboardClient(
         owner_socket, expected_owner_uid=owner_uid, expected_principal=principal,

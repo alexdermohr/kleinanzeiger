@@ -5,8 +5,11 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
+from unittest.mock import patch
 
-from mark_api.protected_frontend import _read_private_config, main
+from mark_api.protected_frontend import _read_private_config, main, create_protected_frontend_server
+from mark_api.storage_owner import StorageOwnerError
 
 _CONFIG = {
     "owner_socket": "/tmp/no-owner-on-this-test.sock", "owner_uid": os.geteuid()+100,
@@ -25,6 +28,29 @@ class ProtectedFrontendTests(unittest.TestCase):
             os.close(w)
         self.addCleanup(os.close, r)
         return r
+
+    def test_real_pathlib_socket_reaches_verified_owner_handshake(self):
+        # PosixPath is the concrete type returned by Path(...). The factory
+        # must not deny it before the kernel/owner verification can run.
+        with patch(
+            "mark_api.protected_frontend.CompletionDashboardClient",
+            side_effect=StorageOwnerError("synthetic absent owner"),
+        ) as authenticated:
+            with self.assertRaises(StorageOwnerError):
+                create_protected_frontend_server(
+                    owner_socket=Path(_CONFIG["owner_socket"]),
+                    owner_uid=_CONFIG["owner_uid"],
+                    principal=_CONFIG["principal"],
+                    owner_port=_CONFIG["owner_port"],
+                    api_token=_CONFIG["api_token"],
+                    ui_token=_CONFIG["ui_token"],
+                    dashboard_port=0,
+                )
+            authenticated.assert_called_once_with(
+                Path(_CONFIG["owner_socket"]),
+                expected_owner_uid=_CONFIG["owner_uid"],
+                expected_principal=_CONFIG["principal"],
+            )
 
     def test_valid_strict_configuration_from_inherited_pipe(self):
         cfg = dict(_CONFIG)
