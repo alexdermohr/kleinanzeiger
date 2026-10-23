@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 
+import mark_api.a6_host_preflight as preflight
 from mark_api.a6_host_preflight import (
     PinnedInode, _fd_writable, _mapping_inode,
     inspect_live_references, pin_source_inodes, main,
@@ -221,6 +222,76 @@ class A6HostPreflightNegativeTests(unittest.TestCase):
                 PinnedInode("wal", self.pinned[0].device, self.pinned[0].inode),
                 self.pinned[1], self.pinned[2],
             ))
+
+    def test_fifo_main_wal_or_shm_returns_sanitized_unknown_without_opening(self) -> None:
+        # A normal O_RDONLY open would wait indefinitely for a FIFO writer,
+        # before fstat can reject it. Bound each actual child to avoid hanging
+        # the suite; execute the installed module file without checkout imports.
+        for suffix in ("", "-wal", "-shm"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory(
+                prefix="a6-fifo-source-",
+            ) as temp:
+                database = Path(temp) / "source.sqlite"
+                for part in ("", "-wal", "-shm"):
+                    path = Path(str(database) + part)
+                    if part == suffix:
+                        os.mkfifo(path)
+                    else:
+                        path.write_bytes(b"\0" * 4096)
+                completed = subprocess.run(
+                    [sys.executable, "-I", preflight.__file__, "--db", str(database)],
+                    capture_output=True, text=True, timeout=3, check=False,
+                )
+                self.assertEqual(completed.returncode, 2)
+                report = json.loads(completed.stdout)
+                self.assertEqual(report["status"], "unknown")
+                self.assertIs(report["cutover_attested"], False)
+                self.assertIs(report["release_authorized"], False)
+                self.assertEqual(completed.stderr, "")
+                self.assertNotIn(str(database), completed.stdout)
+
+    def test_missing_fdinfo_after_protected_fd_stat_remains_unknown(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="a6-incomplete-fdinfo-") as temp:
+            proc = Path(temp)
+            process = proc / "1234"
+            (process / "fd").mkdir(parents=True)
+            (process / "fdinfo").mkdir()
+            (process / "maps").write_text("", encoding="ascii")
+            (process / "fd" / "7").symlink_to(self.database)
+            report = inspect_live_references(self.pinned, proc_root=proc)
+            self.assertTrue(report.found_blocker)
+            self.assertTrue(any(
+                item.kind == "unknown_process" and item.pid == 1234
+                and item.slot == "fdinfo" for item in report.references
+            ))
+            self.assertFalse(report.cutover_attested)
+
+    def test_manifest_requires_exactly_one_native_identity_per_sqlite_role(self) -> None:
+        extra = self.database.with_suffix(".extra")
+        extra.write_bytes(b"\0" * 4096)
+        descriptor = os.open(extra, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            duplicate_role = PinnedInode.from_fd("main", descriptor)
+            with self.assertRaises(ValueError):
+                inspect_live_references(self.pinned + (duplicate_role,))
+        finally:
+            os.close(descriptor)
+        first = self.pinned[0]
+        for invalid in (
+            PinnedInode("main", True, first.inode),
+            PinnedInode("main", first.device, True),
+            PinnedInode("main", str(first.device), first.inode),
+            PinnedInode("main", first.device, str(first.inode)),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                inspect_live_references((invalid,) + self.pinned[1:])
+
+    def test_pin_rejects_symlinks_without_following_target(self) -> None:
+        target = self.database.with_suffix(".original")
+        self.database.rename(target)
+        self.database.symlink_to(target)
+        with ExitStack() as stack, self.assertRaises((OSError, ValueError)):
+            pin_source_inodes(self.database, stack)
 
 
 if __name__ == "__main__":

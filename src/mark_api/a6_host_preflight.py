@@ -34,7 +34,7 @@ class PinnedInode:
 
     @classmethod
     def from_fd(cls, name: str, descriptor: int) -> "PinnedInode":
-        if name not in {"main", "wal", "shm"}:
+        if type(name) is not str or name not in {"main", "wal", "shm"}:
             raise ValueError("invalid protected file kind")
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_ino <= 0:
@@ -74,10 +74,16 @@ def pin_source_inodes(database: Path, stack: ExitStack) -> tuple[PinnedInode, ..
     """
     if not isinstance(database, Path) or not database.is_absolute():
         raise ValueError("absolute source database required")
+    if sys.platform != "linux" or not hasattr(os, "O_PATH"):
+        raise RuntimeError("Linux inode-only descriptors required")
     pins: list[PinnedInode] = []
     for name, suffix in (("main", ""), ("wal", "-wal"), ("shm", "-shm")):
         path = Path(str(database) + suffix)
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        # Pin the inode without opening its contents: O_RDONLY can block on
+        # an attacker-supplied FIFO or activate a device before fstat rejects
+        # it. O_PATH also pins a final symlink itself with O_NOFOLLOW; the
+        # regular-file check below rejects that link rather than following it.
+        descriptor = os.open(path, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW)
         stack.callback(os.close, descriptor)
         pins.append(PinnedInode.from_fd(name, descriptor))
     if len({(pin.device, pin.inode) for pin in pins}) != len(pins):
@@ -126,11 +132,15 @@ def inspect_live_references(
     The user-facing tool must not accept an alternate /proc tree.
     """
     if (
-        not isinstance(pins, tuple) or not pins
+        not isinstance(pins, tuple) or len(pins) != 3
         or any(type(pin) is not PinnedInode for pin in pins)
+        or any(
+            type(pin.name) is not str or type(pin.device) is not int
+            or type(pin.inode) is not int or pin.device <= 0 or pin.inode <= 0
+            for pin in pins
+        )
         or {pin.name for pin in pins} != {"main", "wal", "shm"}
         or len({(pin.device, pin.inode) for pin in pins}) != len(pins)
-        or any(pin.device <= 0 or pin.inode <= 0 for pin in pins)
         or not isinstance(proc_root, Path)
     ):
         raise ValueError("invalid pinned SQLite generation")
@@ -167,6 +177,7 @@ def inspect_live_references(
             for descriptor_path in (entry / "fd").iterdir():
                 if not descriptor_path.name.isdecimal():
                     continue
+                name = None
                 try:
                     info = descriptor_path.stat()
                     name = identity.get((info.st_dev, info.st_ino))
@@ -179,9 +190,13 @@ def inspect_live_references(
                             "writable_fd", pid, descriptor_path.name, name,
                         ))
                 except FileNotFoundError:
-                    # A descriptor can close between readdir/stat; the scan
-                    # stays negative-only and cannot authorize final cutover.
-                    continue
+                    # A descriptor that vanished before stat has no observed
+                    # binding. Once a protected inode was seen, missing flags
+                    # are UNKNOWN, not evidence that it was read-only/closed.
+                    if name is not None:
+                        seen.append(KernelReference(
+                            "unknown_process", pid, "fdinfo", "unknown",
+                        ))
                 except (OSError, ValueError, UnicodeError):
                     seen.append(KernelReference(
                         "unknown_process", pid, "fdinfo", "unknown",
