@@ -1099,3 +1099,5 @@ if __name__ == "__main__":
             arguments = parser.parse_args()
             _acceptance(arguments.host_net, arguments.host_pid)
     except BaseException:
+        traceback.print_exc()
+        raise SystemExit(1)
