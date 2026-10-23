@@ -119,7 +119,8 @@ def _platform(config):
     guard = Lock()
     ads = {"701": {"ad_id": "701", "title": "Existing table", "description": "Existing description", "state": "active"}}
     mutations = []
-    modes = {"unknown_next": False, "unreadable": False}
+    modes = {"unknown_next": False, "unreadable": False, "block_next": False, "blocked_readers": 0}
+    release = Event()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -146,10 +147,21 @@ def _platform(config):
                 with guard:
                     if self.path == "/control/unknown":
                         modes["unknown_next"] = True
+                    elif self.path == "/control/block":
+                        modes["block_next"] = True
+                    elif self.path == "/control/release":
+                        release.set()
                     response = {"mutations": list(mutations), "ads": list(ads.values()), "modes": dict(modes)}
                 self.reply(200, response)
                 return
             if self.command == "GET":
+                with guard:
+                    blocked = modes["block_next"] and bool(mutations)
+                    if blocked:
+                        modes["blocked_readers"] += 1
+                if blocked and not release.wait(20):
+                    self.reply(503, {"error": "synthetic_readback_not_released"})
+                    return
                 with guard:
                     status = 503 if modes["unreadable"] else 200
                     response = {"ads": list(ads.values())}
@@ -371,7 +383,8 @@ class Scenario:
             assert child.returncode == 0, child.stderr.read(8192)
 
     def restart_owner(self):
-        self.stop("owner")
+        if "owner" in self.procs:
+            self.stop("owner")
         deadline = time.monotonic() + 5
         while True:
             with closing(sqlite3.connect("file:" + str(self.witness_db) + "?mode=ro", uri=True)) as conn:
@@ -415,6 +428,57 @@ class Scenario:
         finally:
             for path, mode in reversed(old):
                 os.chmod(path, mode)
+
+    def crash_after_submit(self, role, *, graceful=False):
+        self.state("block")
+        key = "crash:" + role + (":term" if graceful else ":kill")
+        child = self.spawn("request", {"port": self.api_port, "api_token": self.api_token,
+                                       "method": "POST", "path": "/api/write/ads/701/pause", "key": key})
+        deadline = time.monotonic() + 8
+        while True:
+            evidence = self.state()
+            if len(evidence["mutations"]) == 1 and evidence["modes"]["blocked_readers"] > 0:
+                break
+            assert time.monotonic() < deadline, "no exact post-submit crash window"
+            time.sleep(0.02)
+        # The synthetic platform has durably changed state; its independent
+        # readback is still held. Signal ONLY the exact child created above.
+        if graceful:
+            self.procs[role].send_signal(signal.SIGTERM)
+            self.state("release")
+            result = self.receive(child)
+            child.wait(5)
+            assert child.returncode == 0 and result["status"] in (200, 202, 503), result
+            self.stop(role)
+        else:
+            socket_identity = self.actor_socket.stat() if role == "actor" else None
+            self.stop(role, kill=True)
+            self.state("release")
+            child.wait(10)
+            if role == "actor":
+                result = self.receive(child)
+                assert result["status"] in (500, 503), result
+                # A killed server cannot unlink its private stale socket. The
+                # isolated supervisor retires only that exact observed inode,
+                # after waitpid proved its creator is dead. No host path touched.
+                current = self.actor_socket.lstat()
+                assert stat.S_ISSOCK(current.st_mode) and current.st_uid == UIDS["actor"]
+                assert (current.st_dev, current.st_ino) == (socket_identity.st_dev, socket_identity.st_ino)
+                self.actor_socket.unlink()
+                self.start("actor", self.configs["actor"])
+            else:
+                assert child.returncode != 0, "killed owner unexpectedly returned success"
+        self.restart_owner()
+        replay = self.request("POST", "/api/write/ads/701/pause", key)
+        assert replay["body"]["platform_retry_authorized"] is False, replay
+        if graceful and result["status"] == 200:
+            assert replay["status"] == 200 and replay["replayed"] == "true", replay
+        else:
+            assert replay["status"] in (409, 500, 503), replay
+            another = self.request("POST", "/api/write/ads/701/pause", key + ":new")
+            assert another["status"] in (409, 500, 503), another
+        assert len(self.state()["mutations"]) == 1
+        self.probe(peer_only=True)
 
     def close(self):
         errors = []
@@ -491,6 +555,11 @@ def _acceptance(host_net, host_pid):
             scenario.probe(peer_only=True)
             scenario.close()
             scenario = None
+            for role, graceful in (("actor", False), ("owner", False), ("owner", True)):
+                scenario = Scenario(root / ("crash-" + role + ("-term" if graceful else "-kill")))
+                scenario.crash_after_submit(role, graceful=graceful)
+                scenario.close()
+                scenario = None
         finally:
             if scenario is not None:
                 scenario.close()
@@ -500,6 +569,8 @@ def _acceptance(host_net, host_pid):
            "crud": True, "restart_replay": True, "lost_completion_ack": True, "unknown_fenced": True,
            "runtime_raw_db_wal_shm_denied": True, "forged_completion_clearance_denied": True,
            "kernel_peer_credentials": True, "loopback_only": True, "platform_access": False,
+           "sigkill_actor_after_submit": True, "sigkill_owner_after_submit": True,
+           "sigterm_owner_inflight_drained": True,
            "host_cutover_attested": False, "media_release_attested": False, "source_sha256": hashes})
 
 
