@@ -787,11 +787,24 @@ class Scenario:
         assert len(self.state()["mutations"]) == 1
         self.probe(peer_only=True)
 
-    def crash_after_submit(self, role, *, graceful=False):
+    def crash_after_submit(self, role, *, graceful=False, media=False):
+        key = "crash:" + role + (":term" if graceful else ":kill") + (":media" if media else "")
+        path = "/api/write/ads/701/pause"
+        payload = None
+        if media:
+            assert self.with_media
+            staged = self.request("POST", "/api/write/media/stage", media=MEDIA_PNG)
+            assert staged["status"] == 201, staged
+            path = "/api/write/media/ads"
+            payload = {
+                "category_path": ["Haus & Garten", "Möbel & Wohnen"],
+                "title": "UID media crash proof",
+                "description": "One-shot media input before actor or owner death",
+                "price_eur": 29, "media_refs": [staged["body"]["media_ref"]],
+            }
         self.state("block")
-        key = "crash:" + role + (":term" if graceful else ":kill")
         child = self.spawn("request", {"port": self.api_port, "api_token": self.api_token,
-                                       "method": "POST", "path": "/api/write/ads/701/pause", "key": key})
+                                       "method": "POST", "path": path, "key": key, "payload": payload})
         deadline = time.monotonic() + 8
         while True:
             evidence = self.state()
@@ -827,13 +840,13 @@ class Scenario:
             else:
                 assert child.returncode != 0, "killed owner unexpectedly returned success"
         self.restart_owner()
-        replay = self.request("POST", "/api/write/ads/701/pause", key)
+        replay = self.request("POST", path, key, payload)
         assert replay["body"]["platform_retry_authorized"] is False, replay
         if graceful and result["status"] == 200:
             assert replay["status"] == 200 and replay["replayed"] == "true", replay
         else:
             assert replay["status"] in (409, 500, 503), replay
-            another = self.request("POST", "/api/write/ads/701/pause", key + ":new")
+            another = self.request("POST", path, key + ":new", payload)
             assert another["status"] in (409, 500, 503), another
         assert len(self.state()["mutations"]) == 1
         self.probe(peer_only=True)
@@ -918,6 +931,11 @@ def _acceptance(host_net, host_pid):
                 scenario.crash_after_submit(role, graceful=graceful)
                 scenario.close()
                 scenario = None
+            for role, graceful in (("actor", False), ("owner", False), ("owner", True)):
+                scenario = Scenario(root / ("media-crash-" + role + ("-term" if graceful else "-kill")), media=True)
+                scenario.crash_after_submit(role, graceful=graceful, media=True)
+                scenario.close()
+                scenario = None
             scenario = Scenario(root / "media-dashboard", dashboard=True, media=True)
             scenario.media_journey()
             scenario.close()
@@ -964,6 +982,8 @@ def _acceptance(host_net, host_pid):
            "kernel_peer_credentials": True, "loopback_only": True, "platform_access": False,
            "sigkill_actor_after_submit": True, "sigkill_owner_after_submit": True,
            "sigterm_owner_inflight_drained": True,
+           "sigkill_media_actor_after_submit": True, "sigkill_media_owner_after_submit": True,
+           "sigterm_media_owner_inflight_drained": True,
            "protected_media_create": True, "protected_media_private_upload": True,
            "protected_media_independent_postread": True, "protected_media_restart_replay": True,
            "protected_media_two_phase_ack": True, "protected_media_unknown_fenced": True,

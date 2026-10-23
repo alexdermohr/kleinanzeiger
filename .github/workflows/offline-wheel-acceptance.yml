@@ -96,5 +96,8 @@ jobs:
           grep -Fq '"protected_media_create":true' "$report"
           grep -Fq '"protected_media_independent_postread":true' "$report"
           grep -Fq '"protected_media_unknown_fenced":true' "$report"
+          grep -Fq '"sigkill_media_actor_after_submit":true' "$report"
+          grep -Fq '"sigkill_media_owner_after_submit":true' "$report"
+          grep -Fq '"sigterm_media_owner_inflight_drained":true' "$report"
           grep -Fq '"media_release_attested":false' "$report"
           grep -Fq '"host_cutover_attested":false' "$report"
