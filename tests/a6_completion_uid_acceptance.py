@@ -425,32 +425,21 @@ def _child(role, config):
                     handles.close()
         _wait_server(server, {}, close=close_actor)
     elif role == "owner":
-        store = SnapshotStore(Path(config["db"]))
-        witness = FenceWitnessClient(Path(config["witness_socket"]), expected_owner_uid=UIDS["witness"])
-        capabilities = {WriteCapability.CREATE, WriteCapability.UPDATE_CONTENT,
-                        WriteCapability.SET_STATE, WriteCapability.DELETE}
-        if config.get("media_enabled"):
-            capabilities.add(WriteCapability.CREATE_MEDIA)
-        access = WriteApiAccess(principal=PRINCIPAL, bearer_token=config["api_token"], writes_enabled=True,
-                                capabilities=frozenset(capabilities))
-        read_owner = None
-        if config.get("dashboard_socket"):
-            read_owner = CompletionDashboardOwnerServer(
-                database=Path(config["db"]), socket_path=Path(config["dashboard_socket"]),
-                runtime_uid=UIDS["runtime"], runtime_gid=UIDS["runtime"],
-                access=access, fence_witness=witness,
-            )
-            store = read_owner.store  # Share exactly the authoritative store/guards.
-            read_owner.start()
-        server = create_owner_write_api_server(store=store, access=access, authority_socket=Path(config["actor_socket"]),
-                                               authority_uid=UIDS["actor"], runtime_uid=UIDS["runtime"], fence_witness=witness)
-        def close_owner():
-            try:
-                if read_owner is not None:
-                    read_owner.stop()
-            finally:
-                witness.close()
-        _wait_server(server, {"port": server.server_port}, close=close_owner)
+        # This packaged composition, not a weaker inline test adapter, owns
+        # SQLite history, dashboard proof and all standard Write capabilities.
+        from mark_api.protected_owner import create_protected_owner_runtime
+        runtime = create_protected_owner_runtime(
+            database=Path(config["db"]),
+            dashboard_socket=Path(config["dashboard_socket"]),
+            witness_socket=Path(config["witness_socket"]),
+            actor_socket=Path(config["actor_socket"]),
+            witness_uid=UIDS["witness"], actor_uid=UIDS["actor"],
+            runtime_uid=UIDS["runtime"], runtime_gid=UIDS["runtime"],
+            principal=PRINCIPAL, bearer_token=config["api_token"],
+            media_enabled=bool(config.get("media_enabled")),
+        )
+        server = runtime.write_server
+        _wait_server(server, {"port": server.server_port}, close=runtime.close)
     elif role == "frontend":
         # Use the *installed* executable product path, not a test-only server
         # factory. Pass tokens via a disposable private pipe, never argv/logs.
@@ -550,7 +539,7 @@ class Scenario:
                                  "media_handles": str(self.actor_media_root / "handles") if media else None})
             self.api_port = self.start("owner", {"db": str(self.owner_db), "witness_socket": str(self.owner_witness_socket),
                                                  "actor_socket": str(self.actor_socket), "api_token": self.api_token,
-                                                 "dashboard_socket": str(self.dashboard_socket) if dashboard else None,
+                                                 "dashboard_socket": str(self.dashboard_socket),
                                                  "media_enabled": media})["port"]
             if dashboard:
                 self.start_frontend()
@@ -655,9 +644,10 @@ class Scenario:
         return data
 
     def probe(self, *, peer_only=False):
-        paths = [self.actor_socket, self.actor_witness_socket, self.owner_witness_socket]
-        if self.with_dashboard:
-            paths.append(self.dashboard_socket)
+        # Owner always exposes the separately UID-attested dashboard RPC,
+        # even in HTTP-only scenarios. Probe that endpoint on every run.
+        paths = [self.actor_socket, self.actor_witness_socket,
+                 self.owner_witness_socket, self.dashboard_socket]
         old = []
         if peer_only:
             # Deliberately expose ONLY disposable test sockets: rejection must
