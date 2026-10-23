@@ -1,0 +1,197 @@
+# A6-Integrationsstand, 23.10.2026
+
+**Unvollständig; kein Liefer- oder Multi-UID-Abnahmenachweis.** Dieser Bericht
+bezieht sich auf die uncommittete Integration im bestehenden Worktree
+`kleinanzeiger-a6-customer-20261022`: HEAD `ab621837`, MERGE_HEAD `280e861`.
+Vorhandene Index- und Arbeitskopieänderungen bleiben erhalten; kein Commit,
+Reset, Branchwechsel, Deployment oder externer Plattform-/Provideraufruf.
+
+## Verifizierte Verbesserung dieses Arbeitslaufs
+
+Ein Owner-Pending-Claim kann das 32-KiB-Requestlimit einhalten, während seine
+spätere Recovery-Seite wegen des größeren Antwort-Envelopes nicht mehr
+übertragbar ist. Das ließ einen dauerhaft gespeicherten, über RPC nicht mehr
+lesbaren Pending-Fence zu. Der Owner prüft nun vor der Persistenz die exakt
+codierte einzelne Recovery-Zeile einschließlich Antwort-Envelope. Ein zu
+großer Claim wird ohne neue SQLite-Zeile abgewiesen; vorhandene Fences bleiben
+erhalten. Bereits historisch gespeicherte übergroße Zeilen werden weiterhin
+sicher abgewiesen und weder gekürzt noch gelöscht.
+
+Pending-Readback prüft jetzt dieselbe exakte Methoden-/Pfad-/Scope-/Ressourcen-/
+Anzeigenbindung und denselben kanonischen, begrenzten JSON-Vertrag wie die
+Admission. Vertauschte Identitäten, fehlende Bodies, doppelte Mitglieder,
+überlaufende Zahlen, Surrogate und übertiefe Bodies werden zurückgewiesen.
+Es wurde keine Completion-, ACK-, SQL- oder Clearance-RPC hinzugefügt.
+
+Ein bestehender Sync-Migrationstest erwartete noch Schema-v1. Er erwartet
+jetzt das bereits implementierte A6-Schema-v2 und prüft zusätzlich den
+Fortbestand der Recovery-Clearance-Tabelle. Die produktive Schema- und
+Migrationslogik wurde dabei nicht geändert.
+
+## Ausgeführte Prüfungen
+
+Mit den vorhandenen uv-Interpretern Python **3.12.12 und 3.13.9** jeweils:
+
+```bash
+PYTHONPATH=src:tests <python> -m unittest \
+  test_storage test_storage_owner_pending_admission \
+  test_storage_collation_contract test_storage_connection_lifecycle \
+  test_sync_attempt_journal test_application test_analytics -q
+```
+
+**123 Tests bestanden je Interpreter.** Die vier neuen Tests führen echte
+Client-Decodierung, Closed-Table-Dispatch und SQLite-Persistenz mit einem
+Transport im Speicher aus. Sie prüfen Größenrandfälle, Unicode, verlorene
+Antworten, Wiederöffnung, Replay-/Ressourcenbindung, erhaltene Pending-Fences
+und die Sperre nach begonnenen beziehungsweise quarantänisierten Operationen.
+Socket- und UID-Attestation sind in diesem ausdrücklich begrenzten Harness
+ausgenommen; bestehende Sicherheits-/Integrationstests wurden nicht
+abgeschaltet oder entsprechend umgebaut. Python 3.13 meldete außerdem
+ResourceWarnings für vorhandene rohe SQLite-Testverbindungen in
+`test_storage_collation_contract.py`; diese sind nicht als behoben ausgewiesen.
+
+Source-Compile aller **124 Python-Dateien** unter `src` und `tests` unter
+beiden Interpretern sowie `git diff --check`: bestanden. Es wurde keine
+Testabhängigkeit installiert.
+
+Die versuchten bestehenden Integrationssuiten sind **nicht bestanden**:
+
+- `test_dashboard_full_lifecycle_e2e`: zwei Fehler beim Anlegen des lokalen
+  HTTP-Sockets (`PermissionError: EPERM`), vor der Kundenreise.
+- `test_storage_owner`: 77 ausgeführt, 65 Fehler. Insbesondere verweigert die
+  bestehende Owner-Attestation die Sandbox-Ahnenverzeichnisse: `/` und `/tmp`
+  erscheinen als UID 65534 statt root oder eigener UID. Ein separater Check
+  bestätigt außerdem `EPERM` beim Binden eines temporären Unix-Sockets.
+  Die Sicherheitsprüfung bleibt unverändert.
+
+Wheel-Bau, frische Installation, Browser-/Media-Lifecycle, volle Suite,
+Multi-UID-/FD-/MAP_SHARED-Proof und CI wurden in diesem Arbeitslauf nicht
+nachgewiesen. Synthetische Dispatch-Ergebnisse ersetzen diese Prüfungen nicht.
+
+### Nachtrag: lokale Dashboard-Reconciliation
+
+Mit vorhandenen Cache-Paketen, ohne Netzwerk oder Systeminstallation,
+ausgeführt unter Python **3.12.12 und 3.13.9** (uv editable):
+
+```bash
+UV_CACHE_DIR=/tmp/kleinanzeiger-a6-replay-uv uv run --offline --no-project \
+  --python 3.13 --with pytest --with-editable . python -m pytest -q \
+  tests/test_dashboard_local_reconciliation.py \
+  tests/test_storage_owner_pending_admission.py tests/test_storage.py \
+  tests/test_storage_connection_lifecycle.py tests/test_application.py
+```
+
+**96 Tests und 95 Subtests bestanden je Interpreter**, derselbe Aufruf
+zusätzlich mit `--python 3.12`. Der neue ergänzende Dispatch-Harness ersetzt
+nur den HTTP-Transport durch Speicherobjekte; Write-Authentifizierung,
+Orchestrator, Operations-Receipts und SQLite bleiben real. Er prüft CRUD,
+Restart vor und zwischen den ACK-Phasen, Replay ohne weiteren Backend-Aufruf,
+Payload-/Route-/Ressourcen-/Key-Kollisionen, manipulierte Antworten, fehlende
+oder mehrdeutige Receipts, begonnene/unbekannte/202-Ergebnisse sowie
+Mock-/Principal-/Owner-/Container-Sperren. Die ursprünglichen beiden echten
+HTTP-Lifecycle-Tests behalten sämtliche Assertions und zählen jetzt zusätzlich
+Backend-Aufrufe. Sie wurden nicht in Dispatch-Tests umgewandelt.
+
+Unter Python 3.13 außerdem **64 Launcher-/Shutdown-Tests und 24 Subtests
+bestanden**, mit explizitem Ausschluss der beiden socketabhängigen
+Launcher-Tests. Darunter ist die Prüfung, dass Witness-Konfiguration den
+lokalen Reconciliation-Pfad trotz bekanntem Principal deaktiviert.
+
+Der abschließende ungekürzte Aufruf von `test_dashboard_full_lifecycle_e2e`,
+`test_query_dashboard`, `test_dashboard_owner` und `test_storage_owner*`
+ist **nicht grün: 155 fehlgeschlagen, 36 bestanden, 2 übersprungen**.
+86 Fehler entstehen bei der vom Shell-Sandbox verweigerten Socket-Erzeugung
+(`EPERM`), 69 bei der unveränderten Inode-/Ahnen-UID-Attestation. Insbesondere
+ist die echte HTTP-Kundenreise hier weiterhin nicht nachgewiesen. Ein lokaler
+`systemd-run --user` scheitert ebenfalls am verweigerten Bus-Zugriff. Der
+entsprechende Durable-Job-Werkzeugaufruf wurde nicht ausgeführt, weil er
+Approval benötigt und die Sitzung die Approval-Policy `never` hat.
+Keine Attestation wurde gelockert. `git diff --check` und Source-Compile
+der geänderten Python-Dateien bestanden. Kein Commit, Staging oder Push.
+
+**A6 bleibt unvollständig; unabhängiger UID-, Backup-/Restore-, installierter
+Browser-/Media- und echter HTTP-Proof bleiben offen.**
+
+## Konkrete technische Restarbeiten
+
+1. **Trusted Completion Actor:** Der untrusted Owner-RPC-Client kann nur
+   claim/begin/read, unbegonnene Claims abbrechen oder begonnene als festes
+   UNKNOWN quarantänisieren. Es fehlt ein separat geschützter Akteur, der
+   tatsächliche externe Ergebnisse unabhängig prüft und unveränderliche,
+   an Generation, Key, Fingerprint, Aktion und Antwort gebundene Receipts
+   persistiert. Ein Caller-JSON, Browser-ACK oder Inventar-Sync ist keine
+   solche Evidenz. Verlorene Completion-Antworten müssen ausschließlich
+   beobachtend auflösbar sein.
+2. **Produktkomposition:** `build_product_launcher` erstellt weiterhin einen
+   `SnapshotStore`; `create_server(StorageOwnerClient, write_proxy=...)`
+   verweigert vor dem HTTP-Bind. Write-API, Orchestrator und Media-Runtime
+   benötigen außerdem persistente Receipts/Checkpoints, exklusive Laufzeit-
+   Leases und geschützte Media-Handles. Diese Methoden einfach ungeprüft als
+   RPC zu exportieren würde die A6-Grenze aufheben.
+3. **Bedienbare unabhängige Pending-Recovery:** Für den direkten lokalen
+   `SnapshotStore` existiert jetzt ein ausdrücklich konfigurierter Same-UID-
+   Pfad für lesendes Receipt-Replay und zweiphasigen ACK. Er prüft die exakte
+   Pending-Identität, den Backend-Principal, den normalisierten Request-
+   Fingerprint, den abgeschlossenen HTTP-200-Journaleintrag und dessen
+   kanonisches Receipt gegen genau ein persistiertes Operations-Receipt.
+   Replay kontaktiert den Backend-HTTP-Server nicht erneut. Beide ACK-Phasen
+   prüfen das Ergebnis neu. Unbekannte/in-progress/202-Ergebnisse, Kollisionen
+   und veränderte Antworten bleiben gesperrt. Unkonfigurierte Mock-Proxys,
+   Witness-Konfigurationen und Container-Drafts erhalten diese lokale
+   Autorität nicht. `StorageOwnerClient` mit Write-Proxy wird weiterhin vor
+   dem HTTP-Bind verweigert; es gibt keine neue Owner-Completion-/ACK-/
+   Clearance-RPC. Die unabhängige A6-Recovery einschließlich Browser- und
+   Medienreise bleibt offen. Der lokale Pfad ersetzt keinen Multi-UID-Proof.
+4. **Tatsächliche Installation und Cutover:** Der normale lokale Start ist
+   Same-UID/direct-SQLite, auch mit optionalem FenceWitness kein Beleg für
+   isolierten Rohdatenbankzugriff. Die Multi-UID-Containerstarts bleiben
+   Drafts mit technischen Sperren. Frischer, separat UID-geschützter Store,
+   Entzug alter SQLite-/WAL-/SHM-FDs und MAP_SHARED-/Namespace-Aliase,
+   abgestimmter Witness-/Backup-/Restore-Zustand und die installierte
+   UI-Write-/Media-/Recovery-Reise müssen unabhängig geprüft werden.
+
+D-028/D-029 bleiben verbindlich: Default-on Read/Write und vollständiger
+Produktumfang, optional `--read-only`, Generierung zuerst als Entwurf. Eine
+allgemeine externe Plattformfreigabe ist kein Entwicklungsblocker. Die oben
+genannten offenen Punkte sind technische Integrations- und Sicherheitslücken.
+
+
+## Neue verifizierte Produkt-/Recovery-Abnahme, 23.10.2026
+
+Die obigen CLI-Sandbox-Einschränkungen wurden durch authentisierte
+Grabowski-Systemd-Testjobs umgangen, **ohne Sicherheitsattestierungen
+zu lockern**. Das ist keine Host-A6-Freigabe:
+
+- Echtes lokales HTTP CRUD + Restart/Replay/2-Phasen-ACK: Python
+  3.12 und 3.13 jeweils 13 Tests/32 Subtests PASS
+  (Jobs grabowski-job-836c951c76fe, grabowski-job-66e80ff73d4c).
+- Dashboard/Owner/Query/Launcher: Python 3.13
+  172 Tests/176 Subtests PASS (grabowski-job-73745f21353d).
+- Vollständige Projektquelltests: Python 3.13 **1.825 PASS,
+  21 SKIP, 2 fork()-DeprecationWarnings**, 1.263 Subtests
+  (grabowski-job-f9976c2c3706); SKIP ist kein Multi-UID-A6-Beweis.
+- Die vier aktuellen Binary-Blank-ID-Indexe sind mit exakten DDL-
+  SHA-256-Digests in der unabhängigen Offline-Pair-Schemaprüfung gepinnt.
+  Die neue Sicherheitsregression entfernt jeden Index einzeln und
+  verlangt eine harte Ablehnung des Restore. A6 Pair-/Backup-/Restore:
+  226 PASS/91 Subtests; A6-Subset 241 PASS/15 SKIP
+  (Jobs grabowski-job-4cdbc5eb3f18, grabowski-job-3ff9b571f4e6).
+- Frisches lokales Wheel, SHA-256
+  bd52b5304b5b341983e918f331f51f9231af9d2e64e74572d73fa0388f6db46c,
+  wurde unter Python 3.12.12 **und** 3.13.9 separat installiert:
+  offizielle installierte NetNS-only Offline-Wheel-Akzeptanz jeweils
+  PASS (Jobs grabowski-job-b44c457263d7 und
+  grabowski-job-75c5c645a7b6). Die Fixture erfordert jetzt
+  ausdrücklich den vertrauenswürdigen lokalen Backend-Principal und
+  prüft den tatsächlichen sicheren zweiphasigen Dashboard-Pending-ACK,
+  statt eine unwirksame Mock-Konfiguration als Erfolg zu deklarieren.
+  Weitere Gates: vollständiges CRUD/Restart im installierten Wheel,
+  Fake-Provider Text/Bild ohne Kosten, E-Mail/CSV/SQLite und
+  lokale Backup-/Restore-Sicherheit. Kein echter Plattformwrite.
+  Der eigene Wheel-Receipt beschränkt den Backup-Scope ausdrücklich auf
+  create-only-offline-not-a6.
+
+**A6 weiterhin NO-GO:** keine unabhängige hostile-UID Write-/Media-
+Completion-Autorität, kein vollständig verifizierter Multi-UID-Host-Cutover
+mit alter FD-/MAP_SHARED-Revocation, kein reales A6-Backup/Restore.
+Kein untrusted SQL-/Completion-/Clearance-RPC wird freigeschaltet.

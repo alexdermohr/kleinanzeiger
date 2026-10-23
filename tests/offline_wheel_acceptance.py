@@ -859,6 +859,8 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                     store, port=0, write_proxy=DashboardWriteProxy(
                         host="127.0.0.1", port=backend.server_port,
                         bearer_token=backend_token, ui_token=ui_token,
+                        backend_principal=access.principal,
+                        local_reconciliation_enabled=True,
                     ),
                 )
                 threads = []
@@ -923,6 +925,32 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                     )
                     assert status == 200 and replay == paused
                     assert headers["Idempotency-Replayed"] == "true"
+                    # Exact persisted replay above must not contact the backend.
+                    # The installed UI then ACKs both local intents in two
+                    # different, tightly bound persisted phases.
+                    for key, scope in (
+                        ("wheel-create", "create"),
+                        ("wheel-pause", "ad:315:pause"),
+                    ):
+                        for finalized in (False, True):
+                            ack_request = Request(
+                                base + "/api/dashboard/pending-writes/ack",
+                                data=json.dumps({
+                                    "scope": scope, "idempotency_key": key,
+                                }).encode("utf-8"),
+                                method="POST",
+                                headers={
+                                    "Origin": base, "Content-Type": "application/json",
+                                    "X-Mark-Dashboard-Write": "1",
+                                    "X-Mark-Dashboard-Token": ui_token,
+                                },
+                            )
+                            with opener.open(ack_request, timeout=3) as ack:
+                                assert ack.status == 200
+                                assert json.loads(ack.read()) == {
+                                    "acknowledged": True, "finalized": finalized,
+                                }
+                    assert store.dashboard_pending_writes() == ()
                     assert platform.effects == ["create", "set_state"]
                     assert len(store.ad_history("315")) == 2
                 finally:
@@ -937,6 +965,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                     "persisted_dashboard_projection": True,
                     "same_origin_ui_token_enforced": True,
                     "write_idempotency_replay": True,
+                    "installed_local_two_phase_ack": True,
                     "synthetic_platform_only": True,
                 }, sort_keys=True))
             """)
@@ -952,6 +981,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 "persisted_dashboard_projection": True,
                 "same_origin_ui_token_enforced": True,
                 "write_idempotency_replay": True,
+                "installed_local_two_phase_ack": True,
                 "synthetic_platform_only": True,
             })
 

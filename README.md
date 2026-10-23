@@ -24,6 +24,8 @@ kleinanzeiger --db /pfad/kleinanzeiger.sqlite --cdp-port 9222
 
 Der Starter zeigt die lokale Dashboard-URL mit einem sitzungsgebundenen Zugriffstoken an. Der Start aktiviert standardmäßig die **vollständige Anzeigenverwaltung einschließlich Write und Media**. Wer ausnahmsweise nur lesen möchte, verwendet `--read-only`.
 
+Der normale Starter verwendet derzeit **direktes SQLite unter derselben lokalen UID**; das ist kein Nachweis unabhängiger Multi-UID-Isolation gegen einen kompromittierten Dienst. Die laufende A6-Integration ist noch unvollständig: Der Owner-Socket erlaubt bisher keine Write-UI, und der Dashboard-Pending-ACK bleibt auch lokal gesperrt. Dadurch bleibt eine bearbeitete Ressource für weitere Writes gebunden. Anforderungen und Default-on-Konfiguration bleiben verbindlich; die vollständige Kundenreise ist auf diesem Zwischenstand noch nicht abgenommen. Konkrete Restarbeiten und Prüfgrenzen stehen im [A6-Integrationsbericht](docs/a6-integration-status.md).
+
 Unter `Anzeigen verwalten` kann der Anwender eine Anzeige mit Kategorie, Titel, Beschreibung, Festpreis und Bildern erstellen oder eine bestehende eigene Anzeige ändern, pausieren, aktivieren und löschen. Externe Aktionen benötigen eine ausdrückliche Benutzerentscheidung; Idempotenz, Write-Bestätigung und unklare Ausgänge bleiben konservativ behandelt. Bei einem unbekannten Ausgang ist zunächst die vorhandene Reconciliation zu verwenden – **kein blinder erneuter Publish oder Delete**.
 
 ## Text- und Bildentwürfe im selben Dashboard
