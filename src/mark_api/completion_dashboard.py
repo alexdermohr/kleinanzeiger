@@ -1,7 +1,8 @@
 """Protected dashboard reconciliation over the existing typed owner socket.
 
-The frontend can request an exact saved result or acknowledge its display. It
-cannot submit a result, witness proof, clearance, arbitrary SQL or a completion.
+The frontend can request an exact saved result or acknowledge its display,
+including independently verified media Creates. It cannot submit a result,
+witness proof, clearance, arbitrary SQL or a completion.
 The owner itself reads its persisted intent/receipt and asks its independent
 witness before either ACK phase. The old StorageOwnerClient remains read/claim
 only; this explicit composition is not a host-cutover or media-release claim.
@@ -26,7 +27,7 @@ from .strict_json import strict_json_object
 from .write_api import WriteApiAccess
 
 
-_PROFILE = "a6-independent-nonmedia-dashboard-v1"
+_PROFILE = "a6-independent-dashboard-v2"
 _MAX_RESPONSE = 24 * 1024
 
 
@@ -54,7 +55,7 @@ class CompletionDashboardOwnerServer(StorageOwnerServer):
         # Import lazily: this reuses the exact ordinary product's strict
         # fingerprint/receipt validation, not a second weaker ACK algorithm.
         from .dashboard import _local_pending_matches, _stored_completed_write_response
-        if type(expected) is not DashboardPendingWrite or expected.scope == "create-media":
+        if type(expected) is not DashboardPendingWrite:
             raise _denied()
         canonical = _pending_from_json(_pending_as_json(expected))
         if canonical.acknowledged:

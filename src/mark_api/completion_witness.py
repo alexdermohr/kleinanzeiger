@@ -55,8 +55,16 @@ def evidence_response(intent: CompletionIntent, evidence: object) -> dict[str, o
         receipt = decode_evidence(evidence, intent)
         row = (_create_receipt_to_dict(receipt) if type(receipt) is CreateOperationReceipt
                else _receipt_to_dict(receipt))
-        return {"idempotency_key": intent.key, "operation_receipt": row,
-                "platform_retry_authorized": False}
+        response = {"idempotency_key": intent.key, "operation_receipt": row,
+                    "platform_retry_authorized": False}
+        if intent.action == "create_media":
+            if type(receipt) is not CreateOperationReceipt or receipt.media_post_read_status is None:
+                raise _error()
+            response.update({
+                "media_persistence_confirmed": receipt.media_persistence_confirmed,
+                "media_post_read_status": receipt.media_post_read_status.value,
+            })
+        return response
     except (CompletionAuthorityError, TypeError, ValueError):
         raise _error() from None
 
@@ -162,6 +170,11 @@ class CompletionWitnessLedger(FenceLedger):
             # A no-input claim is safe only when the trusted actor did not
             # invoke its writer at all. Anything less certain retains the fence.
             if receipt.outcome is OperationOutcome.PRECONDITION_FAILED and receipt.writer_invoked:
+                outcome = "ambiguous"
+            if (intent.action == "create_media" and receipt.outcome is OperationOutcome.CONFIRMED
+                    and not receipt.media_persistence_confirmed):
+                # A content-confirmed creation with unverified images is HTTP
+                # 202, never an independently settled A6 media completion.
                 outcome = "ambiguous"
             proof = _hash(intent.to_wire()) + "." + _hash(evidence)
             response_sha = _hash(response)

@@ -8,9 +8,10 @@ or complete backup/media release proof. Never run directly in a host namespace.
 from __future__ import annotations
 
 import argparse
+from base64 import b64decode, b64encode
 from contextlib import closing
 import ctypes
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +40,12 @@ from mark_api.completion_witness import AuthorityWitnessClient, CompletionWitnes
 from mark_api.completion_dashboard import CompletionDashboardClient, CompletionDashboardOwnerServer
 from mark_api.dashboard import DashboardWriteProxy, create_server as create_dashboard_server
 from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.private_web import PrivateWebCreateSnapshot, PrivateWebEditorState
+from mark_api.private_web_media import (
+    PrivateWebCreateMediaSnapshot, PrivateWebMediaFileSnapshot, PrivateWebMediaHandleStore,
+    PrivateWebMediaPersistenceSnapshot,
+)
+from mark_api.private_web_runtime import PrivateWebMediaCreateRuntime, PrivateWebMediaCreateService
 from mark_api.fence_witness import FenceWitnessClient, _WitnessUnixHandler
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
@@ -46,6 +53,10 @@ from mark_api.write_api import WriteApiAccess, WriteCapability
 
 UIDS = {"owner": 50111, "actor": 50112, "witness": 50113, "platform": 50114, "runtime": 50115}
 PRINCIPAL = "synthetic-protected-customer"
+# A deterministic 1x1 PNG, never sent outside this disposable net namespace.
+MEDIA_PNG = b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Zr4jV8AAAAASUVORK5CYII="
+)
 
 
 def _json(value):
@@ -75,13 +86,16 @@ def _drop(uid):
     assert os.getresuid() == (uid, uid, uid) and os.getresgid() == (uid, uid, uid)
 
 
-def _http(port, method, path, *, token, payload=None, key=None, ui_token=None, raw=False):
+def _http(port, method, path, *, token, payload=None, key=None, ui_token=None, raw=False, media=None):
     headers = ({"Authorization": "Bearer " + token} if ui_token is None else {
         "Origin": "http://127.0.0.1:" + str(port), "X-Mark-Dashboard-Write": "1",
         "X-Mark-Dashboard-Token": ui_token,
     })
-    data = None if payload is None else _json(payload).encode()
-    if data is not None:
+    data = media if media is not None else (None if payload is None else _json(payload).encode())
+    if media is not None:
+        headers["Content-Type"] = "image/png"
+        headers["X-Mark-Media-Filename"] = "original.png"
+    elif data is not None:
         headers["Content-Type"] = "application/json"
     if key is not None:
         headers["Idempotency-Key"] = key
@@ -125,7 +139,8 @@ def _platform(config):
     guard = Lock()
     ads = {"701": {"ad_id": "701", "title": "Existing table", "description": "Existing description", "state": "active"}}
     mutations = []
-    modes = {"unknown_next": False, "unreadable": False, "block_next": False, "blocked_readers": 0}
+    modes = {"unknown_next": False, "unreadable": False, "block_next": False,
+             "blocked_readers": 0, "media_mismatch_next": False}
     release = Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -157,11 +172,21 @@ def _platform(config):
                         modes["block_next"] = True
                     elif self.path == "/control/release":
                         release.set()
+                    elif self.path == "/control/media_mismatch":
+                        modes["media_mismatch_next"] = True
                     response = {"mutations": list(mutations), "ads": list(ads.values()), "modes": dict(modes)}
                 self.reply(200, response)
                 return
             if self.command == "GET":
                 with guard:
+                    parts = self.path.strip("/").split("/")
+                    media_result = None
+                    if len(parts) == 3 and parts[0] == "ads" and parts[2] == "media":
+                        ad = ads.get(parts[1])
+                        media_result = None if ad is None else {
+                            "ad_id": parts[1], "media_sha256": ad.get("media_sha256", []),
+                            "media_sizes": ad.get("media_sizes", []),
+                        }
                     blocked = modes["block_next"] and bool(mutations)
                     if blocked:
                         modes["blocked_readers"] += 1
@@ -170,14 +195,28 @@ def _platform(config):
                     return
                 with guard:
                     status = 503 if modes["unreadable"] else 200
-                    response = {"ads": list(ads.values())}
+                    response = (media_result if media_result is not None else {"ads": list(ads.values())})
+                    if media_result is None and len(parts) == 3 and parts[2] == "media":
+                        status, response = 404, {"error": "missing_media"}
                 self.reply(status, response)
                 return
             with guard:
                 segments = self.path.strip("/").split("/")
-                if self.command == "POST" and segments == ["ads"]:
+                if self.command == "POST" and segments in (["ads"], ["ads", "media"]):
                     ad_id = str(900 + len(mutations))
                     ads[ad_id] = {"ad_id": ad_id, "title": payload["title"], "description": payload["description"], "state": "active"}
+                    if segments == ["ads", "media"]:
+                        assert set(payload) == {"title", "description", "media_sha256", "media_sizes"}
+                        hashes, sizes = payload["media_sha256"], payload["media_sizes"]
+                        assert isinstance(hashes, list) and 1 <= len(hashes) <= 32
+                        assert len(hashes) == len(sizes)
+                        assert all(isinstance(h, str) and len(h) == 64 for h in hashes)
+                        assert all(type(v) is int and v > 0 for v in sizes)
+                        ads[ad_id]["media_sha256"] = (
+                            ["0" * 64 for _ in hashes] if modes["media_mismatch_next"] else hashes
+                        )
+                        ads[ad_id]["media_sizes"] = sizes
+                        modes["media_mismatch_next"] = False
                 else:
                     assert len(segments) in (2, 3) and segments[0] == "ads"
                     ad_id = segments[1]
@@ -239,6 +278,97 @@ class PlatformAdapter:
         self.write("PATCH", "/ads/" + ad_id, {k: v for k, v in (("title", title), ("description", description)) if v is not None})
 
 
+
+class SyntheticMediaPage:
+    """Owned by the trusted actor UID; exercises the real one-shot media writer.
+
+    The simulated page is only a platform seam: independent platform state is
+    held by a different UID, not by this page or by the normal frontend UID.
+    """
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.form = PrivateWebCreateSnapshot(
+            state=PrivateWebEditorState.READY, title="", description="", price_amount="",
+        )
+        self.media = None
+        self.staged = ()
+        self.closed = False
+        self.submitted = False
+
+    def open_create_form(self, category_path):
+        assert 2 <= len(category_path) <= 6
+
+    def read_create_form(self):
+        return self.form
+
+    def replace_create_title(self, value):
+        self.form = replace(self.form, title=value)
+
+    def replace_create_description(self, value):
+        self.form = replace(self.form, description=value)
+
+    def replace_create_price(self, value):
+        self.form = replace(self.form, price_amount=value)
+
+    def submit_create(self):
+        raise AssertionError("media page must not use ordinary create submit")
+
+    def stage_create_media(self, files):
+        assert not self.staged and files
+        self.staged = tuple((Path(f).name, Path(f).read_bytes()) for f in files)
+        self.media = PrivateWebCreateMediaSnapshot(
+            state=PrivateWebEditorState.READY,
+            files=tuple(PrivateWebMediaFileSnapshot(name=name, size_bytes=len(data))
+                        for name, data in self.staged),
+        )
+
+    def read_create_media(self):
+        assert self.media is not None
+        return self.media
+
+    def submit_create_media(self, expected):
+        assert not self.submitted and expected == self.media and self.staged
+        self.submitted = True
+        self.adapter.write("POST", "/ads/media", {
+            "title": self.form.title, "description": self.form.description,
+            "media_sha256": [hashlib.sha256(data).hexdigest() for _, data in self.staged],
+            "media_sizes": [len(data) for _, data in self.staged],
+        })
+
+    def close(self):
+        self.closed = True
+
+
+class SyntheticMediaVerifier:
+    """Checks a separate platform UID's saved bytes identity via fresh readback."""
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+
+    def verify_media(self, ad_id, expected_sources, *, timeout_seconds):
+        assert 0 < timeout_seconds <= 120
+        try:
+            status, data, _ = _http(
+                self.adapter.port, "GET", "/ads/" + ad_id + "/media",
+                token=self.adapter.token,
+            )
+            if status != 200 or data.get("ad_id") != ad_id:
+                return ReadResult.failure(ReadStatus.PARSE_ERROR, error="media_postread_missing")
+            actual = data.get("media_sha256")
+            sizes = data.get("media_sizes")
+            expected = [hashlib.sha256(Path(source.path).read_bytes()).hexdigest()
+                        for source in expected_sources]
+            expected_sizes = [Path(source.path).stat().st_size for source in expected_sources]
+            return ReadResult.success_nonempty(PrivateWebMediaPersistenceSnapshot(
+                ad_id=ad_id, observed_at=datetime.now(timezone.utc),
+                source="synthetic-independent-platform-media",
+                exact_match=actual == expected and sizes == expected_sizes,
+            ))
+        except (OSError, URLError, ValueError, TypeError):
+            return ReadResult.failure(ReadStatus.PARSE_ERROR, error="media_postread_unavailable")
+
+
 def _child(role, config):
     _drop(UIDS[role] if role in UIDS else UIDS["runtime"])
     if role == "platform":
@@ -271,14 +401,39 @@ def _child(role, config):
                               content_reader_factory=lambda _: PlatformAdapter(config["platform_port"], config["platform_token"]),
                               store=None, writes_enabled=True)
         witness = AuthorityWitnessClient(Path(config["witness_socket"]), expected_owner_uid=UIDS["witness"])
+        handles = None
+        media_runtime = None
+        media_service = None
+        if config.get("media_handles"):
+            handles = PrivateWebMediaHandleStore(directory=config["media_handles"])
+            media_runtime = PrivateWebMediaCreateRuntime(page_factory=lambda: SyntheticMediaPage(adapter))
+            media_service = PrivateWebMediaCreateService(
+                runtime=media_runtime, resolver=handles, reader=adapter,
+                confirmation_reader=adapter,
+                content_reader_factory=lambda _: PlatformAdapter(config["platform_port"], config["platform_token"]),
+                media_persistence_verifier=SyntheticMediaVerifier(adapter),
+                store=None, writes_enabled=True,
+            )
         server = CompletionAuthorityServer(socket_path=Path(config["socket"]), owner_uid=UIDS["owner"], owner_gid=UIDS["owner"],
-                                           runtime_uid=UIDS["runtime"], principal=PRINCIPAL, service=service, witness_client=witness)
-        _wait_server(server, {})
+                                           runtime_uid=UIDS["runtime"], principal=PRINCIPAL, service=service,
+                                           witness_client=witness, media_service=media_service, media_stager=handles)
+        def close_actor():
+            try:
+                if media_runtime is not None:
+                    media_runtime.close()
+            finally:
+                if handles is not None:
+                    handles.close()
+        _wait_server(server, {}, close=close_actor)
     elif role == "owner":
         store = SnapshotStore(Path(config["db"]))
         witness = FenceWitnessClient(Path(config["witness_socket"]), expected_owner_uid=UIDS["witness"])
+        capabilities = {WriteCapability.CREATE, WriteCapability.UPDATE_CONTENT,
+                        WriteCapability.SET_STATE, WriteCapability.DELETE}
+        if config.get("media_enabled"):
+            capabilities.add(WriteCapability.CREATE_MEDIA)
         access = WriteApiAccess(principal=PRINCIPAL, bearer_token=config["api_token"], writes_enabled=True,
-                                capabilities=frozenset({WriteCapability.CREATE, WriteCapability.UPDATE_CONTENT, WriteCapability.SET_STATE, WriteCapability.DELETE}))
+                                capabilities=frozenset(capabilities))
         read_owner = None
         if config.get("dashboard_socket"):
             read_owner = CompletionDashboardOwnerServer(
@@ -308,7 +463,8 @@ def _child(role, config):
     elif role == "request":
         result = _http(config["port"], config["method"], config["path"], token=config["api_token"],
                        payload=config.get("payload"), key=config.get("key"),
-                       ui_token=config.get("ui_token"), raw=config.get("raw", False))
+                       ui_token=config.get("ui_token"), raw=config.get("raw", False),
+                       media=(b64decode(config["media_b64"], validate=True) if config.get("media_b64") else None))
         _emit({"status": result[0], "body": result[1], "replayed": result[2].get("Idempotency-Replayed")})
     elif role == "probe":
         for path in config["files"]:
@@ -329,13 +485,20 @@ def _child(role, config):
                 except (PermissionError, ConnectionResetError, BrokenPipeError):
                     continue
                 assert not response or json.loads(response).get("ok") is False
-        _emit({"denied": True, "uid": os.geteuid(), "file_count": len(config["files"]), "socket_count": len(config["sockets"])})
+        for directory in config.get("private_dirs", []):
+            try:
+                os.listdir(directory)
+            except PermissionError:
+                continue
+            raise AssertionError("untrusted UID listed actor-private media")
+        _emit({"denied": True, "uid": os.geteuid(), "file_count": len(config["files"]),
+               "socket_count": len(config["sockets"]), "private_dirs_denied": len(config.get("private_dirs", []))})
     else:
         raise AssertionError("unknown child role")
 
 
 class Scenario:
-    def __init__(self, root, *, lost_ack=False, dashboard=False):
+    def __init__(self, root, *, lost_ack=False, dashboard=False, media=False):
         self.root = root
         self.children = []
         self.configs = {}
@@ -343,6 +506,7 @@ class Scenario:
         self.api_token = secrets.token_hex(24)
         self.ui_token = secrets.token_hex(24)
         self.with_dashboard = dashboard
+        self.with_media = media
         self.platform_token = secrets.token_hex(24)
         self.control_token = secrets.token_hex(24)
         root.mkdir(mode=0o755)
@@ -352,14 +516,18 @@ class Scenario:
         self.actor_witness_socket = root / "w-actor" / "w.sock"
         self.actor_socket = root / "actor-rpc" / "a.sock"
         self.dashboard_socket = root / "dashboard-rpc" / "d.sock"
-        for path, uid, gid, mode in (
+        self.actor_media_root = root / "actor-media"
+        directories = [
             (self.owner_db.parent, UIDS["owner"], UIDS["owner"], 0o700),
             (self.witness_db.parent, UIDS["witness"], UIDS["witness"], 0o700),
             (self.owner_witness_socket.parent, UIDS["witness"], UIDS["owner"], 0o2710),
             (self.actor_witness_socket.parent, UIDS["witness"], UIDS["actor"], 0o2710),
             (self.actor_socket.parent, UIDS["actor"], UIDS["owner"], 0o2710),
             (self.dashboard_socket.parent, UIDS["owner"], UIDS["runtime"], 0o2710),
-        ):
+        ]
+        if media:
+            directories.append((self.actor_media_root, UIDS["actor"], UIDS["actor"], 0o700))
+        for path, uid, gid, mode in directories:
             path.mkdir()
             os.chown(path, uid, gid)
             os.chmod(path, mode)
@@ -368,10 +536,12 @@ class Scenario:
             self.start("witness", {"db": str(self.witness_db), "owner_socket": str(self.owner_witness_socket),
                                    "actor_socket": str(self.actor_witness_socket), "drop_completion_key": "lost:pause" if lost_ack else None})
             self.start("actor", {"socket": str(self.actor_socket), "witness_socket": str(self.actor_witness_socket),
-                                 "platform_port": self.platform_port, "platform_token": self.platform_token})
+                                 "platform_port": self.platform_port, "platform_token": self.platform_token,
+                                 "media_handles": str(self.actor_media_root / "handles") if media else None})
             self.api_port = self.start("owner", {"db": str(self.owner_db), "witness_socket": str(self.owner_witness_socket),
                                                  "actor_socket": str(self.actor_socket), "api_token": self.api_token,
-                                                 "dashboard_socket": str(self.dashboard_socket) if dashboard else None})["port"]
+                                                 "dashboard_socket": str(self.dashboard_socket) if dashboard else None,
+                                                 "media_enabled": media})["port"]
             if dashboard:
                 self.start_frontend()
         except BaseException:
@@ -446,10 +616,11 @@ class Scenario:
         self.stop("frontend")
         self.start_frontend()
 
-    def ui_request(self, method, path, key=None, payload=None, *, raw=False):
+    def ui_request(self, method, path, key=None, payload=None, *, raw=False, media=None):
         assert self.with_dashboard
         child = self.spawn("request", {"port": self.ui_port, "api_token": "", "ui_token": self.ui_token,
-                                       "method": method, "path": path, "key": key, "payload": payload, "raw": raw})
+                                       "method": method, "path": path, "key": key, "payload": payload,
+                                       "raw": raw, "media_b64": b64encode(media).decode("ascii") if media is not None else None})
         result = self.receive(child)
         child.wait(5)
         assert child.returncode == 0, child.stderr.read(8192)
@@ -458,9 +629,10 @@ class Scenario:
     def ui_ack(self, scope, key):
         return self.ui_request("POST", "/api/dashboard/pending-writes/ack", payload={"scope": scope, "idempotency_key": key})
 
-    def request(self, method, path, key, payload=None):
+    def request(self, method, path, key=None, payload=None, *, media=None):
         child = self.spawn("request", {"port": self.api_port, "api_token": self.api_token,
-                                       "method": method, "path": path, "key": key, "payload": payload})
+                                       "method": method, "path": path, "key": key, "payload": payload,
+                                       "media_b64": b64encode(media).decode("ascii") if media is not None else None})
         result = self.receive(child)
         child.wait(5)
         assert child.returncode == 0, child.stderr.read(8192)
@@ -486,7 +658,10 @@ class Scenario:
                 os.chmod(path, 0o666)
         try:
             files = [str(self.owner_db) + suffix for suffix in ("", "-wal", "-shm")] + [str(self.witness_db)]
-            child = self.spawn("probe", {"files": files, "sockets": list(map(str, paths))})
+            child = self.spawn("probe", {
+                "files": files, "sockets": list(map(str, paths)),
+                "private_dirs": [str(self.actor_media_root)] if self.with_media else [],
+            })
             result = self.receive(child)
             child.wait(5)
             assert child.returncode == 0 and result["denied"] is True
@@ -533,6 +708,84 @@ class Scenario:
             assert self.ui_ack(scope, key)["status"] in (409, 500)
             assert len(self.state()["mutations"]) == count
         self.probe()
+
+    def media_journey(self):
+        assert self.with_media and self.with_dashboard
+        stage = self.ui_request("POST", "/api/write/media/stage", media=MEDIA_PNG)
+        assert stage["status"] == 201, stage
+        ref = stage["body"]["media_ref"]
+        assert ref.startswith("media_") and len(ref) > 18
+        # This stage was held exclusively under the actor UID, not the owner
+        # SQLite UID or the compromised dashboard/runtime UID.
+        self.probe(peer_only=True)
+        payload = {
+            "category_path": ["Haus & Garten", "Möbel & Wohnen"],
+            "title": "UID synthetic image listing",
+            "description": "Separate actor, witness and platform media readback",
+            "price_eur": 29, "media_refs": [ref],
+        }
+        key = "ui:protected-media"
+        created = self.ui_request("POST", "/api/write/media/ads", key, payload)
+        assert created["status"] == 200, created
+        assert created["body"]["media_persistence_confirmed"] is True, created
+        assert created["body"]["media_post_read_status"] == "confirmed", created
+        assert created["body"]["operation_receipt"]["media_persistence_confirmed"] is True, created
+        assert ref not in _json(created["body"]), "private media ref leaked in write response"
+        state = self.state()
+        assert len(state["mutations"]) == 1 and state["mutations"][0]["path"] == "/ads/media", state
+        created_id = created["body"]["operation_receipt"]["created_ad_id"]
+        matching = [ad for ad in state["ads"] if ad["ad_id"] == created_id]
+        assert len(matching) == 1
+        assert matching[0]["media_sha256"] == [hashlib.sha256(MEDIA_PNG).hexdigest()]
+        assert matching[0]["media_sizes"] == [len(MEDIA_PNG)]
+        pending = self.ui_request("GET", "/api/dashboard/pending-writes")
+        assert pending["status"] == 200 and len(pending["body"]["pending_writes"]) == 1, pending
+        assert pending["body"]["pending_writes"][0]["scope"] == "create-media", pending
+        assert pending["body"]["pending_writes"][0]["acknowledged"] is False
+        self.restart_frontend()
+        replay = self.ui_request("POST", "/api/write/media/ads", key, payload)
+        assert replay["status"] == 200 and replay["replayed"] == "true", replay
+        phase1 = self.ui_ack("create-media", key)
+        assert phase1["status"] == 200 and phase1["body"]["finalized"] is False, phase1
+        self.restart_owner()
+        phase2 = self.ui_ack("create-media", key)
+        assert phase2["status"] == 200 and phase2["body"]["finalized"] is True, phase2
+        assert self.ui_request("GET", "/api/dashboard/pending-writes")["body"] == {"pending_writes": []}
+        # Actor process restart must not become new actuation authority.
+        self.stop("actor")
+        self.start("actor", self.configs["actor"])
+        replay = self.ui_request("POST", "/api/write/media/ads", key, payload)
+        assert replay["status"] == 200 and replay["replayed"] == "true", replay
+        assert len(self.state()["mutations"]) == 1
+        self.probe()
+
+    def media_unverified_journey(self):
+        assert self.with_media and self.with_dashboard
+        stage = self.ui_request("POST", "/api/write/media/stage", media=MEDIA_PNG)
+        assert stage["status"] == 201, stage
+        payload = {
+            "category_path": ["Haus & Garten", "Möbel & Wohnen"],
+            "title": "UID synthetic unverified listing",
+            "description": "Content can match while media postread differs",
+            "price_eur": 29, "media_refs": [stage["body"]["media_ref"]],
+        }
+        self.state("media_mismatch")
+        key = "ui:media-unverified"
+        result = self.ui_request("POST", "/api/write/media/ads", key, payload)
+        assert result["status"] in (202, 500, 503), result
+        assert result["body"]["platform_retry_authorized"] is False, result
+        assert len(self.state()["mutations"]) == 1
+        self.restart_owner()
+        for attempted_key in (key, key + ":new"):
+            denied = self.ui_request("POST", "/api/write/media/ads", attempted_key, payload)
+            assert denied["status"] in (409, 500, 503), denied
+            assert denied["body"]["platform_retry_authorized"] is False, denied
+        assert self.ui_ack("create-media", key)["status"] in (409, 500)
+        pending = self.ui_request("GET", "/api/dashboard/pending-writes")
+        assert len(pending["body"]["pending_writes"]) == 1, pending
+        assert pending["body"]["pending_writes"][0]["acknowledged"] is False
+        assert len(self.state()["mutations"]) == 1
+        self.probe(peer_only=True)
 
     def crash_after_submit(self, role, *, graceful=False):
         self.state("block")
@@ -665,6 +918,12 @@ def _acceptance(host_net, host_pid):
                 scenario.crash_after_submit(role, graceful=graceful)
                 scenario.close()
                 scenario = None
+            scenario = Scenario(root / "media-dashboard", dashboard=True, media=True)
+            scenario.media_journey()
+            scenario.close()
+            scenario = Scenario(root / "media-unverified", dashboard=True, media=True)
+            scenario.media_unverified_journey()
+            scenario.close()
             scenario = Scenario(root / "dashboard", dashboard=True)
             scenario.dashboard_journey()
             scenario.close()
@@ -699,12 +958,15 @@ def _acceptance(host_net, host_pid):
                 scenario.close()
     hashes = {name: hashlib.sha256((package.parent / name).read_bytes()).hexdigest()
               for name in ("completion_authority.py", "completion_witness.py", "fence_witness.py", "completion_dashboard.py", "dashboard.py")}
-    _emit({"result": "PASS", "scope": "installed-a6-independent-nonmedia-uid-composition", "roles": UIDS,
+    _emit({"result": "PASS", "scope": "installed-a6-independent-media-nonmedia-uid-composition", "roles": UIDS,
            "crud": True, "restart_replay": True, "lost_completion_ack": True, "unknown_fenced": True,
            "runtime_raw_db_wal_shm_denied": True, "forged_completion_clearance_denied": True,
            "kernel_peer_credentials": True, "loopback_only": True, "platform_access": False,
            "sigkill_actor_after_submit": True, "sigkill_owner_after_submit": True,
            "sigterm_owner_inflight_drained": True,
+           "protected_media_create": True, "protected_media_private_upload": True,
+           "protected_media_independent_postread": True, "protected_media_restart_replay": True,
+           "protected_media_two_phase_ack": True, "protected_media_unknown_fenced": True,
            "protected_dashboard_crud": True, "protected_dashboard_two_phase_ack": True,
            "protected_dashboard_unknown_fenced": True, "protected_dashboard_lost_ack_replay": True,
            "host_cutover_attested": False, "media_release_attested": False, "source_sha256": hashes})

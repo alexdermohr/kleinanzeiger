@@ -66,7 +66,7 @@ jobs:
           grep -Eq '^Ran 1 test in [0-9.]+' "$report"
           grep -Eq '^OK$' "$report"
           grep -Fq '"result": "PASS"' "$report"
-      - name: Installed independent A6 non-media UID acceptance
+      - name: Installed independent A6 media and non-media UID acceptance
         shell: bash
         run: |
           set -euo pipefail
@@ -92,5 +92,9 @@ jobs:
             exec "$1/venv/bin/python" -I "$1/acceptance.py" --host-net "$2" --host-pid "$3"
           ' bash "$isolated" "$host_net" "$host_pid" 2>&1 | tee "$report"
           grep -Fq '"result":"PASS"' "$report"
-          grep -Fq '"scope":"installed-a6-independent-nonmedia-uid-composition"' "$report"
+          grep -Fq '"scope":"installed-a6-independent-media-nonmedia-uid-composition"' "$report"
+          grep -Fq '"protected_media_create":true' "$report"
+          grep -Fq '"protected_media_independent_postread":true' "$report"
+          grep -Fq '"protected_media_unknown_fenced":true' "$report"
+          grep -Fq '"media_release_attested":false' "$report"
           grep -Fq '"host_cutover_attested":false' "$report"
