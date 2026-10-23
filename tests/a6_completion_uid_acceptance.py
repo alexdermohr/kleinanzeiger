@@ -36,6 +36,8 @@ import mark_api
 from mark_api.application import MarkService
 from mark_api.completion_authority import CompletionAuthorityServer, create_owner_write_api_server
 from mark_api.completion_witness import AuthorityWitnessClient, CompletionWitnessLedger, CompletionWitnessServer
+from mark_api.completion_dashboard import CompletionDashboardClient, CompletionDashboardOwnerServer
+from mark_api.dashboard import DashboardWriteProxy, create_server as create_dashboard_server
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.fence_witness import FenceWitnessClient, _WitnessUnixHandler
 from mark_api.results import ReadResult, ReadStatus
@@ -73,8 +75,11 @@ def _drop(uid):
     assert os.getresuid() == (uid, uid, uid) and os.getresgid() == (uid, uid, uid)
 
 
-def _http(port, method, path, *, token, payload=None, key=None):
-    headers = {"Authorization": "Bearer " + token}
+def _http(port, method, path, *, token, payload=None, key=None, ui_token=None, raw=False):
+    headers = ({"Authorization": "Bearer " + token} if ui_token is None else {
+        "Origin": "http://127.0.0.1:" + str(port), "X-Mark-Dashboard-Write": "1",
+        "X-Mark-Dashboard-Token": ui_token,
+    })
     data = None if payload is None else _json(payload).encode()
     if data is not None:
         headers["Content-Type"] = "application/json"
@@ -86,7 +91,8 @@ def _http(port, method, path, *, token, payload=None, key=None):
     except HTTPError as error:
         response = error
     with response:
-        return response.status, json.loads(response.read(1024 * 1024)), dict(response.headers)
+        body = response.read(1024 * 1024)
+        return response.status, body.decode("utf-8") if raw else json.loads(body), dict(response.headers)
 
 
 def _wait_server(server, ready, *, close=None):
@@ -273,12 +279,36 @@ def _child(role, config):
         witness = FenceWitnessClient(Path(config["witness_socket"]), expected_owner_uid=UIDS["witness"])
         access = WriteApiAccess(principal=PRINCIPAL, bearer_token=config["api_token"], writes_enabled=True,
                                 capabilities=frozenset({WriteCapability.CREATE, WriteCapability.UPDATE_CONTENT, WriteCapability.SET_STATE, WriteCapability.DELETE}))
+        read_owner = None
+        if config.get("dashboard_socket"):
+            read_owner = CompletionDashboardOwnerServer(
+                database=Path(config["db"]), socket_path=Path(config["dashboard_socket"]),
+                runtime_uid=UIDS["runtime"], runtime_gid=UIDS["runtime"],
+                access=access, fence_witness=witness,
+            )
+            store = read_owner.store  # Share exactly the authoritative store/guards.
+            read_owner.start()
         server = create_owner_write_api_server(store=store, access=access, authority_socket=Path(config["actor_socket"]),
                                                authority_uid=UIDS["actor"], runtime_uid=UIDS["runtime"], fence_witness=witness)
-        _wait_server(server, {"port": server.server_port}, close=witness.close)
+        def close_owner():
+            try:
+                if read_owner is not None:
+                    read_owner.stop()
+            finally:
+                witness.close()
+        _wait_server(server, {"port": server.server_port}, close=close_owner)
+    elif role == "frontend":
+        client = CompletionDashboardClient(Path(config["dashboard_socket"]),
+                                           expected_owner_uid=UIDS["owner"], expected_principal=PRINCIPAL)
+        proxy = DashboardWriteProxy(host="127.0.0.1", port=config["owner_port"], bearer_token=config["api_token"],
+                                    ui_token=config["ui_token"], backend_principal=PRINCIPAL,
+                                    owner_reconciliation_enabled=True)
+        server = create_dashboard_server(client, port=0, write_proxy=proxy)
+        _wait_server(server, {"port": server.server_port})
     elif role == "request":
         result = _http(config["port"], config["method"], config["path"], token=config["api_token"],
-                       payload=config.get("payload"), key=config["key"])
+                       payload=config.get("payload"), key=config.get("key"),
+                       ui_token=config.get("ui_token"), raw=config.get("raw", False))
         _emit({"status": result[0], "body": result[1], "replayed": result[2].get("Idempotency-Replayed")})
     elif role == "probe":
         for path in config["files"]:
@@ -305,12 +335,14 @@ def _child(role, config):
 
 
 class Scenario:
-    def __init__(self, root, *, lost_ack=False):
+    def __init__(self, root, *, lost_ack=False, dashboard=False):
         self.root = root
         self.children = []
         self.configs = {}
         self.procs = {}
         self.api_token = secrets.token_hex(24)
+        self.ui_token = secrets.token_hex(24)
+        self.with_dashboard = dashboard
         self.platform_token = secrets.token_hex(24)
         self.control_token = secrets.token_hex(24)
         root.mkdir(mode=0o755)
@@ -319,12 +351,14 @@ class Scenario:
         self.owner_witness_socket = root / "w-owner" / "w.sock"
         self.actor_witness_socket = root / "w-actor" / "w.sock"
         self.actor_socket = root / "actor-rpc" / "a.sock"
+        self.dashboard_socket = root / "dashboard-rpc" / "d.sock"
         for path, uid, gid, mode in (
             (self.owner_db.parent, UIDS["owner"], UIDS["owner"], 0o700),
             (self.witness_db.parent, UIDS["witness"], UIDS["witness"], 0o700),
             (self.owner_witness_socket.parent, UIDS["witness"], UIDS["owner"], 0o2710),
             (self.actor_witness_socket.parent, UIDS["witness"], UIDS["actor"], 0o2710),
             (self.actor_socket.parent, UIDS["actor"], UIDS["owner"], 0o2710),
+            (self.dashboard_socket.parent, UIDS["owner"], UIDS["runtime"], 0o2710),
         ):
             path.mkdir()
             os.chown(path, uid, gid)
@@ -336,7 +370,10 @@ class Scenario:
             self.start("actor", {"socket": str(self.actor_socket), "witness_socket": str(self.actor_witness_socket),
                                  "platform_port": self.platform_port, "platform_token": self.platform_token})
             self.api_port = self.start("owner", {"db": str(self.owner_db), "witness_socket": str(self.owner_witness_socket),
-                                                 "actor_socket": str(self.actor_socket), "api_token": self.api_token})["port"]
+                                                 "actor_socket": str(self.actor_socket), "api_token": self.api_token,
+                                                 "dashboard_socket": str(self.dashboard_socket) if dashboard else None})["port"]
+            if dashboard:
+                self.start_frontend()
         except BaseException:
             self.close()
             raise
@@ -366,7 +403,7 @@ class Scenario:
         child = self.spawn(role, config)
         self.procs[role] = child
         ready = self.receive(child)
-        assert ready["ready"] is True and ready["uid"] == UIDS[role]
+        assert ready["ready"] is True and ready["uid"] == UIDS.get(role, UIDS["runtime"])
         return ready
 
     def stop(self, role, *, kill=False):
@@ -383,6 +420,8 @@ class Scenario:
             assert child.returncode == 0, child.stderr.read(8192)
 
     def restart_owner(self):
+        if "frontend" in self.procs:
+            self.stop("frontend")
         if "owner" in self.procs:
             self.stop("owner")
         deadline = time.monotonic() + 5
@@ -394,6 +433,30 @@ class Scenario:
             assert time.monotonic() < deadline
             time.sleep(0.02)
         self.api_port = self.start("owner", self.configs["owner"])["port"]
+        if self.with_dashboard:
+            self.start_frontend()
+
+    def start_frontend(self):
+        self.ui_port = self.start("frontend", {
+            "dashboard_socket": str(self.dashboard_socket), "owner_port": self.api_port,
+            "api_token": self.api_token, "ui_token": self.ui_token,
+        })["port"]
+
+    def restart_frontend(self):
+        self.stop("frontend")
+        self.start_frontend()
+
+    def ui_request(self, method, path, key=None, payload=None, *, raw=False):
+        assert self.with_dashboard
+        child = self.spawn("request", {"port": self.ui_port, "api_token": "", "ui_token": self.ui_token,
+                                       "method": method, "path": path, "key": key, "payload": payload, "raw": raw})
+        result = self.receive(child)
+        child.wait(5)
+        assert child.returncode == 0, child.stderr.read(8192)
+        return result
+
+    def ui_ack(self, scope, key):
+        return self.ui_request("POST", "/api/dashboard/pending-writes/ack", payload={"scope": scope, "idempotency_key": key})
 
     def request(self, method, path, key, payload=None):
         child = self.spawn("request", {"port": self.api_port, "api_token": self.api_token,
@@ -410,6 +473,8 @@ class Scenario:
 
     def probe(self, *, peer_only=False):
         paths = [self.actor_socket, self.actor_witness_socket, self.owner_witness_socket]
+        if self.with_dashboard:
+            paths.append(self.dashboard_socket)
         old = []
         if peer_only:
             # Deliberately expose ONLY disposable test sockets: rejection must
@@ -428,6 +493,46 @@ class Scenario:
         finally:
             for path, mode in reversed(old):
                 os.chmod(path, mode)
+
+    def dashboard_journey(self):
+        page = self.ui_request("GET", "/", raw=True)
+        assert page["status"] == 200 and "<html" in page["body"].lower()
+        assert self.api_token not in page["body"]
+        for path in ("/api/summary", "/api/ads", "/api/email-reactions", "/api/sync/status",
+                     "/api/sync/recovery", "/api/analytics/metrics", "/api/analytics/contract"):
+            result = self.ui_request("GET", path)
+            assert result["status"] == 200, (path, result)
+        self.probe(peer_only=True)
+        payload = {"category_path": ["Haus & Garten", "Möbel & Wohnen"], "title": "UI synthetic table",
+                   "description": "Protected UI description", "price_eur": 25}
+        created = self.ui_request("POST", "/api/write/ads", "ui:create", payload)
+        assert created["status"] == 200, created
+        ad_id = created["body"]["operation_receipt"]["created_ad_id"]
+        operations = [("POST", "/api/write/ads", "ui:create", payload, "create"),
+                      ("PATCH", "/api/write/ads/" + ad_id, "ui:update", {"title": "Protected changed title"}, "ad:" + ad_id + ":update"),
+                      ("POST", "/api/write/ads/" + ad_id + "/pause", "ui:pause", None, "ad:" + ad_id + ":pause"),
+                      ("POST", "/api/write/ads/" + ad_id + "/activate", "ui:activate", None, "ad:" + ad_id + ":activate"),
+                      ("DELETE", "/api/write/ads/" + ad_id, "ui:delete", None, "ad:" + ad_id + ":delete")]
+        for count, (method, path, key, body, scope) in enumerate(operations, 1):
+            result = self.ui_request(method, path, key, body)
+            assert result["status"] == 200 and result["body"]["platform_retry_authorized"] is False, result
+            pending = self.ui_request("GET", "/api/dashboard/pending-writes")
+            assert pending["status"] == 200 and len(pending["body"]["pending_writes"]) == 1, pending
+            assert pending["body"]["pending_writes"][0]["key"] == key
+            self.restart_frontend()
+            replay = self.ui_request(method, path, key, body)
+            assert replay["status"] == 200 and replay["replayed"] == "true", replay
+            phase1 = self.ui_ack(scope, key)
+            assert phase1["status"] == 200 and phase1["body"] == {"acknowledged": True, "finalized": False}, phase1
+            self.restart_owner()  # Durable first ACK survives both process restarts.
+            phase2 = self.ui_ack(scope, key)
+            assert phase2["status"] == 200 and phase2["body"] == {"acknowledged": True, "finalized": True}, phase2
+            assert self.ui_request("GET", "/api/dashboard/pending-writes")["body"] == {"pending_writes": []}
+            replay = self.ui_request(method, path, key, body)
+            assert replay["status"] == 200 and replay["replayed"] == "true", replay
+            assert self.ui_ack(scope, key)["status"] in (409, 500)
+            assert len(self.state()["mutations"]) == count
+        self.probe()
 
     def crash_after_submit(self, role, *, graceful=False):
         self.state("block")
@@ -483,7 +588,7 @@ class Scenario:
     def close(self):
         errors = []
         try:
-            for role in ("owner", "actor", "witness", "platform"):
+            for role in ("frontend", "owner", "actor", "witness", "platform"):
                 if role in self.procs:
                     try:
                         self.stop(role)
@@ -560,17 +665,48 @@ def _acceptance(host_net, host_pid):
                 scenario.crash_after_submit(role, graceful=graceful)
                 scenario.close()
                 scenario = None
+            scenario = Scenario(root / "dashboard", dashboard=True)
+            scenario.dashboard_journey()
+            scenario.close()
+            scenario = Scenario(root / "dashboard-unknown", dashboard=True)
+            scenario.state("unknown")
+            unknown = scenario.ui_request("POST", "/api/write/ads/701/pause", "ui:unknown")
+            assert unknown["status"] == 202, unknown
+            scenario.restart_owner()
+            for attempt in range(2):
+                refused = scenario.ui_ack("ad:701:pause", "ui:unknown")
+                assert refused["status"] in (409, 500), refused
+                pending = scenario.ui_request("GET", "/api/dashboard/pending-writes")
+                assert len(pending["body"]["pending_writes"]) == 1 and pending["body"]["pending_writes"][0]["acknowledged"] is False
+            denied_replay = scenario.ui_request("POST", "/api/write/ads/701/pause", "ui:unknown")
+            assert denied_replay["status"] in (409, 500), denied_replay
+            assert len(scenario.state()["mutations"]) == 1
+            scenario.probe(peer_only=True)
+            scenario.close()
+            scenario = Scenario(root / "dashboard-lost-ack", dashboard=True, lost_ack=True)
+            lost = scenario.ui_request("POST", "/api/write/ads/701/pause", "lost:pause")
+            assert lost["status"] == 503, lost
+            scenario.restart_owner()
+            replay = scenario.ui_request("POST", "/api/write/ads/701/pause", "lost:pause")
+            assert replay["status"] == 200 and replay["replayed"] == "true", replay
+            assert scenario.ui_ack("ad:701:pause", "lost:pause")["status"] == 200
+            assert scenario.ui_ack("ad:701:pause", "lost:pause")["body"]["finalized"] is True
+            assert len(scenario.state()["mutations"]) == 1
+            scenario.close()
+            scenario = None
         finally:
             if scenario is not None:
                 scenario.close()
     hashes = {name: hashlib.sha256((package.parent / name).read_bytes()).hexdigest()
-              for name in ("completion_authority.py", "completion_witness.py", "fence_witness.py")}
+              for name in ("completion_authority.py", "completion_witness.py", "fence_witness.py", "completion_dashboard.py", "dashboard.py")}
     _emit({"result": "PASS", "scope": "installed-a6-independent-nonmedia-uid-composition", "roles": UIDS,
            "crud": True, "restart_replay": True, "lost_completion_ack": True, "unknown_fenced": True,
            "runtime_raw_db_wal_shm_denied": True, "forged_completion_clearance_denied": True,
            "kernel_peer_credentials": True, "loopback_only": True, "platform_access": False,
            "sigkill_actor_after_submit": True, "sigkill_owner_after_submit": True,
            "sigterm_owner_inflight_drained": True,
+           "protected_dashboard_crud": True, "protected_dashboard_two_phase_ack": True,
+           "protected_dashboard_unknown_fenced": True, "protected_dashboard_lost_ack_replay": True,
            "host_cutover_attested": False, "media_release_attested": False, "source_sha256": hashes})
 
 

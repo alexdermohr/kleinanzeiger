@@ -113,10 +113,17 @@ class DashboardWriteProxy:
     # Explicit trusted composition opt-in: never enable with an independent
     # owner or witness. Their completion authority cannot be inferred locally.
     local_reconciliation_enabled: bool = False
+    # Distinct explicit composition: only an authenticated protected owner
+    # with independently witnessed completion may authorize either UI ACK.
+    owner_reconciliation_enabled: bool = False
 
     def __post_init__(self) -> None:
         if type(self.local_reconciliation_enabled) is not bool:
             raise ValueError("local_reconciliation_enabled must be bool")
+        if type(self.owner_reconciliation_enabled) is not bool:
+            raise ValueError("owner_reconciliation_enabled must be bool")
+        if self.local_reconciliation_enabled and self.owner_reconciliation_enabled:
+            raise ValueError("local and owner reconciliation are mutually exclusive")
         if self.backend_principal is not None and (
             not isinstance(self.backend_principal, str)
             or not self.backend_principal.strip()
@@ -2436,6 +2443,19 @@ def _local_completed_write_response(
     """
     if not _local_reconciliation_allowed(store, proxy):
         raise ValueError("local reconciliation is not configured")
+    return _stored_completed_write_response(store, proxy.backend_principal, pending)
+
+
+def _stored_completed_write_response(
+    store: SnapshotStore, principal: str, pending: DashboardPendingWrite,
+) -> bytes:
+    """Exact persisted completion check shared by local and protected owners.
+
+    This helper does not establish an independent witness proof. The protected
+    owner adds that proof itself before any remote ACK or replay is permitted.
+    """
+    if type(store) is not SnapshotStore or type(principal) is not str or not principal:
+        raise ValueError("trusted local completion context required")
     kind = _dashboard_write_route(pending.path, pending.method)
     if (
         kind not in {"json", "empty"}
@@ -2471,7 +2491,7 @@ def _local_completed_write_response(
     if (
         record is None or record.idempotency_key != pending.idempotency_key
         or record.request_sha256 != _request_fingerprint(
-            principal=proxy.backend_principal, method=pending.method,
+            principal=principal, method=pending.method,
             path=pending.path, payload=payload,
         )
         or record.state != "completed" or record.execution_started_at is None
@@ -2510,7 +2530,7 @@ def _local_completed_write_response(
         or receipt.get("operation") != operation
         or receipt.get("outcome") != "confirmed"
         or receipt.get("writer_invoked") is not True
-        or receipt.get("authorization_by") != proxy.backend_principal
+        or receipt.get("authorization_by") != principal
         or receipt.get("authorization_reference") != "write-api:" + pending.idempotency_key
     ):
         raise ValueError("invalid completed receipt")
@@ -2577,6 +2597,51 @@ def _local_completed_write_response(
     if _json_bytes(wire) != _json_bytes(receipt):
         raise ValueError("stored response differs from operation receipt")
     return response_bytes
+
+
+
+def _owner_reconciliation_allowed(
+    store: SnapshotStore | StorageOwnerClient, proxy: DashboardWriteProxy,
+) -> bool:
+    from .completion_dashboard import CompletionDashboardClient
+    return (
+        type(store) is CompletionDashboardClient
+        and proxy.owner_reconciliation_enabled
+        and not proxy.local_reconciliation_enabled
+        and proxy.backend_principal == store.principal
+        and not container_draft_denied()
+    )
+
+
+def _pending_reconciliation_allowed(
+    store: SnapshotStore | StorageOwnerClient, proxy: DashboardWriteProxy,
+) -> bool:
+    return _local_reconciliation_allowed(store, proxy) or _owner_reconciliation_allowed(store, proxy)
+
+
+def _pending_matches(
+    store: SnapshotStore | StorageOwnerClient, *, scope: str, key: str,
+    resource: str | None = None,
+) -> tuple[DashboardPendingWrite, ...]:
+    if type(store) is SnapshotStore:
+        return _local_pending_matches(store, scope=scope, key=key, resource=resource)
+    from .completion_dashboard import CompletionDashboardClient
+    if type(store) is not CompletionDashboardClient:
+        raise ValueError("independent reconciliation is not configured")
+    # This is a bounded typed read of pending intents, not completion evidence.
+    # The owner rechecks the full identity plus its witness before either ACK.
+    return tuple(row for row in store.dashboard_pending_writes()
+                 if row.scope == scope or row.idempotency_key == key
+                 or row.resource_key == resource)[:2]
+
+
+def _completed_write_response(
+    store: SnapshotStore | StorageOwnerClient, proxy: DashboardWriteProxy,
+    pending: DashboardPendingWrite,
+) -> bytes:
+    if _owner_reconciliation_allowed(store, proxy):
+        return store.confirmed_dashboard_write_response(pending)
+    return _local_completed_write_response(store, proxy, pending)
 
 
 def _handler_factory(
@@ -2942,7 +3007,7 @@ def _handler_factory(
                         return
                 replay_body: bytes | None = None
                 try:
-                    if _local_reconciliation_allowed(store, write_proxy):
+                    if _pending_reconciliation_allowed(store, write_proxy):
                         expected = DashboardPendingWrite(
                             scope=pending_scope, resource_key=resource_key,
                             idempotency_key=idempotency_key, method=method,
@@ -2951,7 +3016,7 @@ def _handler_factory(
                             acknowledged=False,
                         )
                         with store.dashboard_pending_write_guard():
-                            matches = _local_pending_matches(
+                            matches = _pending_matches(
                                 store, scope=pending_scope, key=idempotency_key,
                                 resource=resource_key,
                             )
@@ -2961,7 +3026,7 @@ def _handler_factory(
                             ):
                                 raise ValueError("pending write identity conflict")
                             if matches or store.write_api_request(idempotency_key) is not None:
-                                replay_body = _local_completed_write_response(
+                                replay_body = _completed_write_response(
                                     store, write_proxy, matches[0] if matches else expected,
                                 )
                             else:
@@ -3371,14 +3436,14 @@ def _handler_factory(
                     or not isinstance(payload["idempotency_key"], str)
                 ):
                     raise ValueError("invalid_pending_ack")
-                if not _local_reconciliation_allowed(store, write_proxy):
+                if not _pending_reconciliation_allowed(store, write_proxy):
                     self._send_json(409, {
                         "error": "dashboard_pending_write_reconciliation_required",
                         "platform_retry_authorized": False,
                     })
                     return
                 with store.dashboard_pending_write_guard():
-                    matches = _local_pending_matches(
+                    matches = _pending_matches(
                         store, scope=payload["scope"], key=payload["idempotency_key"],
                     )
                     if (
@@ -3386,7 +3451,7 @@ def _handler_factory(
                         or matches[0].idempotency_key != payload["idempotency_key"]
                     ):
                         raise ValueError("pending acknowledgement identity conflict")
-                    _local_completed_write_response(store, write_proxy, matches[0])
+                    _completed_write_response(store, write_proxy, matches[0])
                     phase = store.acknowledge_dashboard_pending_write(
                         scope=matches[0].scope, idempotency_key=matches[0].idempotency_key,
                     )
@@ -3557,10 +3622,14 @@ def create_server(
 
     if generation_access is not None and not isinstance(generation_access, DashboardGenerationAccess):
         raise TypeError("generation_access must be DashboardGenerationAccess or None")
-    if isinstance(store, StorageOwnerClient) and write_proxy is not None:
-        # Dashboard pending ACK and independent external Write completion are
-        # not yet mediated. Refuse the entire Write UI before binding HTTP.
-        raise ValueError("independent storage dashboard Writes are not yet attested")
+    if write_proxy is not None and (
+        isinstance(store, StorageOwnerClient) or write_proxy.owner_reconciliation_enabled
+    ):
+        # The old client remains read/claim only. A dedicated owner composition
+        # checks its persisted receipt AND independent witness for each ACK.
+        if not _owner_reconciliation_allowed(store, write_proxy):
+            raise ValueError("independent storage dashboard Writes are not yet attested")
+        store.verify_completion_profile()
     query = MarkQueryService(store)
     analytics = AnalyticsService(store, contract=analytics_contract)
     return LoopbackDashboardServer(
