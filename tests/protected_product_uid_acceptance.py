@@ -525,6 +525,10 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                         self.server.pending_create = "continue"
                         value = {"state": "ready", "x": 120.5, "y": 240.25}
                     elif ("const allowedHiddenNames = new Set([" in expression
+                          # The CDP file-input handle expression embeds the
+                          # baseline form probe. Never overwrite its real
+                          # objectId with an unrelated form-status value.
+                          and "return files[0];" not in expression
                           and self.server.page == "/p-anzeige-aufgeben-schritt2.html"):
                         if "if (!true)" in expression:
                             self.server.pending_create = "publish"
