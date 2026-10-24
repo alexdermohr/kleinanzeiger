@@ -869,6 +869,85 @@ def shutdown(child):
     child.stderr.close()
 
 
+
+def protected_cold_pair_restore(root, scratch, binary, cdp):
+    """Root-owned installed Wheel: stopped trusted pair -> new safe state root.
+
+    The public origin, actor-held drafts, live/legacy host cutover and paid
+    provider are deliberately outside this cold new-target acceptance.
+    """
+    pair_binary = Path(sys.executable).with_name("kleinanzeiger-protected-pair")
+    check(pair_binary.is_file() and os.access(pair_binary, os.X_OK),
+          "installed protected pair command missing")
+    archive = Path(scratch) / "protected-pair-archive"
+    restored_root = Path(scratch) / "protected-pair-restored"
+    source_db = root / "owner-data" / "snapshot.sqlite"
+    source_inode = (source_db.stat().st_dev, source_db.stat().st_ino)
+
+    def pair(*args):
+        return subprocess.run(
+            [str(pair_binary), *args],
+            env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent",
+                 "LANG": "C.UTF-8"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=90, check=False,
+        )
+
+    made = pair("backup", "--state-root", str(root),
+                "--backup-root", str(archive))
+    check(made.returncode == 0 and not made.stderr,
+          "installed protected cold backup unavailable")
+    saved = json.loads(made.stdout)
+    check(saved.get("backup_complete") is True
+          and saved.get("restore_authorized") is False
+          and len(saved.get("head_sha256", "")) == 64,
+          "protected pair backup did not return one independently anchored HEAD")
+    check((source_db.stat().st_dev, source_db.stat().st_ino) == source_inode,
+          "cold backup replaced existing customer SQLite inode")
+    duplicate = pair("backup", "--state-root", str(root),
+                     "--backup-root", str(archive))
+    check(duplicate.returncode == 2 and not duplicate.stdout,
+          "protected backup silently overwrote a prior sealed generation")
+
+    restored = pair(
+        "restore", "--backup-root", str(archive),
+        "--new-state-root", str(restored_root),
+        "--expected-head-sha256", saved["head_sha256"],
+    )
+    check(restored.returncode == 0 and not restored.stderr,
+          "installed protected cold restore into NEW store unavailable")
+    loaded = json.loads(restored.stdout)
+    check(loaded.get("restored_to_new_store") is True
+          and loaded.get("no_platform_write_performed") is True,
+          "protected restore claimed incorrect customer outcome")
+    restored_db = restored_root / "owner-data" / "snapshot.sqlite"
+    check(restored_db.stat().st_uid == UIDS["owner"]
+          and stat.S_IMODE(restored_db.stat().st_mode) == 0o600,
+          "restored protected SQLite lost its independent owner UID")
+    duplicate_restore = pair(
+        "restore", "--backup-root", str(archive),
+        "--new-state-root", str(restored_root),
+        "--expected-head-sha256", saved["head_sha256"],
+    )
+    check(duplicate_restore.returncode == 2 and not duplicate_restore.stdout,
+          "protected restore overwrote existing customer data")
+
+    # The separately provisioned restored owner/witness pair must start via
+    # the SAME installed protected customer binary without --init-new.
+    restored_child = None
+    try:
+        restored_child, _, _ = start(
+            binary, restored_root, init_new=False, sync_interval=0,
+        )
+        dashboard_ready()
+        inventory_confirmed(cdp)
+    finally:
+        if restored_child is not None:
+            shutdown(restored_child)
+
+
+
+
 def admission(net_before, pid_before):
     check(sys.platform == "linux" and os.geteuid() == 0
           and os.getpid() == 1, "root isolated PID1 required")
@@ -938,6 +1017,7 @@ def admission(net_before, pid_before):
             for role, pid in roles.items():
                 check(not Path(f"/proc/{pid}").exists(),
                       "old protected role still active after successful shutdown")
+            protected_cold_pair_restore(root, scratch, binary, cdp)
 
             child, second_token, absent_gen = start(
                 binary, root, init_new=False, sync_interval=60,
