@@ -913,11 +913,35 @@ def protected_cold_pair_restore(root, scratch, binary, cdp):
             except Exception as error:
                 causes.append(label + ":" + type(error).__name__
                               + ":" + str(error)[:80])
-        entries = (("cold", "history", "anchor", "intents",
-                    ".protected-pair-v1.json"))
+        # All checks concern a disposable fixture. Report only bounded
+        # protocol milestones, never a customer path or database contents.
+        milestones = {
+            "sqlite": archive / "cold" / "mark.sqlite",
+            "witness": archive / "cold" / "witness.sqlite",
+            "lock": archive / "cold" / "witness.sqlite.lock",
+            "intent": archive / "intents" / ".intent.lock",
+            "prepared": archive / "intents",
+            "operator": archive / "anchor" / ".authority.lock",
+            "head": archive / "anchor" / "latest.json",
+            "marker": archive / ".protected-pair-v1.json",
+        }
         causes.append("staged=" + ",".join(
-            key for key in entries if (archive / key).exists()
+            key for key, item in milestones.items()
+            if (
+                any(item.glob("*.prepared.json"))
+                if key == "prepared"
+                else item.exists()
+            )
         ))
+        if milestones["sqlite"].exists() and milestones["witness"].exists():
+            try:
+                from mark_api.paired_restore_preflight import inspect_offline_pair
+                inspect_offline_pair(
+                    milestones["sqlite"], milestones["witness"]
+                )
+            except Exception as error:
+                causes.append("pair=" + type(error).__name__ +
+                              ":" + str(error)[:48])
         raise AssertionError(
             "installed protected cold backup unavailable: "
             + (";".join(causes) if causes else "no read-only admission error")

@@ -252,7 +252,10 @@ def restore(backup_root: Path, target: Path, *,
         or any(char not in "0123456789abcdef" for char in expected_head_sha256)
     ):
         raise ProtectedPairError("independent backup HEAD digest required")
-    product._root_path(backup_root, fresh=False)
+    # Protected store roots are 0755; the independent backup authority is
+    # deliberately 0700. Never use the product-root validator on a backup.
+    from .paired_backup_operator import _private_root
+    _private_root(backup_root)
     if (backup_root.lstat().st_uid != 0
             or stat.S_IMODE(backup_root.lstat().st_mode) != 0o700):
         raise ProtectedPairError("backup authority root invalid")
@@ -281,7 +284,6 @@ def restore(backup_root: Path, target: Path, *,
         raise ProtectedPairError("backup marker disagrees with independent HEAD")
     history = backup_root / "history"
     anchor = backup_root / "anchor"
-    from .paired_backup_operator import _private_root
     _private_root(history)
     _private_root(anchor)
     intent = BackupIntentAuthority(backup_root / "intents")
