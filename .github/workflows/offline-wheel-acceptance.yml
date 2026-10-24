@@ -116,8 +116,8 @@ jobs:
           python_bin="$(command -v python)"
           host_net="$(readlink /proc/self/ns/net)"
           host_pid="$(readlink /proc/self/ns/pid)"
-          # Only disposable root-owned state. No customer files, real CDP,
-          # paid provider, live ads or historical host FD is touched.
+          # Only disposable root-owned state and a test-only loopback CDP peer.
+          # No customer files, real browser, paid provider or live ads touched.
           isolated="$(sudo -n mktemp -d /tmp/kleinanzeiger-product-XXXXXXXX)"
           [[ "$isolated" == /tmp/kleinanzeiger-product-* ]]
           trap 'sudo -n rm -rf -- "$isolated"' EXIT
@@ -146,4 +146,5 @@ jobs:
           grep -Fq '"netless_frontend_owner":true' "$report"
           grep -Fq '"landlock_ingress":true' "$report"
           grep -Fq '"restarted_without_db_recreation":true' "$report"
+          grep -Fq '"real_cdp_inventory_sync_attested":true' "$report"
           grep -Fq '"legacy_cutover_attested":false' "$report"

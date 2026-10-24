@@ -7,7 +7,10 @@ operator-recovery clearance or mark old customer databases as safe.
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import closing
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.client import HTTPConnection
 import json
 import os
@@ -57,6 +60,123 @@ def child_roles(supervisor_pid):
     return roles
 
 
+
+class _SyntheticCDPHandler(BaseHTTPRequestHandler):
+    """Isolated test-only wire-level CDP responder, not a product adapter."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/json/list":
+            body = json.dumps([{"type": "page", "id": "synthetic-owner",
+                "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19322/devtools/page/synthetic-owner"}]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path != "/devtools/page/synthetic-owner":
+            self.send_error(404)
+            return
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or self.headers.get("Upgrade", "").lower() != "websocket":
+            self.send_error(400)
+            return
+        proof = base64.b64encode(hashlib.sha1(
+            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+        ).digest()).decode()
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", proof)
+        self.end_headers()
+        self.close_connection = True
+        while True:
+            header = self.rfile.read(2)
+            if len(header) != 2 or (header[0] & 15) == 8:
+                return
+            n = header[1] & 127
+            if n == 126:
+                n = int.from_bytes(self.rfile.read(2), "big")
+            elif n == 127:
+                n = int.from_bytes(self.rfile.read(8), "big")
+            if n > 256 * 1024 or not header[1] & 128 or (header[0] & 15) != 1:
+                return
+            mask = self.rfile.read(4)
+            payload = self.rfile.read(n)
+            if len(mask) != 4 or len(payload) != n:
+                return
+            try:
+                data = json.loads(bytes(c ^ mask[i % 4] for i, c in enumerate(payload)))
+                method, params = data["method"], data.get("params", {})
+                self.server.commands.append(method)
+                if method != "Runtime.evaluate":
+                    answer = {"error": {"code": -32601, "message": "not admitted"}}
+                elif params.get("awaitPromise") is True:
+                    expression = params["expression"]
+                    if "pageNum=1" not in expression or "same-origin" not in expression:
+                        answer = {"error": {"code": -32602, "message": "unknown inventory"}}
+                    else:
+                        ads = {"ads": [{"id": "1234567890",
+                            "title": "Synthetic CDP vase", "state": "active",
+                            "viewCount": 7, "watchCount": 2}],
+                            "paging": {"last": 1}}
+                        answer = {"result": {"result": {"value": {
+                            "status": 200, "body": json.dumps(ads)}}}}
+                else:
+                    answer = {"result": {"result": {"value": {
+                        "readyState": "complete", "origin": "https://www.kleinanzeigen.de",
+                        "path": "/m-meine-anzeigen.html"}}}}
+                raw = json.dumps({"id": data["id"], **answer}).encode()
+                head = (bytes((0x81, len(raw))) if len(raw) < 126 else
+                        bytes((0x81, 126)) + len(raw).to_bytes(2, "big"))
+                self.wfile.write(head + raw)
+                self.wfile.flush()
+            except (OSError, ValueError, KeyError, TypeError):
+                return
+
+
+class SyntheticCDP(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 19322), _SyntheticCDPHandler)
+        self.commands = []
+
+
+def inventory_confirmed():
+    deadline = monotonic() + 12
+    while monotonic() < deadline:
+        try:
+            with closing(HTTPConnection("127.0.0.1", 8875, timeout=2)) as client:
+                client.request("GET", "/api/sync/status")
+                response = client.getresponse()
+                attempt = (json.loads(response.read()).get("latest_attempt") or {})
+            if attempt.get("outcome") == "success_nonempty":
+                break
+            if attempt.get("outcome") == "failed":
+                raise AssertionError("synthetic real CDP inventory read failed")
+        except (OSError, TimeoutError):
+            pass
+        sleep(.1)
+    else:
+        raise AssertionError("real CDP inventory not persisted")
+    with closing(HTTPConnection("127.0.0.1", 8875, timeout=2)) as client:
+        client.request("GET", "/api/ads")
+        reply = client.getresponse()
+        rows = json.loads(reply.read())
+        check(reply.status == 200 and any(
+            item.get("ad_id") == "1234567890"
+            and item.get("title") == "Synthetic CDP vase"
+            and item.get("views") == 7 for item in rows
+        ), "real CDP inventory absent from protected dashboard")
+
+
 def dashboard_ready():
     with closing(HTTPConnection("127.0.0.1", 8875, timeout=4)) as client:
         client.request("GET", "/readyz")
@@ -76,9 +196,9 @@ def dashboard_ready():
         check(response.status == 200, "protected stored-inventory UI not available")
 
 
-def start(binary, root, init_new):
+def start(binary, root, init_new, *, sync_interval=0):
     argv = [str(binary), "--state-root", str(root), "--cdp-port", "19322",
-            "--sync-interval", "0"]
+            "--sync-interval", str(sync_interval)]
     if init_new:
         argv.append("--init-new")
     child = subprocess.Popen(
@@ -145,9 +265,14 @@ def admission(net_before, pid_before):
         os.chmod(scratch, 0o755)
         root = Path(scratch) / "new-install"
         child = None
+        cdp = SyntheticCDP()
+        from threading import Thread
+        worker = Thread(target=cdp.serve_forever, daemon=True)
+        worker.start()
         try:
-            child, first_token = start(binary, root, init_new=True)
+            child, first_token = start(binary, root, init_new=True, sync_interval=60)
             dashboard_ready()
+            inventory_confirmed()
             roles = child_roles(child.pid)
             host_net = os.readlink("/proc/self/ns/net")
             namespaces = {
@@ -174,7 +299,8 @@ def admission(net_before, pid_before):
                 check(not Path(f"/proc/{pid}").exists(),
                       "old protected role still active after successful shutdown")
 
-            child, second_token = start(binary, root, init_new=False)
+            child, second_token = start(binary, root, init_new=False, sync_interval=60)
+            inventory_confirmed()
             check(first_token != second_token, "restart reused customer UI credential")
             dashboard_ready()
             check((db.stat().st_dev, db.stat().st_ino) == first_inode,
@@ -200,6 +326,12 @@ def admission(net_before, pid_before):
                 child.wait(5)
                 child.stdout.close()
                 child.stderr.close()
+            cdp.shutdown()
+            cdp.server_close()
+            worker.join(3)
+    check(cdp.commands.count("Runtime.evaluate") >= 4
+          and set(cdp.commands) == {"Runtime.evaluate"},
+          "installed actor did not use only real inventory CDP")
     print(json.dumps({
         "result":"PASS", "scope":"installed-protected-fresh-customer-start",
         "real_owner_cli":True,"real_actor_cli":True,
@@ -208,6 +340,7 @@ def admission(net_before, pid_before):
         "landlock_ingress":True,"dashboard_http":True,
         "restarted_without_db_recreation":True,
         "legacy_cutover_attested":False,"real_cdp_write_attested":False,
+        "real_cdp_inventory_sync_attested":True,
         "paid_generation_called":False,
     }, sort_keys=True, separators=(",",":")),flush=True)
 
