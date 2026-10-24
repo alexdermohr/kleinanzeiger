@@ -700,6 +700,7 @@ def synthetic_ai_generation_drafts(token, write_token, cdp):
         "media_refs": [restaged["media_ref"]],
     }
     before_submit = cdp.create_submits
+    before_media_presses, before_media_releases = cdp.presses, cdp.releases
     media_status, media_body, _ = _dashboard_http(
         "POST", "/api/write/media/ads", token=write_token,
         key=media_key, payload=media_payload,
@@ -718,6 +719,15 @@ def synthetic_ai_generation_drafts(token, write_token, cdp):
           and again_body.get("operation_receipt", {}).get("outcome") != "confirmed"
           and cdp.create_submits == before_submit,
           "unverified protected media replay published or confirmed a write")
+    # A failed pre-submit may still navigate and click category/continue
+    # controls. Count only that bounded preparation separately, never as
+    # a successful publish; the successful CRUD journeys keep their own
+    # exact one-shot mouse and submit assertions.
+    extra_clicks = cdp.presses - before_media_presses
+    check(0 <= extra_clicks <= 3
+          and cdp.releases - before_media_releases == extra_clicks,
+          "unverified media preflight dispatched unexpected browser clicks")
+    return extra_clicks
 
 
 def dashboard_ready():
@@ -924,7 +934,9 @@ def admission(net_before, pid_before):
                   "AI opt-in escaped frontend/owner network isolation")
             check((db.stat().st_dev, db.stat().st_ino) == first_inode,
                   "AI opt-in replaced existing customer SQLite")
-            synthetic_ai_generation_drafts(generation_token, third_token, cdp)
+            media_preflight_clicks = synthetic_ai_generation_drafts(
+                generation_token, third_token, cdp,
+            )
             shutdown(child)
             child = None
         finally:
@@ -939,7 +951,8 @@ def admission(net_before, pid_before):
     check(cdp.commands.count("Runtime.evaluate") >= 10
           and set(cdp.commands) == {
               "Runtime.evaluate", "Page.navigate", "Input.dispatchMouseEvent",
-          } and cdp.presses == 9 and cdp.releases == 9
+          } and cdp.presses == 9 + media_preflight_clicks
+          and cdp.releases == 9 + media_preflight_clicks
           and cdp.content_submits == 1 and cdp.delete_submits == 1
           and cdp.create_submits == 1,
           "installed actor did not perform state, content, delete and publish CDP submits")
