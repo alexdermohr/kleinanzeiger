@@ -410,16 +410,25 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
     previous_int = signal.signal(signal.SIGINT, request_stop)
     outcome = 2
     try:
-        net = _private_network()
+        try:
+            net = _private_network()
+        except Exception:
+            raise ProtectedProductError("private network namespace unavailable") from None
         api = secrets.token_urlsafe(48)
         ui = secrets.token_urlsafe(48)
 
         def start(name: str, module: str, uid: int,
                   payload: dict[str, object], *, private: bool):
-            child = _spawn(module, uid, net=net if private else None,
-                           config=payload)
+            try:
+                child = _spawn(module, uid, net=net if private else None,
+                               config=payload)
+            except Exception:
+                raise ProtectedProductError(name + " process admission failed") from None
             children.append((name, child))
-            return _ready(child, uid)
+            try:
+                return _ready(child, uid)
+            except ProtectedProductError:
+                raise ProtectedProductError(name + " readiness unavailable") from None
 
         start("witness", "mark_api.protected_witness", WITNESS, {
             "database": str(paths["wdb"]),
@@ -459,12 +468,15 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
         }, private=True)
         if frontend["port"] == owner["port"]:
             raise ProtectedProductError("backend and dashboard shared a port")
-        ingress = _spawn(
-            "mark_api.dashboard_relay", INGRESS, net=None,
-            args=("public-ingress", "--frontend-socket", str(paths["ingress"]),
-                  "--frontend-uid", str(FRONTEND), "--port", str(PORT)),
-            ingress=True,
-        )
+        try:
+            ingress = _spawn(
+                "mark_api.dashboard_relay", INGRESS, net=None,
+                args=("public-ingress", "--frontend-socket", str(paths["ingress"]),
+                      "--frontend-uid", str(FRONTEND), "--port", str(PORT)),
+                ingress=True,
+            )
+        except Exception:
+            raise ProtectedProductError("Landlock ingress admission failed") from None
         children.append(("ingress", ingress))
         _ready_ingress(ingress)
         # The write token is only in a fragment, not the server HTTP logs.
@@ -501,9 +513,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return run(root=args.state_root, init_new=args.init_new,
                        cdp_port=args.cdp_port, sync_interval=args.sync_interval)
+        except ProtectedProductError as error:
+            # All these error messages are authored static admission phases.
+            print("Kleinanzeiger: protected customer startup unavailable ("
+                  + str(error) + ")", file=sys.stderr)
+            return 2
         except Exception:
-            # Fork/exec/namespace/IO admission failures must never expose
-            # private SQLite paths, browser tokens or Python tracebacks.
             print("Kleinanzeiger: protected customer startup unavailable", file=sys.stderr)
             return 2
     finally:

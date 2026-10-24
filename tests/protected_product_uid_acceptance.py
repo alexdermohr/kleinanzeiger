@@ -90,8 +90,17 @@ def start(binary, root, init_new):
     check(child.stdout is not None, "product startup pipe missing")
     check(select.select([child.stdout], [], [], 40)[0], "product never printed dashboard URL")
     line = child.stdout.readline()
-    check(line.startswith("Kleinanzeiger: http://127.0.0.1:8875/#write_token="),
-          "real installed protected dashboard URL unavailable")
+    if not line.startswith("Kleinanzeiger: http://127.0.0.1:8875/#write_token="):
+        if child.poll() is not None:
+            raw = child.stderr.read(512).strip()
+            marker = "Kleinanzeiger: protected customer startup unavailable ("
+            if (raw.startswith(marker) and raw.endswith(")")
+                    and len(raw) < 190
+                    and all(char.isascii() and
+                            (char.isalpha() or char in " -()")
+                            for char in raw)):
+                raise AssertionError(raw)
+        raise AssertionError("installed protected dashboard URL unavailable")
     parsed = urlsplit(line.strip().split(": ",1)[1])
     fragment = parse_qs(parsed.fragment)
     check(len(fragment.get("write_token",[])) == 1
@@ -210,8 +219,13 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except AssertionError as error:
+        # Every assertion message is one of this file's fixed, nonsensitive
+        # admission labels or the product's own restricted static phase.
+        print("Kleinanzeiger protected installed start acceptance: FAIL",
+              str(error)[:190], file=sys.stderr)
+        raise SystemExit(1)
     except BaseException as error:
-        # Public runner logs must never contain UI tokens or SQLite bytes.
         print("Kleinanzeiger protected installed start acceptance: FAIL",
               type(error).__name__, file=sys.stderr)
         raise SystemExit(1)
