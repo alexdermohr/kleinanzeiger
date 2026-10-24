@@ -141,6 +141,24 @@ class CiSecretScanTests(unittest.TestCase):
             ), ("github_token",),
         )
 
+
+    def test_known_synthetic_generation_credential_is_only_exactly_exempted(self) -> None:
+        # This exact public disposable unit-test fixture was introduced in
+        # e7be455; the scanner still blocks one-character variants.
+        credential = "only-synthetic-generation-credential-do-not-use"
+        assignment = ('secret = "' + credential + '"').encode()
+        self.assertIsNone(ci_secret_scan._credential_assignment_rule(assignment))
+        changed = ('secret = "' + credential + 'X"').encode()
+        self.assertEqual(
+            ci_secret_scan._credential_assignment_rule(changed),
+            "secret_assignment",
+        )
+        self.assertEqual(
+            ci_secret_scan._line_rules(
+                b'secret = "sk-' + b'A' * 24 + b'"'
+            ), ("openai_key",),
+        )
+
     def test_specific_token_pattern_still_blocks(self) -> None:
         repo = self.make_repo()
         self.commit_file(repo, "sample.txt", "safe\n", "base")

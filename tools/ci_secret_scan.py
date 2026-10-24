@@ -31,6 +31,8 @@ _PLACEHOLDER_VALUES = {
     b"private-generation-token-1234567890",
     b"synthetic-generation-session-987654321",
     b"synthetic-http-generation-token-123456",
+    # Exact public fixture in e7be455; not a real provider credential.
+    b"only-synthetic-generation-credential-do-not-use",
     b"none",
     b"null",
     b"true",
