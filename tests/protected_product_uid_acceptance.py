@@ -679,6 +679,46 @@ def synthetic_ai_generation_drafts(token, write_token, cdp):
     check(tuple(cdp.commands) == calls_before,
           "draft generation/media preparation performed a platform CDP action")
 
+    # Exercise the installed protected Media-Create route through the real
+    # frontend/Owner/Actor, NOT an in-memory substitute. The synthetic CDP
+    # wire intentionally has no file-input object: it cannot prove a media
+    # selection or independent public-media persistence. A plausible form
+    # and actor-owned PNG must never be promoted into a confirmed publish.
+    with closing(HTTPConnection("127.0.0.1", 8875, timeout=15)) as http:
+        http.request("POST", "/api/write/media/stage", body=png, headers=headers)
+        response = http.getresponse()
+        restaged = json.loads(response.read())
+    check(response.status == 201
+          and type(restaged.get("media_ref")) is str,
+          "protected synthetic Media-Create setup could not stage image")
+    media_key = "protected-cdp-unverified-media-20261024"
+    media_payload = {
+        "category_path": ["Freizeit", "Sammeln"],
+        "title": "Created synthetic bowl",
+        "description": "Created in root installed CDP acceptance",
+        "price_eur": 10,
+        "media_refs": [restaged["media_ref"]],
+    }
+    before_submit = cdp.create_submits
+    media_status, media_body, _ = _dashboard_http(
+        "POST", "/api/write/media/ads", token=write_token,
+        key=media_key, payload=media_payload,
+    )
+    check(media_status != 200
+          and media_body.get("operation_receipt", {}).get("outcome") != "confirmed"
+          and cdp.create_submits == before_submit,
+          "unverified protected CDP file-input claimed successful publication")
+    # Repeating the exact key must not turn an unverified media outcome
+    # into a fake success or produce a browser publish side effect.
+    again_status, again_body, _ = _dashboard_http(
+        "POST", "/api/write/media/ads", token=write_token,
+        key=media_key, payload=media_payload,
+    )
+    check(again_status != 200
+          and again_body.get("operation_receipt", {}).get("outcome") != "confirmed"
+          and cdp.create_submits == before_submit,
+          "unverified protected media replay published or confirmed a write")
+
 
 def dashboard_ready():
     with closing(HTTPConnection("127.0.0.1", 8875, timeout=4)) as client:
