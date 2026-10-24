@@ -962,7 +962,7 @@ def synthetic_positive_media_publish(cdp, write_token):
         ack_status, ack, _ = _dashboard_http(
             "POST", "/api/dashboard/pending-writes/ack",
             token=write_token,
-            payload={"scope": "create", "idempotency_key": media_key},
+            payload={"scope": "create-media", "idempotency_key": media_key},
         )
         check(ack_status == 200 and ack.get("acknowledged") is True
               and ack.get("finalized") is terminal,
