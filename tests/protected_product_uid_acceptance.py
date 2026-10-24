@@ -202,6 +202,12 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                             "status": 200, "body": json.dumps(ads)}}}}
                 elif method == "Runtime.evaluate":
                     expression = params.get("expression", "")
+                    # Observe the actual CDP file-input binding attempt;
+                    # an early HTTP rejection is not an adequate media test.
+                    if ("const baseline =" in expression
+                            and 'input[type="file"]' in expression
+                            and "return files[0];" in expression):
+                        self.server.media_input_bind_probes += 1
                     value = None
                     if (("__mark_private_web_state_navigation_probe_" in expression
                          or "__mark_private_web_navigation_probe_" in expression
@@ -358,6 +364,7 @@ class SyntheticCDP(ThreadingHTTPServer):
         self.create_description = ""
         self.create_price = ""
         self.create_submits = 0
+        self.media_input_bind_probes = 0
 
 
 def inventory_confirmed(cdp):
@@ -630,6 +637,59 @@ def synthetic_ai_generation_drafts(token, write_token, cdp):
     check(tuple(cdp.commands) == calls_before,
           "draft generation/media preparation performed a platform CDP action")
 
+    # Exercise the installed protected Media-Create route through the real
+    # frontend/Owner/Actor, NOT an in-memory substitute. The synthetic CDP
+    # wire intentionally has no file-input object: it cannot prove a media
+    # selection or independent public-media persistence. A plausible form
+    # and actor-owned PNG must never be promoted into a confirmed publish.
+    with closing(HTTPConnection("127.0.0.1", 8875, timeout=15)) as http:
+        http.request("POST", "/api/write/media/stage", body=png, headers=headers)
+        response = http.getresponse()
+        restaged = json.loads(response.read())
+    check(response.status == 201
+          and type(restaged.get("media_ref")) is str,
+          "protected synthetic Media-Create setup could not stage image")
+    media_key = "protected-cdp-unverified-media-20261024"
+    media_payload = {
+        "category_path": ["Freizeit", "Sammeln"],
+        "title": "Created synthetic bowl",
+        "description": "Created in root installed CDP acceptance",
+        "price_eur": 10,
+        "media_refs": [restaged["media_ref"]],
+    }
+    before_submit = cdp.create_submits
+    before_media_presses, before_media_releases = cdp.presses, cdp.releases
+    before_media_probes = cdp.media_input_bind_probes
+    media_status, media_body, _ = _dashboard_http(
+        "POST", "/api/write/media/ads", token=write_token,
+        key=media_key, payload=media_payload,
+    )
+    check(media_status != 200
+          and media_body.get("operation_receipt", {}).get("outcome") != "confirmed"
+          and cdp.create_submits == before_submit,
+          "unverified protected CDP file-input claimed successful publication")
+    # Repeating the exact key must not turn an unverified media outcome
+    # into a fake success or produce a browser publish side effect.
+    again_status, again_body, _ = _dashboard_http(
+        "POST", "/api/write/media/ads", token=write_token,
+        key=media_key, payload=media_payload,
+    )
+    check(again_status != 200
+          and again_body.get("operation_receipt", {}).get("outcome") != "confirmed"
+          and cdp.create_submits == before_submit,
+          "unverified protected media replay published or confirmed a write")
+    # A failed pre-submit may still navigate and click category/continue
+    # controls. Count only that bounded preparation separately, never as
+    # a successful publish; the successful CRUD journeys keep their own
+    # exact one-shot mouse and submit assertions.
+    extra_clicks = cdp.presses - before_media_presses
+    check(1 <= extra_clicks <= 3
+          and cdp.releases - before_media_releases == extra_clicks,
+          "unverified media preflight dispatched unexpected browser clicks")
+    check(cdp.media_input_bind_probes == before_media_probes + 1,
+          "media negative test did not reach exactly one CDP file-input binding")
+    return extra_clicks
+
 
 def dashboard_ready():
     with closing(HTTPConnection("127.0.0.1", 8875, timeout=4)) as client:
@@ -834,7 +894,9 @@ def admission(net_before, pid_before):
                   "AI opt-in escaped frontend/owner network isolation")
             check((db.stat().st_dev, db.stat().st_ino) == first_inode,
                   "AI opt-in replaced existing customer SQLite")
-            synthetic_ai_generation_drafts(generation_token, third_token, cdp)
+            media_preflight_clicks = synthetic_ai_generation_drafts(
+                generation_token, third_token, cdp,
+            )
             shutdown(child)
             child = None
         finally:
@@ -849,7 +911,8 @@ def admission(net_before, pid_before):
     check(cdp.commands.count("Runtime.evaluate") >= 10
           and set(cdp.commands) == {
               "Runtime.evaluate", "Page.navigate", "Input.dispatchMouseEvent",
-          } and cdp.presses == 9 and cdp.releases == 9
+          } and cdp.presses == 9 + media_preflight_clicks
+          and cdp.releases == 9 + media_preflight_clicks
           and cdp.content_submits == 1 and cdp.delete_submits == 1
           and cdp.create_submits == 1,
           "installed actor did not perform state, content, delete and publish CDP submits")
