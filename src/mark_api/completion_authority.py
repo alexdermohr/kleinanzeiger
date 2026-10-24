@@ -35,6 +35,7 @@ from .domain import (
 )
 from .fence_witness import FenceWitnessClient, FenceWitnessError, _private_directory
 from .private_web_media import PrivateWebMediaHandleStore
+from .protected_inventory import ActorInventoryPages
 from .private_web_runtime import PrivateWebMediaCreateService
 from .storage import SnapshotStore
 from .storage_owner import (
@@ -356,6 +357,18 @@ class _AuthorityHandler(socketserver.StreamRequestHandler):
                     raise _fail()
                 response = {"version": 1, "ok": True,
                             "media_ready": server.media_ready}
+            elif request.get("op") == "inventory_begin":
+                if set(request) != {"version", "op"} or type(request["version"]) is not int or request["version"] != 1:
+                    raise _fail()
+                response = server.inventory_begin()
+            elif request.get("op") == "inventory_page":
+                if set(request) != {"version", "op", "token", "offset"} or type(request["version"]) is not int or request["version"] != 1:
+                    raise _fail()
+                response = server.inventory_page(request["token"], request["offset"])
+            elif request.get("op") == "inventory_finish":
+                if set(request) != {"version", "op", "token", "digest"} or type(request["version"]) is not int or request["version"] != 1:
+                    raise _fail()
+                response = server.inventory_finish(request["token"], request["digest"])
             else:
                 intent = CompletionIntent.from_wire(request, expected_principal=server.principal)
                 response = server.execute(intent)
@@ -421,6 +434,9 @@ class CompletionAuthorityServer(socketserver.ThreadingMixIn, socketserver.UnixSt
         self.owner_uid, self.runtime_uid = owner_uid, runtime_uid
         self._service, self._socket_path = service, socket_path
         self._operation_lock = Lock()
+        # Inventory observations and browser Writes serialize on the exact
+        # actor lock. No ordinary runtime UID can query this owner-only UDS.
+        self._inventory = ActorInventoryPages(service._owner_reader, self._operation_lock)
         self._workers = Condition()
         self._active = 0
         self._capacity = BoundedSemaphore(8)
@@ -468,6 +484,21 @@ class CompletionAuthorityServer(socketserver.ThreadingMixIn, socketserver.UnixSt
             super().process_request_thread(request, client_address)
         finally:
             self._finished()
+
+    def inventory_begin(self) -> dict[str, object]:
+        if self._closed:
+            raise _fail()
+        return self._inventory.begin()
+
+    def inventory_page(self, token: object, offset: object) -> dict[str, object]:
+        if self._closed:
+            raise _fail()
+        return self._inventory.page(token, offset)
+
+    def inventory_finish(self, token: object, digest: object) -> dict[str, object]:
+        if self._closed:
+            raise _fail()
+        return self._inventory.finish(token, digest)
 
     @property
     def media_ready(self) -> bool:

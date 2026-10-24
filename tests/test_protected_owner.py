@@ -209,5 +209,220 @@ class ProtectedOwnerCliTests(unittest.TestCase):
         fake_runtime.close.assert_not_called()
 
 
+    def test_sync_interval_is_strictly_private_and_bounded(self):
+        import json
+        from mark_api.protected_owner import _read_private_owner_config
+        cfg = {**params(), **{
+            k: str(params()[k])
+            for k in ("database", "dashboard_socket", "witness_socket", "actor_socket")
+        }}
+        for value in (0, 0.0, 60, 90.5, 86400):
+            with self.subTest(allowed=value):
+                candidate = {**cfg, "sync_interval_seconds": value}
+                result = _read_private_owner_config(
+                    self.pipe((json.dumps(candidate) + "\n").encode())
+                )
+                self.assertEqual(result, candidate)
+        for value in (True, False, -1, 1, 59, 86401, 60.0 + 10**6,
+                      float("nan"), float("inf"), "120", 10**350):
+            with self.subTest(denied=repr(value)[:32]), self.assertRaises(ValueError):
+                candidate = {**cfg, "sync_interval_seconds": value}
+                _read_private_owner_config(
+                    self.pipe((json.dumps(candidate) + "\n").encode())
+                )
+
+    def test_trusted_periodic_sync_reuses_same_attested_store_and_drains(self):
+        import io
+        import signal
+        import threading
+        from contextlib import redirect_stdout, redirect_stderr
+        from mark_api.protected_owner import main
+
+        config = {**params(), **{
+            k: str(params()[k])
+            for k in ("database", "dashboard_socket", "witness_socket", "actor_socket")
+        }, "sync_interval_seconds": 60}
+        runtime = MagicMock()
+        runtime.write_server.server_port = 17723
+        owner_store = runtime.dashboard_owner.store
+        actor_client = object()
+        RealEvent = threading.Event
+        events = []
+        threads = []
+
+        def make_event():
+            event = RealEvent()
+            events.append(event)
+            return event
+
+        class FakeThread:
+            def __init__(self, *, target, name=None, kwargs=None, daemon=None):
+                self.target = target
+                self.name = name
+                self.kwargs = kwargs or {}
+                self.daemon = daemon
+                threads.append(self)
+
+            def start(self):
+                if self.name == "kleinanzeiger-protected-inventory":
+                    self.target(**self.kwargs)
+
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return False
+
+        def persist_once(store, client):
+            self.assertIs(store, owner_store)
+            self.assertIs(client, actor_client)
+            events[0].set()
+            return 1
+
+        with patch(
+            "mark_api.protected_owner._read_private_owner_config",
+            return_value=config,
+        ), patch(
+            "mark_api.protected_owner.create_protected_owner_runtime",
+            return_value=runtime,
+        ), patch(
+            "mark_api.protected_inventory.OwnerActorInventoryClient",
+            return_value=actor_client,
+        ) as client_build, patch(
+            "mark_api.protected_inventory.sync_actor_inventory_once",
+            side_effect=persist_once,
+        ) as sync, patch(
+            "threading.Event", side_effect=make_event,
+        ), patch(
+            "threading.Thread", side_effect=FakeThread,
+        ), patch(
+            "signal.signal", return_value=signal.SIG_DFL,
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            status = main(["--config-fd", "0"])
+        self.assertEqual(status, 0)
+        client_build.assert_called_once_with(
+            actor_socket=params()["actor_socket"],
+            actor_uid=config["actor_uid"],
+        )
+        sync.assert_called_once_with(owner_store, actor_client)
+        self.assertEqual(len(threads), 2)
+        self.assertTrue(next(t for t in threads if t.name == "kleinanzeiger-protected-inventory").daemon)
+        runtime.write_server.shutdown.assert_called_once_with()
+        runtime.close.assert_called_once_with()
+
+    def test_failed_actor_read_does_not_trigger_retry_or_success_exit(self):
+        import io
+        import signal
+        import threading
+        from contextlib import redirect_stdout, redirect_stderr
+        from mark_api.protected_owner import main
+
+        cfg = {**params(), **{
+            k: str(params()[k])
+            for k in ("database", "dashboard_socket", "witness_socket", "actor_socket")
+        }, "sync_interval_seconds": 60}
+        runtime = MagicMock()
+        runtime.write_server.server_port = 17724
+        original_event = threading.Event
+        events = []
+
+        def new_event():
+            event = original_event()
+            events.append(event)
+            return event
+
+        class FakeThread:
+            def __init__(self, *, target, name=None, kwargs=None, daemon=None):
+                self.target, self.name, self.kwargs = target, name, kwargs or {}
+
+            def start(self):
+                if self.name == "kleinanzeiger-protected-inventory":
+                    self.target(**self.kwargs)
+                    events[0].set()
+
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return False
+
+        with patch(
+            "mark_api.protected_owner._read_private_owner_config",
+            return_value=cfg,
+        ), patch(
+            "mark_api.protected_owner.create_protected_owner_runtime",
+            return_value=runtime,
+        ), patch(
+            "mark_api.protected_inventory.OwnerActorInventoryClient",
+        ), patch(
+            "mark_api.protected_inventory.sync_actor_inventory_once",
+            side_effect=RuntimeError("synthetic unknown actor ACK"),
+        ) as sync, patch(
+            "threading.Event", side_effect=new_event,
+        ), patch(
+            "threading.Thread", side_effect=FakeThread,
+        ), patch(
+            "signal.signal", return_value=signal.SIG_DFL,
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            status = main(["--config-fd", "0"])
+        self.assertEqual(status, 2)
+        sync.assert_called_once()
+        runtime.close.assert_called_once()
+
+
+
+    def test_unresolved_inventory_thread_cannot_block_process_exit_indefinitely(self):
+        import io
+        import signal
+        from contextlib import redirect_stdout, redirect_stderr
+        from mark_api.protected_owner import main
+
+        cfg = {**params(), **{
+            name: str(params()[name])
+            for name in ("database", "dashboard_socket", "witness_socket", "actor_socket")
+        }, "sync_interval_seconds": 60}
+        runtime = MagicMock()
+        runtime.write_server.server_port = 17725
+        workers = []
+
+        class HungThread:
+            def __init__(self, *, target, name=None, kwargs=None, daemon=None):
+                self.name = name
+                self.daemon = daemon
+                self.join_seconds = None
+                workers.append(self)
+
+            def start(self):
+                pass
+
+            def join(self, seconds=None):
+                self.join_seconds = seconds
+
+            def is_alive(self):
+                return self.name == "kleinanzeiger-protected-inventory"
+
+        with patch(
+            "mark_api.protected_owner._read_private_owner_config", return_value=cfg,
+        ), patch(
+            "mark_api.protected_owner.create_protected_owner_runtime", return_value=runtime,
+        ), patch(
+            "mark_api.protected_inventory.OwnerActorInventoryClient",
+        ), patch(
+            "threading.Thread", side_effect=HungThread,
+        ), patch(
+            "threading.Event",
+        ) as event, patch(
+            "signal.signal", return_value=signal.SIG_DFL,
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            event.return_value.wait.return_value = True
+            status = main(["--config-fd", "0"])
+        self.assertEqual(status, 2)
+        self.assertEqual(len(workers), 2)
+        inventory_worker = next(t for t in workers if t.name == "kleinanzeiger-protected-inventory")
+        self.assertTrue(inventory_worker.daemon)
+        self.assertEqual(inventory_worker.join_seconds, 50.0)
+        runtime.close.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

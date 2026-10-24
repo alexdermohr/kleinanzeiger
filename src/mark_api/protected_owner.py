@@ -121,8 +121,17 @@ def _read_private_owner_config(fd: int) -> dict[str, object]:
         "witness_uid", "actor_uid", "runtime_uid", "runtime_gid",
         "principal", "bearer_token", "media_enabled", "write_port",
     }
-    if set(config) != expected:
+    # Older preprovisioned runtimes remain valid with sync disabled; a
+    # trusted supervisor can explicitly enable periodic Actor-sourced reads.
+    # No untrusted runtime chooses the interval or CDP endpoint.
+    optional = {"sync_interval_seconds"}
+    if set(config) not in (expected, expected | optional):
         raise ValueError("unexpected private owner config")
+    if optional <= set(config):
+        value = config["sync_interval_seconds"]
+        if (type(value) not in (int, float)
+                or not (value == 0 or 60 <= value <= 86400)):
+            raise ValueError("invalid protected sync interval")
     for key in ("database", "dashboard_socket", "witness_socket", "actor_socket"):
         path = config[key]
         if type(path) is not str or not path.startswith("/"):
@@ -147,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
     from threading import Event, Thread
 
     from .container_draft import container_draft_denied
+    from .protected_inventory import (
+        OwnerActorInventoryClient, ProtectedInventoryError,
+        _READ_CYCLE_SECONDS, sync_actor_inventory_once,
+    )
 
     parser = argparse.ArgumentParser(
         description="Kleinanzeiger independent A6 SQLite owner and Write API")
@@ -179,6 +192,50 @@ def main(argv: list[str] | None = None) -> int:
 
     server = runtime.write_server
     stopped = Event()
+    sync_failed = Event()
+    interval = float(config.get("sync_interval_seconds", 0))
+    sync_worker: Thread | None = None
+
+    if interval:
+        try:
+            # This is the SAME attested SnapshotStore used by the write API.
+            # The actor owns CDP reads; neither the ordinary frontend nor a
+            # second SQLite writer can inject owner-observed inventory.
+            reader = OwnerActorInventoryClient(
+                actor_socket=Path(config["actor_socket"]),
+                actor_uid=config["actor_uid"],
+            )
+
+            def sync_periodically() -> None:
+                while not stopped.is_set():
+                    try:
+                        sync_actor_inventory_once(runtime.dashboard_owner.store, reader)
+                    except ProtectedInventoryError as exc:
+                        if not exc.retryable_read:
+                            # Unresolved SQLite commit/Write recovery is never
+                            # transformed into a new actor observation.
+                            sync_failed.set()
+                            return
+                        # A proven *durably failed* read-only cycle may start
+                        # a fresh observation after the configured interval.
+                        # The actor's old page token expires independently.
+                    except Exception:
+                        sync_failed.set()
+                        return
+                    if stopped.wait(interval):
+                        return
+
+            # With a non-daemon worker, a stuck kernel/socket extension keeps
+            # the process alive even AFTER a failed bounded join. The owner
+            # exits nonzero without closing still-active resource fences.
+            sync_worker = Thread(
+                target=sync_periodically, daemon=True,
+                name="kleinanzeiger-protected-inventory",
+            )
+        except Exception:
+            print("Kleinanzeiger: protected inventory unavailable (admission denied)",
+                  file=sys.stderr)
+            return 2
     def stop(_signum, _frame) -> None:
         stopped.set()
     previous_term = signal.signal(signal.SIGTERM, stop)
@@ -187,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
                     daemon=True, name="kleinanzeiger-owner-write-api")
     try:
         thread.start()
+        if sync_worker is not None:
+            sync_worker.start()
         print(json.dumps({"ready": True, "uid": os.geteuid(),
                           "port": server.server_port}, separators=(",", ":")), flush=True)
         stopped.wait()
@@ -200,8 +259,17 @@ def main(argv: list[str] | None = None) -> int:
         thread.join(3)
         if thread.is_alive():
             return 2
+        if sync_worker is not None:
+            # A pending browser read or SQLite commit is not proven stopped
+            # by SIGTERM alone. Keep that process/journal alive until drained.
+            sync_worker.join(_READ_CYCLE_SECONDS + 5)
+            if sync_worker.is_alive():
+                # Never claim a successful drain while an old read or SQLite
+                # commit might still run. Process exit does not authorize
+                # restore or any new platform Write.
+                return 2
         runtime.close()
-        return 0
+        return 2 if sync_failed.is_set() else 0
     except Exception:
         # A host/SQLite/server error during SIGTERM is UNKNOWN, never a
         # successful drain. Do not expose paths, tokens or low-level details.

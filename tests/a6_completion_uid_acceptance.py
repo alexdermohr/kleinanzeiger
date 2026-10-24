@@ -488,6 +488,7 @@ def _child(role, config):
             "runtime_uid": UIDS["runtime"], "runtime_gid": UIDS["runtime"],
             "principal": PRINCIPAL, "bearer_token": config["api_token"],
             "media_enabled": bool(config.get("media_enabled")), "write_port": 0,
+            "sync_interval_seconds": config.get("sync_interval_seconds", 0),
         }).encode("utf-8") + b"\n"
         read_fd, write_fd = os.pipe()
         try:
@@ -560,7 +561,7 @@ def _child(role, config):
 
 
 class Scenario:
-    def __init__(self, root, *, lost_ack=False, dashboard=False, media=False):
+    def __init__(self, root, *, lost_ack=False, dashboard=False, media=False, sync_interval_seconds=0):
         self.root = root
         self.children = []
         self.configs = {}
@@ -569,6 +570,7 @@ class Scenario:
         self.ui_token = secrets.token_hex(24)
         self.with_dashboard = dashboard
         self.with_media = media
+        self.sync_interval_seconds = sync_interval_seconds
         self.platform_token = secrets.token_hex(24)
         self.control_token = secrets.token_hex(24)
         root.mkdir(mode=0o755)
@@ -618,7 +620,8 @@ class Scenario:
             self.api_port = self.start("owner", {"db": str(self.owner_db), "witness_socket": str(self.owner_witness_socket),
                                                  "actor_socket": str(self.actor_socket), "api_token": self.api_token,
                                                  "dashboard_socket": str(self.dashboard_socket),
-                                                 "media_enabled": media})["port"]
+                                                 "media_enabled": media,
+                                                 "sync_interval_seconds": sync_interval_seconds})["port"]
             if dashboard:
                 self.start_frontend()
         except BaseException:
@@ -998,6 +1001,31 @@ def _acceptance(host_net, host_pid):
             assert scenario.request(*operations[0])["status"] == 200
             assert len(scenario.state()["mutations"]) == 5
             scenario.close()
+            scenario = Scenario(root / "protected-inventory", dashboard=True, sync_interval_seconds=60)
+            deadline = time.monotonic() + 12
+            while True:
+                # Read-only supervisor observation. The data itself came from
+                # installed Owner CLI -> independent Actor UID -> platform UID.
+                with closing(sqlite3.connect(
+                    "file:" + str(scenario.owner_db) + "?mode=ro", uri=True, timeout=2,
+                )) as conn:
+                    observed = conn.execute(
+                        "SELECT outcome,snapshot_count FROM sync_attempts "
+                        "ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                    current = conn.execute(
+                        "SELECT title FROM ad_snapshots WHERE ad_id='701' "
+                        "ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                if observed == ("success_nonempty", 1) and current == ("Existing table",):
+                    break
+                assert time.monotonic() < deadline, (observed, current)
+                time.sleep(0.05)
+            assert scenario.ui_request("GET", "/api/sync/status")["status"] == 200
+            assert scenario.ui_request("GET", "/api/ads")["status"] == 200
+            assert scenario.state()["mutations"] == [], "inventory must never mutate platform"
+            scenario.probe(peer_only=True)
+            scenario.close()
             scenario = Scenario(root / "lost-ack", lost_ack=True)
             lost = scenario.request("POST", "/api/write/ads/701/pause", "lost:pause")
             assert lost["status"] == 503 and lost["body"]["platform_retry_authorized"] is False, lost
@@ -1070,7 +1098,7 @@ def _acceptance(host_net, host_pid):
     hashes = {name: hashlib.sha256((package.parent / name).read_bytes()).hexdigest()
               for name in ("completion_authority.py", "completion_witness.py", "fence_witness.py", "completion_dashboard.py", "dashboard.py")}
     _emit({"result": "PASS", "scope": "installed-a6-independent-media-nonmedia-uid-composition", "roles": UIDS,
-           "installed_witness_cli": True,
+           "installed_witness_cli": True, "protected_actor_inventory_sync": True,
            "crud": True, "restart_replay": True, "lost_completion_ack": True, "unknown_fenced": True,
            "runtime_raw_db_wal_shm_denied": True, "forged_completion_clearance_denied": True,
            "kernel_peer_credentials": True, "loopback_only": True, "platform_access": False,
