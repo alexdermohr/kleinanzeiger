@@ -1012,7 +1012,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                 cwd=root, env=env, timeout=95,
             )
             self.assertEqual(media_result.returncode, 0, media_result.stderr[-2500:])
-            self.assertRegex(media_result.stderr, r"Ran 3 tests? in [0-9.]+s")
+            self.assertRegex(media_result.stderr, r"Ran 4 tests? in [0-9.]+s")
             self.assertIn("OK", media_result.stderr)
 
             # Exercise the installed, not checkout-imported, fixed Owner
