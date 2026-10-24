@@ -1270,6 +1270,68 @@ class CdpPrivateWebPage:
         finally:
             pass
 
+    def restore_management(self, ad_id: str) -> None:
+        """Restore verified management context after a target-bound editor read.
+
+        Page.navigate alone is no post-read proof. Unknown page transitions
+        remain fail-closed and retain the native target reservation.
+        """
+        target = _validated_ad_id(ad_id)
+        if self._bound_ad_id != target:
+            raise PrivateWebCdpError("restore_management")
+        client = self._client()
+        marker = json.dumps(f"__mark_private_web_restore_management_{target}__")
+        try:
+            current = self._runtime_value(
+                client,
+                "(() => ({readyState: document.readyState, origin: location.origin, "
+                "path: location.pathname, adId: new URLSearchParams(location.search).get('adId')}))()",
+            )
+            if not (
+                isinstance(current, dict)
+                and current.get("readyState") == "complete"
+                and current.get("origin") == self._expected_origin
+                and current.get("path") == _EDITOR_PATH
+                and current.get("adId") == target
+            ):
+                raise PrivateWebCdpError("restore_management")
+            armed = self._runtime_value(
+                client, "(() => { const key = " + marker
+                + "; globalThis[key] = true; return globalThis[key] === true; })()",
+            )
+            if armed is not True:
+                raise PrivateWebCdpError("restore_management")
+            navigation = client.call("Page.navigate", {
+                "url": self._expected_origin + _MANAGEMENT_PATH,
+            })
+            if navigation.get("errorText"):
+                raise PrivateWebCdpError("restore_management")
+            deadline = self._monotonic() + self._timeout_seconds
+            expression = (
+                "(() => ({ readyState: document.readyState, origin: location.origin, "
+                "path: location.pathname, oldDocument: globalThis[" + marker
+                + "] === true }))()"
+            )
+            while True:
+                state = self._runtime_value(client, expression)
+                if (
+                    isinstance(state, dict)
+                    and state.get("readyState") == "complete"
+                    and state.get("origin") == self._expected_origin
+                    and state.get("path") == _MANAGEMENT_PATH
+                    and state.get("oldDocument") is False
+                ):
+                    self._bound_ad_id = None
+                    self._last_ready_snapshot = None
+                    return
+                if self._monotonic() >= deadline:
+                    raise PrivateWebCdpError("restore_management")
+                self._sleep(0.05)
+        except PrivateWebCdpError:
+            raise
+        except Exception:
+            raise PrivateWebCdpError("restore_management") from None
+
     def read_editor(self) -> PrivateWebEditorSnapshot:
         self._last_ready_snapshot = None
         origin = json.dumps(self._expected_origin)
@@ -4233,6 +4295,16 @@ class CdpPrivateWebOwnerReader:
             page = self._page_factory()
             page.open_editor(self._ad_id)
             editor = page.read_editor()
+            if (
+                isinstance(editor, PrivateWebEditorSnapshot)
+                and editor.state is PrivateWebEditorState.READY
+                and editor.ad_id == self._ad_id
+                and editor.title is not None
+                and editor.description is not None
+            ):
+                # A later owner inventory must see the original management
+                # target, not the editor left by this verified content read.
+                page.restore_management(self._ad_id)
         except Exception:  # noqa: BLE001 - sanitize browser/provider boundary.
             if page is not None:
                 try:

@@ -184,6 +184,11 @@ class SharedPage:
             description=self._state["description"],
         )
 
+    def restore_management(self, ad_id: str) -> None:
+        if ad_id != self._ad_id:
+            raise AssertionError("restored management target mismatch")
+        self._events.append(("restore_management", ad_id))
+
     def replace_title(self, value: str) -> None:
         self._events.append(("replace_title", value))
         self._state["title"] = value
@@ -2108,6 +2113,7 @@ class PrivateWebContentRuntimeTests(unittest.TestCase):
             [
                 ("open_editor", AD_ID),
                 ("read_editor", AD_ID),
+                ("restore_management", AD_ID),
                 ("close", AD_ID),
             ],
         )
@@ -2629,9 +2635,14 @@ class PrivateWebContentRuntimeTests(unittest.TestCase):
             runtime = build_private_web_content_runtime(cdp_port=19610, timeout_seconds=4.0)
 
         dependency.assert_called_once_with()
-        browser_reader.assert_called_once_with(
-            cdp_port=19610, timeout_seconds=4.0, source="kleinanzeigen-management",
+        browser_reader.assert_called_once()
+        options = browser_reader.call_args.kwargs
+        self.assertEqual(
+            {key: val for key, val in options.items() if key != "client_factory"},
+            {"cdp_port": 19610, "timeout_seconds": 4.0,
+             "source": "kleinanzeigen-management"},
         )
+        self.assertIs(options["client_factory"].__self__, runtime._cdp_session)
         cookies.assert_not_called()
         transport.assert_not_called()
         management.assert_not_called()

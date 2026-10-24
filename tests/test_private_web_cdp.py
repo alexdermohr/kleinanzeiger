@@ -3802,6 +3802,7 @@ class CdpPrivateWebOwnerReaderTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.opened: list[str] = []
                 self.closed = False
+                self.restored: list[str] = []
 
             def open_editor(self, ad_id: str) -> None:
                 self.opened.append(ad_id)
@@ -3813,6 +3814,9 @@ class CdpPrivateWebOwnerReaderTests(unittest.TestCase):
                     title="Fresh title",
                     description="Fresh description",
                 )
+
+            def restore_management(self, ad_id: str) -> None:
+                self.restored.append(ad_id)
 
             def close(self) -> None:
                 self.closed = True
@@ -3847,6 +3851,7 @@ class CdpPrivateWebOwnerReaderTests(unittest.TestCase):
         self.assertEqual(enriched.metric_source, "kleinanzeigen-management")
         self.assertEqual(pages[0].opened, [AD_ID])
         self.assertTrue(pages[0].closed)
+        self.assertEqual(pages[0].restored, [AD_ID])
 
     def test_owner_reader_keeps_explicit_counter_origin_when_content_is_enriched(self) -> None:
         target = AdSnapshot(
@@ -3877,6 +3882,9 @@ class CdpPrivateWebOwnerReaderTests(unittest.TestCase):
                     title="After",
                     description="After",
                 )
+
+            def restore_management(self, ad_id):
+                assert ad_id == AD_ID
 
             def close(self):
                 pass
@@ -3988,6 +3996,9 @@ class CdpPrivateWebOwnerReaderTests(unittest.TestCase):
                     description="Fresh description",
                 )
 
+            def restore_management(self, ad_id: str) -> None:
+                assert ad_id == AD_ID
+
             def close(self) -> None:
                 raise RuntimeError("provider secret")
 
@@ -4024,6 +4035,9 @@ class CdpPrivateWebOwnerReaderTests(unittest.TestCase):
                     title=state["title"],
                     description=state["description"],
                 )
+
+            def restore_management(self, ad_id: str) -> None:
+                assert ad_id == AD_ID
 
             def close(self) -> None:
                 return None

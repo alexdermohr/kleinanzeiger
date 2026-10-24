@@ -496,9 +496,20 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                     if (("__mark_private_web_state_navigation_probe_" in expression
                          or "__mark_private_web_navigation_probe_" in expression
                          or "__mark_private_web_delete_navigation_probe_" in expression
-                         or "__mark_private_web_create_navigation_probe__" in expression)
+                         or "__mark_private_web_create_navigation_probe__" in expression
+                         or "__mark_private_web_restore_management_" in expression)
                             and "globalThis[key] = true" in expression):
                         value = True
+                    elif ("adId: new URLSearchParams(location.search).get('adId')"
+                          in expression):
+                        value = {
+                            "readyState": "complete",
+                            "origin": "https://www.kleinanzeigen.de",
+                            "path": self.server.page,
+                            "adId": (self.server.ad_id
+                                     if self.server.page == "/p-anzeige-bearbeiten.html"
+                                     else None),
+                        }
                     elif "oldDocument: globalThis[" in expression:
                         value = {"readyState": "complete", "oldDocument": False}
                         if ("origin: location.origin" in expression

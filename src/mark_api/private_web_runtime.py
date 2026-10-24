@@ -1855,9 +1855,17 @@ def build_private_web_write_api_runtime(
                 media_resolver = media_handle_store
             else:
                 media_resolver = PrivateWebMediaRefResolver(media_bindings)
+            media_options = {}
+            owned_session = getattr(content_runtime, "_cdp_session", None)
+            if owned_session is not None:
+                # Default product: media must borrow exactly the same pinned
+                # native target as inventory and every content writer. A
+                # media page must never construct a competing CDP claim.
+                media_options["cdp_session"] = owned_session
             media_runtime = build_private_web_media_create_runtime(
                 cdp_port=cdp_port,
                 timeout_seconds=float(timeout_seconds),
+                **media_options,
             )
         runtime = compose_private_web_write_api_runtime(
             content_runtime=content_runtime,
@@ -1953,6 +1961,7 @@ def build_private_web_media_create_runtime(
     *,
     cdp_port: int,
     timeout_seconds: float = 5.0,
+    cdp_session: object | None = None,
 ) -> PrivateWebMediaCreateRuntime:
     """Build only the media-create lifecycle for an existing CDP worker.
 
@@ -1962,10 +1971,22 @@ def build_private_web_media_create_runtime(
 
     require_private_web_runtime_dependency()
 
+    if cdp_session is not None:
+        # Import here to avoid a cycle with protected actor runtime builders.
+        from .protected_cdp_session import ProtectedActorCdpSession
+        if (
+            not isinstance(cdp_session, ProtectedActorCdpSession)
+            or cdp_session.port != cdp_port
+            or cdp_session.timeout_seconds != float(timeout_seconds)
+        ):
+            raise ValueError("media CDP session identity mismatch")
+
     def page_factory() -> CdpPrivateWebMediaPage:
         return CdpPrivateWebMediaPage.from_port(
             cdp_port,
             timeout_seconds=timeout_seconds,
+            **({"client_factory": cdp_session.borrow}
+               if cdp_session is not None else {}),
         )
 
     return PrivateWebMediaCreateRuntime(page_factory=page_factory)
@@ -2008,21 +2029,44 @@ def build_private_web_content_runtime(
     """
 
     require_private_web_runtime_dependency()
-    management_reader, cookie_provider = _build_private_web_owner_reader(
-        cdp_port=cdp_port,
-        timeout_seconds=timeout_seconds,
-        management_source=management_source,
-        clock=clock,
+    # The protected actor already has the exact single native CDP claim +
+    # non-owning borrower contract. Reuse that contract in the default-on
+    # product rather than allowing an editor to quarantine its own target
+    # before the subsequent authoritative owner post-read.
+    from .protected_cdp_session import ProtectedActorCdpSession
+
+    session = ProtectedActorCdpSession(
+        port=cdp_port, timeout_seconds=float(timeout_seconds),
     )
+    owner_options = {
+        "cdp_port": cdp_port,
+        "timeout_seconds": timeout_seconds,
+        "source": management_source,
+        "client_factory": session.borrow,
+    }
+    if clock is not None:
+        owner_options["clock"] = clock
+    management_reader = CdpManagementInventoryReader(**owner_options)
 
     def page_factory() -> CdpPrivateWebPage:
         return CdpPrivateWebPage.from_port(
             cdp_port,
             timeout_seconds=timeout_seconds,
+            client_factory=session.borrow,
         )
 
-    return PrivateWebContentRuntime(
+    def close_runtime() -> None:
+        try:
+            management_reader.close()
+        finally:
+            # The owner, not a temporary browser page, retains any unresolved
+            # side-effect/UNKNOWN claim until the whole product shuts down.
+            session.close()
+
+    runtime = PrivateWebContentRuntime(
         owner_reader=management_reader,
         page_factory=page_factory,
-        close_runtime=cookie_provider.close,
+        close_runtime=close_runtime,
     )
+    runtime._cdp_session = session
+    return runtime
