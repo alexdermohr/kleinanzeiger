@@ -494,7 +494,10 @@ class TrustedDashboardPublicIngress(
 ):
     """Host-loopback TCP ingress with no CDP/SQLite/owner/witness mounts."""
 
-    allow_reuse_address = False
+    # Allow a verified clean restart while old HTTP connections are in TIME_WAIT.
+    # SO_REUSEADDR does not allow a second simultaneously listening TCP socket;
+    # SO_REUSEPORT stays disabled, and peer/UID/socket validation is unchanged.
+    allow_reuse_address = True
     request_queue_size = _MAX_PEERS
 
     def __init__(

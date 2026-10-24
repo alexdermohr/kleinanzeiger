@@ -359,6 +359,40 @@ class NetlessFrontendContractTests(unittest.TestCase):
                 listen_host="0.0.0.0", listen_port=8875,
             )
 
+    def test_public_ingress_rebinds_after_http_and_never_double_binds(self) -> None:
+        # Emulate a legitimate short-lived HTTP connection, then immediate
+        # customer restart. Only the TCP bind is synthesized: the Unix socket
+        # identity rules remain covered by independent UID tests.
+        self.assertTrue(TrustedDashboardPublicIngress.allow_reuse_address)
+        with patch.object(TrustedDashboardPublicIngress, "_validate_socket"):
+            first = TrustedDashboardPublicIngress(
+                socket_path=self.sock, frontend_uid=self.fake_ingress_uid,
+                listen_port=0,
+            )
+            port = first.server_address[1]
+            first.start()
+            try:
+                with closing(socket.create_connection(("127.0.0.1", port),
+                                                      timeout=2)) as client:
+                    client.sendall(b"GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n")
+                    try:
+                        client.recv(1)
+                    except ConnectionResetError:
+                        pass
+                with self.assertRaises(OSError) as busy:
+                    TrustedDashboardPublicIngress(
+                        socket_path=self.sock, frontend_uid=self.fake_ingress_uid,
+                        listen_port=port,
+                    )
+                self.assertEqual(busy.exception.errno, errno.EADDRINUSE)
+            finally:
+                self.assertTrue(first.stop())
+            restarted = TrustedDashboardPublicIngress(
+                socket_path=self.sock, frontend_uid=self.fake_ingress_uid,
+                listen_port=port,
+            )
+            restarted.server_close()
+
     def test_public_ingress_denial_reports_only_fixed_phase(self) -> None:
         from contextlib import redirect_stderr
         from io import StringIO
