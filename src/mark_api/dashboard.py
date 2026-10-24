@@ -3484,8 +3484,11 @@ def _handler_factory(
             tokens = self.headers.get_all("X-Mark-Generation-Token") or []
             origins = self.headers.get_all("Origin") or []
             fetch_sites = self.headers.get_all("Sec-Fetch-Site") or []
-            host, port = self.server.server_address
-            expected_origin = _dashboard_http_origin(str(host), int(port))
+            # parse_request already restricts Host to exact loopback
+            # listener/public-ingress ports. Bind generation consent to the
+            # *browser-facing* Host, not the private frontend netns port.
+            hosts = self.headers.get_all("Host") or []
+            expected_origin = "http://" + hosts[0] if len(hosts) == 1 else ""
             return (
                 len(marker) == 1
                 and marker[0] == "1"
