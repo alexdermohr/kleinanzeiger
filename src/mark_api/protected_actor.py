@@ -22,12 +22,15 @@ from .application import MarkService
 from .completion_authority import CompletionAuthorityServer, _roles
 from .completion_witness import AuthorityWitnessClient
 from .private_web_media import PrivateWebMediaHandleStore
+from .protected_cdp_session import (
+    ProtectedActorCdpSession, build_protected_actor_content_runtime,
+    build_protected_actor_media_runtime,
+)
 from .private_web_media_verify import PrivateWebPublicMediaPersistenceVerifier
 from .private_web_runtime import (
     PrivateWebContentRuntime, PrivateWebMediaCreateRuntime,
     PrivateWebMediaCreateService, _PrivateWebRuntimeAdsReader,
-    _WriteOnlyReactionReader, build_private_web_content_runtime,
-    build_private_web_media_create_runtime,
+    _WriteOnlyReactionReader,
 )
 from .storage_owner import _linux_ucred_uid
 from .strict_json import strict_json_object
@@ -116,6 +119,7 @@ class ProtectedActorRuntime:
     content: PrivateWebContentRuntime
     media_runtime: PrivateWebMediaCreateRuntime | None
     media_handles: PrivateWebMediaHandleStore | None
+    cdp_session: ProtectedActorCdpSession | None = None
 
     def close(self) -> None:
         # Never shut down the browser or abandon handles while an external
@@ -124,6 +128,8 @@ class ProtectedActorRuntime:
         if self.media_runtime is not None:
             self.media_runtime.close()
         self.content.close()
+        if self.cdp_session is not None:
+            self.cdp_session.close()
         # Persistent staged handles deliberately survive an actor restart.
         # A future verified owner receipt/ACK may retire them; without such
         # authorization do not delete unresolved media on ordinary shutdown.
@@ -169,12 +175,14 @@ def create_protected_actor_runtime(
     content = None
     media_runtime = None
     handles = None
+    session = None
     try:
         # This is the real product's authenticated CDP transport, not a
         # synthetic page/service or a local SQLite-backed write runtime.
-        content = build_private_web_content_runtime(
-            cdp_port=cdp_port, timeout_seconds=float(timeout_seconds),
+        session = ProtectedActorCdpSession(
+            port=cdp_port, timeout_seconds=float(timeout_seconds),
         )
+        content = build_protected_actor_content_runtime(session)
         reader = _PrivateWebRuntimeAdsReader(content)
         service = MarkService(
             owner_reader=reader, management_reader=reader,
@@ -190,9 +198,7 @@ def create_protected_actor_runtime(
         media_service = None
         if media_enabled:
             handles = PrivateWebMediaHandleStore(directory=media_directory)
-            media_runtime = build_private_web_media_create_runtime(
-                cdp_port=cdp_port, timeout_seconds=float(timeout_seconds),
-            )
+            media_runtime = build_protected_actor_media_runtime(session)
             media_service = PrivateWebMediaCreateService(
                 runtime=media_runtime, resolver=handles, reader=reader,
                 confirmation_reader=reader,
@@ -206,7 +212,7 @@ def create_protected_actor_runtime(
             witness_client=witness, media_service=media_service,
             media_stager=handles,
         )
-        return ProtectedActorRuntime(authority, content, media_runtime, handles)
+        return ProtectedActorRuntime(authority, content, media_runtime, handles, session)
     except BaseException:
         # A failed startup never grants write authority. Retain private
         # persistent media on error; a retry must meet the same host gates.
@@ -216,6 +222,8 @@ def create_protected_actor_runtime(
         finally:
             if content is not None:
                 content.close()
+            if session is not None:
+                session.close()
         raise
 
 

@@ -107,7 +107,7 @@ class ActorCompositionTests(unittest.TestCase):
                 **altered,
             }
             with self.subTest(changed=altered), patch(
-                "mark_api.protected_actor.build_private_web_content_runtime"
+                "mark_api.protected_actor.build_protected_actor_content_runtime"
             ) as browser:
                 with self.assertRaises((ValueError, CompletionAuthorityError)):
                     create_protected_actor_runtime(**cfg)
@@ -116,7 +116,7 @@ class ActorCompositionTests(unittest.TestCase):
     def test_no_witness_never_starts_browser_or_actor(self):
         cfg = parameters()
         with patch(
-            "mark_api.protected_actor.build_private_web_content_runtime"
+            "mark_api.protected_actor.build_protected_actor_content_runtime"
         ) as content:
             with self.assertRaises(ValueError):
                 create_protected_actor_runtime(
@@ -134,7 +134,7 @@ class ActorCompositionTests(unittest.TestCase):
         cfg = parameters()
         content = MagicMock()
         with patch("mark_api.protected_actor._attest_witness_socket"), patch(
-            "mark_api.protected_actor.build_private_web_content_runtime",
+            "mark_api.protected_actor.build_protected_actor_content_runtime",
             return_value=content,
         ) as content_builder, patch(
             "mark_api.protected_actor.CompletionAuthorityServer",
@@ -178,10 +178,10 @@ class ActorCompositionTests(unittest.TestCase):
             media_dir = Path(tmp) / "actor-private-media"
             media_runtime = PrivateWebMediaCreateRuntime(page_factory=lambda: MagicMock())
             with patch("mark_api.protected_actor._attest_witness_socket"), patch(
-                "mark_api.protected_actor.build_private_web_content_runtime",
+                "mark_api.protected_actor.build_protected_actor_content_runtime",
                 return_value=MagicMock(),
             ), patch(
-                "mark_api.protected_actor.build_private_web_media_create_runtime",
+                "mark_api.protected_actor.build_protected_actor_media_runtime",
                 return_value=media_runtime,
             ), patch(
                 "mark_api.protected_actor.CompletionAuthorityServer",
