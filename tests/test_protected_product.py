@@ -167,5 +167,69 @@ class ProtectedProductTests(unittest.TestCase):
                 product._ingress_landlock()
 
 
+    def test_concurrently_exiting_child_never_masks_startup_failure(self):
+        class RacedChild:
+            def __init__(self):
+                self.stdout = io.BytesIO(b"")
+                self.kills = 0
+
+            def poll(self):
+                return None
+
+            def send_signal(self, _signal):
+                raise ProcessLookupError("child exited during SIGTERM")
+
+            def kill(self):
+                self.kills += 1
+
+            def wait(self, timeout=None):
+                self.returncode = 2
+                return 2
+
+        witness = RacedChild()
+        self.assertFalse(product._stop([("witness", witness)]))
+        self.assertTrue(witness.stdout.closed)
+
+    def test_unexpected_role_readiness_exception_is_sanitized_and_drained(self):
+        import unittest.mock as mock
+        children = []
+
+        class Child:
+            stdout = io.BytesIO(b"")
+            returncode = 2
+
+            def poll(self):
+                return 2
+
+            def wait(self, timeout=None):
+                return 2
+
+        child = Child()
+        with patch("mark_api.protected_product._root_admission"), patch(
+            "mark_api.protected_product._root_path",
+        ), patch(
+            "mark_api.protected_product._uids_free",
+        ), patch(
+            "mark_api.protected_product._attest_existing",
+        ), patch(
+            "mark_api.protected_product._lock", return_value=os.open(os.devnull, os.O_RDONLY),
+        ), patch(
+            "mark_api.protected_product._private_network",
+            side_effect=lambda: os.open(os.devnull, os.O_RDONLY),
+        ), patch(
+            "mark_api.protected_product._spawn", return_value=child,
+        ), patch(
+            "mark_api.protected_product._ready",
+            side_effect=OSError("synthetic private token must never leak"),
+        ), patch(
+            "signal.signal", return_value=signal.SIG_DFL,
+        ):
+            with self.assertRaisesRegex(
+                product.ProtectedProductError, "witness readiness unavailable",
+            ) as raised:
+                product.run(root=Path("/tmp/disposable"), sync_interval=0)
+        self.assertNotIn("private token", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

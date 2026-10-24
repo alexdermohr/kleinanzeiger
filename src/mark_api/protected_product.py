@@ -366,19 +366,33 @@ def _ready_ingress(proc: subprocess.Popen) -> None:
 def _stop(children: list[tuple[str, subprocess.Popen]]) -> bool:
     success = True
     for name, child in reversed(children):
-        if child.poll() is None:
-            child.send_signal(signal.SIGTERM)
         try:
-            child.wait(timeout=90 if name == "owner" else 35)
-            if child.returncode != 0:
+            if child.poll() is None:
+                child.send_signal(signal.SIGTERM)
+            try:
+                child.wait(timeout=90 if name == "owner" else 35)
+                if child.returncode != 0:
+                    success = False
+            except subprocess.TimeoutExpired:
                 success = False
-        except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+        except Exception:
+            # Reaping a concurrently crashed child must NOT overwrite the
+            # original witness/actor startup error or mint a success result.
             success = False
-            child.kill()
-            child.wait(timeout=5)
+            try:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
+            except Exception:
+                pass
         finally:
             if child.stdout is not None:
-                child.stdout.close()
+                try:
+                    child.stdout.close()
+                except Exception:
+                    success = False
     return success
 
 
@@ -437,7 +451,7 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
             children.append((name, child))
             try:
                 return _ready(child, uid)
-            except ProtectedProductError:
+            except Exception:
                 raise ProtectedProductError(name + " readiness unavailable") from None
 
         start("witness", "mark_api.protected_witness", WITNESS, {
@@ -488,7 +502,10 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
         except Exception:
             raise ProtectedProductError("Landlock ingress admission failed") from None
         children.append(("ingress", ingress))
-        _ready_ingress(ingress)
+        try:
+            _ready_ingress(ingress)
+        except Exception:
+            raise ProtectedProductError("ingress readiness unavailable") from None
         # The write token is only in a fragment, not the server HTTP logs.
         print("Kleinanzeiger: http://127.0.0.1:" + str(PORT)
               + "/#write_token=" + quote(ui, safe=""), flush=True)
