@@ -262,5 +262,150 @@ class ProtectedFrontendTests(unittest.TestCase):
 
 
 
+    def test_private_ingress_profile_is_strict_and_generation_compatible(self):
+        ingress = {
+            "ingress_socket": "/tmp/kleinanzeiger-test-ingress.sock",
+            "ingress_uid": os.geteuid() + 201,
+            "ingress_gid": os.geteuid() + 201,
+        }
+        for variant in (
+            {**_CONFIG, **ingress},
+            {**_CONFIG, **ingress,
+             "generation_token": "synthetic-generation-private-session"},
+        ):
+            with self.subTest(variant=bool(variant.get("generation_token"))):
+                self.assertEqual(_read_private_config(self._pipe(
+                    (json.dumps(variant) + "\n").encode(),
+                )), variant)
+        for variant in (
+            {**_CONFIG, "ingress_uid": ingress["ingress_uid"]},
+            {**_CONFIG, **ingress, "ingress_socket": "../escape.sock"},
+            {**_CONFIG, **ingress, "ingress_socket": "/tmp/../tmp/escape.sock"},
+            {**_CONFIG, **ingress, "ingress_socket": _CONFIG["owner_socket"]},
+            {**_CONFIG, **ingress, "ingress_uid": _CONFIG["owner_uid"]},
+            {**_CONFIG, **ingress, "ingress_uid": os.geteuid()},
+            {**_CONFIG, **ingress, "ingress_gid": ingress["ingress_uid"]+1},
+            {**_CONFIG, **ingress, "ingress_uid": True},
+            {**_CONFIG, **ingress, "ingress_gid": -1},
+        ):
+            with self.subTest(variant=repr(variant)[-85:]), self.assertRaises(ValueError):
+                _read_private_config(self._pipe(
+                    (json.dumps(variant) + "\n").encode(),
+                ))
+
+    def test_frontend_cli_reuses_real_relay_without_leaking_tokens(self):
+        config = {
+            **_CONFIG, "ingress_socket": "/tmp/synthetic-ingress-ipc.sock",
+            "ingress_uid": os.geteuid() + 201,
+            "ingress_gid": os.geteuid() + 201,
+        }
+        dashboard = MagicMock()
+        dashboard.server_port = 17772
+        relay = MagicMock()
+        relay._serving.is_alive.return_value = True
+        relay.stop.return_value = True
+        with patch("mark_api.protected_frontend.create_protected_frontend_server",
+                   return_value=dashboard) as owner, patch(
+                   "mark_api.dashboard_relay.UnixDashboardRelay",
+                   return_value=relay) as relay_factory, patch(
+                   "signal.signal",
+                   ) as sig, redirect_stdout(io.StringIO()) as out:
+            status = main(["--config-fd", str(self._pipe(
+                (json.dumps(config) + "\n").encode(),
+            ))])
+        self.assertEqual(status, 0)
+        self.assertEqual(owner.call_args.kwargs["public_origin_port"], 8875)
+        relay_factory.assert_called_once_with(
+            socket_path=Path(config["ingress_socket"]),
+            frontend_uid=config["ingress_uid"],
+            frontend_gid=config["ingress_gid"],
+            dashboard_host="127.0.0.1", dashboard_port=dashboard.server_port,
+        )
+        relay.start.assert_called_once_with()
+        relay.stop.assert_called_once()
+        self.assertNotIn(config["api_token"], out.getvalue())
+        self.assertNotIn(config["ui_token"], out.getvalue())
+        self.assertNotIn(config["ingress_socket"], out.getvalue())
+
+    def test_ingress_bind_failure_closes_dashboard_without_reporting_ready(self):
+        config = {
+            **_CONFIG, "ingress_socket": "/tmp/synthetic-ingress-ipc.sock",
+            "ingress_uid": os.geteuid() + 201,
+            "ingress_gid": os.geteuid() + 201,
+        }
+        dashboard = MagicMock()
+        with patch("mark_api.protected_frontend.create_protected_frontend_server",
+                   return_value=dashboard), patch(
+                   "mark_api.dashboard_relay.UnixDashboardRelay",
+                   side_effect=OSError("synthetic secret path " + config["api_token"]),
+                   ), redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            status = main(["--config-fd", str(self._pipe(
+                (json.dumps(config) + "\n").encode(),
+            ))])
+        self.assertEqual(status, 2)
+        dashboard.serve_forever.assert_not_called()
+        dashboard.server_close.assert_called_once_with()
+        self.assertNotIn(config["api_token"], err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+
+    def test_real_local_http_over_uid_verified_frontend_unix_relay(self):
+        import socket
+        from http.client import HTTPResponse
+        from mark_api.dashboard_relay import UnixDashboardRelay
+
+        # Same-UID local functional seam; distinct kernel UIDs are verified
+        # separately by the existing installed multi-UID suite.
+        client = CompletionDashboardClient.__new__(CompletionDashboardClient)
+        client._pid, client._uid = os.getpid(), os.geteuid()
+        client.expected_owner_uid = os.geteuid() + 101
+        client.principal = _CONFIG["principal"]
+        client._dashboard_guard = RLock()
+        client.verify_completion_profile = lambda: None
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "ingress.sock"
+            os.chmod(temp, 0o2710)
+            with patch("mark_api.protected_frontend.CompletionDashboardClient",
+                       return_value=client):
+                dashboard = create_protected_frontend_server(
+                    owner_socket=Path(_CONFIG["owner_socket"]),
+                    owner_uid=client.expected_owner_uid,
+                    principal=client.principal,
+                    owner_port=_CONFIG["owner_port"],
+                    api_token=_CONFIG["api_token"],
+                    ui_token=_CONFIG["ui_token"],
+                    dashboard_port=0, public_origin_port=8875,
+                )
+            relay = UnixDashboardRelay(
+                socket_path=path,
+                frontend_uid=os.geteuid(),
+                frontend_gid=os.getegid(),
+                dashboard_host="127.0.0.1",
+                dashboard_port=dashboard.server_port,
+            )
+            server_thread = Thread(target=dashboard.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                relay.start()
+                with closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as peer:
+                    peer.settimeout(5)
+                    peer.connect(str(path))
+                    peer.sendall(
+                        b"GET /api/dashboard/config HTTP/1.1\r\n"
+                        b"Host: 127.0.0.1:8875\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                    response = HTTPResponse(peer)
+                    response.begin()
+                    self.assertEqual(response.status, 200)
+                    content = json.loads(response.read())
+                    self.assertTrue(content["write_ui_available"])
+            finally:
+                self.assertTrue(relay.stop(3))
+                dashboard.shutdown()
+                dashboard.server_close()
+                server_thread.join(3)
+                self.assertFalse(server_thread.is_alive())
+
+
 if __name__ == "__main__":
     unittest.main()
