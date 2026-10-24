@@ -26,7 +26,9 @@ from .protected_cdp_session import (
     ProtectedActorCdpSession, build_protected_actor_content_runtime,
     build_protected_actor_media_runtime,
 )
-from .private_web_media_verify import PrivateWebPublicMediaPersistenceVerifier
+from .private_web_media_verify import (
+    PrivateWebPublicMediaPersistenceVerifier, ProtectedMediaReadbackAuthority,
+)
 from .private_web_runtime import (
     PrivateWebContentRuntime, PrivateWebMediaCreateRuntime,
     PrivateWebMediaCreateService, _PrivateWebRuntimeAdsReader,
@@ -203,7 +205,13 @@ def create_protected_actor_runtime(
                 runtime=media_runtime, resolver=handles, reader=reader,
                 confirmation_reader=reader,
                 content_reader_factory=content.content_reader_for,
-                media_persistence_verifier=PrivateWebPublicMediaPersistenceVerifier(),
+                media_persistence_verifier=PrivateWebPublicMediaPersistenceVerifier(
+                    protected_authority=ProtectedMediaReadbackAuthority(
+                        witness_socket=str(witness_socket),
+                        witness_uid=witness_uid,
+                        actor_uid=os.geteuid(),
+                    ),
+                ),
                 store=None, writes_enabled=True,
             )
         authority = CompletionAuthorityServer(

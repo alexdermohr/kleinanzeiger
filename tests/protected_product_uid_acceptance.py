@@ -114,6 +114,50 @@ sys.exit(0)
 
 
 
+def authenticated_media_readback_witness_probe(witness_socket):
+    """Real installed nonroot Actor may read back only with live Witness UID.
+
+    This proves the protected transport-admission boundary, NOT a media
+    publication or public server persistence claim.
+    """
+    program = r"""
+import sys
+from mark_api.private_web_media_verify import (
+    ProtectedMediaReadbackAuthority,
+    _require_private_web_public_media_transport_authority,
+    _PrivateWebMediaAdmissionDenied,
+)
+socket_path, mode = sys.argv[1:]
+grant = ProtectedMediaReadbackAuthority(
+    witness_socket=socket_path, witness_uid=50043, actor_uid=50044,
+)
+try:
+    _require_private_web_public_media_transport_authority(grant)
+except _PrivateWebMediaAdmissionDenied:
+    assert mode == "deny"
+    print("WITNESS_MEDIA_READBACK_DENIED", flush=True)
+else:
+    assert mode == "admit"
+    print("WITNESS_MEDIA_READBACK_ADMITTED", flush=True)
+"""
+    for role, allowed in (("actor", True), ("frontend", False)):
+        uid = UIDS[role]
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", program, str(witness_socket),
+             "admit" if allowed else "deny"],
+            cwd="/", env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=10,
+            user=uid, group=uid, extra_groups=(), check=False,
+        )
+        marker = (b"WITNESS_MEDIA_READBACK_ADMITTED" if allowed
+                  else b"WITNESS_MEDIA_READBACK_DENIED")
+        check(result.returncode == 0 and result.stdout.strip() == marker
+              and not result.stderr,
+              "installed independent media Witness transport admission mismatch")
+
+
+
 class _SyntheticCDPHandler(BaseHTTPRequestHandler):
     """Isolated test-only wire-level CDP responder, not a product adapter."""
     protocol_version = "HTTP/1.1"
@@ -887,6 +931,7 @@ def admission(net_before, pid_before):
             check(witness.stat().st_uid == UIDS["witness"],
                   "fresh Witness ledger not independently owned")
             hostile_uid_direct_storage_denied(db, witness)
+            authenticated_media_readback_witness_probe(root / "w-actor" / "w.sock")
             first_inode = (dbinfo.st_dev, dbinfo.st_ino)
             shutdown(child)
             child = None

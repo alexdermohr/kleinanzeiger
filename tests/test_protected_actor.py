@@ -200,6 +200,10 @@ class ActorCompositionTests(unittest.TestCase):
                     params["media_service"]._media_persistence_verifier,
                     PrivateWebPublicMediaPersistenceVerifier,
                 )
+                grant = params["media_service"]._media_persistence_verifier._protected_authority
+                self.assertEqual(grant.witness_socket, cfg["witness_socket"])
+                self.assertEqual(grant.witness_uid, cfg["witness_uid"])
+                self.assertEqual(grant.actor_uid, os.geteuid())
                 self.assertIs(params["media_stager"], runtime.media_handles)
                 self.assertIsNone(params["media_service"]._store)
                 self.assertEqual(media_dir.stat().st_mode & 0o777, 0o700)
