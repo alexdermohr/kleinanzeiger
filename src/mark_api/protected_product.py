@@ -235,9 +235,10 @@ def _generator_egress_landlock() -> None:
 
     if call(444, ctypes.c_void_p(), ctypes.c_size_t(), ctypes.c_uint(1)) < 4:
         raise ProtectedProductError("generator Landlock ABI4 required")
-    # Handle TCP CONNECT globally; explicitly grant only ordinary HTTPS.
-    # DNS UDP does not grant a TCP bypass and creates no CDP browser route.
-    ruleset = _LandlockRuleset(0, 2)
+    # Handle both TCP BIND and CONNECT: no TCP listener may be opened,
+    # and only ordinary HTTPS 443 is allowed outbound. DNS UDP cannot
+    # bypass TCP Landlock or gain an authenticated CDP browser route.
+    ruleset = _LandlockRuleset(0, 3)
     fd = call(444, ctypes.byref(ruleset), ctypes.sizeof(ruleset), ctypes.c_uint(0))
     try:
         https = _LandlockPort(2, 443)

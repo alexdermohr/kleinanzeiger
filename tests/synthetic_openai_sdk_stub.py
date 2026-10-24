@@ -40,6 +40,14 @@ def _assert_cdp_blocked() -> None:
                 raise RuntimeError("AI egress isolation not attested") from None
         else:
             raise RuntimeError("AI worker reached protected browser CDP")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        try:
+            listener.bind(("127.0.0.1", 19323))
+        except OSError as exc:
+            if exc.errno != errno.EACCES:
+                raise RuntimeError("AI worker TCP bind not denied") from None
+        else:
+            raise RuntimeError("AI worker could bind a host TCP listener")
 
 
 class _Responses:
