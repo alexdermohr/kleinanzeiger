@@ -24,7 +24,62 @@ kleinanzeiger --db /pfad/kleinanzeiger.sqlite --cdp-port 9222
 
 Der Starter zeigt die lokale Dashboard-URL mit einem sitzungsgebundenen Zugriffstoken an. Der Start aktiviert standardmäßig die **vollständige Anzeigenverwaltung einschließlich Write und Media**. Wer ausnahmsweise nur lesen möchte, verwendet `--read-only`.
 
-Der normale Starter verwendet weiterhin **direktes SQLite unter derselben lokalen UID**. Die vollständige lokale Create-/Media-/Update-/Pause-/Activate-/Delete-Reise einschließlich persistenter Write-Receipts, Restart-Replay und zweiphasigem Dashboard-Pending-ACK wurde mit echten lokalen HTTP-Handlern und synthetischen Plattformgegenstellen aus einem installierten Wheel geprüft. Ein unbekannter Plattform- oder Medienausgang bleibt dagegen offen und autorisiert weder erneuten Submit noch ACK. **Dies ist noch keine A6-Multi-UID-Kundenfreigabe:** Der getrennte `StorageOwnerClient` bietet absichtlich keine untrusted Write-/Completion-/Clearance-RPC. Die unabhängige Actor-/Owner-/Witness-/Medien-Completion ist in einer aus dem Wheel installierten, synthetischen Mehr-UID-Kundenreise einschließlich Wiederanlauf nachgeprüft. Offen bleiben der reguläre geschützte Gesamtprodukt-Bootstrap, der tatsächliche Host-Cutover samt alter FD-/MAP_SHARED-/WAL-/SHM-Grenze, die feindliche Restore-Abnahme sowie eine unabhängige Sicherheitsfreigabe. Konkrete Restarbeiten stehen im [A6-Integrationsbericht](docs/a6-integration-status.md).
+Der normale `kleinanzeiger`-Starter nutzt zur Kompatibilität SQLite unter
+der aufrufenden lokalen UID. Für den streng getrennten, durch unabhängige
+Owner-/Actor-/Witness-Rollen abgesicherten Kundenstart steht zusätzlich der
+vollständig installierte und synthetisch abgenommene **geschützte
+Produktlauncher** bereit.
+
+### Geschützter Kundenstart (A6)
+
+Auf einem dafür vorbereiteten Linux-Host mit Landlock ABI 4 oder neuer,
+funktionsfähigen Netzwerk-/PID-Namespaces, freier Rollentrennung der UIDs
+50042–50047 und einem **root-eigenen, nicht beschreibbaren installierten Wheel**
+als Root in einer kontrollierten Shell starten. Der CDP-Port muss auf
+`127.0.0.1` erreichbar sein und einem bereits angemeldeten Kundenbrowser
+gehören.
+
+```bash
+# Nur für eine wirklich neue, noch nicht vorhandene Zustandswurzel:
+kleinanzeiger-protected --state-root /var/lib/kleinanzeiger --init-new --cdp-port 9222
+
+# Jeder reguläre Neustart ohne --init-new:
+kleinanzeiger-protected --state-root /var/lib/kleinanzeiger --cdp-port 9222
+```
+
+Der geschützte Starter stellt das volle lokale Dashboard über
+`http://127.0.0.1:8875` bereit und gibt eine private Sitzungstoken-URL aus.
+Die geschützte Anzeigenverwaltung einschließlich Create/Publish, Content,
+Pause/Activate und Delete wurde unter realen getrennten UIDs über den
+produktiven CDP-Adapter gegen zustandsbehaftete, synthetische Browsergegenstellen
+aus einem frischen Wheel getestet. Medienvorbereitung und ein getrennt
+getesteter Media-Create-Pfad sind vorhanden. Ein unbekanntes Write-Ergebnis
+löst **keinen** zweiten Plattform-Submit aus.
+
+Für die ausdrücklich optionale Text- und Bildgenerierung die Zusatzabhängigkeit
+`kleinanzeiger[generation]` installieren, den eigenen API-Schlüssel nur im
+vertrauenswürdigen Root-Startkontext setzen und zusätzlich starten:
+
+```bash
+export OPENAI_API_KEY=...  # nicht in Git, Screenshots oder Logdateien ablegen
+kleinanzeiger-protected --state-root /var/lib/kleinanzeiger --cdp-port 9222 --enable-generation
+```
+
+Die KI arbeitet in einer sechsten separaten Nicht-Owner-UID mit auf HTTPS-Port
+443 begrenztem TCP-Egress und peer-authentifiziertem Unix-Socket. Das Dashboard
+und der SQLite-Owner bleiben ohne externen Netzwerkzugang. Jeder KI-Aufruf
+braucht eine neue, sichtbare Kostenbestätigung; Entwürfe werden nie automatisch
+veröffentlicht. Der installierte KI-Pfad ist nur mit **synthetischem, niemals
+kostenpflichtigem Provider** abgenommen; der konkrete externe API-Schlüssel
+und Kundenaccount werden hier nicht zum Test eingesetzt. Kein paralleler
+Kleinanzeiger-Prozess darf denselben CDP-Target-Claim verwenden.
+
+**Liefergrenze:** Der native geschützte Start und die synthetische, installierte
+Kundenkette sind belegbar. Bestehende Legacy-Datenbanken werden durch
+`--init-new` nicht übernommen. Ein Host-Cutover mit alten
+FD-/MAP_SHARED-/WAL-/SHM-Rechten und die unabhängige Sicherheitsfreigabe sind
+weiterhin gesondert nachzuweisen. Ein externer Plattformfreigabeprozess ist
+nicht Teil der technischen Implementierung.
 
 **Geschütztes A6-Frontend (separater installierter Einstieg):** Das Wheel
 stellt zusätzlich `kleinanzeiger-protected-frontend --config-fd FD` bereit.
