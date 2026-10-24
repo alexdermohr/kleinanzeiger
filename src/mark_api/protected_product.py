@@ -149,11 +149,11 @@ def _generation_admission() -> str:
     if (type(key) is not str or not 16 <= len(key) <= 4096
             or any(not 33 <= ord(char) <= 126 for char in key)):
         raise ProtectedProductError("generation credential unavailable")
+    # Provider imports execute arbitrary third-party Python code. Root may
+    # check installation metadata, but only the already UID-dropped, Landlock-
+    # confined generator worker may import the SDK or inspect its symbols.
     try:
         if importlib.util.find_spec("openai") is None:
-            raise ImportError()
-        from openai import OpenAI
-        if not callable(OpenAI):
             raise ImportError()
     except Exception:
         raise ProtectedProductError("generation SDK unavailable") from None
