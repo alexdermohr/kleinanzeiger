@@ -106,6 +106,7 @@ jobs:
           grep -Fq '"media_release_attested":false' "$report"
           grep -Fq '"host_cutover_attested":false' "$report"
       - name: Installed native protected fresh start and restart
+        if: matrix.python_version == '3.12'
         shell: bash
         run: |
           set -euo pipefail
@@ -121,7 +122,11 @@ jobs:
           [[ "$isolated" == /tmp/kleinanzeiger-product-* ]]
           trap 'sudo -n rm -rf -- "$isolated"' EXIT
           sudo -n chmod 0755 "$isolated"
-          sudo -n "$python_bin" -m venv "$isolated/venv"
+          # Setup-python is often runner-owned, correctly rejected by the
+          # installed privileged launcher. Use the root-owned distro
+          # interpreter for the *protected* customer start. Python 3.13
+          # source/installed A6-role acceptance runs in the other matrix job.
+          sudo -n /usr/bin/python3 -m venv "$isolated/venv"
           sudo -n "$isolated/venv/bin/python" -m pip install \
             --no-index --no-deps "${wheels[0]}"
           sudo -n "$isolated/venv/bin/python" -m pip install \
