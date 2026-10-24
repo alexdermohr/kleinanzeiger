@@ -384,21 +384,31 @@ def _stop(children: list[tuple[str, subprocess.Popen]]) -> bool:
 
 def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
         sync_interval: int = 300) -> int:
-    _root_admission()
+    # Emit only static phase names on unexpected host/runtime errors. The
+    # customer-facing CLI never logs a UID token, secret, path or traceback.
+    def admitted(label, operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except ProtectedProductError:
+            raise
+        except Exception:
+            raise ProtectedProductError(label) from None
+
+    admitted("root runtime admission failed", _root_admission)
     if container_draft_denied():
         raise ProtectedProductError("draft cannot start protected product")
     if (type(cdp_port) is not int or not 1 <= cdp_port <= 65535
             or type(sync_interval) is not int or
             sync_interval != 0 and not 60 <= sync_interval <= 86400):
         raise ProtectedProductError("invalid CDP port/sync cadence")
-    _root_path(root, fresh=init_new)
-    _uids_free()
+    admitted("state root inspection failed", _root_path, root, fresh=init_new)
+    admitted("service UID census failed", _uids_free)
     if init_new:
-        _initialize(root)
+        admitted("fresh state provisioning failed", _initialize, root)
     else:
-        _attest_existing(root)
+        admitted("protected state attestation failed", _attest_existing, root)
     paths = _paths(root)
-    lock = _lock(root)
+    lock = admitted("supervisor lock admission failed", _lock, root)
     net = None
     children: list[tuple[str, subprocess.Popen]] = []
     stopped = [False]
