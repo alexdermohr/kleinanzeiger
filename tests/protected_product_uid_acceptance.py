@@ -895,8 +895,33 @@ def protected_cold_pair_restore(root, scratch, binary, cdp):
 
     made = pair("backup", "--state-root", str(root),
                 "--backup-root", str(archive))
-    check(made.returncode == 0 and not made.stderr,
-          "installed protected cold backup unavailable")
+    if made.returncode != 0 or made.stderr:
+        # Synthetically provisioned disposable root only. Observe the same
+        # read-only admission gates without retrying any backup effect.
+        from mark_api import protected_pair
+        gates = (
+            ("root", protected_pair.product._root_admission),
+            ("uids", protected_pair.product._uids_free),
+            ("attest", lambda: protected_pair.product._attest_existing(root)),
+            ("sidecars", lambda: protected_pair._no_journals(root)),
+            ("media", lambda: protected_pair._no_actor_media(root)),
+        )
+        causes = []
+        for label, action in gates:
+            try:
+                action()
+            except Exception as error:
+                causes.append(label + ":" + type(error).__name__
+                              + ":" + str(error)[:80])
+        entries = (("cold", "history", "anchor", "intents",
+                    ".protected-pair-v1.json"))
+        causes.append("staged=" + ",".join(
+            key for key in entries if (archive / key).exists()
+        ))
+        raise AssertionError(
+            "installed protected cold backup unavailable: "
+            + (";".join(causes) if causes else "no read-only admission error")
+        )
     saved = json.loads(made.stdout)
     check(saved.get("backup_complete") is True
           and saved.get("restore_authorized") is False
