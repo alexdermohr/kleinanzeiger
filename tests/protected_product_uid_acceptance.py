@@ -149,12 +149,25 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                             self.server.page = "/m-meine-anzeigen.html"
                             self.server.releases += 1
                             answer = {"result": {}}
+                        elif (self.server.pending_delete in ("open", "submit")
+                              and self.server.page == "/m-meine-anzeigen.html"):
+                            if self.server.pending_delete == "open":
+                                self.server.delete_modal = True
+                            elif self.server.delete_modal:
+                                self.server.present = False
+                                self.server.delete_modal = False
+                                self.server.delete_submits += 1
+                            self.server.pending_delete = None
+                            self.server.releases += 1
+                            answer = {"result": {}}
                 elif method == "Runtime.evaluate" and params.get("awaitPromise") is True:
                     expression = params["expression"]
                     if "pageNum=1" in expression and 'credentials: "same-origin"' in expression:
-                        ads = {"ads": [{"id": "1234567890",
-                            "title": self.server.title, "state": self.server.state,
-                            "viewCount": 7, "watchCount": 2}],
+                        ads = {"ads": (
+                            [{"id": "1234567890",
+                              "title": self.server.title, "state": self.server.state,
+                              "viewCount": 7, "watchCount": 2}]
+                            if self.server.present else []),
                             "paging": {"last": 1}}
                         answer = {"result": {"result": {"type": "object", "value": {
                             "status": 200, "body": json.dumps(ads)}}}}
@@ -162,7 +175,8 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                     expression = params.get("expression", "")
                     value = None
                     if (("__mark_private_web_state_navigation_probe_" in expression
-                         or "__mark_private_web_navigation_probe_" in expression)
+                         or "__mark_private_web_navigation_probe_" in expression
+                         or "__mark_private_web_delete_navigation_probe_" in expression)
                             and "globalThis[key] = true" in expression):
                         value = True
                     elif "oldDocument: globalThis[" in expression:
@@ -192,6 +206,26 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                     elif ('if (currentPath === "/m-meine-anzeigen.html") return "confirmed"' in expression
                           and self.server.page == "/m-meine-anzeigen.html"):
                         value = "confirmed"
+                    elif ("const deleteControls = " in expression
+                          and self.server.page == "/m-meine-anzeigen.html"
+                          and self.server.present and not self.server.delete_modal):
+                        if "const activate = true" in expression:
+                            self.server.pending_delete = "open"
+                            value = {"x": 120.5, "y": 240.25}
+                        elif "const activate = false" in expression:
+                            value = {"state": "ready", "ad_id": "1234567890"}
+                    elif ("#delete-celebration-sbmt" in expression
+                          and "const containers = " in expression
+                          and self.server.page == "/m-meine-anzeigen.html"
+                          and self.server.present and self.server.delete_modal):
+                        if "const activate = true" in expression:
+                            self.server.pending_delete = "submit"
+                            value = {"x": 120.5, "y": 240.25}
+                        elif "const activate = false" in expression:
+                            value = {"state": "ready", "ad_id": "1234567890"}
+                    elif ("document.querySelector(\"#celebration-container\")" in expression
+                          and not self.server.present):
+                        value = True
                     elif "const expectedControl =" in expression:
                         if 'const expectedControl = "reservieren"' in expression:
                             if self.server.state == "active":
@@ -243,6 +277,10 @@ class SyntheticCDP(ThreadingHTTPServer):
         self.draft_description = self.description
         self.pending_content = False
         self.content_submits = 0
+        self.present = True
+        self.delete_modal = False
+        self.pending_delete = None
+        self.delete_submits = 0
 
 
 def inventory_confirmed(cdp):
@@ -362,6 +400,35 @@ def synthetic_content_write(cdp, token):
         row.get("ad_id") == "1234567890"
         and row.get("title") == payload["title"] for row in rows
     ), "real CDP content write missing from owner SQLite/dashboard")
+
+
+
+def synthetic_delete_write(cdp, token):
+    path = "/api/write/ads/1234567890"
+    key = "synthetic-real-cdp-delete-1234567890"
+    before = (cdp.presses, cdp.releases, cdp.delete_submits)
+    status, body, replayed = _dashboard_http("DELETE", path, token=token, key=key)
+    check(status == 200 and body.get("operation_receipt", {}).get("outcome") == "confirmed",
+          "protected real CDP modal delete was not confirmed")
+    check(replayed != "true" and cdp.present is False and cdp.delete_modal is False
+          and (cdp.presses, cdp.releases, cdp.delete_submits)
+          == (before[0] + 2, before[1] + 2, before[2] + 1),
+          "real CDP modal delete was not executed exactly once")
+    again, replay_body, replay_flag = _dashboard_http(
+        "DELETE", path, token=token, key=key,
+    )
+    check(again == status and replay_body == body and replay_flag == "true"
+          and (cdp.presses, cdp.releases, cdp.delete_submits)
+          == (before[0] + 2, before[1] + 2, before[2] + 1),
+          "replayed protected CDP delete repeated browser input")
+    for terminal in (False, True):
+        ack_status, ack, _ = _dashboard_http(
+            "POST", "/api/dashboard/pending-writes/ack", token=token,
+            payload={"scope": "ad:1234567890:delete", "idempotency_key": key},
+        )
+        check(ack_status == 200 and ack.get("acknowledged") is True
+              and ack.get("finalized") is terminal,
+              "real CDP delete two-phase durable ACK failed")
 
 
 def dashboard_ready():
@@ -506,6 +573,7 @@ def admission(net_before, pid_before):
             dashboard_ready()
             check((db.stat().st_dev, db.stat().st_ino) == first_inode,
                   "restart replaced a customer's SQLite inode")
+            synthetic_delete_write(cdp, second_token)
             shutdown(child)
             child = None
 
@@ -533,9 +601,9 @@ def admission(net_before, pid_before):
     check(cdp.commands.count("Runtime.evaluate") >= 10
           and set(cdp.commands) == {
               "Runtime.evaluate", "Page.navigate", "Input.dispatchMouseEvent",
-          } and cdp.presses == 3 and cdp.releases == 3
-          and cdp.content_submits == 1,
-          "installed actor did not perform state plus content CDP submits")
+          } and cdp.presses == 5 and cdp.releases == 5
+          and cdp.content_submits == 1 and cdp.delete_submits == 1,
+          "installed actor did not perform state, content and modal delete CDP submits")
     print(json.dumps({
         "result":"PASS", "scope":"installed-protected-fresh-customer-start",
         "real_owner_cli":True,"real_actor_cli":True,
@@ -547,6 +615,7 @@ def admission(net_before, pid_before):
         "real_cdp_inventory_sync_attested":True,
         "protected_cdp_synthetic_state_write_attested":True,
         "protected_cdp_synthetic_content_write_attested":True,
+        "protected_cdp_synthetic_delete_write_attested":True,
         "paid_generation_called":False,
     }, sort_keys=True, separators=(",",":")),flush=True)
 
