@@ -38,6 +38,8 @@ class ProtectedProductTests(unittest.TestCase):
                 {"cdp_port": True}, {"cdp_port": 0},
                 {"sync_interval": 59}, {"sync_interval": 86401},
                 {"sync_interval": False},
+                {"cdp_port": 443, "enable_generation": True},
+                {"enable_generation": 1},
             ):
                 with self.subTest(altered=altered), patch(
                     "mark_api.protected_product._root_path",
@@ -262,6 +264,14 @@ class ProtectedProductTests(unittest.TestCase):
             with self.assertRaises(product.ProtectedProductError):
                 product._ingress_landlock()
 
+
+    def test_generator_landlock_requires_exact_nonroot_generator_uid(self):
+        with patch("mark_api.protected_product.os.geteuid",
+                   return_value=product.FRONTEND):
+            with self.assertRaisesRegex(
+                product.ProtectedProductError, "wrong generator UID",
+            ):
+                product._generator_egress_landlock()
 
     def test_concurrently_exiting_child_never_masks_startup_failure(self):
         class RacedChild:

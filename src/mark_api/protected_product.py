@@ -215,6 +215,39 @@ def _ingress_landlock() -> None:
         os.close(fd)
 
 
+def _generator_egress_landlock() -> None:
+    """Allow AI worker HTTPS port 443 only; deny access to host CDP TCP.
+
+    Linux Landlock network ABI4 governs all TCP connects from this process,
+    including future provider libraries. This is applied in the pre-exec UID
+    drop, before importing any optional provider code or reading the key.
+    """
+    if os.geteuid() != GENERATOR:
+        raise ProtectedProductError("wrong generator UID")
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+
+    def call(number: int, *args: object) -> int:
+        value = libc.syscall(number, *args)
+        if value < 0:
+            raise ProtectedProductError("generator egress Landlock unavailable")
+        return int(value)
+
+    if call(444, ctypes.c_void_p(), ctypes.c_size_t(), ctypes.c_uint(1)) < 4:
+        raise ProtectedProductError("generator Landlock ABI4 required")
+    # Handle TCP CONNECT globally; explicitly grant only ordinary HTTPS.
+    # DNS UDP does not grant a TCP bypass and creates no CDP browser route.
+    ruleset = _LandlockRuleset(0, 2)
+    fd = call(444, ctypes.byref(ruleset), ctypes.sizeof(ruleset), ctypes.c_uint(0))
+    try:
+        https = _LandlockPort(2, 443)
+        call(445, ctypes.c_int(fd), ctypes.c_int(2),
+             ctypes.byref(https), ctypes.c_uint(0))
+        call(446, ctypes.c_int(fd), ctypes.c_uint(0))
+    finally:
+        os.close(fd)
+
+
 def _private_network() -> int:
     host_fd = os.open("/proc/self/ns/net", os.O_RDONLY | os.O_CLOEXEC)
     guest_fd = None
@@ -339,6 +372,8 @@ def _spawn(module: str, uid: int, *, net: int | None,
             _drop(uid, network_fd=net)
             if ingress:
                 _ingress_landlock()
+            elif module == "mark_api.protected_generation":
+                _generator_egress_landlock()
         return subprocess.Popen(
             argv, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE if ingress else subprocess.DEVNULL,
@@ -491,7 +526,8 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
     if (type(cdp_port) is not int or not 1 <= cdp_port <= 65535
             or type(sync_interval) is not int or
             sync_interval != 0 and not 60 <= sync_interval <= 86400
-            or type(enable_generation) is not bool):
+            or type(enable_generation) is not bool
+            or (enable_generation and cdp_port == 443)):
         raise ProtectedProductError("invalid CDP port/sync cadence")
     generation_key = admitted("generation admission failed", _generation_admission) if enable_generation else None
     admitted("state root inspection failed", _root_path, root, fresh=init_new)
