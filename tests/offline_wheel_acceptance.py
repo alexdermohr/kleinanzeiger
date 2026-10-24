@@ -268,6 +268,23 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
             self.assertEqual(imported.returncode, 0, imported.stderr)
             self.assertIn(str(venv), imported.stdout)
 
+            # Exercise the independently observed stateful synthetic HTTP
+            # gallery using the installed wheel, never src/checkout imports.
+            # The local peer substitutes for public HTTPS; protected native
+            # UID/CDP admission is verified by the separate installed test.
+            stateful_test = root / "stateful-media-readback-test.py"
+            shutil.copyfile(
+                Path(__file__).with_name("test_protected_media_stateful_readback.py"),
+                stateful_test,
+            )
+            stateful = _command(
+                str(python), "-I", str(stateful_test), cwd=root, env=env,
+                timeout=30,
+            )
+            self.assertEqual(stateful.returncode, 0, stateful.stderr[-1600:])
+            self.assertIn("Ran 1 test", stateful.stderr)
+            self.assertIn("OK", stateful.stderr)
+
             database = root / "mark.sqlite"
             missing = root / "not-created.sqlite"
             refused = _command(
