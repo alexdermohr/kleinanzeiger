@@ -70,6 +70,7 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/json/list":
+            self.server.discoveries += 1
             body = json.dumps([{"type": "page", "id": "synthetic-owner",
                 "webSocketDebuggerUrl":
                 "ws://127.0.0.1:19322/devtools/page/synthetic-owner"}]).encode()
@@ -89,6 +90,7 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
         proof = base64.b64encode(hashlib.sha1(
             (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
         ).digest()).decode()
+        self.server.upgrades += 1
         self.send_response(101, "Switching Protocols")
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -147,9 +149,11 @@ class SyntheticCDP(ThreadingHTTPServer):
     def __init__(self):
         super().__init__(("127.0.0.1", 19322), _SyntheticCDPHandler)
         self.commands = []
+        self.discoveries = 0
+        self.upgrades = 0
 
 
-def inventory_confirmed():
+def inventory_confirmed(cdp):
     deadline = monotonic() + 12
     while monotonic() < deadline:
         try:
@@ -160,12 +164,12 @@ def inventory_confirmed():
             if attempt.get("outcome") == "success_nonempty":
                 break
             if attempt.get("outcome") == "failed":
-                raise AssertionError("synthetic real CDP inventory read failed")
+                raise AssertionError("real CDP sync failed d=%d ws=%d calls=%d" % (cdp.discoveries, cdp.upgrades, len(cdp.commands)))
         except (OSError, TimeoutError):
             pass
         sleep(.1)
     else:
-        raise AssertionError("real CDP inventory not persisted")
+        raise AssertionError("real CDP sync timeout d=%d ws=%d calls=%d" % (cdp.discoveries, cdp.upgrades, len(cdp.commands)))
     with closing(HTTPConnection("127.0.0.1", 8875, timeout=2)) as client:
         client.request("GET", "/api/ads")
         reply = client.getresponse()
@@ -270,9 +274,18 @@ def admission(net_before, pid_before):
         worker = Thread(target=cdp.serve_forever, daemon=True)
         worker.start()
         try:
+            # Real production CDP transport: verify this test-only wire server
+            # before interpreting an actor/owner sync failure as product error.
+            from mark_api.private_web_inventory_cdp import CdpManagementInventoryReader
+            from mark_api.results import ReadStatus
+            probe = CdpManagementInventoryReader(cdp_port=19322)
+            observed = probe.read_ads()
+            probe.close()
+            check(observed.status is ReadStatus.SUCCESS_NONEMPTY,
+                  "synthetic CDP peer protocol failed: " + observed.status.value)
             child, first_token = start(binary, root, init_new=True, sync_interval=60)
             dashboard_ready()
-            inventory_confirmed()
+            inventory_confirmed(cdp)
             roles = child_roles(child.pid)
             host_net = os.readlink("/proc/self/ns/net")
             namespaces = {
@@ -300,7 +313,7 @@ def admission(net_before, pid_before):
                       "old protected role still active after successful shutdown")
 
             child, second_token = start(binary, root, init_new=False, sync_interval=60)
-            inventory_confirmed()
+            inventory_confirmed(cdp)
             check(first_token != second_token, "restart reused customer UI credential")
             dashboard_ready()
             check((db.stat().st_dev, db.stat().st_ino) == first_inode,
