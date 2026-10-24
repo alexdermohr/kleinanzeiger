@@ -22,7 +22,9 @@ from .container_draft import container_draft_denied
 from .paired_backup_operator import (
     _read_head, _validate_anchored_history,
 )
-from .paired_restore_preflight import verify_offline_pair, _no_sidecars
+from .paired_restore_preflight import (
+    verify_offline_pair, _no_sidecars, _manifest, _MAX_MANIFEST, _pinned_file,
+)
 
 
 class ProtectedPairError(RuntimeError):
@@ -307,6 +309,19 @@ def restore(backup_root: Path, target: Path, *,
     )
     if verified["generation"] != record["generation"]:
         raise ProtectedPairError("backup pair generation not verified")
+    # The public preflight receipt deliberately reports only fence counts:
+    # it does NOT carry per-image SHA fields. Bind restored bytes to the
+    # independently anchored, size-bounded canonical manifest instead of
+    # inventing hashes from the copied target.
+    with _pinned_file(generation / "manifest.json") as fd:
+        length = os.fstat(fd).st_size
+        if not 1 <= length <= _MAX_MANIFEST:
+            raise ProtectedPairError("anchored pair manifest length invalid")
+        anchored = _manifest(
+            os.pread(fd, length, 0), record["manifest_sha256"],
+        )
+    if anchored["generation"] != record["generation"]:
+        raise ProtectedPairError("anchored pair generation mismatched")
     product._uids_free()
     product._root_path(target, fresh=True)
     os.mkdir(target, 0o755)
@@ -325,8 +340,8 @@ def restore(backup_root: Path, target: Path, *,
             image, output, source_uid=0, destination_uid=uid,
         )
         expected = (
-            verified["sqlite_sha256"]
-            if uid == product.OWNER else verified["witness_sha256"]
+            anchored["sqlite_sha256"]
+            if uid == product.OWNER else anchored["witness_sha256"]
         )
         if observed != expected:
             raise ProtectedPairError("restored file digest mismatch")
