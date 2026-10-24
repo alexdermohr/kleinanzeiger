@@ -15,6 +15,7 @@ import argparse
 import ctypes
 from contextlib import closing
 import fcntl
+import importlib.util
 from http.client import HTTPConnection
 import json
 import os
@@ -35,6 +36,7 @@ from urllib.parse import quote
 from .container_draft import container_draft_denied
 
 FRONTEND, WITNESS, ACTOR, INGRESS, OWNER = 50042, 50043, 50044, 50045, 50046
+GENERATOR = 50047
 PRINCIPAL = "kleinanzeiger-protected-local"
 PORT = 8875
 DIRS = {
@@ -116,6 +118,7 @@ def _paths(root: Path) -> dict[str, Path]:
         "dashboard": root / "dashboard-rpc" / "d.sock",
         "ingress": root / "ingress-rpc" / "frontend.sock",
         "media": root / "actor-media" / "handles",
+        "generation": root / "generation-rpc" / "g.sock",
         "lock": root / ".protected.lock",
     }
 
@@ -137,6 +140,40 @@ def _attest_existing(root: Path) -> None:
     for key in ("wo", "wa", "actor", "dashboard", "ingress"):
         if paths[key].exists() or paths[key].is_symlink():
             raise ProtectedProductError("stale socket requires independent reconciliation")
+
+
+def _generation_admission() -> str:
+    # Never create or mutate a customer database when opted-in provider
+    # credentials/dependencies are missing. No paid provider contact here.
+    key = os.environ.get("OPENAI_API_KEY")
+    if (type(key) is not str or not 16 <= len(key) <= 4096
+            or any(not 33 <= ord(char) <= 126 for char in key)):
+        raise ProtectedProductError("generation credential unavailable")
+    try:
+        if importlib.util.find_spec("openai") is None:
+            raise ImportError()
+        from openai import OpenAI
+        if not callable(OpenAI):
+            raise ImportError()
+    except Exception:
+        raise ProtectedProductError("generation SDK unavailable") from None
+    return key
+
+
+def _generation_directory(root: Path) -> None:
+    # Optional opt-in directory is separate from the five-role baseline; a
+    # previous installation can enable AI without recutting SQLite/Witness.
+    path = root / "generation-rpc"
+    if not path.exists() and not path.is_symlink():
+        os.mkdir(path, 0o700)
+        os.chown(path, GENERATOR, FRONTEND)
+        os.chmod(path, 0o2710)
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode)
+            or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+               != (GENERATOR, FRONTEND, 0o2710)
+            or (path / "g.sock").exists() or (path / "g.sock").is_symlink()):
+        raise ProtectedProductError("generation worker directory invalid")
 
 
 def _drop(uid: int, network_fd: int | None = None) -> None:
@@ -203,10 +240,12 @@ def _private_network() -> int:
         os.close(host_fd)
 
 
-def _uids_free() -> None:
+def _uids_free(*, include_generator: bool = False) -> None:
     # Necessary check before a fresh start, not a substitute for independently
     # witnessed host-/PID-namespace history and writable FD/MAP_SHARED cutover.
     target = {FRONTEND, WITNESS, ACTOR, INGRESS, OWNER}
+    if include_generator:
+        target.add(GENERATOR)
     for proc in Path("/proc").iterdir():
         if not proc.name.isdecimal():
             continue
@@ -408,7 +447,7 @@ def _stop(children: list[tuple[str, subprocess.Popen]]) -> bool:
             if child.poll() is None:
                 child.send_signal(signal.SIGTERM)
             try:
-                child.wait(timeout=90 if name == "owner" else 35)
+                child.wait(timeout=150 if name == "generation" else 90 if name == "owner" else 35)
                 if child.returncode != 0:
                     success = False
             except subprocess.TimeoutExpired:
@@ -435,7 +474,7 @@ def _stop(children: list[tuple[str, subprocess.Popen]]) -> bool:
 
 
 def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
-        sync_interval: int = 300) -> int:
+        sync_interval: int = 300, enable_generation: bool = False) -> int:
     # Emit only static phase names on unexpected host/runtime errors. The
     # customer-facing CLI never logs a UID token, secret, path or traceback.
     def admitted(label, operation, *args, **kwargs):
@@ -451,10 +490,12 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
         raise ProtectedProductError("draft cannot start protected product")
     if (type(cdp_port) is not int or not 1 <= cdp_port <= 65535
             or type(sync_interval) is not int or
-            sync_interval != 0 and not 60 <= sync_interval <= 86400):
+            sync_interval != 0 and not 60 <= sync_interval <= 86400
+            or type(enable_generation) is not bool):
         raise ProtectedProductError("invalid CDP port/sync cadence")
+    generation_key = admitted("generation admission failed", _generation_admission) if enable_generation else None
     admitted("state root inspection failed", _root_path, root, fresh=init_new)
-    admitted("service UID census failed", _uids_free)
+    admitted("service UID census failed", _uids_free, include_generator=enable_generation)
     if init_new:
         admitted("fresh state provisioning failed", _initialize, root)
     else:
@@ -478,6 +519,9 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
             raise ProtectedProductError("private network namespace unavailable") from None
         api = secrets.token_urlsafe(48)
         ui = secrets.token_urlsafe(48)
+        gen_ui = secrets.token_urlsafe(48) if enable_generation else None
+        if enable_generation:
+            admitted("generation directory admission failed", _generation_directory, root)
 
         def start(name: str, module: str, uid: int,
                   payload: dict[str, object], *, private: bool):
@@ -520,14 +564,28 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
             "media_enabled": True, "write_port": 0,
             "sync_interval_seconds": sync_interval,
         }, private=True)
-        frontend = start("frontend", "mark_api.protected_frontend", FRONTEND, {
+        if enable_generation:
+            start("generation", "mark_api.protected_generation", GENERATOR, {
+                "socket": str(paths["generation"]),
+                "frontend_uid": FRONTEND,
+                "generation_key": generation_key,
+            }, private=False)
+        frontend_payload = {
             "owner_socket": str(paths["dashboard"]),
             "owner_uid": OWNER, "principal": PRINCIPAL,
             "owner_port": owner["port"], "api_token": api,
             "ui_token": ui, "dashboard_port": 0,
             "ingress_socket": str(paths["ingress"]),
             "ingress_uid": INGRESS, "ingress_gid": INGRESS,
-        }, private=True)
+        }
+        if enable_generation:
+            frontend_payload.update({
+                "generation_token": gen_ui,
+                "generation_socket": str(paths["generation"]),
+                "generator_uid": GENERATOR,
+            })
+        frontend = start("frontend", "mark_api.protected_frontend", FRONTEND,
+                         frontend_payload, private=True)
         if frontend["port"] == owner["port"]:
             raise ProtectedProductError("backend and dashboard shared a port")
         try:
@@ -553,8 +611,11 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
                     pass
             Thread(target=discard_ingress_stderr, daemon=True).start()
         # The write token is only in a fragment, not the server HTTP logs.
+        public_fragment = "write_token=" + quote(ui, safe="")
+        if gen_ui is not None:
+            public_fragment += "&generation_token=" + quote(gen_ui, safe="")
         print("Kleinanzeiger: http://127.0.0.1:" + str(PORT)
-              + "/#write_token=" + quote(ui, safe=""), flush=True)
+              + "/#" + public_fragment, flush=True)
         while not stopped[0]:
             if any(process.poll() is not None for _, process in children):
                 raise ProtectedProductError("protected role terminated")
@@ -580,12 +641,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="One-time NEW owner/Witness store; never import legacy state")
     parser.add_argument("--cdp-port", type=int, default=9222)
     parser.add_argument("--sync-interval", type=int, default=300)
+    parser.add_argument("--enable-generation", action="store_true",
+                        help="Opt-in prompt generation with per-request provider cost consent")
     args = parser.parse_args(argv)
     old_umask = os.umask(0o077)
     try:
         try:
             return run(root=args.state_root, init_new=args.init_new,
-                       cdp_port=args.cdp_port, sync_interval=args.sync_interval)
+                       cdp_port=args.cdp_port, sync_interval=args.sync_interval,
+                       enable_generation=args.enable_generation)
         except ProtectedProductError as error:
             # All these error messages are authored static admission phases.
             print("Kleinanzeiger: protected customer startup unavailable ("

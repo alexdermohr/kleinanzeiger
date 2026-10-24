@@ -132,6 +132,15 @@ jobs:
           sudo -n "$isolated/venv/bin/python" -m pip install \
             --no-index --find-links "$RUNNER_TEMP/mark-wheels" \
             'websocket-client>=1.8,<2' 'Pillow>=10.4,<13'
+          # The native 6-UID opt-in AI path runs against a dedicated
+          # non-network SDK stub copied ONLY into this disposable test venv.
+          # Neither a provider credential nor the real OpenAI SDK is called.
+          sitepkg="$(sudo -n "$isolated/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+          [[ "$sitepkg" == "$isolated/venv/"*"/site-packages" ]]
+          test ! -e "$sitepkg/openai"
+          sudo -n install -d -o root -g root -m 0755 "$sitepkg/openai"
+          sudo -n install -o root -g root -m 0444 \
+            tests/synthetic_openai_sdk_stub.py "$sitepkg/openai/__init__.py"
           sudo -n install -o root -g root -m 0444 \
             tests/protected_product_uid_acceptance.py "$isolated/acceptance.py"
           report="$RUNNER_TEMP/kleinanzeiger-installed-protected-start.log"
@@ -151,4 +160,5 @@ jobs:
           grep -Fq '"protected_cdp_synthetic_content_write_attested":true' "$report"
           grep -Fq '"protected_cdp_synthetic_delete_write_attested":true' "$report"
           grep -Fq '"protected_cdp_synthetic_create_write_attested":true' "$report"
+          grep -Fq '"protected_synthetic_ai_generation_attested":true' "$report"
           grep -Fq '"legacy_cutover_attested":false' "$report"

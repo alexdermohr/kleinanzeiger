@@ -29,6 +29,7 @@ import mark_api
 
 UIDS = {"frontend":50042, "witness":50043, "actor":50044,
         "ingress":50045, "owner":50046}
+GENERATOR_UID = 50047
 
 
 def check(condition, reason):
@@ -36,8 +37,11 @@ def check(condition, reason):
         raise AssertionError(reason)
 
 
-def child_roles(supervisor_pid):
+def child_roles(supervisor_pid, *, include_generation=False):
     roles = {}
+    expected_roles = dict(UIDS)
+    if include_generation:
+        expected_roles["generation"] = GENERATOR_UID
     for path in Path("/proc").iterdir():
         if not path.name.isdecimal():
             continue
@@ -52,11 +56,11 @@ def child_roles(supervisor_pid):
         if fields.get("PPid") != [str(supervisor_pid)]:
             continue
         uid = int(fields["Uid"][1])
-        for role, expected in UIDS.items():
+        for role, expected in expected_roles.items():
             if uid == expected:
                 check(role not in roles, "duplicate protected role UID")
                 roles[role] = int(path.name)
-    check(set(roles) == set(UIDS), "five installed role processes not found")
+    check(set(roles) == set(expected_roles), "installed protected role count/UID mismatch")
     return roles
 
 
@@ -548,6 +552,60 @@ def synthetic_create_write(cdp, token):
     ), "real CDP publish missing from protected owner SQLite/dashboard")
 
 
+
+def synthetic_ai_generation_drafts(token, cdp):
+    from mark_api.generation import _validate_png_payload
+    base = "http://127.0.0.1:8875"
+    calls_before = tuple(cdp.commands)
+
+    with closing(HTTPConnection("127.0.0.1", 8875, timeout=5)) as http:
+        http.request("GET", "/api/dashboard/config")
+        reply = http.getresponse()
+        config = json.loads(reply.read())
+    check(reply.status == 200
+          and config.get("generation_ui_available") is True
+          and config.get("write_ui_available") is True,
+          "installed protected customer AI draft panel unavailable")
+
+    def call(mode, prompt, *, consent=True, token_override=None):
+        request = json.dumps({"mode": mode, "prompt": prompt,
+                              "acknowledge_provider_cost": consent}).encode()
+        headers = {
+            "Origin": base,
+            "Content-Type": "application/json",
+            "X-Mark-Generation": "1",
+            "X-Mark-Generation-Token": token if token_override is None else token_override,
+        }
+        with closing(HTTPConnection("127.0.0.1", 8875, timeout=15)) as http:
+            http.request("POST", "/api/dashboard/generate", body=request,
+                         headers=headers)
+            response = http.getresponse()
+            return response.status, dict(response.headers), response.read()
+
+    status, _, invalid = call("text", "Synthetischer Schrank", consent=False)
+    check(status == 400 and b"invalid_generation_request" in invalid,
+          "provider cost consent was not enforced")
+    status, _, denied = call("text", "Synthetischer Schrank",
+                             token_override="wrong-test-only-token")
+    check(status == 403 and b"generation_session_required" in denied,
+          "generation token access not independently enforced")
+    status, _, result = call("text", "Synthetischer Schrank")
+    check(status == 200, "protected installed text generation unavailable")
+    draft = json.loads(result)
+    check(draft == {
+        "title": "Synthetic generated title",
+        "description": "Synthetic generated description, no publication.",
+        "status": "draft", "published": False,
+    }, "installed generated text was not a nonpublished draft")
+
+    status, headers, png = call("image", "Synthetisches Schrankbild")
+    check(status == 200 and headers.get("Content-Type") == "image/png",
+          "protected installed generated image missing")
+    _validate_png_payload(png)
+    check(tuple(cdp.commands) == calls_before,
+          "draft generation performed an unintended platform CDP action")
+
+
 def dashboard_ready():
     with closing(HTTPConnection("127.0.0.1", 8875, timeout=4)) as client:
         client.request("GET", "/readyz")
@@ -567,16 +625,24 @@ def dashboard_ready():
         check(response.status == 200, "protected stored-inventory UI not available")
 
 
-def start(binary, root, init_new, *, sync_interval=0):
+def start(binary, root, init_new, *, sync_interval=0,
+          enable_generation=False):
     argv = [str(binary), "--state-root", str(root), "--cdp-port", "19322",
             "--sync-interval", str(sync_interval)]
     if init_new:
         argv.append("--init-new")
+    if enable_generation:
+        argv.append("--enable-generation")
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C.UTF-8"}
+    if enable_generation:
+        # This accepted test-only credential reaches the installed SDK stub,
+        # never an external provider. Real customer credentials are absent.
+        env["OPENAI_API_KEY"] = "synthetic-protected-generation-test-only"
     child = subprocess.Popen(
         argv, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, close_fds=True,
-        env={"PATH":"/usr/bin:/bin","HOME":"/nonexistent","LANG":"C.UTF-8"},
+        env=env,
     )
     check(child.stdout is not None, "product startup pipe missing")
     check(select.select([child.stdout], [], [], 40)[0], "product never printed dashboard URL")
@@ -601,8 +667,14 @@ def start(binary, root, init_new, *, sync_interval=0):
     check(len(fragment.get("write_token",[])) == 1
           and len(fragment["write_token"][0]) >= 40,
           "private UI token missing")
+    generation = fragment.get("generation_token", [])
+    check((len(generation) == 1 and len(generation[0]) >= 40)
+          if enable_generation else not generation,
+          "generation token availability does not match opt-in")
     check(child.poll() is None, "protected product exited after readiness")
-    return child, fragment["write_token"][0]
+    return child, fragment["write_token"][0], (
+        generation[0] if generation else None
+    )
 
 
 def shutdown(child):
@@ -650,7 +722,10 @@ def admission(net_before, pid_before):
             probe.close()
             check(observed.status is ReadStatus.SUCCESS_NONEMPTY,
                   "synthetic CDP peer protocol failed: " + observed.status.value)
-            child, first_token = start(binary, root, init_new=True, sync_interval=60)
+            child, first_token, absent_gen = start(
+                binary, root, init_new=True, sync_interval=60,
+            )
+            check(absent_gen is None, "default product minted unwanted paid provider credential")
             dashboard_ready()
             inventory_confirmed(cdp)
             synthetic_state_write(cdp, first_token, "pause")
@@ -684,7 +759,10 @@ def admission(net_before, pid_before):
                 check(not Path(f"/proc/{pid}").exists(),
                       "old protected role still active after successful shutdown")
 
-            child, second_token = start(binary, root, init_new=False, sync_interval=60)
+            child, second_token, absent_gen = start(
+                binary, root, init_new=False, sync_interval=60,
+            )
+            check(absent_gen is None, "restarted product minted unwanted provider credential")
             inventory_confirmed(cdp)
             check(first_token != second_token, "restart reused customer UI credential")
             dashboard_ready()
@@ -707,6 +785,33 @@ def admission(net_before, pid_before):
                   "old owner data accepted as an untracked fresh install")
             check((db.stat().st_dev, db.stat().st_ino) == first_inode,
                   "invalid fresh attempt changed existing SQLite")
+            # Opt-in on the SAME protected customer store: six real UID roles,
+            # frontend/SQLite remain netless while only generator owns egress.
+            child, third_token, generation_token = start(
+                binary, root, init_new=False, enable_generation=True,
+            )
+            check(third_token not in (first_token, second_token)
+                  and generation_token is not None,
+                  "new protected AI session reused private frontend credentials")
+            dashboard_ready()
+            roles_with_ai = child_roles(child.pid, include_generation=True)
+            ai_nets = {
+                role: os.readlink(f"/proc/{pid}/ns/net")
+                for role, pid in roles_with_ai.items()
+            }
+            current_net = os.readlink("/proc/self/ns/net")
+            check(ai_nets["generation"] == current_net
+                  and ai_nets["actor"] == current_net
+                  and ai_nets["ingress"] == current_net,
+                  "isolated generator does not have its own host-network UID")
+            check(len({ai_nets[k] for k in ("owner", "frontend", "witness")}) == 1
+                  and ai_nets["frontend"] != current_net,
+                  "AI opt-in escaped frontend/owner network isolation")
+            check((db.stat().st_dev, db.stat().st_ino) == first_inode,
+                  "AI opt-in replaced existing customer SQLite")
+            synthetic_ai_generation_drafts(generation_token, cdp)
+            shutdown(child)
+            child = None
         finally:
             if child is not None:
                 child.kill()
@@ -736,6 +841,7 @@ def admission(net_before, pid_before):
         "protected_cdp_synthetic_content_write_attested":True,
         "protected_cdp_synthetic_delete_write_attested":True,
         "protected_cdp_synthetic_create_write_attested":True,
+        "protected_synthetic_ai_generation_attested":True,
         "paid_generation_called":False,
     }, sort_keys=True, separators=(",",":")),flush=True)
 

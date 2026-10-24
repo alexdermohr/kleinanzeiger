@@ -111,6 +111,53 @@ class ProtectedFrontendTests(unittest.TestCase):
                     json.dumps({**cfg, "generation_token": invalid}) + "\n"
                 ).encode()))
 
+    def test_worker_generation_config_rejects_other_uid_and_unexpected_fields(self):
+        from mark_api.protected_generation import ProtectedGenerationClient
+
+        cfg = {**_CONFIG,
+               "generation_token": "safe-generation-session-token-1234567890",
+               "generation_socket": "/tmp/synthetic-generation-worker.sock",
+               "generator_uid": os.geteuid() + 104}
+        self.assertEqual(_read_private_config(self._pipe(
+            (json.dumps(cfg) + "\n").encode())), cfg)
+        for variant in (
+            {**cfg, "generator_uid": os.geteuid()},
+            {**cfg, "generator_uid": cfg["owner_uid"]},
+            {**cfg, "generator_uid": True},
+            {**cfg, "generation_socket": "relative/worker.sock"},
+            {**cfg, "generation_socket": "/tmp/../tmp/worker.sock"},
+            {**cfg, "generation_socket": cfg["owner_socket"]},
+            {**cfg, "generator_uid": 0},
+            {**cfg, "unexpected": "injected"},
+        ):
+            with self.subTest(variant=repr(variant)[:80]), self.assertRaises(ValueError):
+                _read_private_config(self._pipe((json.dumps(variant) + "\n").encode()))
+
+    def test_worker_generation_never_requires_secret_or_sdk_in_netless_frontend(self):
+        from mark_api.protected_generation import ProtectedGenerationClient
+        cfg = {**_CONFIG,
+               "generation_token": "safe-generation-session-token-1234567890",
+               "generation_socket": "/tmp/synthetic-generation-worker.sock",
+               "generator_uid": os.geteuid() + 104}
+        server = MagicMock(server_port=18875)
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), patch(
+            "mark_api.protected_frontend.create_protected_frontend_server",
+            return_value=server,
+        ) as compose, redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["--config-fd", str(self._pipe(
+                (json.dumps(cfg) + "\n").encode()))]), 0)
+        access = compose.call_args.kwargs["generation_access"]
+        self.assertIsInstance(access, DashboardGenerationAccess)
+        self.assertEqual(access.ui_token, cfg["generation_token"])
+        delegated = access._factory()
+        self.assertIsInstance(delegated, ProtectedGenerationClient)
+        self.assertEqual(delegated.worker_uid, cfg["generator_uid"])
+        self.assertEqual(str(delegated.path), cfg["generation_socket"])
+        self.assertNotIn(cfg["generation_token"], out.getvalue())
+        server.serve_forever.assert_called_once()
+        server.server_close.assert_called_once()
+
+
     def test_protected_generation_uses_existing_dashboard_gate(self):
         token = "synthetic-generation-session-987654321"
         access = DashboardGenerationAccess(ui_token=token)

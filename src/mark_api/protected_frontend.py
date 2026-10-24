@@ -22,6 +22,7 @@ from .strict_json import strict_json_object
 _FIELDS = frozenset(("owner_socket", "owner_uid", "principal", "owner_port",
                      "api_token", "ui_token", "dashboard_port"))
 _GENERATION_FIELDS = _FIELDS | {"generation_token"}
+_GENERATOR_FIELDS = _GENERATION_FIELDS | {"generation_socket", "generator_uid"}
 _INGRESS_FIELDS = frozenset(("ingress_socket", "ingress_uid", "ingress_gid"))
 _INGRESS_PORT = 8875
 _LIMIT = 8192
@@ -69,7 +70,8 @@ def _read_private_config(fd: int) -> dict[str, object]:
         raise ValueError("invalid protected frontend configuration")
     config = strict_json_object(raw[:-1])
     if set(config) not in (_FIELDS, _GENERATION_FIELDS, _FIELDS | _INGRESS_FIELDS,
-                           _GENERATION_FIELDS | _INGRESS_FIELDS) or type(config["owner_socket"]) is not str:
+                           _GENERATION_FIELDS | _INGRESS_FIELDS,
+                           _GENERATOR_FIELDS, _GENERATOR_FIELDS | _INGRESS_FIELDS) or type(config["owner_socket"]) is not str:
         raise ValueError("invalid protected frontend configuration")
     if not config["owner_socket"].startswith("/"):
         raise ValueError("invalid protected frontend configuration")
@@ -92,6 +94,16 @@ def _read_private_config(fd: int) -> dict[str, object]:
         if (type(token) is not str or not 16 <= len(token) <= 512
                 or any(not 0x21 <= ord(char) <= 0x7E for char in token)):
             raise ValueError("invalid private generation token")
+    if "generation_socket" in config:
+        location = config["generation_socket"]
+        uid = config["generator_uid"]
+        if (type(location) is not str or not location.startswith("/")
+                or Path(location) != Path(os.path.normpath(location))
+                or Path(location) == Path(config["owner_socket"])
+                or location == config.get("ingress_socket")
+                or type(uid) is not int or uid <= 0
+                or uid in (os.geteuid(), config["owner_uid"], config.get("ingress_uid"))):
+            raise ValueError("invalid private generator identity")
     return config
 
 
@@ -118,19 +130,34 @@ def main(argv: list[str] | None = None) -> int:
     generation_access = None
     generation_token = config.get("generation_token")
     if generation_token is not None:
-        if not os.environ.get("OPENAI_API_KEY"):
-            print("Kleinanzeiger: protected frontend unavailable (generation credential missing)",
-                  file=sys.stderr)
-            return 2
-        try:
-            from openai import OpenAI as sdk
-            if not callable(sdk):
-                raise TypeError("generation SDK unavailable")
-        except Exception:
-            print("Kleinanzeiger: protected frontend unavailable (generation SDK missing)",
-                  file=sys.stderr)
-            return 2
-        generation_access = DashboardGenerationAccess(ui_token=generation_token)
+        if "generation_socket" in config:
+            # Protected installs keep frontend netless and credential-free.
+            # A separate peer-verified worker handles each explicitly
+            # consented provider call, never a marketplace Write.
+            from .protected_generation import ProtectedGenerationClient
+            socket_path = Path(config["generation_socket"])
+            worker_uid = config["generator_uid"]
+            generation_access = DashboardGenerationAccess(
+                ui_token=generation_token,
+                generator_factory=lambda: ProtectedGenerationClient(
+                    socket_path=socket_path, worker_uid=worker_uid,
+                ),
+            )
+        else:
+            # Legacy individually provisioned frontend composition.
+            if not os.environ.get("OPENAI_API_KEY"):
+                print("Kleinanzeiger: protected frontend unavailable (generation credential missing)",
+                      file=sys.stderr)
+                return 2
+            try:
+                from openai import OpenAI as sdk
+                if not callable(sdk):
+                    raise TypeError("generation SDK unavailable")
+            except Exception:
+                print("Kleinanzeiger: protected frontend unavailable (generation SDK missing)",
+                      file=sys.stderr)
+                return 2
+            generation_access = DashboardGenerationAccess(ui_token=generation_token)
     try:
         server = create_protected_frontend_server(
             owner_socket=Path(config["owner_socket"]),

@@ -154,6 +154,102 @@ class ProtectedProductTests(unittest.TestCase):
         self.assertIn("#write_token=", stdout.getvalue())
         self.assertNotIn(configs[2][3]["bearer_token"], stdout.getvalue())
 
+    def test_optin_missing_provider_fails_before_customer_state_creation(self):
+        with patch("mark_api.protected_product._root_admission"), patch.dict(
+            os.environ, {"OPENAI_API_KEY": ""}
+        ), patch("mark_api.protected_product._initialize") as initialize, patch(
+            "mark_api.protected_product._root_path"
+        ) as path, patch("mark_api.protected_product._spawn") as child:
+            with self.assertRaisesRegex(
+                product.ProtectedProductError, "generation credential unavailable",
+            ):
+                product.run(root=Path("/tmp/synthetic-new-product"),
+                            init_new=True, enable_generation=True)
+            initialize.assert_not_called()
+            path.assert_not_called()
+            child.assert_not_called()
+
+    def test_optin_launch_wires_sixth_uid_only_host_network_for_provider(self):
+        configs = []
+        children = []
+
+        class Child:
+            def __init__(self, name):
+                self.name = name
+                self.returncode = None
+                self.stdout = io.BytesIO()
+            def poll(self):
+                return None
+            def wait(self, timeout=None):
+                self.returncode = 0
+            def send_signal(self, sig):
+                self.returncode = 0
+            def kill(self):
+                self.returncode = 2
+
+        def spawn(module, uid, *, net=None, config=None, args=(), ingress=False):
+            name = module.rsplit(".", 1)[-1]
+            configs.append((name, uid, net, config, args, ingress))
+            proc = Child(name)
+            children.append(proc)
+            return proc
+
+        def ready(child, uid):
+            return {"ready": True, "uid": uid,
+                    "port": 18333 if uid == product.OWNER else 18444}
+
+        def mark_stop(_duration):
+            if len(children) == 6:
+                raise KeyboardInterrupt("synthetic shutdown")
+
+        root = Path("/tmp/synthetic-protected-optin")
+        with patch("mark_api.protected_product._root_admission"), patch(
+            "mark_api.protected_product._generation_admission",
+            return_value="synthetic-nonbillable-provider-key",
+        ), patch("mark_api.protected_product._root_path"), patch(
+            "mark_api.protected_product._uids_free"
+        ) as census, patch("mark_api.protected_product._attest_existing"), patch(
+            "mark_api.protected_product._generation_directory"
+        ) as directory, patch(
+            "mark_api.protected_product._lock",
+            side_effect=lambda _root: os.open(os.devnull, os.O_RDONLY),
+        ), patch("mark_api.protected_product._private_network",
+                 side_effect=lambda: os.open(os.devnull, os.O_RDONLY)), patch(
+            "mark_api.protected_product._spawn", side_effect=spawn,
+        ), patch("mark_api.protected_product._ready", side_effect=ready), patch(
+            "mark_api.protected_product._ready_ingress",
+        ), patch("mark_api.protected_product.sleep",
+                 side_effect=mark_stop), patch(
+            "signal.signal", return_value=signal.SIG_DFL,
+        ), redirect_stdout(io.StringIO()) as stdout:
+            with self.assertRaises(KeyboardInterrupt):
+                product.run(root=root, sync_interval=0, enable_generation=True)
+
+        census.assert_called_once_with(include_generator=True)
+        directory.assert_called_once_with(root)
+        self.assertEqual([x[0] for x in configs], [
+            "protected_witness", "protected_actor", "protected_owner",
+            "protected_generation", "protected_frontend", "dashboard_relay",
+        ])
+        generator, frontend = configs[3], configs[4]
+        self.assertEqual(generator[1], product.GENERATOR)
+        self.assertIsNone(generator[2])
+        self.assertIsInstance(frontend[2], int)
+        self.assertEqual(generator[3]["generation_key"],
+                         "synthetic-nonbillable-provider-key")
+        self.assertEqual(generator[3]["frontend_uid"], product.FRONTEND)
+        self.assertEqual(frontend[3]["generator_uid"], product.GENERATOR)
+        self.assertEqual(frontend[3]["generation_socket"],
+                         generator[3]["socket"])
+        self.assertNotIn("generation_key", frontend[3])
+        self.assertIn("#write_token=", stdout.getvalue())
+        self.assertIn("&generation_token=", stdout.getvalue())
+        self.assertNotIn(generator[3]["generation_key"], stdout.getvalue())
+        self.assertNotIn(generator[3]["generation_key"], str(generator[4]))
+        self.assertNotIn(generator[3]["generation_key"], str(frontend[3]))
+        self.assertNotEqual(frontend[3]["generation_token"],
+                            frontend[3]["ui_token"])
+
     def test_noncanonical_state_root_fails_closed_before_db_creation(self):
         for raw in ("relative/data", "/tmp/../var/lib/test", "/tmp/../../var/lib/test"):
             with self.subTest(path=raw), self.assertRaises(
