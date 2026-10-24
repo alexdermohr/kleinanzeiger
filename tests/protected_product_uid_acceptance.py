@@ -118,7 +118,15 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                 self.server.commands.append(method)
                 answer = {"error": {"code": -32601, "message": "not admitted"}}
                 if method == "Page.navigate":
-                    if params.get("url") == "https://www.kleinanzeigen.de/m-meine-anzeigen.html":
+                    url = params.get("url")
+                    if url == "https://www.kleinanzeigen.de/m-meine-anzeigen.html":
+                        self.server.page = "/m-meine-anzeigen.html"
+                        answer = {"result": {}}
+                    elif url == ("https://www.kleinanzeigen.de/"
+                                 "p-anzeige-bearbeiten.html?adId=1234567890"):
+                        self.server.page = "/p-anzeige-bearbeiten.html"
+                        self.server.draft_title = self.server.title
+                        self.server.draft_description = self.server.description
                         answer = {"result": {}}
                 elif method == "Input.dispatchMouseEvent":
                     if (params.get("type") == "mousePressed"
@@ -126,17 +134,26 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                         self.server.presses += 1
                         answer = {"result": {}}
                     elif (params.get("type") == "mouseReleased"
-                            and self.server.presses == self.server.releases + 1
-                            and self.server.pending_state in ("active", "paused")):
-                        self.server.releases += 1
-                        self.server.state = self.server.pending_state
-                        self.server.pending_state = None
-                        answer = {"result": {}}
+                            and self.server.presses == self.server.releases + 1):
+                        if self.server.pending_state in ("active", "paused"):
+                            self.server.state = self.server.pending_state
+                            self.server.pending_state = None
+                            self.server.releases += 1
+                            answer = {"result": {}}
+                        elif (self.server.pending_content
+                              and self.server.page == "/p-anzeige-bearbeiten.html"):
+                            self.server.title = self.server.draft_title
+                            self.server.description = self.server.draft_description
+                            self.server.pending_content = False
+                            self.server.content_submits += 1
+                            self.server.page = "/m-meine-anzeigen.html"
+                            self.server.releases += 1
+                            answer = {"result": {}}
                 elif method == "Runtime.evaluate" and params.get("awaitPromise") is True:
                     expression = params["expression"]
                     if "pageNum=1" in expression and 'credentials: "same-origin"' in expression:
                         ads = {"ads": [{"id": "1234567890",
-                            "title": "Synthetic CDP vase", "state": self.server.state,
+                            "title": self.server.title, "state": self.server.state,
                             "viewCount": 7, "watchCount": 2}],
                             "paging": {"last": 1}}
                         answer = {"result": {"result": {"type": "object", "value": {
@@ -144,11 +161,37 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                 elif method == "Runtime.evaluate":
                     expression = params.get("expression", "")
                     value = None
-                    if ("__mark_private_web_state_navigation_probe_" in expression
+                    if (("__mark_private_web_state_navigation_probe_" in expression
+                         or "__mark_private_web_navigation_probe_" in expression)
                             and "globalThis[key] = true" in expression):
                         value = True
                     elif "oldDocument: globalThis[" in expression:
                         value = {"readyState": "complete", "oldDocument": False}
+                    elif ("const saveButtons =" in expression
+                          and "const adId = new URL(location.href)" in expression
+                          and self.server.page == "/p-anzeige-bearbeiten.html"):
+                        value = {"state": "ready", "ad_id": "1234567890",
+                                 "title": self.server.draft_title,
+                                 "description": self.server.draft_description}
+                    elif ("descriptor.set.call(element," in expression
+                          and self.server.page == "/p-anzeige-bearbeiten.html"):
+                        if ('document.querySelector("#ad-title")' in expression
+                                and 'descriptor.set.call(element, "Edited synthetic vase")' in expression):
+                            self.server.draft_title = "Edited synthetic vase"
+                            value = True
+                        elif ('document.querySelector("#ad-description")' in expression
+                                and 'descriptor.set.call(element, "Edited synthetic description")' in expression):
+                            self.server.draft_description = "Edited synthetic description"
+                            value = True
+                    elif ("const buttons = Array.from(document.querySelectorAll" in expression
+                          and '"Anzeige speichern"' in expression
+                          and "button.scrollIntoView" in expression
+                          and self.server.page == "/p-anzeige-bearbeiten.html"):
+                        self.server.pending_content = True
+                        value = {"x": 120.5, "y": 240.25}
+                    elif ('if (currentPath === "/m-meine-anzeigen.html") return "confirmed"' in expression
+                          and self.server.page == "/m-meine-anzeigen.html"):
+                        value = "confirmed"
                     elif "const expectedControl =" in expression:
                         if 'const expectedControl = "reservieren"' in expression:
                             if self.server.state == "active":
@@ -167,7 +210,10 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                                  "origin": "https://www.kleinanzeigen.de",
                                  "path": "/m-meine-anzeigen.html"}
                     if value is not None:
-                        answer = {"result": {"result": {"type": "object", "value": value}}}
+                        remote_type = ("boolean" if type(value) is bool else
+                                       "string" if type(value) is str else "object")
+                        answer = {"result": {"result": {"type": remote_type,
+                                                         "value": value}}}
                 raw = json.dumps({"id": data["id"], **answer}).encode()
                 head = (bytes((0x81, len(raw))) if len(raw) < 126 else
                         bytes((0x81, 126)) + len(raw).to_bytes(2, "big"))
@@ -190,6 +236,13 @@ class SyntheticCDP(ThreadingHTTPServer):
         self.pending_state = None
         self.presses = 0
         self.releases = 0
+        self.page = "/m-meine-anzeigen.html"
+        self.title = "Synthetic CDP vase"
+        self.description = "Original synthetic description"
+        self.draft_title = self.title
+        self.draft_description = self.description
+        self.pending_content = False
+        self.content_submits = 0
 
 
 def inventory_confirmed(cdp):
@@ -215,7 +268,7 @@ def inventory_confirmed(cdp):
         rows = json.loads(reply.read())
         check(reply.status == 200 and any(
             item.get("ad_id") == "1234567890"
-            and item.get("title") == "Synthetic CDP vase"
+            and item.get("title") == cdp.title
             and item.get("views") == 7 for item in rows
         ), "real CDP inventory absent from protected dashboard")
 
@@ -267,6 +320,48 @@ def synthetic_state_write(cdp, token, action):
         check(ack_status == 200 and ack.get("acknowledged") is True
               and ack.get("finalized") is terminal,
               "protected state write two-phase ACK was not durable")
+
+
+
+def synthetic_content_write(cdp, token):
+    key = "synthetic-real-cdp-content-1234567890"
+    path = "/api/write/ads/1234567890"
+    payload = {"title": "Edited synthetic vase",
+               "description": "Edited synthetic description"}
+    before = (cdp.presses, cdp.releases, cdp.content_submits)
+    status, body, replayed = _dashboard_http(
+        "PATCH", path, token=token, key=key, payload=payload,
+    )
+    check(status == 200 and body.get("operation_receipt", {}).get("outcome") == "confirmed",
+          "protected real CDP content write was not confirmed")
+    check(replayed != "true" and cdp.title == payload["title"]
+          and cdp.description == payload["description"]
+          and (cdp.presses, cdp.releases, cdp.content_submits)
+          == (before[0] + 1, before[1] + 1, before[2] + 1),
+          "real CDP content update was not applied exactly once")
+    repeated, replay_body, replay_flag = _dashboard_http(
+        "PATCH", path, token=token, key=key, payload=payload,
+    )
+    check(repeated == status and replay_body == body and replay_flag == "true"
+          and (cdp.presses, cdp.releases, cdp.content_submits)
+          == (before[0] + 1, before[1] + 1, before[2] + 1),
+          "CDP content write replay performed duplicate browser input")
+    for terminal in (False, True):
+        ack_status, ack, _ = _dashboard_http(
+            "POST", "/api/dashboard/pending-writes/ack", token=token,
+            payload={"scope": "ad:1234567890:update", "idempotency_key": key},
+        )
+        check(ack_status == 200 and ack.get("acknowledged") is True
+              and ack.get("finalized") is terminal,
+              "protected content write two-phase ACK was not durable")
+    with closing(HTTPConnection("127.0.0.1", 8875, timeout=4)) as conn:
+        conn.request("GET", "/api/ads")
+        response = conn.getresponse()
+        rows = json.loads(response.read())
+    check(response.status == 200 and any(
+        row.get("ad_id") == "1234567890"
+        and row.get("title") == payload["title"] for row in rows
+    ), "real CDP content write missing from owner SQLite/dashboard")
 
 
 def dashboard_ready():
@@ -378,6 +473,7 @@ def admission(net_before, pid_before):
             check(cdp.state == "paused", "CDP pause did not change synthetic inventory")
             synthetic_state_write(cdp, first_token, "activate")
             check(cdp.state == "active", "CDP activate did not restore inventory")
+            synthetic_content_write(cdp, first_token)
             roles = child_roles(child.pid)
             host_net = os.readlink("/proc/self/ns/net")
             namespaces = {
@@ -437,8 +533,9 @@ def admission(net_before, pid_before):
     check(cdp.commands.count("Runtime.evaluate") >= 10
           and set(cdp.commands) == {
               "Runtime.evaluate", "Page.navigate", "Input.dispatchMouseEvent",
-          } and cdp.presses == 2 and cdp.releases == 2,
-          "installed actor did not perform exactly two bounded CDP state submits")
+          } and cdp.presses == 3 and cdp.releases == 3
+          and cdp.content_submits == 1,
+          "installed actor did not perform state plus content CDP submits")
     print(json.dumps({
         "result":"PASS", "scope":"installed-protected-fresh-customer-start",
         "real_owner_cli":True,"real_actor_cli":True,
@@ -449,6 +546,7 @@ def admission(net_before, pid_before):
         "legacy_cutover_attested":False,"real_cdp_write_attested":False,
         "real_cdp_inventory_sync_attested":True,
         "protected_cdp_synthetic_state_write_attested":True,
+        "protected_cdp_synthetic_content_write_attested":True,
         "paid_generation_called":False,
     }, sort_keys=True, separators=(",",":")),flush=True)
 
