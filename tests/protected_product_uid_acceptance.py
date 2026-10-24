@@ -127,10 +127,10 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                             "title": "Synthetic CDP vase", "state": "active",
                             "viewCount": 7, "watchCount": 2}],
                             "paging": {"last": 1}}
-                        answer = {"result": {"result": {"value": {
+                        answer = {"result": {"result": {"type": "object", "value": {
                             "status": 200, "body": json.dumps(ads)}}}}
                 else:
-                    answer = {"result": {"result": {"value": {
+                    answer = {"result": {"result": {"type": "object", "value": {
                         "readyState": "complete", "origin": "https://www.kleinanzeigen.de",
                         "path": "/m-meine-anzeigen.html"}}}}
                 raw = json.dumps({"id": data["id"], **answer}).encode()
