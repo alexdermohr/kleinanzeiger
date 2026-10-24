@@ -91,15 +91,19 @@ def start(binary, root, init_new):
     check(select.select([child.stdout], [], [], 40)[0], "product never printed dashboard URL")
     line = child.stdout.readline()
     if not line.startswith("Kleinanzeiger: http://127.0.0.1:8875/#write_token="):
-        if child.poll() is not None:
-            raw = child.stderr.read(512).strip()
-            marker = "Kleinanzeiger: protected customer startup unavailable ("
-            if (raw.startswith(marker) and raw.endswith(")")
-                    and len(raw) < 190
-                    and all(char.isascii() and
-                            (char.isalpha() or char in " -()")
-                            for char in raw)):
-                raise AssertionError(raw)
+        # A read of EOF may precede waitpid by a few milliseconds. Wait for
+        # the actual exit before inspecting only our fixed nonsecret phase.
+        try:
+            child.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("protected startup closed readiness before finishing") from None
+        raw = child.stderr.read(512).strip()
+        marker = "Kleinanzeiger: protected customer startup unavailable ("
+        if raw.startswith(marker) and raw.endswith(")") and len(raw) < 190:
+            phase = raw[len(marker):-1]
+            if phase and all(char.isascii() and (char.isalpha() or char in " -")
+                             for char in phase):
+                raise AssertionError("startup phase: " + phase)
         raise AssertionError("installed protected dashboard URL unavailable")
     parsed = urlsplit(line.strip().split(": ",1)[1])
     fragment = parse_qs(parsed.fragment)
