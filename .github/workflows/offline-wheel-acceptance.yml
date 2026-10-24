@@ -143,13 +143,16 @@ jobs:
             tests/synthetic_openai_sdk_stub.py "$sitepkg/openai/__init__.py"
           sudo -n install -o root -g root -m 0444 \
             tests/protected_product_uid_acceptance.py "$isolated/acceptance.py"
+          # DNS aliases and test CA are bind-mounted only in this new
+          # network/PID/MOUNT namespace; host files stay unchanged.
+          host_mnt="$(readlink /proc/self/ns/mnt)"
           report="$RUNNER_TEMP/kleinanzeiger-installed-protected-start.log"
-          sudo -n unshare --net --pid --fork --mount-proc -- bash -c '
+          sudo -n unshare --net --pid --mount --fork --mount-proc -- bash -c '
             set -euo pipefail
             ip link set lo up
             exec "$1/venv/bin/python" -I "$1/acceptance.py" \
-              --host-net "$2" --host-pid "$3"
-          ' bash "$isolated" "$host_net" "$host_pid" 2>&1 | tee "$report"
+              --host-net "$2" --host-pid "$3" --host-mnt "$4"
+          ' bash "$isolated" "$host_net" "$host_pid" "$host_mnt" 2>&1 | tee "$report"
           grep -Fq '"result":"PASS"' "$report"
           grep -Fq '"scope":"installed-protected-fresh-customer-start"' "$report"
           grep -Fq '"netless_frontend_owner":true' "$report"
@@ -163,6 +166,9 @@ jobs:
           grep -Fq '"protected_cdp_synthetic_create_write_attested":true' "$report"
           grep -Fq '"protected_synthetic_ai_generation_attested":true' "$report"
           grep -Fq '"protected_ai_generated_media_stage_attested":true' "$report"
+          grep -Fq '"protected_cdp_media_positive_https_postread_attested":true' "$report"
+          grep -Fq '"protected_cdp_media_replay_no_duplicate":true' "$report"
+          grep -Fq '"synthetic_public_https_tls_gallery":true' "$report"
           grep -Fq '"legacy_cutover_attested":false' "$report"
       - name: Record the accepted Kleinanzeiger wheel SHA-256
         if: matrix.python_version == '3.12'

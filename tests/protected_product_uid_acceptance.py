@@ -11,18 +11,20 @@ import base64
 from contextlib import closing
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPSConnection
 import json
 import os
 from pathlib import Path
 import select
 import signal
 import socket
+import ssl
 import stat
 import subprocess
 import sys
 import tempfile
 from time import monotonic, sleep
+from threading import Thread
 from urllib.parse import parse_qs, urlsplit
 
 import mark_api
@@ -158,6 +160,132 @@ else:
 
 
 
+# Fixed test-only public gallery: production URL/TLS/galleries are unchanged.
+# Only the disposable root PID/net/MOUNT namespace may install this fixture.
+_SYNTHETIC_MEDIA_AD = "1234567892"
+_SYNTHETIC_IMAGE = (
+    "https://img.kleinanzeigen.de/api/v1/prod-ads/images/"
+    "aa/aa111111-1111-4111-8111-111111111111?rule=$_59.JPG"
+)
+_SYNTHETIC_IMAGE_PATH = urlsplit(
+    _SYNTHETIC_IMAGE.replace("$_59.JPG", "$_57.JPG")
+).path + "?rule=$_57.JPG"
+
+
+def _setup_isolated_synthetic_tls(directory, host_mnt):
+    check(os.getpid() == 1 and os.geteuid() == 0,
+          "synthetic TLS setup requires isolated PID1 root")
+    check(os.readlink("/proc/self/ns/mnt") != host_mnt,
+          "synthetic TLS setup has no independent mount namespace")
+    bundle = Path("/etc/ssl/certs/ca-certificates.crt")
+    check(bundle.is_file() and ssl.get_default_verify_paths().cafile is not None
+          and Path(ssl.get_default_verify_paths().cafile).resolve()
+          == bundle.resolve(), "synthetic TLS cannot locate the system trust store")
+    key = Path(directory) / "synthetic-server.key"
+    certificate = Path(directory) / "synthetic-server.crt"
+    created = subprocess.run([
+        "/usr/bin/openssl", "req", "-x509", "-newkey", "rsa:2048",
+        "-nodes", "-days", "1", "-keyout", str(key), "-out", str(certificate),
+        "-subj", "/CN=www.kleinanzeigen.de",
+        "-addext", "subjectAltName=DNS:www.kleinanzeigen.de,DNS:img.kleinanzeigen.de",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=20, check=False)
+    check(created.returncode == 0, "isolated synthetic TLS fixture unavailable")
+    aliases = Path(directory) / "synthetic-hosts"
+    aliases.write_bytes(
+        b"127.0.0.1 www.kleinanzeigen.de img.kleinanzeigen.de\n"
+        + Path("/etc/hosts").read_bytes()
+    )
+    trusted = Path(directory) / "synthetic-trust-bundle.pem"
+    trusted.write_bytes(bundle.read_bytes() + b"\n" + certificate.read_bytes())
+    # Mounts are local to the already verified fresh MOUNT namespace: no
+    # host CA/hosts edits, no external route, no authentication bypass.
+    for argv in (
+        ("/usr/bin/mount", "--make-rprivate", "/"),
+        ("/usr/bin/mount", "--bind", str(aliases), "/etc/hosts"),
+        ("/usr/bin/mount", "--bind", str(trusted), str(bundle)),
+    ):
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=10,
+                                check=False)
+        check(result.returncode == 0, "namespaced TLS trust setup unavailable")
+    return certificate, key
+
+
+class _PublicMediaGalleryHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args):
+        pass
+
+    def _respond(self, status, media_type, content):
+        self.send_response(status)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(content)
+        self.close_connection = True
+
+    def do_POST(self):
+        if (self.path != "/__synthetic_upload/" + _SYNTHETIC_MEDIA_AD
+                or self.headers.get("X-Synthetic-Browser-Upload") != "1"):
+            self._respond(404, "text/plain", b"unrecognized")
+            return
+        raw_len = self.headers.get("Content-Length")
+        if not raw_len or not raw_len.isdecimal() or not 100 <= int(raw_len) <= 1048576:
+            self._respond(400, "text/plain", b"invalid size")
+            return
+        payload = self.rfile.read(int(raw_len))
+        if (len(payload) != int(raw_len) or not payload.startswith(b"\xff\xd8")
+                or not payload.endswith(b"\xff\xd9")
+                or self.server.media is not None):
+            self._respond(409, "text/plain", b"not accepted")
+            return
+        self.server.media = bytes(payload)
+        self.server.media_uploads += 1
+        self._respond(201, "text/plain", _SYNTHETIC_MEDIA_AD.encode())
+
+    def do_GET(self):
+        if self.server.media is None:
+            self._respond(404, "text/plain", b"not published")
+            return
+        if (self.headers.get("Host") == "www.kleinanzeigen.de"
+                and self.path == "/s-anzeige/" + _SYNTHETIC_MEDIA_AD):
+            self.server.listing_gets += 1
+            body = (
+                '<html><head><link rel="canonical" href="'
+                'https://www.kleinanzeigen.de/s-anzeige/' + _SYNTHETIC_MEDIA_AD
+                + '"></head><body><div class="vip-image-gallery j-gallery-image">'
+                  '<script type="application/ld+json">'
+                  '{"@type":"ImageObject","contentUrl":"' + _SYNTHETIC_IMAGE
+                + '"}</script></div></body></html>'
+            ).encode()
+            self._respond(200, "text/html", body)
+        elif (self.headers.get("Host") == "img.kleinanzeigen.de"
+              and self.path == _SYNTHETIC_IMAGE_PATH):
+            self.server.image_gets += 1
+            self._respond(200, "image/jpeg", self.server.media)
+        else:
+            self._respond(404, "text/plain", b"unrecognized")
+
+
+class SyntheticPublicMediaGallery(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, certificate, key):
+        super().__init__(("127.0.0.1", 443), _PublicMediaGalleryHandler)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(certificate), str(key))
+        self.socket = ctx.wrap_socket(self.socket, server_side=True)
+        self.media = None
+        self.media_uploads = 0
+        self.listing_gets = 0
+        self.image_gets = 0
+
+
 class _SyntheticCDPHandler(BaseHTTPRequestHandler):
     """Isolated test-only wire-level CDP responder, not a product adapter."""
     protocol_version = "HTTP/1.1"
@@ -231,6 +359,7 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                         self.server.create_title = ""
                         self.server.create_description = ""
                         self.server.create_price = ""
+                        self.server.media_selected = ()
                         answer = {"result": {}}
                 elif method == "Input.dispatchMouseEvent":
                     if (params.get("type") == "mousePressed"
@@ -272,7 +401,29 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                                     "Freizeit", "Sammeln"]:
                                 self.server.page = "/p-anzeige-aufgeben-schritt2.html"
                             elif action == "publish" and self.server.page == "/p-anzeige-aufgeben-schritt2.html":
-                                self.server.ad_id = "1234567891"
+                                if self.server.media_bind_enabled:
+                                    # This is the synthetic browser's independent
+                                    # platform upload, NOT the Actor verifier.
+                                    check(len(self.server.media_selected) == 1,
+                                          "synthetic CDP had no selected media bytes")
+                                    with closing(HTTPSConnection(
+                                        "127.0.0.1", 443, timeout=3,
+                                        context=ssl._create_unverified_context(),
+                                    )) as http:
+                                        http.request(
+                                            "POST", "/__synthetic_upload/" + _SYNTHETIC_MEDIA_AD,
+                                            body=self.server.media_selected[0][1],
+                                            headers={"X-Synthetic-Browser-Upload": "1",
+                                                     "Content-Type": "image/jpeg"},
+                                        )
+                                        upload = http.getresponse()
+                                        check(upload.status == 201
+                                              and upload.read() == _SYNTHETIC_MEDIA_AD.encode(),
+                                              "synthetic CDP media upload not persisted")
+                                    self.server.ad_id = _SYNTHETIC_MEDIA_AD
+                                    self.server.media_publish_submits += 1
+                                else:
+                                    self.server.ad_id = "1234567891"
                                 self.server.present = True
                                 self.server.title = self.server.create_title
                                 self.server.description = self.server.create_description
@@ -282,6 +433,41 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                             self.server.pending_create = None
                             self.server.releases += 1
                             answer = {"result": {}}
+                elif method == "DOM.setFileInputFiles":
+                    names = params.get("files")
+                    if (self.server.media_bind_enabled
+                            and params.get("objectId") == "synthetic-media-input-v1"
+                            and isinstance(names, list) and len(names) == 1
+                            and isinstance(names[0], str)):
+                        source = Path(names[0])
+                        check(source.is_absolute() and source.is_file(),
+                              "browser media file input bytes unavailable")
+                        self.server.media_selected = ((source.name, source.read_bytes()),)
+                        self.server.media_file_set_calls += 1
+                        answer = {"result": {}}
+                elif method == "Runtime.callFunctionOn":
+                    declaration = params.get("functionDeclaration", "")
+                    if (self.server.media_bind_enabled
+                            and params.get("objectId") == "synthetic-media-input-v1"
+                            and self.server.media_selected):
+                        value = None
+                        if "files: Array.from(input.files)" in declaration:
+                            value = {"state": "ready", "files": [
+                                {"name": name, "size_bytes": len(payload)}
+                                for name, payload in self.server.media_selected
+                            ]}
+                        elif ("expectedFiles =" in declaration
+                                and '"Anzeige aufgeben"' in declaration
+                                and self.server.page == "/p-anzeige-aufgeben-schritt2.html"):
+                            self.server.pending_create = "publish"
+                            value = {"state": "ready", "x": 120.5, "y": 240.25}
+                        if value is not None:
+                            answer = {"result": {"result": {
+                                "type": "object", "value": value,
+                            }}}
+                elif method == "Runtime.releaseObject":
+                    if params.get("objectId") == "synthetic-media-input-v1":
+                        answer = {"result": {}}
                 elif method == "Runtime.evaluate" and params.get("awaitPromise") is True:
                     expression = params["expression"]
                     if "pageNum=1" in expression and 'credentials: "same-origin"' in expression:
@@ -301,6 +487,11 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                             and 'input[type="file"]' in expression
                             and "return files[0];" in expression):
                         self.server.media_input_bind_probes += 1
+                        if self.server.media_bind_enabled:
+                            answer = {"result": {"result": {
+                                "type": "object",
+                                "objectId": "synthetic-media-input-v1",
+                            }}}
                     value = None
                     if (("__mark_private_web_state_navigation_probe_" in expression
                          or "__mark_private_web_navigation_probe_" in expression
@@ -458,6 +649,10 @@ class SyntheticCDP(ThreadingHTTPServer):
         self.create_price = ""
         self.create_submits = 0
         self.media_input_bind_probes = 0
+        self.media_bind_enabled = False
+        self.media_selected = ()
+        self.media_file_set_calls = 0
+        self.media_publish_submits = 0
 
 
 def inventory_confirmed(cdp):
@@ -653,6 +848,110 @@ def synthetic_create_write(cdp, token):
 
 
 
+def synthetic_positive_media_publish(cdp, write_token):
+    """Full installed real CDP FileList -> one browser submit -> public HTTPS.
+
+    The readback is performed by the UNMODIFIED installed protected Actor
+    verifier against the independent test-owned TLS gallery. No fixture
+    replaces production media persistence authorization, host namespaces,
+    provider, fingerprint algorithm, or Witness completion.
+    """
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.new("RGB", (256, 192), (38, 125, 181))
+    encoded = BytesIO()
+    image.save(encoded, format="JPEG", quality=92)
+    jpeg = encoded.getvalue()
+    check(jpeg.startswith(bytes((255, 216)))
+          and jpeg.endswith(bytes((255, 217))),
+          "synthetic customer JPEG image is invalid")
+
+    # A blank CDN gallery cannot claim a successful media publication.
+    with closing(HTTPSConnection("www.kleinanzeigen.de", 443, timeout=4)) as net:
+        net.request("GET", "/s-anzeige/" + _SYNTHETIC_MEDIA_AD)
+        unavailable = net.getresponse()
+        check(unavailable.status == 404
+              and unavailable.read() == b"not published",
+              "synthetic public media gallery was not initially empty")
+
+    headers = {
+        "Origin": "http://127.0.0.1:8875",
+        "X-Mark-Dashboard-Write": "1",
+        "X-Mark-Dashboard-Token": write_token,
+        "Content-Type": "image/jpeg",
+        "X-Mark-Media-Filename": "verified-photo.jpg",
+    }
+    with closing(HTTPConnection("127.0.0.1", 8875, timeout=15)) as http:
+        http.request("POST", "/api/write/media/stage", body=jpeg,
+                     headers=headers)
+        reply = http.getresponse()
+        staged = json.loads(reply.read())
+        check(reply.status == 201
+              and type(staged.get("media_ref")) is str,
+              "synthetic positive media could not stage file")
+    media_key = "protected-cdp-published-media-20261024"
+    payload = {
+        "category_path": ["Freizeit", "Sammeln"],
+        "title": "Created synthetic bowl",
+        "description": "Created in root installed CDP acceptance",
+        "price_eur": 10,
+        "media_refs": [staged["media_ref"]],
+    }
+    before = (cdp.presses, cdp.releases, cdp.create_submits,
+              cdp.media_file_set_calls, cdp.media_publish_submits,
+              cdp.media_input_bind_probes, cdp.gallery.media_uploads)
+    check(cdp.gallery.media is None and not cdp.media_bind_enabled,
+          "positive synthetic media fixture not initially isolated")
+    cdp.media_bind_enabled = True
+    try:
+        code, result, replay = _dashboard_http(
+            "POST", "/api/write/media/ads", token=write_token,
+            key=media_key, payload=payload,
+        )
+    finally:
+        cdp.media_bind_enabled = False
+
+    check(code == 200 and replay != "true"
+          and result.get("operation_receipt", {}).get("outcome") == "confirmed"
+          and result.get("media_persistence_confirmed") is True
+          and result.get("media_post_read_status") == "confirmed",
+          "protected published media did not receive independent HTTPS confirmation")
+    check(cdp.create_submits == before[2] + 1
+          and cdp.media_file_set_calls == before[3] + 1
+          and cdp.media_publish_submits == before[4] + 1
+          and cdp.media_input_bind_probes == before[5] + 1
+          and cdp.gallery.media_uploads == before[6] + 1
+          and cdp.gallery.media == jpeg
+          and cdp.gallery.listing_gets >= 1
+          and cdp.gallery.image_gets >= 1,
+          "protected CDP publish did not durably match independently fetched JPEG")
+    check(cdp.ad_id == _SYNTHETIC_MEDIA_AD
+          and cdp.presses == before[0] + 4
+          and cdp.releases == before[1] + 4,
+          "protected media attempted duplicate or missing CDP clicks")
+
+    again, same, replayed = _dashboard_http(
+        "POST", "/api/write/media/ads", token=write_token,
+        key=media_key, payload=payload,
+    )
+    check(again == code and same == result and replayed == "true"
+          and cdp.create_submits == before[2] + 1
+          and cdp.media_publish_submits == before[4] + 1
+          and cdp.gallery.media_uploads == before[6] + 1,
+          "confirmed media replay dispatched another browser publish")
+    for terminal in (False, True):
+        ack_status, ack, _ = _dashboard_http(
+            "POST", "/api/dashboard/pending-writes/ack",
+            token=write_token,
+            payload={"scope": "create", "idempotency_key": media_key},
+        )
+        check(ack_status == 200 and ack.get("acknowledged") is True
+              and ack.get("finalized") is terminal,
+              "protected confirmed media two-phase ACK was not durable")
+    return cdp.presses - before[0]
+
+
 def synthetic_ai_generation_drafts(token, write_token, cdp):
     from mark_api.generation import _validate_png_payload
     base = "http://127.0.0.1:8875"
@@ -730,11 +1029,9 @@ def synthetic_ai_generation_drafts(token, write_token, cdp):
     check(tuple(cdp.commands) == calls_before,
           "draft generation/media preparation performed a platform CDP action")
 
-    # Exercise the installed protected Media-Create route through the real
-    # frontend/Owner/Actor, NOT an in-memory substitute. The synthetic CDP
-    # wire intentionally has no file-input object: it cannot prove a media
-    # selection or independent public-media persistence. A plausible form
-    # and actor-owned PNG must never be promoted into a confirmed publish.
+    # Verify the positive protected media publication first, then
+    # separately reject incomplete CDP file-input binding and replay.
+    positive_clicks = synthetic_positive_media_publish(cdp, write_token)
     with closing(HTTPConnection("127.0.0.1", 8875, timeout=15)) as http:
         http.request("POST", "/api/write/media/stage", body=png, headers=headers)
         response = http.getresponse()
@@ -781,7 +1078,7 @@ def synthetic_ai_generation_drafts(token, write_token, cdp):
           "unverified media preflight dispatched unexpected browser clicks")
     check(cdp.media_input_bind_probes == before_media_probes + 1,
           "media negative test did not reach exactly one CDP file-input binding")
-    return extra_clicks
+    return extra_clicks + positive_clicks
 
 
 def dashboard_ready():
@@ -997,12 +1294,13 @@ def protected_cold_pair_restore(root, scratch, binary, cdp):
 
 
 
-def admission(net_before, pid_before):
+def admission(net_before, pid_before, mount_before):
     check(sys.platform == "linux" and os.geteuid() == 0
           and os.getpid() == 1, "root isolated PID1 required")
     check(os.readlink("/proc/self/ns/net") != net_before
-          and os.readlink("/proc/self/ns/pid") != pid_before,
-          "test must not use any host PID/network namespace")
+          and os.readlink("/proc/self/ns/pid") != pid_before
+          and os.readlink("/proc/self/ns/mnt") != mount_before,
+          "test must not use any host PID/network/mount namespace")
     image = Path(mark_api.__file__).resolve()
     check("site-packages" in image.parts and image.stat().st_uid == 0,
           "test must execute root-owned installed wheel")
@@ -1013,9 +1311,13 @@ def admission(net_before, pid_before):
     with tempfile.TemporaryDirectory(prefix="kleinanzeiger-new-product-") as scratch:
         os.chmod(scratch, 0o755)
         root = Path(scratch) / "new-install"
+        certificate, key = _setup_isolated_synthetic_tls(scratch, mount_before)
+        public_gallery = SyntheticPublicMediaGallery(certificate, key)
+        gallery_worker = Thread(target=public_gallery.serve_forever, daemon=True)
+        gallery_worker.start()
         child = None
         cdp = SyntheticCDP()
-        from threading import Thread
+        cdp.gallery = public_gallery
         worker = Thread(target=cdp.serve_forever, daemon=True)
         worker.start()
         try:
@@ -1132,13 +1434,23 @@ def admission(net_before, pid_before):
             cdp.shutdown()
             cdp.server_close()
             worker.join(3)
+            public_gallery.shutdown()
+            public_gallery.server_close()
+            gallery_worker.join(3)
     check(cdp.commands.count("Runtime.evaluate") >= 10
           and set(cdp.commands) == {
-              "Runtime.evaluate", "Page.navigate", "Input.dispatchMouseEvent",
+              "Runtime.evaluate", "Runtime.callFunctionOn",
+              "Runtime.releaseObject", "DOM.setFileInputFiles",
+              "Page.navigate", "Input.dispatchMouseEvent",
           } and cdp.presses == 9 + media_preflight_clicks
           and cdp.releases == 9 + media_preflight_clicks
           and cdp.content_submits == 1 and cdp.delete_submits == 1
-          and cdp.create_submits == 1,
+          and cdp.create_submits == 2
+          and cdp.media_file_set_calls == 1
+          and cdp.media_publish_submits == 1
+          and public_gallery.media_uploads == 1
+          and public_gallery.listing_gets >= 1
+          and public_gallery.image_gets >= 1,
           "installed actor did not perform state, content, delete and publish CDP submits")
     print(json.dumps({
         "result":"PASS", "scope":"installed-protected-fresh-customer-start",
@@ -1156,6 +1468,9 @@ def admission(net_before, pid_before):
         "protected_cdp_synthetic_create_write_attested":True,
         "protected_synthetic_ai_generation_attested":True,
         "protected_ai_generated_media_stage_attested":True,
+        "protected_cdp_media_positive_https_postread_attested":True,
+        "protected_cdp_media_replay_no_duplicate":True,
+        "synthetic_public_https_tls_gallery":True,
         "paid_generation_called":False,
     }, sort_keys=True, separators=(",",":")),flush=True)
 
@@ -1164,8 +1479,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host-net",required=True)
     parser.add_argument("--host-pid",required=True)
+    parser.add_argument("--host-mnt",required=True)
     args = parser.parse_args()
-    admission(args.host_net,args.host_pid)
+    admission(args.host_net,args.host_pid,args.host_mnt)
 
 
 if __name__ == "__main__":
