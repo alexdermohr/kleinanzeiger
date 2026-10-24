@@ -147,4 +147,5 @@ jobs:
           grep -Fq '"landlock_ingress":true' "$report"
           grep -Fq '"restarted_without_db_recreation":true' "$report"
           grep -Fq '"real_cdp_inventory_sync_attested":true' "$report"
+          grep -Fq '"protected_cdp_synthetic_state_write_attested":true' "$report"
           grep -Fq '"legacy_cutover_attested":false' "$report"
