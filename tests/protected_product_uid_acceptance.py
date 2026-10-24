@@ -202,6 +202,12 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                             "status": 200, "body": json.dumps(ads)}}}}
                 elif method == "Runtime.evaluate":
                     expression = params.get("expression", "")
+                    # Observe the actual CDP file-input binding attempt;
+                    # an early HTTP rejection is not an adequate media test.
+                    if ("const baseline =" in expression
+                            and 'input[type="file"]' in expression
+                            and "return files[0];" in expression):
+                        self.server.media_input_bind_probes += 1
                     value = None
                     if (("__mark_private_web_state_navigation_probe_" in expression
                          or "__mark_private_web_navigation_probe_" in expression
@@ -358,6 +364,7 @@ class SyntheticCDP(ThreadingHTTPServer):
         self.create_description = ""
         self.create_price = ""
         self.create_submits = 0
+        self.media_input_bind_probes = 0
 
 
 def inventory_confirmed(cdp):
@@ -652,6 +659,7 @@ def synthetic_ai_generation_drafts(token, write_token, cdp):
     }
     before_submit = cdp.create_submits
     before_media_presses, before_media_releases = cdp.presses, cdp.releases
+    before_media_probes = cdp.media_input_bind_probes
     media_status, media_body, _ = _dashboard_http(
         "POST", "/api/write/media/ads", token=write_token,
         key=media_key, payload=media_payload,
@@ -675,9 +683,11 @@ def synthetic_ai_generation_drafts(token, write_token, cdp):
     # a successful publish; the successful CRUD journeys keep their own
     # exact one-shot mouse and submit assertions.
     extra_clicks = cdp.presses - before_media_presses
-    check(0 <= extra_clicks <= 3
+    check(1 <= extra_clicks <= 3
           and cdp.releases - before_media_releases == extra_clicks,
           "unverified media preflight dispatched unexpected browser clicks")
+    check(cdp.media_input_bind_probes == before_media_probes + 1,
+          "media negative test did not reach exactly one CDP file-input binding")
     return extra_clicks
 
 
