@@ -215,3 +215,127 @@ class ManagementRestoreTests(TestCase):
         self.assertEqual(client.navigations, 1)
         self.assertEqual(client.polls, 2)
         self.assertEqual(client.page, "/m-meine-anzeigen.html")
+
+
+    def test_native_protocol_context_loss_reobserves_without_second_navigation(self):
+        """A CDP error frame is different from a successful exceptionDetails reply."""
+        import json
+        from mark_api.private_web_cdp import _LoopbackCdpClient
+
+        port = 19786
+        address = f"http://127.0.0.1:{port}"
+        class Discovery:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return None
+            def geturl(self):
+                return address + "/json/list"
+            def read(self, size):
+                return json.dumps([{
+                    "type": "page",
+                    "webSocketDebuggerUrl":
+                        f"ws://127.0.0.1:{port}/devtools/page/management-test",
+                }]).encode()
+
+        class Tcp:
+            def close(self):
+                pass
+
+        class WebSocket:
+            def __init__(self):
+                self.pending = None
+                self.calls = []
+                self.navigations = 0
+                self.polls = 0
+            def send(self, frame):
+                self.pending = json.loads(frame)
+                self.calls.append(self.pending["method"])
+            def recv(self):
+                call = self.pending
+                self.pending = None
+                method = call["method"]
+                if method == "Page.navigate":
+                    self.navigations += 1
+                    value = {}
+                else:
+                    assert method == "Runtime.evaluate"
+                    expr = call["params"]["expression"]
+                    if "return globalThis[key] === true" in expr:
+                        value = {"result": {"type": "boolean", "value": True}}
+                    elif expr == "(() => 1)()":
+                        return json.dumps({
+                            "id": call["id"],
+                            "error": {
+                                "code": -32000,
+                                "message": "Execution context was destroyed.",
+                            },
+                        })
+                    elif "oldDocument" in expr:
+                        self.polls += 1
+                        if self.polls == 1:
+                            return json.dumps({
+                                "id": call["id"],
+                                "error": {
+                                    "code": -32000,
+                                    "message": "Execution context was destroyed.",
+                                },
+                            })
+                        value = {"result": {"type": "object", "value": {
+                            "readyState": "complete",
+                            "origin": "https://www.kleinanzeigen.de",
+                            "path": "/m-meine-anzeigen.html",
+                            "oldDocument": False,
+                        }}}
+                    else:
+                        value = {"result": {"type": "object", "value": {
+                            "readyState": "complete",
+                            "origin": "https://www.kleinanzeigen.de",
+                            "path": "/p-anzeige-bearbeiten.html",
+                            "adId": "12345",
+                        }}}
+                return json.dumps({"id": call["id"], "result": value})
+            def close(self):
+                pass
+
+        websocket = WebSocket()
+        with patch("mark_api.private_web_cdp._require_private_web_cdp_authority"):
+            client = _LoopbackCdpClient(
+                address, timeout_seconds=0.1, opener=lambda *a, **k: Discovery(),
+                websocket_factory=lambda *a, **k: websocket,
+                tcp_socket_factory=lambda *a, **k: Tcp(),
+            )
+            page = CdpPrivateWebPage(
+                address, client_factory=lambda: client, sleep=lambda _: None,
+            )
+            page._bound_ad_id = "12345"
+            try:
+                page.restore_management("12345")
+                self.assertFalse(client._unresolved_call)
+                self.assertIsNone(page._bound_ad_id)
+                self.assertEqual(websocket.navigations, 1)
+                self.assertEqual(websocket.polls, 2)
+                self.assertNotIn("Input.dispatchMouseEvent", websocket.calls)
+                # The identical protocol error on an arbitrary evaluation
+                # MUST still quarantine the native target; never grant
+                # generalized retries or clear a write/UNKNOWN fence.
+                with self.assertRaises(PrivateWebCdpError):
+                    client.call("Runtime.evaluate", {
+                        "expression": "(() => 1)()",
+                        "returnByValue": True, "awaitPromise": False,
+                    })
+                self.assertTrue(client._unresolved_call)
+                sent_count = len(websocket.calls)
+                with self.assertRaises(PrivateWebCdpError) as blocked:
+                    client.call("Runtime.evaluate", {
+                        "expression": "(() => 1)()",
+                        "returnByValue": True, "awaitPromise": False,
+                    })
+                self.assertEqual(blocked.exception.stage, "target_unowned")
+                self.assertEqual(len(websocket.calls), sent_count)
+            finally:
+                try:
+                    client.close()
+                except PrivateWebCdpError:
+                    # The navigated native target is intentionally quarantined.
+                    pass

@@ -171,6 +171,26 @@ def _reserve_exclusive_cdp_target(port: int) -> socket.socket:
         raise PrivateWebCdpWriteNotAttemptedError("target_busy") from None
 
 
+def _is_fixed_management_restore_observation(expression: str) -> bool:
+    """Only the exact product-generated, side-effect-free management DOM poll."""
+    prefix = (
+        "(() => ({ readyState: document.readyState, origin: location.origin, "
+        'path: location.pathname, oldDocument: globalThis["__mark_private_web_restore_management_'
+    )
+    suffix = '__"] === true }))()'
+    if (
+        type(expression) is not str
+        or not expression.startswith(prefix)
+        or not expression.endswith(suffix)
+    ):
+        return False
+    ad_id = expression[len(prefix):-len(suffix)]
+    try:
+        return _validated_ad_id(ad_id) == ad_id
+    except (TypeError, ValueError):
+        return False
+
+
 class _LoopbackCdpClient:
     """Minimal CDP client bound to an exclusively held loopback page."""
 
@@ -736,6 +756,7 @@ class _LoopbackCdpClient:
             # read-only. Arbitrary Runtime.evaluate and UNKNOWN calls retain
             # their browser-effect fence, even after a CDP transport ACK.
             inventory_read = False
+            management_restore_read = False
             if (
                 not self._unresolved_submit
                 and type(method) is str and method == "Runtime.evaluate"
@@ -754,9 +775,15 @@ class _LoopbackCdpClient:
                     inventory_read = _is_fixed_inventory_read_only_evaluation(
                         read_expression, read_await_promise,
                     )
-                    if inventory_read:
-                        # Serialize only the exact evaluated safe expression,
-                        # not the mutable caller dict used for classification.
+                    # A read-only restore probe may reobserve after Chrome
+                    # ACKs a destroyed context. This is NOT general clearance
+                    # of the native target or any outstanding platform submit.
+                    management_restore_read = (
+                        read_await_promise is False
+                        and _is_fixed_management_restore_observation(read_expression)
+                    )
+                    if inventory_read or management_restore_read:
+                        # Freeze the exact admitted expression before send.
                         bound_params = {
                             "expression": read_expression,
                             "returnByValue": True,
@@ -841,6 +868,29 @@ class _LoopbackCdpClient:
                 if response.get("id") != message_id:
                     continue
                 if "error" in response:
+                    error = response["error"]
+                    if (
+                        management_restore_read
+                        and not self._unresolved_submit
+                        and type(error) is dict
+                        and type(error.get("code")) is int
+                        and error.get("code") == -32000
+                        and type(error.get("message")) is str
+                        and error["message"] in (
+                            "Execution context was destroyed.",
+                            "Execution context was destroyed",
+                        )
+                    ):
+                        # Exact reply-id from the pinned WebSocket ACKs that
+                        # this particular DOM-only evaluation failed; no JS
+                        # write or submit was attempted by that expression.
+                        # Never clear _possible_browser_side_effect or any
+                        # submit fence. Only another READ may follow.
+                        with lock:
+                            if self._closing:
+                                raise PrivateWebCdpError("call")
+                            self._unresolved_call = False
+                        raise PrivateWebCdpError("call")
                     raise ValueError("cdp returned an error")
                 result = response.get("result")
                 if not isinstance(result, dict):
