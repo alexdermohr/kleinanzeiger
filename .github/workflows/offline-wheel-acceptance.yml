@@ -161,4 +161,5 @@ jobs:
           grep -Fq '"protected_cdp_synthetic_delete_write_attested":true' "$report"
           grep -Fq '"protected_cdp_synthetic_create_write_attested":true' "$report"
           grep -Fq '"protected_synthetic_ai_generation_attested":true' "$report"
+          grep -Fq '"protected_ai_generated_media_stage_attested":true' "$report"
           grep -Fq '"legacy_cutover_attested":false' "$report"

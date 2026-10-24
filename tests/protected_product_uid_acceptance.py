@@ -553,7 +553,7 @@ def synthetic_create_write(cdp, token):
 
 
 
-def synthetic_ai_generation_drafts(token, cdp):
+def synthetic_ai_generation_drafts(token, write_token, cdp):
     from mark_api.generation import _validate_png_payload
     base = "http://127.0.0.1:8875"
     calls_before = tuple(cdp.commands)
@@ -602,8 +602,33 @@ def synthetic_ai_generation_drafts(token, cdp):
     check(status == 200 and headers.get("Content-Type") == "image/png",
           "protected installed generated image missing")
     _validate_png_payload(png)
+    # The exact AI-generated PNG must be accepted by the *real installed*
+    # A6 protected media staging chain, with opaque actor-owned handle.
+    # Staging and explicit discard are local-only, never publication.
+    headers = {
+        "Origin": base,
+        "X-Mark-Dashboard-Write": "1",
+        "X-Mark-Dashboard-Token": write_token,
+        "Content-Type": "image/png",
+        "X-Mark-Media-Filename": "generated-draft.png",
+    }
+    with closing(HTTPConnection("127.0.0.1", 8875, timeout=15)) as http:
+        http.request("POST", "/api/write/media/stage", body=png,
+                     headers=headers)
+        response = http.getresponse()
+        stage = json.loads(response.read())
+    check(response.status == 201
+          and type(stage.get("media_ref")) is str
+          and len(stage["media_ref"]) > 12,
+          "generated PNG was not staged through installed private actor")
+    code, cleanup, _ = _dashboard_http(
+        "POST", "/api/write/media/discard", token=write_token,
+        payload={"media_refs": [stage["media_ref"]]},
+    )
+    check(code == 200 and cleanup.get("discarded") == 1,
+          "generated PNG private media draft could not be safely discarded")
     check(tuple(cdp.commands) == calls_before,
-          "draft generation performed an unintended platform CDP action")
+          "draft generation/media preparation performed a platform CDP action")
 
 
 def dashboard_ready():
@@ -809,7 +834,7 @@ def admission(net_before, pid_before):
                   "AI opt-in escaped frontend/owner network isolation")
             check((db.stat().st_dev, db.stat().st_ino) == first_inode,
                   "AI opt-in replaced existing customer SQLite")
-            synthetic_ai_generation_drafts(generation_token, cdp)
+            synthetic_ai_generation_drafts(generation_token, third_token, cdp)
             shutdown(child)
             child = None
         finally:
@@ -842,6 +867,7 @@ def admission(net_before, pid_before):
         "protected_cdp_synthetic_delete_write_attested":True,
         "protected_cdp_synthetic_create_write_attested":True,
         "protected_synthetic_ai_generation_attested":True,
+        "protected_ai_generated_media_stage_attested":True,
         "paid_generation_called":False,
     }, sort_keys=True, separators=(",",":")),flush=True)
 
