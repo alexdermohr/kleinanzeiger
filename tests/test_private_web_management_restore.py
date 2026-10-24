@@ -160,3 +160,58 @@ class ManagementRestoreTests(TestCase):
             with self.assertRaises(PrivateWebCdpError):
                 page.restore_management("54321")
         self.assertEqual(client.calls, [])
+
+
+    def test_native_restore_polls_transient_context_loss_without_second_navigation(self):
+        class Client:
+            def __init__(self):
+                self.page = "/p-anzeige-bearbeiten.html"
+                self.navigations = 0
+                self.polls = 0
+
+            def call(self, method, params=None):
+                if method == "Page.navigate":
+                    self.navigations += 1
+                    self.page = "/m-meine-anzeigen.html"
+                    return {"frameId": "synthetic"}
+                assert method == "Runtime.evaluate"
+                expr = params["expression"]
+                if "return globalThis[key] === true" in expr:
+                    return {"result": {"value": True}}
+                if "oldDocument" in expr:
+                    self.polls += 1
+                    if self.polls == 1:
+                        # Chrome may discard the old document during navigate.
+                        # This is a *read* failure, not permission to navigate
+                        # or submit a second time.
+                        return {"exceptionDetails": {"text": "context vanished"}}
+                    return {"result": {"value": {
+                        "readyState": "complete",
+                        "origin": "https://www.kleinanzeigen.de",
+                        "path": self.page,
+                        "oldDocument": False,
+                    }}}
+                return {"result": {"value": {
+                    "readyState": "complete",
+                    "origin": "https://www.kleinanzeigen.de",
+                    "path": self.page,
+                    "adId": "12345",
+                }}}
+
+            def close(self):
+                pass
+
+        client = Client()
+        with patch(
+            "mark_api.private_web_cdp._require_private_web_cdp_authority",
+            return_value=None,
+        ):
+            page = CdpPrivateWebPage(
+                "http://127.0.0.1:9222", client_factory=lambda: client,
+                sleep=lambda _: None,
+            )
+            page._bound_ad_id = "12345"
+            page.restore_management("12345")
+        self.assertEqual(client.navigations, 1)
+        self.assertEqual(client.polls, 2)
+        self.assertEqual(client.page, "/m-meine-anzeigen.html")

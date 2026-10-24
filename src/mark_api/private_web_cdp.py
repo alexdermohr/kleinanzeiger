@@ -1313,7 +1313,14 @@ class CdpPrivateWebPage:
                 + "] === true }))()"
             )
             while True:
-                state = self._runtime_value(client, expression)
+                try:
+                    state = self._runtime_value(client, expression)
+                except PrivateWebCdpError:
+                    # A destroyed execution context during Page.navigate is
+                    # not failure of the one-shot navigation. Reobserve only;
+                    # native UNKNOWN fences still deny unsafe calls and no
+                    # additional navigation or platform submit is attempted.
+                    state = None
                 if (
                     isinstance(state, dict)
                     and state.get("readyState") == "complete"
