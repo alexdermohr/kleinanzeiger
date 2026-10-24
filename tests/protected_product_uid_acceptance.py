@@ -65,6 +65,55 @@ def child_roles(supervisor_pid, *, include_generation=False):
 
 
 
+def hostile_uid_direct_storage_denied(owner_db, witness_db):
+    """Fresh-only kernel DAC negative: untrusted roles cannot write either DB.
+
+    This cannot establish old inherited FD/MAP_SHARED revocation or restore
+    authority for legacy data. The whole test runs in disposable PID/netns.
+    """
+    program = r"""
+import errno, os, sys
+status = {}
+for line in open("/proc/self/status", encoding="ascii"):
+    if ":" in line:
+        key, value = line.split(":", 1)
+        status[key] = value.strip()
+if os.geteuid() == 0 or int(status["CapEff"], 16) or int(status["CapPrm"], 16):
+    sys.exit(51)
+for index, path in enumerate(sys.argv[1:]):
+    flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    if index >= 2:
+        flags |= os.O_CREAT
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EPERM):
+            sys.exit(52)
+    else:
+        os.close(fd)
+        sys.exit(53)
+sys.exit(0)
+"""
+    paths = (
+        str(owner_db), str(witness_db),
+        str(owner_db) + "-wal", str(owner_db) + "-shm",
+        str(witness_db) + "-wal", str(witness_db) + "-shm",
+    )
+    for uid in (UIDS["frontend"], UIDS["actor"], UIDS["ingress"], GENERATOR_UID):
+        run = subprocess.run(
+            [sys.executable, "-I", "-c", program, *paths],
+            cwd="/", env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=10,
+            user=uid, group=uid, extra_groups=(),
+            check=False,
+        )
+        check(run.returncode == 0 and not run.stdout and not run.stderr,
+              "untrusted customer role could access private Owner/Witness SQLite")
+
+
+
+
 class _SyntheticCDPHandler(BaseHTTPRequestHandler):
     """Isolated test-only wire-level CDP responder, not a product adapter."""
     protocol_version = "HTTP/1.1"
@@ -777,6 +826,7 @@ def admission(net_before, pid_before):
                   "fresh owner SQLite not private")
             check(witness.stat().st_uid == UIDS["witness"],
                   "fresh Witness ledger not independently owned")
+            hostile_uid_direct_storage_denied(db, witness)
             first_inode = (dbinfo.st_dev, dbinfo.st_ino)
             shutdown(child)
             child = None
@@ -858,6 +908,7 @@ def admission(net_before, pid_before):
         "real_owner_cli":True,"real_actor_cli":True,
         "real_witness_cli":True,"real_frontend_cli":True,
         "uid_isolation":True,"netless_frontend_owner":True,
+        "fresh_hostile_uid_storage_denial_attested":True,
         "landlock_ingress":True,"dashboard_http":True,
         "restarted_without_db_recreation":True,
         "legacy_cutover_attested":False,"real_cdp_write_attested":False,

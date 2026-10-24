@@ -153,6 +153,7 @@ jobs:
           grep -Fq '"result":"PASS"' "$report"
           grep -Fq '"scope":"installed-protected-fresh-customer-start"' "$report"
           grep -Fq '"netless_frontend_owner":true' "$report"
+          grep -Fq '"fresh_hostile_uid_storage_denial_attested":true' "$report"
           grep -Fq '"landlock_ingress":true' "$report"
           grep -Fq '"restarted_without_db_recreation":true' "$report"
           grep -Fq '"real_cdp_inventory_sync_attested":true' "$report"
