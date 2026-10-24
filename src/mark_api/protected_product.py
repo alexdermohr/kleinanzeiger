@@ -27,6 +27,7 @@ import stat
 import struct
 import subprocess
 import sys
+from threading import Thread
 from time import monotonic, sleep
 from urllib.parse import quote
 
@@ -300,7 +301,8 @@ def _spawn(module: str, uid: int, *, net: int | None,
                 _ingress_landlock()
         return subprocess.Popen(
             argv, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, close_fds=True, bufsize=0,
+            stderr=subprocess.PIPE if ingress else subprocess.DEVNULL,
+            close_fds=True, bufsize=0,
             pass_fds=tuple(x for x in (rd, net) if x is not None),
             preexec_fn=child_entry,
             env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent",
@@ -349,6 +351,21 @@ def _ready_ingress(proc: subprocess.Popen) -> None:
     deadline = monotonic() + 20
     while monotonic() < deadline:
         if proc.poll() is not None:
+            # The existing relay emits one of a tiny set of fixed, sanitized
+            # startup denials. Never echo arbitrary child stderr or a URL.
+            pipe = getattr(proc, "stderr", None)
+            try:
+                raw = pipe.read(512).strip() if pipe is not None else b""
+            except Exception:
+                raw = b""
+            if raw == b"mark public ingress: verified frontend unavailable":
+                raise ProtectedProductError(
+                    "ingress frontend socket identity unavailable"
+                )
+            if raw == b"mark public ingress: fixed localhost port 8875 required":
+                raise ProtectedProductError("ingress fixed port refused")
+            if raw == b"mark-api: unattested container draft cannot run Python entrypoints":
+                raise ProtectedProductError("ingress image draft denied")
             raise ProtectedProductError("trusted HTTP ingress unavailable")
         try:
             with HTTPConnection("127.0.0.1", PORT, timeout=0.5) as http:
@@ -502,10 +519,18 @@ def run(*, root: Path, init_new: bool = False, cdp_port: int = 9222,
         except Exception:
             raise ProtectedProductError("Landlock ingress admission failed") from None
         children.append(("ingress", ingress))
-        try:
-            _ready_ingress(ingress)
-        except Exception:
-            raise ProtectedProductError("ingress readiness unavailable") from None
+        _ready_ingress(ingress)
+        # Drain discarded runtime errors without ever serializing HTTP
+        # contents, cookies or provider secrets in root-owned startup logs.
+        pipe = getattr(ingress, "stderr", None)
+        if pipe is not None:
+            def discard_ingress_stderr():
+                try:
+                    while pipe.read(4096):
+                        pass
+                except Exception:
+                    pass
+            Thread(target=discard_ingress_stderr, daemon=True).start()
         # The write token is only in a fragment, not the server HTTP logs.
         print("Kleinanzeiger: http://127.0.0.1:" + str(PORT)
               + "/#write_token=" + quote(ui, safe=""), flush=True)

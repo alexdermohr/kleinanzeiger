@@ -231,5 +231,28 @@ class ProtectedProductTests(unittest.TestCase):
         self.assertNotIn("private token", str(raised.exception))
 
 
+    def test_trusted_ingress_failure_reports_only_fixed_socket_reason(self):
+        class ExitedIngress:
+            def __init__(self, raw):
+                self.stderr = io.BytesIO(raw)
+            def poll(self):
+                return 2
+
+        for data, phase in (
+            (b"mark public ingress: verified frontend unavailable\n",
+             "ingress frontend socket identity unavailable"),
+            (b"mark public ingress: fixed localhost port 8875 required\n",
+             "ingress fixed port refused"),
+            (b"synthetic secret api bearer should never be reported\n",
+             "trusted HTTP ingress unavailable"),
+        ):
+            with self.subTest(reason=phase), self.assertRaises(
+                product.ProtectedProductError
+            ) as error:
+                product._ready_ingress(ExitedIngress(data))
+            self.assertEqual(str(error.exception), phase)
+            self.assertNotIn("bearer", str(error.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
