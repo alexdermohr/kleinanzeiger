@@ -912,11 +912,25 @@ def synthetic_positive_media_publish(cdp, write_token):
     finally:
         cdp.media_bind_enabled = False
 
+    observed_outcome = result.get("operation_receipt", {}).get("outcome")
+    observed_media = result.get("media_post_read_status")
+    safe_outcome = (observed_outcome if observed_outcome in {
+        "confirmed", "precondition_failed", "ambiguous",
+    } else "unavailable")
+    safe_media = (observed_media if observed_media in {
+        "confirmed", "mismatch", "unknown", "not_read",
+        "verifier_unavailable",
+    } else "unavailable")
     check(code == 200 and replay != "true"
-          and result.get("operation_receipt", {}).get("outcome") == "confirmed"
+          and observed_outcome == "confirmed"
           and result.get("media_persistence_confirmed") is True
-          and result.get("media_post_read_status") == "confirmed",
-          "protected published media did not receive independent HTTPS confirmation")
+          and observed_media == "confirmed",
+          "protected media readback denied: status=%d,outcome=%s,media=%s,"
+          "input=%d,selected=%d,published=%d,gallery=%d,reads=%d/%d"
+          % (code, safe_outcome, safe_media, cdp.media_input_bind_probes,
+             cdp.media_file_set_calls, cdp.media_publish_submits,
+             cdp.gallery.media_uploads, cdp.gallery.listing_gets,
+             cdp.gallery.image_gets))
     check(cdp.create_submits == before[2] + 1
           and cdp.media_file_set_calls == before[3] + 1
           and cdp.media_publish_submits == before[4] + 1
