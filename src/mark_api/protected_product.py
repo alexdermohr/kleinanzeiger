@@ -570,8 +570,19 @@ def main(argv: list[str] | None = None) -> int:
             print("Kleinanzeiger: protected customer startup unavailable ("
                   + str(error) + ")", file=sys.stderr)
             return 2
-        except Exception:
-            print("Kleinanzeiger: protected customer startup unavailable", file=sys.stderr)
+        except Exception as error:
+            # Builtin exception *types* only. No exception message, traceback,
+            # source path, filesystem identity, SQL value or credential.
+            kind = type(error).__name__
+            if type(error).__module__ != "builtins" or kind not in {
+                "OSError", "FileNotFoundError", "PermissionError", "RuntimeError",
+                "TypeError", "ValueError", "AttributeError", "KeyError",
+                "IndexError", "ImportError", "TimeoutError",
+                "ConnectionError", "BrokenPipeError", "MemoryError",
+            }:
+                kind = "unknown"
+            print("Kleinanzeiger: protected customer startup unavailable (internal "
+                  + kind + ")", file=sys.stderr)
             return 2
     finally:
         os.umask(old_umask)

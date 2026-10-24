@@ -254,5 +254,18 @@ class ProtectedProductTests(unittest.TestCase):
             self.assertNotIn("bearer", str(error.exception))
 
 
+    def test_unexpected_runtime_exception_never_exposes_secret_details(self):
+        with patch(
+            "mark_api.protected_product.run",
+            side_effect=OSError("synthetic db location and bearer secret"),
+        ), redirect_stderr(io.StringIO()) as err:
+            result = product.main(["--state-root", "/tmp/no-customer-data"])
+        self.assertEqual(result, 2)
+        self.assertIn("internal OSError", err.getvalue())
+        self.assertNotIn("db location", err.getvalue())
+        self.assertNotIn("bearer secret", err.getvalue())
+        self.assertNotIn("/tmp/no-customer-data", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
