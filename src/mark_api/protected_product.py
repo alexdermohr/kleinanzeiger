@@ -359,10 +359,24 @@ def _ready_ingress(proc: subprocess.Popen) -> None:
                 raw = pipe.read(512).strip() if pipe is not None else b""
             except Exception:
                 raw = b""
-            if raw == b"mark public ingress: verified frontend unavailable":
-                raise ProtectedProductError(
-                    "ingress frontend socket identity unavailable"
-                )
+            ingress_phases = {
+                b"mark public ingress: verified frontend unavailable":
+                    "ingress frontend socket identity unavailable",
+                b"mark public ingress: frontend socket stat unavailable":
+                    "ingress frontend socket stat unavailable",
+                b"mark public ingress: frontend socket metadata invalid":
+                    "ingress frontend socket metadata invalid",
+                b"mark public ingress: frontend identity invalid":
+                    "ingress frontend identity invalid",
+                b"mark public ingress: localhost listener unavailable":
+                    "ingress localhost listener unavailable",
+                b"mark public ingress: frontend Unix connect unavailable":
+                    "ingress frontend Unix connect unavailable",
+                b"mark public ingress: frontend peer identity invalid":
+                    "ingress frontend peer identity invalid",
+            }
+            if raw in ingress_phases:
+                raise ProtectedProductError(ingress_phases[raw])
             if raw == b"mark public ingress: fixed localhost port 8875 required":
                 raise ProtectedProductError("ingress fixed port refused")
             if raw == b"mark-api: unattested container draft cannot run Python entrypoints":

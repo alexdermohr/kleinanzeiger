@@ -607,14 +607,31 @@ def relay_public_ingress_main(argv: list[str] | None = None) -> int:
             socket_path=args.frontend_socket, frontend_uid=args.frontend_uid,
             listen_port=args.port,
         )
+    except DashboardRelayError as exc:
+        # Fixed phase codes only: no paths, owner details or kernel errors.
+        phase = {
+            "frontend ingress socket unavailable":
+                "mark public ingress: frontend socket stat unavailable",
+            "untrusted frontend ingress socket identity":
+                "mark public ingress: frontend socket metadata invalid",
+        }.get(str(exc), "mark public ingress: frontend identity invalid")
+        print(phase, file=sys.stderr)
+        return 2
+    except (OSError, ValueError):
+        print("mark public ingress: localhost listener unavailable",
+              file=sys.stderr)
+        return 2
+    phase = "mark public ingress: frontend Unix connect unavailable"
+    try:
         with closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as check:
             check.settimeout(5.0)
             check.connect(str(args.frontend_socket))
+            phase = "mark public ingress: frontend peer identity invalid"
             if _peer_uid(check) != args.frontend_uid:
                 raise DashboardRelayError("wrong frontend peer UID")
     except (OSError, ValueError, DashboardRelayError):
-        print("mark public ingress: verified frontend unavailable",
-              file=sys.stderr)
+        service.server_close()
+        print(phase, file=sys.stderr)
         return 2
     stopping = Event()
     previous = signal.getsignal(signal.SIGTERM)

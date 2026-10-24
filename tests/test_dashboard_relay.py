@@ -358,6 +358,29 @@ class NetlessFrontendContractTests(unittest.TestCase):
                 listen_host="0.0.0.0", listen_port=8875,
             )
 
+    def test_public_ingress_denial_reports_only_fixed_phase(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        args = ["--frontend-socket", str(self.sock),
+                "--frontend-uid", str(self.fake_ingress_uid)]
+        for cause, expected in (
+            (DashboardRelayError("untrusted frontend ingress socket identity"),
+             "mark public ingress: frontend socket metadata invalid"),
+            (OSError("synthetic sensitive path and secret"),
+             "mark public ingress: localhost listener unavailable"),
+        ):
+            with self.subTest(expected=expected):
+                output = StringIO()
+                with patch("mark_api.dashboard_relay.container_draft_denied",
+                           return_value=False), patch(
+                    "mark_api.dashboard_relay.TrustedDashboardPublicIngress",
+                    side_effect=cause,
+                ), redirect_stderr(output):
+                    self.assertEqual(relay_public_ingress_main(args), 2)
+                self.assertEqual(output.getvalue().strip(), expected)
+                self.assertNotIn("sensitive", output.getvalue())
+
     def test_new_direct_python_mains_preserve_unattested_draft_stop(self) -> None:
         with patch("mark_api.dashboard_relay.container_draft_denied", return_value=True):
             self.assertEqual(relay_netless_frontend_main([]), 2)
