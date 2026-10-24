@@ -6,7 +6,9 @@ import math
 import multiprocessing
 import os
 import re
+import socket
 import stat
+import struct
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -261,16 +263,95 @@ class _PrivateWebMediaAdmissionDenied(OSError):
     """Permanent platform-authority denial, never a retryable network outage."""
 
 
-def _require_private_web_public_media_transport_authority() -> None:
-    # Public listing/media fetches remain platform automation even without a
-    # logged-in account. No environment flag can grant external permission.
-    raise _PrivateWebMediaAdmissionDenied(
-        "private Web public media transport not authorized; use mark-api-offline"
-    )
+@dataclass(frozen=True, slots=True)
+class ProtectedMediaReadbackAuthority:
+    """Root-supervised Actor credential checked against a live separate Witness.
+
+    This is not an environment toggle: each readback verifies its independent
+    AF_UNIX peer and the exact Actor UID. It cannot grant an arbitrary HTTP
+    destination, publish, SQL access, or Witness clearance.
+    """
+
+    witness_socket: str
+    witness_uid: int
+    actor_uid: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.witness_socket) is not str
+            or not os.path.isabs(self.witness_socket)
+            or os.path.normpath(self.witness_socket) != self.witness_socket
+            or "\x00" in self.witness_socket
+            or any(type(uid) is not int or uid <= 0 for uid in
+                   (self.witness_uid, self.actor_uid))
+            or self.witness_uid == self.actor_uid
+        ):
+            raise ValueError("protected media readback identity invalid")
 
 
-def _default_fetch(url: str, timeout_seconds: float, max_bytes: int) -> _Fetched:
-    _require_private_web_public_media_transport_authority()
+def _require_private_web_public_media_transport_authority(
+    authority: ProtectedMediaReadbackAuthority | None = None,
+) -> None:
+    # A default/injected verifier has no transport authority whatsoever.
+    # The separate role UID and live Witness peer must both be present on
+    # every read, not merely at Actor startup or in an environment variable.
+    if (
+        type(authority) is not ProtectedMediaReadbackAuthority
+        or os.geteuid() != authority.actor_uid
+        or not hasattr(socket, "SO_PEERCRED")
+    ):
+        raise _PrivateWebMediaAdmissionDenied(
+            "private Web public media transport not authorized"
+        )
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+            peer.settimeout(1.0)
+            peer.connect(authority.witness_socket)
+            raw = peer.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"),
+            )
+            _pid, uid, gid = struct.unpack("3i", raw)
+            if (uid, gid) != (authority.witness_uid, authority.witness_uid):
+                raise _PrivateWebMediaAdmissionDenied(
+                    "private Web media Witness identity mismatch"
+                )
+    except (OSError, ValueError, struct.error) as exc:
+        raise _PrivateWebMediaAdmissionDenied(
+            "private Web public media transport not authorized"
+        ) from exc
+
+
+def _require_exact_readback_url(url: str) -> None:
+    # This function is also used by the directly-importable fetch helper.
+    # Never turn the Witness credential into a generic outbound URL fetch.
+    if type(url) is not str:
+        raise _MediaParseError("invalid media verification URL")
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https" or parsed.port is not None
+        or parsed.username is not None or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise _MediaParseError("untrusted media verification URL")
+    if parsed.hostname == "www.kleinanzeigen.de":
+        path = parsed.path.split("/")
+        if (
+            not parsed.query and len(path) == 3 and path[:2] == ["", "s-anzeige"]
+            and _AD_ID_RE.fullmatch(path[2]) is not None
+        ):
+            return
+    elif parsed.hostname == "img.kleinanzeigen.de":
+        if _trusted_image_url(url) == url:
+            return
+    raise _MediaParseError("untrusted media verification URL")
+
+
+def _default_fetch(
+    url: str, timeout_seconds: float, max_bytes: int,
+    *, protected_authority: ProtectedMediaReadbackAuthority | None = None,
+) -> _Fetched:
+    _require_private_web_public_media_transport_authority(protected_authority)
+    _require_exact_readback_url(url)
     if timeout_seconds <= 0:
         raise TimeoutError("fetch timeout exhausted")
     request = Request(
@@ -489,6 +570,7 @@ class PrivateWebPublicMediaPersistenceVerifier:
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        protected_authority: ProtectedMediaReadbackAuthority | None = None,
     ) -> None:
         # Never evaluate user-supplied callables' __bool__ before admission.
         self._fetch = fetch if fetch is not None else _default_fetch
@@ -496,6 +578,7 @@ class PrivateWebPublicMediaPersistenceVerifier:
         self._clock = clock if clock is not None else (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._sleep = sleep
+        self._protected_authority = protected_authority
         self._use_isolated_default = (
             fetch is None
             and signature_loader is None
@@ -517,7 +600,9 @@ class PrivateWebPublicMediaPersistenceVerifier:
         deadline: float,
     ) -> tuple[str, ...]:
         # Directly callable listing wrapper must not invoke injected fetches.
-        _require_private_web_public_media_transport_authority()
+        _require_private_web_public_media_transport_authority(
+            self._protected_authority
+        )
         response = self._fetch(
             f"{_LISTING_ORIGIN}/s-anzeige/{ad_id}",
             self._remaining(deadline),
@@ -535,7 +620,9 @@ class PrivateWebPublicMediaPersistenceVerifier:
         *,
         deadline: float,
     ) -> tuple[_ImageSignature, ...]:
-        _require_private_web_public_media_transport_authority()
+        _require_private_web_public_media_transport_authority(
+            self._protected_authority
+        )
         signatures: list[_ImageSignature] = []
         for url in urls:
             response = self._fetch(
@@ -559,7 +646,9 @@ class PrivateWebPublicMediaPersistenceVerifier:
     ) -> ReadResult[PrivateWebMediaPersistenceSnapshot]:
         # Caller-provided fetch functions cannot grant external authority.
         try:
-            _require_private_web_public_media_transport_authority()
+            _require_private_web_public_media_transport_authority(
+                self._protected_authority
+            )
         except _PrivateWebMediaAdmissionDenied:
             return ReadResult.failure(
                 ReadStatus.TRANSPORT_ERROR,
@@ -570,6 +659,7 @@ class PrivateWebPublicMediaPersistenceVerifier:
                 ad_id,
                 expected_sources,
                 timeout_seconds=timeout_seconds,
+                protected_authority=self._protected_authority,
             )
         return self._verify_media_inline(
             ad_id,
@@ -586,7 +676,9 @@ class PrivateWebPublicMediaPersistenceVerifier:
     ) -> ReadResult[PrivateWebMediaPersistenceSnapshot]:
         # _verify_media_inline is independently callable: fail closed too.
         try:
-            _require_private_web_public_media_transport_authority()
+            _require_private_web_public_media_transport_authority(
+                self._protected_authority
+            )
         except _PrivateWebMediaAdmissionDenied:
             return ReadResult.failure(
                 ReadStatus.TRANSPORT_ERROR,
@@ -830,15 +922,22 @@ def _default_verification_worker(
     ad_id: str,
     source_paths: tuple[str, ...],
     deadline_monotonic: float,
+    protected_authority: ProtectedMediaReadbackAuthority | None,
 ) -> None:
     try:
         sources = tuple(
             PrivateWebMediaSource(path)
             for path in source_paths
         )
+        # Only this root-provisioned, Witness-checked worker may use the
+        # fixed read-only HTTPS fetch. No user-controlled origin is passed.
         verifier = PrivateWebPublicMediaPersistenceVerifier(
-            fetch=_default_fetch,
+            fetch=lambda url, timeout, maximum: _default_fetch(
+                url, timeout, maximum,
+                protected_authority=protected_authority,
+            ),
             signature_loader=_pillow_signature,
+            protected_authority=protected_authority,
         )
         remaining = (
             deadline_monotonic
@@ -879,11 +978,14 @@ def _verify_media_in_isolated_process(
     expected_sources: tuple[PrivateWebMediaSource, ...],
     *,
     timeout_seconds: float,
+    protected_authority: ProtectedMediaReadbackAuthority | None = None,
 ) -> ReadResult[PrivateWebMediaPersistenceSnapshot]:
     # This directly importable worker gateway also needs independent denial.
     # A synthetic caller cannot induce process creation or inspect local media.
     try:
-        _require_private_web_public_media_transport_authority()
+        _require_private_web_public_media_transport_authority(
+            protected_authority
+        )
     except _PrivateWebMediaAdmissionDenied:
         return ReadResult.failure(
             ReadStatus.TRANSPORT_ERROR,
@@ -930,6 +1032,7 @@ def _verify_media_in_isolated_process(
             ad_id,
             tuple(source.path for source in expected_sources),
             deadline,
+            protected_authority,
         ),
         daemon=True,
     )
