@@ -267,5 +267,30 @@ class ProtectedProductTests(unittest.TestCase):
         self.assertNotIn("/tmp/no-customer-data", err.getvalue())
 
 
+    def test_real_readiness_probe_closes_http_connection_without_context_protocol(self):
+        class HTTPClient:
+            closed = False
+            def request(self, method, path):
+                self.seen = (method, path)
+            def getresponse(self):
+                return self
+            status = 200
+            def read(self, limit=None):
+                return b'{"ready":true}'
+            def close(self):
+                self.closed = True
+
+        class Ingress:
+            def poll(self):
+                return None
+
+        connection = HTTPClient()
+        self.assertFalse(hasattr(connection, "__enter__"))
+        with patch("mark_api.protected_product.HTTPConnection", return_value=connection):
+            self.assertIsNone(product._ready_ingress(Ingress()))
+        self.assertTrue(connection.closed)
+        self.assertEqual(connection.seen, ("GET", "/readyz"))
+
+
 if __name__ == "__main__":
     unittest.main()

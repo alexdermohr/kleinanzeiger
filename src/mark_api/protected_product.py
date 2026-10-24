@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from contextlib import closing
 import fcntl
 from http.client import HTTPConnection
 import json
@@ -368,7 +369,7 @@ def _ready_ingress(proc: subprocess.Popen) -> None:
                 raise ProtectedProductError("ingress image draft denied")
             raise ProtectedProductError("trusted HTTP ingress unavailable")
         try:
-            with HTTPConnection("127.0.0.1", PORT, timeout=0.5) as http:
+            with closing(HTTPConnection("127.0.0.1", PORT, timeout=0.5)) as http:
                 http.request("GET", "/readyz")
                 response = http.getresponse()
                 response.read(2048)
