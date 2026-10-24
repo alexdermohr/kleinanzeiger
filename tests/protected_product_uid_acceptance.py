@@ -123,10 +123,17 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                         self.server.page = "/m-meine-anzeigen.html"
                         answer = {"result": {}}
                     elif url == ("https://www.kleinanzeigen.de/"
-                                 "p-anzeige-bearbeiten.html?adId=1234567890"):
+                                 "p-anzeige-bearbeiten.html?adId=" + self.server.ad_id):
                         self.server.page = "/p-anzeige-bearbeiten.html"
                         self.server.draft_title = self.server.title
                         self.server.draft_description = self.server.description
+                        answer = {"result": {}}
+                    elif url == "https://www.kleinanzeigen.de/p-anzeige-aufgeben.html":
+                        self.server.page = "/p-anzeige-aufgeben.html"
+                        self.server.categories = []
+                        self.server.create_title = ""
+                        self.server.create_description = ""
+                        self.server.create_price = ""
                         answer = {"result": {}}
                 elif method == "Input.dispatchMouseEvent":
                     if (params.get("type") == "mousePressed"
@@ -160,11 +167,29 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                             self.server.pending_delete = None
                             self.server.releases += 1
                             answer = {"result": {}}
+                        elif self.server.pending_create is not None:
+                            action = self.server.pending_create
+                            if action.startswith("category:"):
+                                self.server.categories.append(action.split(":", 1)[1])
+                            elif action == "continue" and self.server.categories == [
+                                    "Freizeit", "Sammeln"]:
+                                self.server.page = "/p-anzeige-aufgeben-schritt2.html"
+                            elif action == "publish" and self.server.page == "/p-anzeige-aufgeben-schritt2.html":
+                                self.server.ad_id = "1234567891"
+                                self.server.present = True
+                                self.server.title = self.server.create_title
+                                self.server.description = self.server.create_description
+                                self.server.state = "active"
+                                self.server.create_submits += 1
+                                self.server.page = "/m-meine-anzeigen.html"
+                            self.server.pending_create = None
+                            self.server.releases += 1
+                            answer = {"result": {}}
                 elif method == "Runtime.evaluate" and params.get("awaitPromise") is True:
                     expression = params["expression"]
                     if "pageNum=1" in expression and 'credentials: "same-origin"' in expression:
                         ads = {"ads": (
-                            [{"id": "1234567890",
+                            [{"id": self.server.ad_id,
                               "title": self.server.title, "state": self.server.state,
                               "viewCount": 7, "watchCount": 2}]
                             if self.server.present else []),
@@ -176,17 +201,58 @@ class _SyntheticCDPHandler(BaseHTTPRequestHandler):
                     value = None
                     if (("__mark_private_web_state_navigation_probe_" in expression
                          or "__mark_private_web_navigation_probe_" in expression
-                         or "__mark_private_web_delete_navigation_probe_" in expression)
+                         or "__mark_private_web_delete_navigation_probe_" in expression
+                         or "__mark_private_web_create_navigation_probe__" in expression)
                             and "globalThis[key] = true" in expression):
                         value = True
                     elif "oldDocument: globalThis[" in expression:
                         value = {"readyState": "complete", "oldDocument": False}
+                        if ("origin: location.origin" in expression
+                                and "path: location.pathname" in expression):
+                            value.update({"origin": "https://www.kleinanzeigen.de",
+                                          "path": self.server.page})
                     elif ("const saveButtons =" in expression
                           and "const adId = new URL(location.href)" in expression
                           and self.server.page == "/p-anzeige-bearbeiten.html"):
-                        value = {"state": "ready", "ad_id": "1234567890",
+                        value = {"state": "ready", "ad_id": self.server.ad_id,
                                  "title": self.server.draft_title,
                                  "description": self.server.draft_description}
+                    elif ("if ((link.innerText || \"\").trim() !==" in expression
+                          and self.server.page == "/p-anzeige-aufgeben.html"):
+                        labels = ("Freizeit", "Sammeln")
+                        index = len(self.server.categories)
+                        if (index < len(labels)
+                                and '!== "' + labels[index] + '"' in expression):
+                            self.server.pending_create = "category:" + labels[index]
+                            value = {"state": "ready", "x": 120.5, "y": 240.25}
+                    elif ("const forms = Array.from(document.forms)" in expression
+                          and self.server.page == "/p-anzeige-aufgeben.html"
+                          and self.server.categories == ["Freizeit", "Sammeln"]):
+                        self.server.pending_create = "continue"
+                        value = {"state": "ready", "x": 120.5, "y": 240.25}
+                    elif ("const allowedHiddenNames = new Set([" in expression
+                          and self.server.page == "/p-anzeige-aufgeben-schritt2.html"):
+                        if "if (!true)" in expression:
+                            self.server.pending_create = "publish"
+                            value = {"state": "ready", "x": 120.5, "y": 240.25}
+                        elif "if (!false)" in expression:
+                            value = {"state": "ready", "title": self.server.create_title,
+                                     "description": self.server.create_description,
+                                     "price_amount": self.server.create_price}
+                    elif ("descriptor.set.call(element," in expression
+                          and self.server.page == "/p-anzeige-aufgeben-schritt2.html"):
+                        if ('document.querySelector("#ad-title")' in expression
+                                and 'descriptor.set.call(element, "Created synthetic bowl")' in expression):
+                            self.server.create_title = "Created synthetic bowl"
+                            value = True
+                        elif ('document.querySelector("#ad-description")' in expression
+                                and 'descriptor.set.call(element, "Created in root installed CDP acceptance")' in expression):
+                            self.server.create_description = "Created in root installed CDP acceptance"
+                            value = True
+                        elif ('document.querySelector("#ad-price-amount")' in expression
+                                and 'descriptor.set.call(element, "10")' in expression):
+                            self.server.create_price = "10"
+                            value = True
                     elif ("descriptor.set.call(element," in expression
                           and self.server.page == "/p-anzeige-bearbeiten.html"):
                         if ('document.querySelector("#ad-title")' in expression
@@ -281,6 +347,13 @@ class SyntheticCDP(ThreadingHTTPServer):
         self.delete_modal = False
         self.pending_delete = None
         self.delete_submits = 0
+        self.ad_id = "1234567890"
+        self.categories = []
+        self.pending_create = None
+        self.create_title = ""
+        self.create_description = ""
+        self.create_price = ""
+        self.create_submits = 0
 
 
 def inventory_confirmed(cdp):
@@ -431,6 +504,50 @@ def synthetic_delete_write(cdp, token):
               "real CDP delete two-phase durable ACK failed")
 
 
+
+def synthetic_create_write(cdp, token):
+    key = "synthetic-real-cdp-create-1234567891"
+    payload = {"category_path": ["Freizeit", "Sammeln"],
+               "title": "Created synthetic bowl",
+               "description": "Created in root installed CDP acceptance",
+               "price_eur": 10}
+    before = (cdp.presses, cdp.releases, cdp.create_submits)
+    status, body, replayed = _dashboard_http(
+        "POST", "/api/write/ads", token=token, key=key, payload=payload,
+    )
+    check(status == 200 and body.get("operation_receipt", {}).get("outcome") == "confirmed",
+          "protected real CDP publish was not confirmed")
+    check(replayed != "true" and cdp.present is True
+          and cdp.ad_id == "1234567891" and cdp.title == payload["title"]
+          and cdp.categories == payload["category_path"]
+          and (cdp.presses, cdp.releases, cdp.create_submits)
+          == (before[0] + 4, before[1] + 4, before[2] + 1),
+          "real CDP publish was not performed exactly once")
+    again, same, flag = _dashboard_http(
+        "POST", "/api/write/ads", token=token, key=key, payload=payload,
+    )
+    check(again == status and same == body and flag == "true"
+          and (cdp.presses, cdp.releases, cdp.create_submits)
+          == (before[0] + 4, before[1] + 4, before[2] + 1),
+          "replayed protected CDP publish issued duplicate browser input")
+    for terminal in (False, True):
+        ack_status, ack, _ = _dashboard_http(
+            "POST", "/api/dashboard/pending-writes/ack", token=token,
+            payload={"scope": "create", "idempotency_key": key},
+        )
+        check(ack_status == 200 and ack.get("acknowledged") is True
+              and ack.get("finalized") is terminal,
+              "real CDP publish two-phase durable ACK failed")
+    with closing(HTTPConnection("127.0.0.1", 8875, timeout=4)) as conn:
+        conn.request("GET", "/api/ads")
+        response = conn.getresponse()
+        rows = json.loads(response.read())
+    check(response.status == 200 and any(
+        row.get("ad_id") == "1234567891"
+        and row.get("title") == payload["title"] for row in rows
+    ), "real CDP publish missing from protected owner SQLite/dashboard")
+
+
 def dashboard_ready():
     with closing(HTTPConnection("127.0.0.1", 8875, timeout=4)) as client:
         client.request("GET", "/readyz")
@@ -574,6 +691,7 @@ def admission(net_before, pid_before):
             check((db.stat().st_dev, db.stat().st_ino) == first_inode,
                   "restart replaced a customer's SQLite inode")
             synthetic_delete_write(cdp, second_token)
+            synthetic_create_write(cdp, second_token)
             shutdown(child)
             child = None
 
@@ -601,9 +719,10 @@ def admission(net_before, pid_before):
     check(cdp.commands.count("Runtime.evaluate") >= 10
           and set(cdp.commands) == {
               "Runtime.evaluate", "Page.navigate", "Input.dispatchMouseEvent",
-          } and cdp.presses == 5 and cdp.releases == 5
-          and cdp.content_submits == 1 and cdp.delete_submits == 1,
-          "installed actor did not perform state, content and modal delete CDP submits")
+          } and cdp.presses == 9 and cdp.releases == 9
+          and cdp.content_submits == 1 and cdp.delete_submits == 1
+          and cdp.create_submits == 1,
+          "installed actor did not perform state, content, delete and publish CDP submits")
     print(json.dumps({
         "result":"PASS", "scope":"installed-protected-fresh-customer-start",
         "real_owner_cli":True,"real_actor_cli":True,
@@ -616,6 +735,7 @@ def admission(net_before, pid_before):
         "protected_cdp_synthetic_state_write_attested":True,
         "protected_cdp_synthetic_content_write_attested":True,
         "protected_cdp_synthetic_delete_write_attested":True,
+        "protected_cdp_synthetic_create_write_attested":True,
         "paid_generation_called":False,
     }, sort_keys=True, separators=(",",":")),flush=True)
 

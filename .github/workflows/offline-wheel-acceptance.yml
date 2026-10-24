@@ -150,4 +150,5 @@ jobs:
           grep -Fq '"protected_cdp_synthetic_state_write_attested":true' "$report"
           grep -Fq '"protected_cdp_synthetic_content_write_attested":true' "$report"
           grep -Fq '"protected_cdp_synthetic_delete_write_attested":true' "$report"
+          grep -Fq '"protected_cdp_synthetic_create_write_attested":true' "$report"
           grep -Fq '"legacy_cutover_attested":false' "$report"
