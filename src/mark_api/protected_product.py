@@ -370,6 +370,12 @@ def _ready_ingress(proc: subprocess.Popen) -> None:
                     "ingress frontend identity invalid",
                 b"mark public ingress: localhost listener unavailable":
                     "ingress localhost listener unavailable",
+                b"mark public ingress: localhost bind permission denied":
+                    "ingress localhost bind permission denied",
+                b"mark public ingress: localhost port occupied":
+                    "ingress localhost port occupied",
+                b"mark public ingress: localhost address unavailable":
+                    "ingress localhost address unavailable",
                 b"mark public ingress: frontend Unix connect unavailable":
                     "ingress frontend Unix connect unavailable",
                 b"mark public ingress: frontend peer identity invalid":

@@ -5,6 +5,7 @@ a separate multi-UID process test remains required for the real installation.
 """
 from __future__ import annotations
 
+import errno
 import http.client
 import os
 from contextlib import closing
@@ -367,6 +368,12 @@ class NetlessFrontendContractTests(unittest.TestCase):
         for cause, expected in (
             (DashboardRelayError("untrusted frontend ingress socket identity"),
              "mark public ingress: frontend socket metadata invalid"),
+            (OSError(errno.EACCES, "synthetic sensitive path and secret"),
+             "mark public ingress: localhost bind permission denied"),
+            (OSError(errno.EADDRINUSE, "synthetic sensitive path and secret"),
+             "mark public ingress: localhost port occupied"),
+            (OSError(errno.EADDRNOTAVAIL, "synthetic sensitive path and secret"),
+             "mark public ingress: localhost address unavailable"),
             (OSError("synthetic sensitive path and secret"),
              "mark public ingress: localhost listener unavailable"),
         ):

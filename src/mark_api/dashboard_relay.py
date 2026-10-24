@@ -11,6 +11,7 @@ from .container_draft import container_draft_denied
 
 import argparse
 from contextlib import closing
+import errno
 import os
 import sys
 from pathlib import Path
@@ -617,7 +618,19 @@ def relay_public_ingress_main(argv: list[str] | None = None) -> int:
         }.get(str(exc), "mark public ingress: frontend identity invalid")
         print(phase, file=sys.stderr)
         return 2
-    except (OSError, ValueError):
+    except OSError as exc:
+        # Kernel errno is a bounded category, never a logged exception string.
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            phase = "mark public ingress: localhost bind permission denied"
+        elif exc.errno == errno.EADDRINUSE:
+            phase = "mark public ingress: localhost port occupied"
+        elif exc.errno == errno.EADDRNOTAVAIL:
+            phase = "mark public ingress: localhost address unavailable"
+        else:
+            phase = "mark public ingress: localhost listener unavailable"
+        print(phase, file=sys.stderr)
+        return 2
+    except ValueError:
         print("mark public ingress: localhost listener unavailable",
               file=sys.stderr)
         return 2
