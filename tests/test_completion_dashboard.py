@@ -141,6 +141,32 @@ class ProtectedDashboardCompletionTests(unittest.TestCase):
             conn.execute("UPDATE operation_receipts SET writer_error='invented_error'")
         self.assert_fenced()
 
+    def test_untrusted_frontend_cannot_invoke_owner_sync_or_claim(self):
+        # These are valid typed Owner RPC frames, not malformed probes.
+        # A compromised frontend UID must not control the Owner's sync
+        # history or durable write-API fences through the dashboard socket.
+        # This unit harness constructs the Owner without opening a socket.
+        # Restore real Owner lock/stage state to test valid hostile operations.
+        self.owner._sync_lock = RLock()
+        self.owner._active_sync = None
+        self.owner._inbox_lock = RLock()
+        self.owner._inbox_stage = None
+        before_sync = self.store.sync_recovery_status()
+        when = _local.NOW.isoformat()
+        attacks = (
+            {"op": "sync_begin", "source": "hostile-frontend", "at": when},
+            {"op": "claim", "key": "hostile-claim", "sha": "a" * 64,
+             "owner": "hostile-frontend", "at": when},
+            {"op": "inbound_begin", "id": "hostile-inbox"},
+            {"op": "create_pending", "exclude_key": "hostile-claim",
+             "owner": "hostile-frontend"},
+        )
+        for request in attacks:
+            with self.subTest(op=request["op"]), self.assertRaises(StorageOwnerError):
+                self.owner.dispatch({"version": 1, **request})
+        self.assertEqual(self.store.sync_recovery_status(), before_sync)
+        self.assertIsNone(self.store.write_api_request("hostile-claim"))
+
     def test_frontend_cannot_supply_success_proof_or_select_an_ack_phase(self):
         self.completed_edit()
         before = self.store.dashboard_pending_writes()

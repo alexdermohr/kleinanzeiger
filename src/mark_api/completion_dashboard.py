@@ -30,6 +30,19 @@ from .write_api import WriteApiAccess
 _PROFILE = "a6-independent-dashboard-v2"
 _MAX_RESPONSE = 24 * 1024
 
+# The dashboard's untrusted UID owns presentation and one strictly validated
+# pending-intent admission, never inventory ingestion, sync journaling, raw
+# write claims, quarantine or recovery transitions. StorageOwnerServer serves
+# additional internal roles, so inheriting its dispatch without this gate
+# would silently grant those mutating operations to the frontend socket.
+_FRONTEND_OWNER_OPS = frozenset({
+    "ready", "sync_status", "sync_recovery_status",
+    "inbound_message_page", "inbound_ad_ids_page", "inbound_counts",
+    "classification_latest", "reaction_history_page", "ad_history_page",
+    "tracked_ids", "read_request", "dashboard_pending_page",
+    "dashboard_pending_claim",
+})
+
 
 def _denied() -> StorageOwnerError:
     return StorageOwnerError("independent dashboard completion not verified")
@@ -119,6 +132,8 @@ class CompletionDashboardOwnerServer(StorageOwnerServer):
                 if phase not in {"acknowledged", "finalized"}:
                     raise _denied()
                 return {"phase": phase}
+        if type(operation) is not str or operation not in _FRONTEND_OWNER_OPS:
+            raise _denied()
         return super().dispatch(request)
 
 
