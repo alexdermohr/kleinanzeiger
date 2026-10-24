@@ -24,7 +24,7 @@ from mark_api.completion_witness import (
 from mark_api.domain import (
     AdSnapshot, LifecycleState, OperationOutcome, OperationReceipt,
 )
-from mark_api.fence_witness import FenceLedger
+from mark_api.fence_witness import FenceLedger, FenceWitnessRejected
 from mark_api.paired_restore_preflight import (
     PairPreflightError, _witness_inventory,
 )
@@ -297,6 +297,54 @@ class A6WitnessOfflineRecoveryTests(unittest.TestCase):
         # attested host cutover this scanner cannot clear old write authority.
         self.assertEqual(observed["fences"]["witness_unresolved"], [[self.key, self.sha]])
         self.assertEqual(observed["fences"]["sqlite_unverified_replay"], [])
+
+    def test_safe_a6_actor_completion_admits_followup_without_erasing_fences(self):
+        self.witness = self.root / "valid-multiple-a6-writes.sqlite"
+        self._record(stage="completed")
+        key2, sha2 = "a6:followup:702", "b" * 64
+        # This is the exact live CompletionWitnessLedger replay gate, not a
+        # forged synthetic event inserted directly into the database.
+        with CompletionWitnessLedger(
+            self.witness, principal=self.principal,
+        ) as ledger:
+            followup = ledger.open_session()
+            ledger.execution_started(
+                followup, key=key2, sha=sha2, action="activate",
+            )
+            ledger.seal_session(followup)
+
+        restored = self.inspect()
+        self.assertEqual(
+            restored["witness_started"],
+            [[key2, sha2], [self.key, self.sha]],
+        )
+        # Source-level host cutover remains unproven: both original starts
+        # must still be visible in an offline/restore fence inventory.
+        self.assertEqual(
+            restored["witness_unresolved"],
+            [[key2, sha2], [self.key, self.sha]],
+        )
+
+    def test_unsettled_actor_proof_cannot_precede_another_write(self):
+        for stage in ("started", "begun", "verified"):
+            with self.subTest(stage=stage):
+                self.witness = self.root / ("blocked-" + stage + ".sqlite")
+                self._record(stage=stage)
+                with CompletionWitnessLedger(
+                    self.witness, principal=self.principal,
+                ) as ledger:
+                    session = ledger.open_session()
+                    with self.assertRaises(FenceWitnessRejected):
+                        ledger.execution_started(
+                            session,
+                            key="a6:blocked:702", sha="b" * 64,
+                            action="activate",
+                        )
+                    ledger.seal_session(session)
+                self.assertEqual(
+                    self.inspect()["witness_started"],
+                    [[self.key, self.sha]],
+                )
 
     def test_legacy_four_index_witness_stays_compatible(self):
         with FenceLedger(self.witness, initialize=True) as ledger:

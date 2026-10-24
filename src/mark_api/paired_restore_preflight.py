@@ -1312,6 +1312,25 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
         }
     }
     has_actor_indexes = len(actor_indexes) == 2
+
+    def prior_write_settled(item: dict[str, object]) -> bool:
+        if item["operator"]:
+            return True
+        # CompletionWitnessLedger._is_pending() admits a later write only
+        # after a separate actor has durably begun, verified and completed a
+        # matching SAFE operation. Legacy executor-only completions, unknown
+        # media, runtime clearance and partial actor proofs never suffice.
+        proof = item["authority_verified"]
+        return bool(
+            has_actor_indexes
+            and item["completed"] is True
+            and item["completion_outcome"] in _WITNESS_SAFE_OUTCOMES
+            and item["authority_begun"] is not None
+            and type(proof) is tuple
+            and len(proof) == 3
+            and proof[1] == item["completion_outcome"]
+        )
+
     history = _rows(
         conn,
         "SELECT seq,session_id,kind,request_key,request_sha256,action,"
@@ -1358,10 +1377,11 @@ def _verify_witness_event_history(conn: sqlite3.Connection) -> None:
             if (
                 key in starts or action not in _WITNESS_ACTIONS
                 or any((outcome, response, evidence))
-                # FenceLedger.execution_started() refuses ANY second start
-                # until every earlier started write was independently
-                # operator-cleared after its originating session sealed.
-                or any(not item["operator"] for item in starts.values())
+                # The A6 runtime also permits a FOLLOWING write after a
+                # validated, matching independent Actor completion. Keep
+                # executor-only/ambiguous/partial/legacy starts fenced.
+                or any(not prior_write_settled(item)
+                       for item in starts.values())
             ):
                 raise PairPreflightError("witness started operation invalid")
             starts[key] = {
