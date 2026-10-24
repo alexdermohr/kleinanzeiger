@@ -10,16 +10,18 @@ import base64
 import json
 import os
 import stat
+import struct
 import tempfile
 import threading
 import unittest
+import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from mark_api.dashboard import DashboardWriteProxy, create_server
+from mark_api.dashboard import DashboardGenerationAccess, DashboardWriteProxy, create_server
 from mark_api.domain import (
     AdSnapshot,
     CreateOperationReceipt,
@@ -40,16 +42,32 @@ PNG_BYTES = base64.b64decode(
 )
 
 
+
+def _synthetic_generated_png() -> bytes:
+    """Valid full-size PNG fixture returned by a fake, never a real provider."""
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + tag + payload
+                + struct.pack(">I", zlib.crc32(tag + payload) & 0xffffffff))
+    header = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1024, 1024, 8, 6, 0, 0, 0)
+    raster = (b"\x00" + b"\x00" * 4096) * 1024
+    return (header + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raster))
+            + chunk(b"IEND", b""))
+
+
 class NeverCalledStandardService:
     def create(self, *args, **kwargs):
         raise AssertionError("media create must not reach the ordinary create writer")
 
 
 class SyntheticConfirmedMediaService:
-    def __init__(self, stager: PrivateWebMediaHandleStore, store: SnapshotStore, *, confirmed: bool = True):
+    def __init__(self, stager: PrivateWebMediaHandleStore, store: SnapshotStore, *,
+                 confirmed: bool = True, expected_image: bytes = PNG_BYTES):
         self.stager = stager
         self.store = store
         self.confirmed = confirmed
+        self.expected_image = expected_image
         self.effects: list[tuple[str, ...]] = []
 
     def create_with_media(
@@ -62,7 +80,7 @@ class SyntheticConfirmedMediaService:
     ) -> CreateOperationReceipt:
         sources = self.stager.resolve(media_refs)
         assert len(sources) == 1 and len(media_refs) == 1
-        assert Path(sources[0].path).read_bytes() == PNG_BYTES
+        assert Path(sources[0].path).read_bytes() == self.expected_image
         assert stat.S_IMODE(os.stat(sources[0].path).st_mode) == 0o600
         self.effects.append(media_refs)
         if self.confirmed:
@@ -110,7 +128,7 @@ class SyntheticConfirmedMediaService:
 
 
 @contextmanager
-def servers(store, media_service, stager):
+def servers(store, media_service, stager, *, generation_access=None):
     access = WriteApiAccess(
         principal=PRINCIPAL, bearer_token=BACKEND_TOKEN,
         capabilities=frozenset({WriteCapability.CREATE_MEDIA}), writes_enabled=True,
@@ -127,6 +145,7 @@ def servers(store, media_service, stager):
             bearer_token=BACKEND_TOKEN, ui_token=UI_TOKEN,
             backend_principal=PRINCIPAL, local_reconciliation_enabled=True,
         ),
+        generation_access=generation_access,
     )
     workers = []
     try:
@@ -261,6 +280,93 @@ class DashboardMediaFullLifecycleTests(unittest.TestCase):
             self.assertEqual((code, after), (replay_code, replay))
             self.assertEqual(h.get("Idempotency-Replayed"), "true")
             self.assertEqual(len(media.effects), 1)
+
+    def test_confirmed_generated_png_passes_same_http_media_create_and_replay(self):
+        """Fake AI -> real generation HTTP -> real media stage -> Write/SQLite.
+
+        Only the final platform MediaCreate effect is synthetic. This is not
+        proof of a real external listing or real provider transaction.
+        """
+        png = _synthetic_generated_png()
+        from mark_api.generation import _validate_png_payload
+        _validate_png_payload(png)
+
+        class FakeProvider:
+            def __init__(self):
+                self.prompts = []
+
+            def generate_image(self, prompt):
+                self.prompts.append(prompt)
+                return png
+
+        provider = FakeProvider()
+        generation_token = "synthetic-ai-media-session-1234567890"
+        generation_access = DashboardGenerationAccess(
+            ui_token=generation_token, generator_factory=lambda: provider,
+            max_requests=1,
+        )
+        media = SyntheticConfirmedMediaService(
+            self.stager, self.store, expected_image=png,
+        )
+        with servers(
+            self.store, media, self.stager, generation_access=generation_access,
+        ) as base:
+            prompt = "Synthetisches Titelbild ohne Plattformaktion"
+            body = json.dumps({
+                "mode": "image", "prompt": prompt,
+                "acknowledge_provider_cost": True,
+            }, separators=(",", ":")).encode()
+            generate_request = Request(
+                base + "/api/dashboard/generate", data=body, method="POST",
+                headers={
+                    "Origin": base,
+                    "Content-Type": "application/json",
+                    "X-Mark-Generation": "1",
+                    "X-Mark-Generation-Token": generation_token,
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            )
+            with build_opener(ProxyHandler({})).open(
+                generate_request, timeout=5,
+            ) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers.get_content_type(), "image/png")
+                generated = response.read()
+            self.assertEqual(generated, png)
+            self.assertEqual(provider.prompts, [prompt])
+            self.assertEqual(media.effects, [])
+            self.assertEqual(self.store.dashboard_pending_writes(), ())
+
+            # Generation alone publishes nothing; the user explicitly stages
+            # the bytes and separately authorizes Create + Media.
+            code, stage, _ = request(
+                base, "/api/write/media/stage", method="POST",
+                image=generated, filename="generated-ad.png",
+            )
+            self.assertEqual(code, 201, stage)
+            reference = stage["media_ref"]
+            key = "synthetic-generated-media-create-01"
+            payload = {**self.payload, "media_refs": [reference]}
+            code, receipt, _ = request(
+                base, "/api/write/media/ads", method="POST",
+                payload=payload, key=key,
+            )
+            self.assertEqual(code, 200, receipt)
+            self.assertEqual(receipt["operation_receipt"]["outcome"], "confirmed")
+            self.assertTrue(receipt["media_persistence_confirmed"])
+            self.assertEqual(receipt["media_post_read_status"], "confirmed")
+            self.assertEqual(media.effects, [(reference,)])
+            self.assertEqual(provider.prompts, [prompt])
+            replay_code, replay_body, replay_headers = request(
+                base, "/api/write/media/ads", method="POST",
+                payload=payload, key=key,
+            )
+            self.assertEqual((replay_code, replay_body), (code, receipt))
+            self.assertEqual(replay_headers.get("Idempotency-Replayed"), "true")
+            self.assertEqual(media.effects, [(reference,)])
+            self._ack(base, key, False)
+            self._ack(base, key, True)
+            self.assertEqual(self.store.dashboard_pending_writes(), ())
 
     def test_tampered_final_media_receipt_does_not_replay_or_ack(self):
         media = SyntheticConfirmedMediaService(self.stager, self.store)
