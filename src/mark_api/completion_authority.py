@@ -14,6 +14,8 @@ old-FD/mapping and restore gates remain in force. Media composition is separate.
 """
 from __future__ import annotations
 
+from .windows_runtime import UnixStreamServerBase
+
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -387,7 +389,7 @@ class _AuthorityHandler(socketserver.StreamRequestHandler):
                 pass
 
 
-class CompletionAuthorityServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class CompletionAuthorityServer(socketserver.ThreadingMixIn, UnixStreamServerBase):
     """Trusted actuation/readback process. No SQLite and no public completion RPC."""
     daemon_threads = True
     block_on_close = False

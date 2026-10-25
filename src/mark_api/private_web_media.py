@@ -19,6 +19,7 @@ from typing import Protocol
 from .domain import AdCreateRequest
 from .results import ReadResult
 from .ports import WriteNotAttemptedError
+from .windows_runtime import require_private_windows_directory
 from .private_web import (
     PrivateWebCreateSnapshot,
     PrivateWebCreateWriter,
@@ -267,7 +268,7 @@ def _copy_validated_descriptor(
         ):
             raise ValueError("media source must be a regular file")
 
-        source_flags = os.O_RDONLY
+        source_flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
         if hasattr(os, "O_CLOEXEC"):
             source_flags |= os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
@@ -281,12 +282,18 @@ def _copy_validated_descriptor(
                 or pathname_snapshot.st_ino != opened.st_ino
                 or pathname_snapshot.st_size != opened.st_size
                 or pathname_snapshot.st_mtime_ns != opened.st_mtime_ns
-                or pathname_snapshot.st_ctime_ns != opened.st_ctime_ns
+                # Windows lstat(path) and fstat(fd) report different
+                # st_ctime semantics (creation vs metadata-change timestamp).
+                # Keep exact device/inode/size/mtime comparisons on Windows.
+                or (
+                    os.name != "nt"
+                    and pathname_snapshot.st_ctime_ns != opened.st_ctime_ns
+                )
             ):
                 raise ValueError("media source changed during validation")
 
             destination = os.path.join(directory, name)
-            destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
             if hasattr(os, "O_CLOEXEC"):
                 destination_flags |= os.O_CLOEXEC
             destination_fd = os.open(destination, destination_flags, 0o600)
@@ -439,6 +446,11 @@ class PrivateWebMediaRefResolver:
 
 
 def _fsync_directory(path: str) -> None:
+    if os.name == "nt":
+        # Windows flushes staged file handles. NTFS metadata journaling is
+        # not a Linux fsync(dir) attestation; interrupted writes remain fenced
+        # in the durable operation journal, never retried blindly.
+        return
     flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -536,6 +548,25 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
             )
             self._directory_path = self._temporary_directory.name
             self._persistent = False
+        elif os.name == "nt":
+            # The regular Windows launcher runs in the user's profile, not
+            # in the independently attested Linux A6 multi-UID environment.
+            directory_path = require_private_windows_directory(directory, create=True)
+            marker = directory_path / self._DURABLE_DIRECTORY_MARKER
+            try:
+                with marker.open("xb") as ready:
+                    ready.flush()
+                    os.fsync(ready.fileno())
+            except FileExistsError:
+                info = marker.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode) or info.st_size != 0
+                    or getattr(info, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                ):
+                    raise ValueError("Windows media readiness marker is invalid")
+            self._directory_path = str(directory_path)
+            self._persistent = True
         else:
             raw_directory = os.fspath(directory)
             if (
@@ -715,7 +746,14 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
                 ):
                     raise RuntimeError("persistent media handle directory is invalid")
                 file_stat = entry.stat(follow_symlinks=False)
-                if not stat.S_ISREG(file_stat.st_mode):
+                if (
+                    not stat.S_ISREG(file_stat.st_mode)
+                    or (
+                        os.name == "nt"
+                        and getattr(file_stat, "st_file_attributes", 0)
+                        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                    )
+                ):
                     raise RuntimeError("persistent media handle is invalid")
                 if file_stat.st_size <= 0:
                     if ref in protected:
@@ -727,7 +765,7 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
                     continue
                 fd = os.open(
                     entry.path,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, 'O_BINARY', 0),
                 )
                 try:
                     prefix = os.read(fd, 12)
@@ -882,7 +920,7 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
             )
             fd = os.open(
                 temp_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0),
                 0o600,
             )
             try:
@@ -906,11 +944,16 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
             published = False
             try:
                 staged_at = float(self._wall_clock())
-                os.utime(
-                    temp_path,
-                    (staged_at, staged_at),
-                    follow_symlinks=False,
-                )
+                if os.name == "nt":
+                    # Windows Python does not implement follow_symlinks=False
+                    # for utime. This unique O_EXCL filename is under the
+                    # validated private per-user LocalAppData directory.
+                    os.utime(temp_path, (staged_at, staged_at))
+                else:
+                    os.utime(
+                        temp_path, (staged_at, staged_at),
+                        follow_symlinks=False,
+                    )
                 os.replace(temp_path, path)
                 published = True
                 if self._persistent:

@@ -7,6 +7,8 @@ is a byte-forwarder with no data, browser, witness or operator mounts.
 """
 from __future__ import annotations
 
+from .windows_runtime import UnixStreamServerBase
+
 from .container_draft import container_draft_denied
 
 import argparse
@@ -225,7 +227,7 @@ class _BackendHandler(socketserver.BaseRequestHandler):
 
 
 class UnixDashboardRelay(
-    _LimitedThreading, socketserver.ThreadingMixIn, socketserver.UnixStreamServer,
+    _LimitedThreading, socketserver.ThreadingMixIn, UnixStreamServerBase,
 ):
     """Owner-controlled socket; accepts only the configured frontend OS UID."""
 
@@ -406,7 +408,7 @@ class _NetlessFrontendHandler(socketserver.BaseRequestHandler):
 
 
 class NetlessFrontendDashboardRelay(
-    _LimitedThreading, socketserver.ThreadingMixIn, socketserver.UnixStreamServer,
+    _LimitedThreading, socketserver.ThreadingMixIn, UnixStreamServerBase,
 ):
     """UID 50042 cannot create network traffic; accepts only UID 50045 ingress."""
 

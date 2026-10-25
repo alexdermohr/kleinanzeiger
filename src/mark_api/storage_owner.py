@@ -17,6 +17,8 @@ and independent witness before deciding what happened, never blindly retry.
 """
 from __future__ import annotations
 
+from .windows_runtime import UnixStreamServerBase
+
 import argparse
 import hashlib
 import json
@@ -630,7 +632,7 @@ class _StorageHandler(socketserver.StreamRequestHandler):
 
 
 class StorageOwnerServer(
-    socketserver.ThreadingMixIn, socketserver.UnixStreamServer,
+    socketserver.ThreadingMixIn, UnixStreamServerBase,
 ):
     """Private UID-owned SQLite; only an exact distinct runtime UID can RPC."""
 

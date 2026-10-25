@@ -19,6 +19,10 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX import compatibility
     fcntl = None
+try:
+    import msvcrt
+except ImportError:  # Linux uses flock, Windows uses record locking.
+    msvcrt = None
 
 from .domain import (
     AdCreateRequest,
@@ -384,7 +388,7 @@ class _WriteApiStoreLock:
 
     @classmethod
     def acquire(cls, path) -> "_WriteApiStoreLock":
-        if fcntl is None:
+        if fcntl is None and msvcrt is None:
             raise RuntimeError(
                 "write API store locking is unavailable on this platform"
             )
@@ -393,11 +397,15 @@ class _WriteApiStoreLock:
             flags |= os.O_CLOEXEC
         descriptor = os.open(path, flags)
         try:
-            fcntl.flock(
-                descriptor,
-                fcntl.LOCK_EX | fcntl.LOCK_NB,
-            )
-        except BlockingIOError:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                assert msvcrt is not None
+                # SQLite's Windows lock bytes are at 1 GiB. A separate,
+                # non-overlapping 1 TiB byte protects our product writer.
+                os.lseek(descriptor, 1 << 40, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except (BlockingIOError, PermissionError) as exc:
             os.close(descriptor)
             raise RuntimeError(
                 "write API runtime is already active for this snapshot store"
@@ -411,8 +419,12 @@ class _WriteApiStoreLock:
         descriptor = self._descriptor
         if descriptor is None:
             return
-        assert fcntl is not None
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        else:
+            assert msvcrt is not None
+            os.lseek(descriptor, 1 << 40, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
         os.close(descriptor)
         self._descriptor = None
 

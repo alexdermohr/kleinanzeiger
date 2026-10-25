@@ -555,6 +555,12 @@ def backup_store(source_db: Path, *, backup_db: Path) -> BackupReceipt:
     """
     if not isinstance(source_db, Path) or not isinstance(backup_db, Path):
         raise TypeError("source and backup paths must be pathlib.Path")
+    if os.name == "nt":
+        from .windows_backup import WindowsBackupError, backup_native_windows
+        try:
+            return BackupReceipt(**backup_native_windows(source_db, backup_db))
+        except WindowsBackupError as exc:
+            raise BackupError(str(exc)) from exc
     source = source_db.expanduser().absolute()
     target = backup_db.expanduser().absolute()
     canonical_source = source.resolve(strict=False)

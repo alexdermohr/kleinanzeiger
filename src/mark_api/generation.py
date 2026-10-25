@@ -302,12 +302,15 @@ def _validate_png_payload(data: bytes) -> None:
 
 
 def _require_private_image_parent(output: Path) -> None:
-    """Reject paths that another UID can replace after the final check.
-
-    A stored pathname is not an immutable handle. Even with a retained file
-    descriptor we can promise only that *our inode* was fully written; the
-    caller must trust other processes running with the same filesystem UID.
-    """
+    """Reject replaceable parents for generated files on the local platform."""
+    if os.name == "nt":
+        from .windows_runtime import require_private_windows_directory
+        try:
+            require_private_windows_directory(Path(os.path.abspath(output)).parent)
+        except OSError:
+            raise GenerationError("image destination parent must be private under LocalAppData") from None
+        return
+    # POSIX independent-UID ancestry validation remains unchanged.
     try:
         lexical_parent = Path(os.path.abspath(output)).parent
         parent = lexical_parent.resolve(strict=True)

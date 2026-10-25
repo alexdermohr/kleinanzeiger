@@ -1,0 +1,87 @@
+name: Native Windows installed customer acceptance
+on:
+  push:
+    branches: [main, feat/kleinanzeiger-native-windows-20261025]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-windows:
+    name: windows-installed-py${{ matrix.python-version }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - name: Checkout Windows candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build tested distributable Wheel and install customer extras
+        shell: pwsh
+        run: |
+          python -m pip wheel --no-deps --wheel-dir dist .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = @(Get-ChildItem -Path dist -Filter 'kleinanzeiger-*.whl')
+          if ($wheel.Count -ne 1) { throw 'Exactly one Kleinanzeiger wheel required' }
+          python -m pip install "$($wheel[0].FullName)[private-web,generation]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m mark_api.launcher --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows kernel exclusion, SQLite lock, staged-media restart
+        run: python -m unittest discover -s tests -p test_windows_compat.py -v
+      - name: Windows installed backup and create-only restore
+        run: python -m unittest discover -s tests -p test_windows_backup.py -v
+      - name: Installed Windows binary media round-trip
+        run: python -m unittest discover -s tests -p test_windows_binary_media.py -v
+      - name: Installed full dashboard and write lifecycle
+        run: python -m unittest discover -s tests -p test_dashboard_full_lifecycle_e2e.py -v
+      - name: Installed synthetic create and media lifecycle
+        run: python -m unittest discover -s tests -p test_dashboard_media_full_lifecycle_e2e.py -v
+      - name: Installed synthetic text/image generation dashboard
+        run: python -m unittest discover -s tests -p test_generation_dashboard.py -v
+      - name: Pack native Windows customer ZIP from tested Wheel
+        if: matrix.python-version == '3.12'
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:RUNNER_TEMP 'kleinanzeiger-windows'
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          $wheel = @(Get-ChildItem -Path dist -Filter 'kleinanzeiger-*.whl')
+          if ($wheel.Count -ne 1) { throw 'Expected exactly one Wheel' }
+          Copy-Item $wheel[0].FullName $staging
+          Copy-Item scripts\Installieren.cmd, scripts\Starten.cmd, scripts\Sichern.cmd, scripts\Wiederherstellen.cmd, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1 $staging
+          Copy-Item docs\windows-installation.md (Join-Path $staging 'Windows-Installation.md')
+          $digest = (Get-FileHash $wheel[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  $($wheel[0].Name)" | Set-Content -Path (Join-Path $staging 'SHA256SUMS.txt') -Encoding ascii
+          Compress-Archive -Path "$staging\*" -DestinationPath 'Kleinanzeiger-v0.1.1-Windows.zip'
+          $zipHash = (Get-FileHash 'Kleinanzeiger-v0.1.1-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Output "Windows Wheel SHA256 $digest"
+          Write-Output "Windows customer ZIP SHA256 $zipHash"
+      - name: Verify customer install script against packaged and hashed wheel
+        if: matrix.python-version == '3.12'
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:RUNNER_TEMP 'kleinanzeiger-windows'
+          & (Join-Path $staging 'windows-install.ps1')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installed = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger\.venv\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
+            throw 'Customer installation did not produce the venv Python executable'
+          }
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.1'"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain exact accepted Windows customer ZIP
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kleinanzeiger-windows-${{ github.sha }}
+          path: Kleinanzeiger-v0.1.1-Windows.zip
+          if-no-files-found: error
+          retention-days: 30
