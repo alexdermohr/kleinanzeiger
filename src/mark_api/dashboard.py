@@ -294,7 +294,13 @@ _DASHBOARD_HTML = """<!doctype html>
         <form id="manage-form" class="write-form">
           <h3>Bestehende Anzeige</h3>
           <label>
-            Anzeigen-ID
+            Vorhandene Anzeige auswählen
+            <select id="manage-ad-select" data-write-control>
+              <option value="">Anzeige auswählen …</option>
+            </select>
+          </label>
+          <label>
+            Anzeigen-ID (automatisch übernommen)
             <input id="manage-ad-id" type="text" readonly>
           </label>
           <p class="note">Aktueller lokaler Status: <strong id="manage-state">—</strong></p>
@@ -481,6 +487,7 @@ button { cursor: pointer; }
 button:hover { background: #2a313b; }
 button:disabled { cursor: not-allowed; opacity: 0.55; }
 textarea { min-height: 110px; resize: vertical; }
+#manage-ad-select { width: 100%; min-width: 0; }
 .status {
   min-height: 1.4em;
   color: #f2c36b;
@@ -1013,8 +1020,18 @@ function managedBaselineFor(ad) {
   };
 }
 
+function clearManagedSelection() {
+  managedAdBaseline = null;
+  byId("manage-ad-select").value = "";
+  byId("manage-ad-id").value = "";
+  byId("manage-title").value = "";
+  byId("manage-description").value = "";
+  byId("manage-state").textContent = "—";
+}
+
 function populateManageForm(ad) {
   managedAdBaseline = managedBaselineFor(ad);
+  byId("manage-ad-select").value = ad.ad_id;
   byId("manage-ad-id").value = ad.ad_id;
   byId("manage-title").value = managedAdBaseline.titleKnown ? managedAdBaseline.title : "";
   byId("manage-description").value = managedAdBaseline.descriptionKnown
@@ -1083,6 +1100,26 @@ function managedContentChanges(adId) {
 
 function renderAds(ads) {
   latestAdsById = new Map(ads.map((ad) => [ad.ad_id, ad]));
+  const picker = byId("manage-ad-select");
+  const previouslySelected = picker.value;
+  const eligibleIds = new Set();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Anzeige auswählen …";
+  picker.replaceChildren(placeholder);
+  for (const ad of ads) {
+    if (!writeUiReady() || !(ad.present || pendingForAd(ad.ad_id) !== null)) continue;
+    eligibleIds.add(ad.ad_id);
+    const option = document.createElement("option");
+    option.value = ad.ad_id;
+    option.textContent = `${ad.title || "Ohne Titel"} · ${ad.ad_id} · ${ad.lifecycle_state ?? "unbekannt"}`;
+    picker.append(option);
+  }
+  if (eligibleIds.has(previouslySelected)) {
+    picker.value = previouslySelected;
+  } else {
+    clearManagedSelection();
+  }
   const body = byId("ads-body");
   body.replaceChildren();
   byId("empty").hidden = ads.length !== 0;
@@ -2284,6 +2321,15 @@ byId("reload").addEventListener("click", load);
 byId("metric-select").addEventListener("change", loadAnalytics);
 byId("dimension-select").addEventListener("change", loadAnalytics);
 byId("create-form").addEventListener("submit", submitCreate);
+byId("manage-ad-select").addEventListener("change", () => {
+  const adId = byId("manage-ad-select").value;
+  const ad = latestAdsById.get(adId);
+  if (writeUiReady() && ad && (ad.present || pendingForAd(adId) !== null)) {
+    populateManageForm(ad);
+  } else {
+    clearManagedSelection();
+  }
+});
 byId("manage-save").addEventListener("click", saveManagedAd);
 byId("manage-pause").addEventListener(
   "click",

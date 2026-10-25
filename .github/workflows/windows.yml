@@ -1,7 +1,8 @@
 name: Native Windows installed customer acceptance
 on:
   push:
-    branches: [main, feat/kleinanzeiger-native-windows-20261025]
+    branches: [main, feat/kleinanzeiger-native-windows-20261025, fix/manage-ad-selector-20261025]
+    tags: ['v0.1.2']
   pull_request:
   workflow_dispatch:
 permissions:
@@ -47,6 +48,32 @@ jobs:
         run: python -m unittest discover -s tests -p test_dashboard_media_full_lifecycle_e2e.py -v
       - name: Installed synthetic text/image generation dashboard
         run: python -m unittest discover -s tests -p test_generation_dashboard.py -v
+      - name: Installed ad selector and Windows installer contract
+        shell: python
+        run: |
+          import subprocess
+          import sys
+          for pattern in ("test_dashboard_managed_ad_picker.py", "test_windows_installer_scripts.py"):
+              result = subprocess.run(
+                  [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern, "-v"],
+                  capture_output=True, text=True, check=False
+              )
+              print(result.stdout, flush=True)
+              print(result.stderr, file=sys.stderr, flush=True)
+              if result.returncode:
+                  summary = (result.stdout + "\n" + result.stderr)[-6000:]
+                  summary = summary.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print("::error file=tests/" + pattern + ",title=Windows acceptance failure::" + summary, flush=True)
+                  raise SystemExit(result.returncode)
+      - name: Parse customer PowerShell scripts
+        shell: pwsh
+        run: |
+          foreach ($script in @('windows-install.ps1', 'windows-start.ps1', 'windows-chrome.ps1', 'windows-ki-einrichten.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path (Join-Path scripts $script)).Path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { throw "$script has invalid PowerShell syntax: $errors" }
+          }
       - name: Pack native Windows customer ZIP from tested Wheel
         if: matrix.python-version == '3.12'
         shell: pwsh
@@ -56,12 +83,12 @@ jobs:
           $wheel = @(Get-ChildItem -Path dist -Filter 'kleinanzeiger-*.whl')
           if ($wheel.Count -ne 1) { throw 'Expected exactly one Wheel' }
           Copy-Item $wheel[0].FullName $staging
-          Copy-Item scripts\Installieren.cmd, scripts\Starten.cmd, scripts\Sichern.cmd, scripts\Wiederherstellen.cmd, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1 $staging
+          Copy-Item scripts\Installieren.cmd, scripts\Starten.cmd, scripts\Sichern.cmd, scripts\Wiederherstellen.cmd, scripts\KI-einrichten.cmd, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1, scripts\windows-chrome.ps1, scripts\windows-ki-einrichten.ps1 $staging
           Copy-Item docs\windows-installation.md (Join-Path $staging 'Windows-Installation.md')
           $digest = (Get-FileHash $wheel[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           "$digest  $($wheel[0].Name)" | Set-Content -Path (Join-Path $staging 'SHA256SUMS.txt') -Encoding ascii
-          Compress-Archive -Path "$staging\*" -DestinationPath 'Kleinanzeiger-v0.1.1-Windows.zip'
-          $zipHash = (Get-FileHash 'Kleinanzeiger-v0.1.1-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Compress-Archive -Path "$staging\*" -DestinationPath 'Kleinanzeiger-v0.1.2-Windows.zip'
+          $zipHash = (Get-FileHash 'Kleinanzeiger-v0.1.2-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Output "Windows Wheel SHA256 $digest"
           Write-Output "Windows customer ZIP SHA256 $zipHash"
       - name: Verify customer install script against packaged and hashed wheel
@@ -75,13 +102,78 @@ jobs:
           if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
             throw 'Customer installation did not produce the venv Python executable'
           }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.1'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.2'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Retain exact accepted Windows customer ZIP
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kleinanzeiger-windows-${{ github.sha }}
-          path: Kleinanzeiger-v0.1.1-Windows.zip
+          path: Kleinanzeiger-v0.1.2-Windows.zip
           if-no-files-found: error
           retention-days: 30
+
+  publish-windows-release:
+    name: publish-windows-v0.1.2
+    if: github.ref == 'refs/tags/v0.1.2'
+    needs: native-windows
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Verify tested ZIP and publish immutable versioned release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = 'v0.1.2'
+          stage="$RUNNER_TEMP/kleinanzeiger-release-v0.1.2"
+          mkdir -p "$stage" "$stage/unpacked"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "kleinanzeiger-windows-$GITHUB_SHA" --dir "$stage"
+          zip="$stage/Kleinanzeiger-v0.1.2-Windows.zip"
+          test -s "$zip"
+          unzip -t "$zip"
+          unzip -q "$zip" -d "$stage/unpacked"
+          (cd "$stage/unpacked" && sha256sum -c SHA256SUMS.txt)
+          test -s "$stage/unpacked/kleinanzeiger-0.1.2-py3-none-any.whl"
+          test -s "$stage/unpacked/Windows-Installation.md"
+          test -s "$stage/unpacked/Installieren.cmd"
+          test -s "$stage/unpacked/KI-einrichten.cmd"
+          zip_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
+          printf '%s  %s\n' "$zip_sha" "Kleinanzeiger-v0.1.2-Windows.zip" > "$stage/Kleinanzeiger-v0.1.2-Windows.sha256"
+          wheel="$stage/unpacked/kleinanzeiger-0.1.2-py3-none-any.whl"
+          wheel_sha="$(sha256sum "$wheel" | cut -d' ' -f1)"
+          zip_bytes="$(stat -c%s "$zip")"
+          wheel_bytes="$(stat -c%s "$wheel")"
+          printf '{"version":"0.1.2","tag":"%s","source_commit":"%s","workflow_run_id":"%s","windows_zip":{"filename":"Kleinanzeiger-v0.1.2-Windows.zip","bytes":%s,"sha256":"%s"},"wheel":{"filename":"kleinanzeiger-0.1.2-py3-none-any.whl","bytes":%s,"sha256":"%s"}}\n' \
+            "$GITHUB_REF_NAME" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$zip_bytes" "$zip_sha" "$wheel_bytes" "$wheel_sha" > "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json"
+          jq -e '.version == "0.1.2" and (.source_commit | length == 40)' "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json" >/dev/null
+          cat > "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" <<'EOF'
+          # Kleinanzeiger v0.1.2 – Windows
+
+          - Vorhandene eigene Anzeigen direkt auswählen, ohne manuelle Anzeigen-ID
+          - Automatischer Python- und Chrome-Setup bei fehlenden Voraussetzungen
+          - Einfache, benutzergebundene Einrichtung optionaler KI-Text- und Bildentwürfe
+          - Vorhandene Daten, Chrome-Profil und offene Write-Recovery-Zustände bleiben beim Update erhalten
+
+          Installation und Update: Windows-Installation.md lesen, Installieren.cmd ausführen,
+          anschließend Starten.cmd. Optional KI-einrichten.cmd starten.
+          Keine echten Plattform-Schreibaktionen oder kostenpflichtige KI-Aufrufe wurden
+          während der synthetischen technischen Abnahme ausgelöst.
+          EOF
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Refusing to overwrite an existing release" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title 'Kleinanzeiger v0.1.2 – Windows' \
+            --notes-file "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" \
+            "$zip" \
+            "$stage/Kleinanzeiger-v0.1.2-Windows.sha256" \
+            "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json" \
+            "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" \
+            "$stage/unpacked/Windows-Installation.md" \
+            "$stage/unpacked/SHA256SUMS.txt" \
+            "$stage/unpacked/kleinanzeiger-0.1.2-py3-none-any.whl"
