@@ -938,11 +938,16 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
             published = False
             try:
                 staged_at = float(self._wall_clock())
-                os.utime(
-                    temp_path,
-                    (staged_at, staged_at),
-                    follow_symlinks=False,
-                )
+                if os.name == "nt":
+                    # Windows Python does not implement follow_symlinks=False
+                    # for utime. This unique O_EXCL filename is under the
+                    # validated private per-user LocalAppData directory.
+                    os.utime(temp_path, (staged_at, staged_at))
+                else:
+                    os.utime(
+                        temp_path, (staged_at, staged_at),
+                        follow_symlinks=False,
+                    )
                 os.replace(temp_path, path)
                 published = True
                 if self._persistent:
