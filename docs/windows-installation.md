@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.2 – Windows 11
+# Kleinanzeiger v0.1.3 – Windows 11
 
 Native Windows-Anwendung ohne WSL, Ubuntu oder Docker.
 
@@ -19,15 +19,19 @@ sind damit nicht belegt.
 3. **Starten.cmd** doppelklicken; das separate Chrome-Fenster öffnet sich.
 4. Dort selbst beim eigenen Kleinanzeigen-Konto anmelden und im
    Startfenster ENTER drücken. Lokale Dashboard-URL öffnen.
-5. Unter **Bestehende Anzeige** mit **Vorhandene Anzeige auswählen**
-   eine synchronisierte Anzeige wählen. ID, Titel, Beschreibung und
-   Status werden übernommen. Keine manuelle Anzeigen-ID nötig.
+5. Unter **Meine Anzeigen** auf **Bearbeiten** klicken. Rechts erscheinen Titel,
+   Beschreibung und Status zur Bearbeitung. Alternativ im Dropdown
+   **Vorhandene Anzeige auswählen** die gewünschte Anzeige wählen.
+   Die Anzeigen-ID wird automatisch und sicher übernommen.
+6. **Neue Anzeige** öffnet das Erstellformular. **Auswertungen** und die
+   optionale **KI** lassen sich bei Bedarf aufklappen. Technische Details
+   liegen in den jeweiligen Info-Bereichen, nicht mehr im Arbeitsfluss.
 
 Die Vollversion umfasst Anzeigen-Synchronisation, Erstellen und
 Veröffentlichen, Bearbeiten, Pause/Aktivieren/Löschen, Bilder,
 Dashboard, Historie, Rankings, Analytics und lokale E-Mail-Reaktionen.
 
-## Update von v0.1.1
+## Update von v0.1.1 oder v0.1.2
 
 1. Anwendung und deren Chrome-Fenster vollständig beenden.
 2. Im alten Ordner **Sichern.cmd** ausführen und Backup sowie

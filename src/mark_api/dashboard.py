@@ -234,38 +234,121 @@ _DASHBOARD_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kleinanzeiger</title>
+  <title>Kleinanzeiger – Meine Anzeigen</title>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
-  <main>
-    <header>
-      <div>
+  <main id="top">
+    <header class="app-header">
+      <div class="brand">
+        <span class="eyebrow">DEIN ANZEIGEN-COCKPIT</span>
         <h1>Kleinanzeiger</h1>
-        <p>Lokale Sicht auf Historie, Analytics und sichere Produktaktionen.</p>
+        <p>Alle Anzeigen auf einen Blick. Einfach bearbeiten und auswerten.</p>
       </div>
-      <button id="reload" type="button">Neu laden</button>
+      <button id="reload" class="reload-button" type="button">↻ Aktualisieren</button>
     </header>
 
-    <section id="status" class="status" aria-live="polite"></section>
+    <nav class="quick-nav" aria-label="Bereiche">
+      <a href="#workspace">Meine Anzeigen</a>
+      <a id="nav-create" href="#create-disclosure">Neue Anzeige</a>
+      <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
+      <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
+    </nav>
+    <section id="status" class="status" role="status" aria-live="polite"></section>
 
-    <section class="cards" aria-label="Zusammenfassung">
-      <article><span>Bekannt</span><strong id="tracked">—</strong></article>
-      <article><span>Aktuell</span><strong id="current">—</strong></article>
-      <article><span>Entfernt</span><strong id="absent">—</strong></article>
-      <article><span>Views (bekannt)</span><strong id="views">—</strong></article>
-      <article><span>Merker (bekannt)</span><strong id="watches">—</strong></article>
-      <article><span>Replies (bekannt)</span><strong id="replies">—</strong></article>
+    <section class="cards" aria-label="Übersicht">
+      <article><span>Aktuelle Anzeigen</span><strong id="current">—</strong></article>
+      <article><span>Aufrufe</span><strong id="views">—</strong></article>
+      <article><span>Merker</span><strong id="watches">—</strong></article>
+      <article><span>Antworten</span><strong id="replies">—</strong></article>
+      <article><span>Insgesamt erfasst</span><strong id="tracked">—</strong></article>
+      <article><span>Nicht mehr vorhanden</span><strong id="absent">—</strong></article>
     </section>
 
-    <section id="write-panel" class="panel" hidden>
-      <h2>Anzeigen verwalten</h2>
-      <p class="muted">Schreibaktionen laufen ausschließlich über die bestehende lokale Write API mit denselben Idempotenz-, Ownership-, Confirmation- und No-Blind-Retry-Grenzen.</p>
-      <p id="write-session-note" class="note" hidden>Für Schreibaktionen diese Seite über die vom Product Launcher ausgegebene Dashboard-URL öffnen. Ohne per-process Write-Token bleibt die Oberfläche read-only.</p>
-      <p id="write-status" class="status write-status" aria-live="polite"></p>
-      <div class="write-grid">
+    <div id="workspace" class="workspace">
+      <section id="ads-panel" class="panel inventory-panel">
+        <div class="section-heading">
+          <div>
+            <h2>Meine Anzeigen</h2>
+            <p class="section-subtitle">Zum Bearbeiten eine Anzeige auswählen.</p>
+          </div>
+          <span class="section-label" id="sync-overview">Lokaler Bestand</span>
+        </div>
+        <div id="ad-cards" class="ad-cards" role="list"></div>
+        <p id="ad-cards-empty" class="empty" hidden>Hier erscheinen deine Anzeigen nach der Synchronisierung.</p>
+        <details class="compact-details inventory-details">
+          <summary>Alle Kennzahlen und Details anzeigen</summary>
+          <p id="sync-status" class="note" aria-live="polite">Aktualisierung wird geladen …</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Titel</th>
+              <th>Status</th>
+              <th>Views</th>
+              <th>Merker</th>
+              <th>Replies</th>
+              <th>Letzte Beobachtung</th>
+              <th>Aktion</th>
+            </tr>
+          </thead>
+          <tbody id="ads-body"></tbody>
+        </table>
+      </div>
+      <p id="empty" class="empty" hidden>Keine Anzeigenhistorie vorhanden.</p>
+
+          <details class="compact-details">
+            <summary>Woher kommen die Zahlen?</summary>
+            <p class="note">Bestandsaktualisierung und Zeitpunkt einzelner Zähler sind getrennt. Für jeden Wert zeigt die Detailtabelle Beobachtungszeit und Quelle.</p>
+          </details>
+        </details>
+      </section>
+
+      <section id="write-panel" class="panel management-panel" hidden>
+        <div class="section-heading">
+          <div>
+            <h2>Anzeige bearbeiten</h2>
+            <p class="section-subtitle">Titel oder Beschreibung ändern und den Status verwalten.</p>
+          </div>
+        </div>
+        <p id="write-session-note" class="note" hidden>Zum Bearbeiten Kleinanzeiger über Starten.cmd öffnen.</p>
+        <p id="write-status" class="status write-status" role="status" aria-live="polite"></p>
+        <form id="manage-form" class="write-form">
+          <h3 class="sr-only">Bestehende Anzeige</h3>
+          <label>
+            Vorhandene Anzeige auswählen
+            <select id="manage-ad-select" data-write-control>
+              <option value="">Anzeige auswählen …</option>
+            </select>
+          </label>
+          <div class="selection-status">Status: <strong id="manage-state">—</strong></div>
+          <details class="compact-details technical-detail">
+            <summary>Anzeigen-ID anzeigen</summary>
+            <label>
+              Anzeigen-ID (automatisch übernommen)
+              <input id="manage-ad-id" type="text" readonly>
+            </label>
+          </details>
+          <label>
+            Titel
+            <input id="manage-title" data-write-control type="text" autocomplete="off">
+          </label>
+          <label>
+            Beschreibung
+            <textarea id="manage-description" data-write-control></textarea>
+          </label>
+          <div class="write-actions">
+            <button id="manage-save" class="primary-button" data-write-control type="button">Änderungen speichern</button>
+            <button id="manage-pause" data-write-control type="button">Pausieren</button>
+            <button id="manage-activate" data-write-control type="button">Aktivieren</button>
+            <button id="manage-delete" data-write-control class="danger" type="button">Löschen</button>
+          </div>
+        </form>
+        <details id="create-disclosure" class="feature-disclosure create-disclosure">
+          <summary><span>Neue Anzeige erstellen</span><small>Mit Titel, Preis und Bildern</small></summary>
         <form id="create-form" class="write-form">
-          <h3>Neue Anzeige</h3>
+          <h3 class="sr-only">Neue Anzeige</h3>
           <label>
             Kategoriepfad
             <input id="create-category" data-write-control type="text" placeholder="Haus &amp; Garten &gt; Dekoration" autocomplete="off">
@@ -287,44 +370,25 @@ _DASHBOARD_HTML = """<!doctype html>
             <input id="create-media" data-write-control type="file" accept="image/jpeg,image/png,image/webp" multiple>
           </label>
           <div class="write-actions">
-            <button id="create-submit" data-write-control type="submit">Anzeige erstellen</button>
+            <button id="create-submit" class="primary-button" data-write-control type="submit">Anzeige erstellen</button>
           </div>
         </form>
+        </details>
+        <details class="compact-details safety-details">
+          <summary>Hinweise zu Änderungen</summary>
+          <p class="note">Änderungen erfolgen nur nach deiner Aktion. Unklare Ergebnisse werden nicht automatisch wiederholt. Offene Vorgänge müssen zuerst geklärt werden.</p>
+        </details>
+      </section>
+      <section id="write-unavailable" class="panel read-only-panel" hidden>
+        <h2>Nur Ansicht</h2>
+        <p class="muted">Zum Bearbeiten und Erstellen Kleinanzeiger normal über Starten.cmd starten.</p>
+      </section>
+    </div>
 
-        <form id="manage-form" class="write-form">
-          <h3>Bestehende Anzeige</h3>
-          <label>
-            Vorhandene Anzeige auswählen
-            <select id="manage-ad-select" data-write-control>
-              <option value="">Anzeige auswählen …</option>
-            </select>
-          </label>
-          <label>
-            Anzeigen-ID (automatisch übernommen)
-            <input id="manage-ad-id" type="text" readonly>
-          </label>
-          <p class="note">Aktueller lokaler Status: <strong id="manage-state">—</strong></p>
-          <label>
-            Titel
-            <input id="manage-title" data-write-control type="text" autocomplete="off">
-          </label>
-          <label>
-            Beschreibung
-            <textarea id="manage-description" data-write-control></textarea>
-          </label>
-          <div class="write-actions">
-            <button id="manage-save" data-write-control type="button">Titel/Beschreibung speichern</button>
-            <button id="manage-pause" data-write-control type="button">Pausieren</button>
-            <button id="manage-activate" data-write-control type="button">Aktivieren</button>
-            <button id="manage-delete" data-write-control class="danger" type="button">Löschen</button>
-          </div>
-        </form>
-      </div>
-    </section>
-
-    <section id="generation-panel" class="panel" hidden>
-      <h2>Anzeige entwerfen – Text und Bild</h2>
-      <p class="muted">Diese Funktion erzeugt nur einen ungeprüften Entwurf. Eine Veröffentlichung erfolgt niemals automatisch. Für KI-Bilder und Texte können beim externen Anbieter Kosten entstehen; der Prompt wird an ihn übertragen.</p>
+    <section id="generation-panel" class="panel secondary-panel" hidden>
+      <details id="generation-disclosure" class="feature-disclosure">
+        <summary><span>KI-Assistent für Anzeigen</span><small>Texte und Bilder als Entwurf</small></summary>
+      <p class="muted">Erstelle einen Text- oder Bildvorschlag, den du vor der Veröffentlichung selbst prüfst.</p>
       <p id="generation-pricing-note" class="note">Kostenbasis für das jeweils ausgewählte Verfahren (OpenAI-Standardtarife, Stand 20.10.2026):
         <strong>Textentwurf:</strong> Modell <code>gpt-5.6-terra</code>, 2.00 USD je 1 Mio Text-Eingabetokens und 12.00 USD je 1 Mio Text-Ausgabetokens.
         <strong>Bildentwurf:</strong> Modell <code>gpt-image-2.5-flare</code>, 5.00 USD je 1 Mio Text-Eingabetokens und 30.00 USD je 1 Mio Bild-Ausgabetokens.
@@ -357,16 +421,14 @@ _DASHBOARD_HTML = """<!doctype html>
         <img id="generation-draft-image" alt="KI-generierter Bildentwurf, noch nicht veröffentlicht" style="max-width: 100%; max-height: 360px;" hidden>
         <p><button id="generation-apply-image" type="button" disabled>Als neues Anzeigenbild übernehmen (ohne Veröffentlichung)</button></p>
       </div>
+
+      </details>
     </section>
 
-    <section id="write-unavailable" class="panel" hidden>
-      <h2>Anzeigen verwalten</h2>
-      <p class="muted">Diese standalone Dashboard-Instanz ist read-only. Der Product Launcher aktiviert die sichere Write-UX separat.</p>
-    </section>
+    <section id="analytics-panel" class="panel secondary-panel">
+      <details id="analytics-disclosure" class="feature-disclosure">
+        <summary><span>Auswertungen und Rankings</span><small>Erfolge vergleichen und Trends erkennen</small></summary>
 
-    <section class="panel">
-      <h2>Analytics-Rankings</h2>
-      <p class="muted">Rohmetriken nach explizit gespeicherten Labels. Keine Qualitäts- oder Kausalaussage.</p>
       <p id="analytics-contract" class="note"></p>
       <div class="controls">
         <label>
@@ -397,11 +459,11 @@ _DASHBOARD_HTML = """<!doctype html>
         </table>
       </div>
       <p id="groups-empty" class="empty" hidden>Keine ausreichenden klassifizierten Daten für diese Auswahl.</p>
-      <p class="note">Stichprobengröße 1 ist nur ein Datenwert, keine Qualitätsaussage.</p>
+      <details class="compact-details"><summary>Was bedeuten die Werte?</summary><p class="note">Stichprobengröße 1 ist nur ein Datenwert, keine Qualitätsaussage.</p></details>
 
       <h3>Anzeigenranking</h3>
       <p><a id="ranking-csv" href="#" hidden>Ranking als CSV exportieren</a></p>
-      <p class="note">Jeder Ranking-Wert besitzt seine eigene Beobachtungszeit und Quelle. Reaktions- und E-Mail-Werte stammen aus getrennten Datengrundlagen; Summen sind keine aktuelle Plattformbestätigung.</p>
+      <details class="compact-details"><summary>Quellen und Aktualität</summary><p class="note">Jeder Ranking-Wert besitzt seine eigene Beobachtungszeit und Quelle. Reaktions- und E-Mail-Werte stammen aus getrennten Datengrundlagen; Summen sind keine aktuelle Plattformbestätigung.</p></details>
       <div id="ranking-chart" class="chart" role="list" aria-label="Anzeigenvergleich nach ausgewählter Metrik" hidden></div>
       <div class="table-wrap">
         <table>
@@ -418,242 +480,172 @@ _DASHBOARD_HTML = """<!doctype html>
         </table>
       </div>
       <p id="ranking-empty" class="empty" hidden>Keine Anzeigen mit bekanntem Wert für diese Metrik.</p>
-    </section>
 
-    <section class="panel">
-      <h2>Anzeigen</h2>
-      <p id="sync-status" class="note" aria-live="polite">Synchronisationsjournal wird geladen …</p>
-      <p class="note">Der letzte erfolgreiche Bestandsread und das Alter einzelner Zähler sind getrennte Aussagen. Metrikwerte zeigen jeweils ihre eigene Beobachtungszeit, Quelle und gegebenenfalls „letzter bekannter Wert“.</p>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Titel</th>
-              <th>Status</th>
-              <th>Views</th>
-              <th>Merker</th>
-              <th>Replies</th>
-              <th>Letzte Beobachtung</th>
-              <th>Aktion</th>
-            </tr>
-          </thead>
-          <tbody id="ads-body"></tbody>
-        </table>
-      </div>
-      <p id="empty" class="empty" hidden>Keine Anzeigenhistorie vorhanden.</p>
+      </details>
     </section>
   </main>
   <script src="/dashboard.js" defer></script>
 </body>
 </html>
 """
-
 _DASHBOARD_CSS = """
 :root {
-  color-scheme: light dark;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
-  line-height: 1.45;
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  --page: #f3f6fa;
+  --surface: #fff;
+  --surface-soft: #f6f9fb;
+  --ink: #172e3b;
+  --subtle: #5e7282;
+  --line: #dbe5eb;
+  --accent: #11677a;
+  --accent-dark: #0d5263;
+  --positive: #196948;
+  --danger: #ac3446;
 }
-body {
-  margin: 0;
-  background: #111318;
-  color: #f4f5f7;
-}
-main {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 28px 20px 56px;
-}
-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 22px;
-}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--page); color: var(--ink); }
+main { max-width: 1380px; margin: 0 auto; padding: 28px 24px 72px; }
+.app-header { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 20px; }
 h1, h2, h3, p { margin-top: 0; }
-header p, .muted, .note { color: #aeb5c0; }
-header p { margin-bottom: 0; }
+h1 { font-size: clamp(1.9rem, 3vw, 2.5rem); letter-spacing: -0.05em; margin-bottom: 2px; line-height: 1.15; }
+h2 { font-size: 1.28rem; letter-spacing: -0.025em; margin-bottom: 3px; }
+h3 { font-size: 1.02rem; }
+.brand p { margin: 6px 0 0; color: var(--subtle); font-size: .94rem; }
+.eyebrow { display: inline-block; margin-bottom: 8px; font-size: .66rem; font-weight: 800; letter-spacing: .15em; color: var(--accent); }
+button, select, input, textarea { font: inherit; color: inherit; }
 button, select, input, textarea {
-  border: 1px solid #424a57;
-  background: #20252d;
-  color: inherit;
-  border-radius: 8px;
-  padding: 9px 14px;
-  box-sizing: border-box;
-}
-button { cursor: pointer; }
-button:hover { background: #2a313b; }
-button:disabled { cursor: not-allowed; opacity: 0.55; }
-textarea { min-height: 110px; resize: vertical; }
-#manage-ad-select { width: 100%; min-width: 0; }
-.status {
-  min-height: 1.4em;
-  color: #f2c36b;
-  margin-bottom: 12px;
-}
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
-  margin-bottom: 22px;
-}
-.cards article, .panel {
-  border: 1px solid #303641;
-  border-radius: 12px;
-  background: #181c22;
-}
-.cards article { padding: 16px; }
-.cards span {
-  display: block;
-  color: #9da6b2;
-  font-size: 0.9rem;
-}
-.cards strong {
-  display: block;
-  margin-top: 5px;
-  font-size: 1.7rem;
-}
-.panel {
-  padding: 18px;
-  margin-bottom: 22px;
-}
-.write-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 18px;
-}
-.write-form {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-  border: 1px solid #2d333d;
+  border: 1px solid #cad8e0;
+  background: var(--surface);
   border-radius: 10px;
-  padding: 14px;
+  padding: 10px 12px;
+  max-width: 100%;
 }
-.write-form label {
-  display: grid;
-  gap: 6px;
-  color: #b7bec8;
-  font-size: 0.9rem;
-}
-.write-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-button.danger { border-color: #87505a; }
-.metric-evidence {
-  display: block;
-  font-size: 0.76rem;
-  color: #aeb5c0;
-  overflow-wrap: anywhere;
-}
-.write-status.success { color: #82db9e; }
-.write-status.warning { color: #f2c36b; }
-.write-status.error { color: #ef9aa8; }
-.row-action { padding: 6px 10px; }
-.controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin: 14px 0 20px;
-}
-.controls label {
-  display: grid;
-  gap: 6px;
-  color: #b7bec8;
-  font-size: 0.9rem;
-}
-.chart {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 16px;
-}
+input:not([type="checkbox"]):not([type="file"]), select, textarea { width: 100%; }
+textarea { min-height: 116px; resize: vertical; }
+input[readonly] { color: var(--subtle); background: var(--surface-soft); }
+input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+button { cursor: pointer; font-weight: 650; }
+button:hover { border-color: var(--accent); background: #f4f9fb; }
+button:disabled { opacity: .52; cursor: not-allowed; }
+:focus-visible { outline: 3px solid #6bb6c5; outline-offset: 2px; }
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.reload-button { white-space: nowrap; background: var(--surface); color: var(--accent-dark); padding: 10px 16px; }
+.quick-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 23px; }
+.quick-nav a { text-decoration: none; color: #486879; font-weight: 700; font-size: .84rem; padding: 9px 14px; border: 1px solid transparent; border-radius: 999px; }
+.quick-nav a:first-child { color: var(--accent-dark); background: #e0f0f3; }
+.quick-nav a:hover, .quick-nav a:focus-visible { color: var(--accent-dark); background: #e0f0f3; }
+.status { color: #95551e; font-size: .87rem; margin: 12px 0; }
+.status:empty { display: none; }
+.cards { display: grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 12px; margin-bottom: 22px; }
+.cards article, .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 6px 26px rgba(27,55,77,.045); }
+.cards article { padding: 16px; }
+.cards span { display: block; font-size: .75rem; font-weight: 650; color: var(--subtle); }
+.cards strong { display: block; font-size: clamp(1.18rem, 2vw, 1.65rem); letter-spacing: -.025em; line-height: 1.3; margin-top: 7px; font-variant-numeric: tabular-nums; }
+.panel { padding: 22px; margin-bottom: 18px; min-width: 0; }
+.workspace { display: grid; grid-template-columns: minmax(0,1.12fr) minmax(340px,.88fr); gap: 18px; align-items: start; }
+.workspace > .panel { margin-bottom: 18px; }
+.section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.section-subtitle { margin: 3px 0 0; color: var(--subtle); font-size: .85rem; }
+.section-label { display: inline-flex; align-items: center; background: #e9f4f6; color: #21667a; border-radius: 999px; padding: 5px 9px; font-size: .72rem; font-weight: 700; text-align: right; }
+.section-label.warning { background: #fff1df; color: #8b5417; }
+.ad-cards { display: grid; gap: 10px; }
+.ad-card { padding: 15px; border: 1px solid var(--line); border-radius: 13px; background: #fbfcfd; display: grid; gap: 10px; }
+.ad-card.selected { border-color: #65a8b9; background: #f1fafb; box-shadow: 0 0 0 2px #dbf0f2; }
+.ad-card-head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+.ad-card h3 { margin: 0; font-size: .98rem; line-height: 1.35; overflow-wrap: anywhere; }
+.ad-id { margin: 4px 0 0; color: var(--subtle); font-size: .76rem; }
+.ad-card-footer { display: flex; gap: 12px; justify-content: space-between; align-items: center; }
+.ad-views { font-size: .82rem; color: var(--subtle); }
+.ad-card-action { background: #e8f3f5; border-color: #cce3e9; color: var(--accent-dark); padding: 7px 12px; font-size: .83rem; white-space: nowrap; }
+.ad-card.selected .ad-card-action, .primary-button { background: var(--accent); border-color: var(--accent); color: #fff; }
+.primary-button:hover, .ad-card.selected .ad-card-action:hover { background: var(--accent-dark); border-color: var(--accent-dark); color: #fff; }
+.write-form { display: grid; gap: 14px; align-content: start; }
+.write-form label { display: grid; gap: 6px; font-size: .82rem; font-weight: 650; color: #41596a; }
+.write-form textarea { min-height: 126px; }
+#manage-ad-select { width: 100%; min-width: 0; font-weight: 600; }
+.selection-status { font-size: .78rem; color: var(--subtle); margin: -7px 0 0; }
+.selection-status strong { color: var(--ink); }
+.write-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.write-actions .primary-button { flex: 1 1 100%; }
+button.danger { border-color: #f0d2d4; color: var(--danger); background: #fff7f8; margin-left: auto; }
+button.danger:hover { border-color: var(--danger); }
+.write-status { background: #fff2e2; border-left: 3px solid #e6ad54; border-radius: 6px; padding: 9px 12px; }
+.write-status.success { color: var(--positive); background: #e9f5ed; border-color: #69af80; }
+.write-status.warning { color: #885116; }
+.write-status.error { color: var(--danger); background: #fff0f2; border-color: #d97786; }
+.feature-disclosure { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.create-disclosure { margin-top: 20px; border-color: #cbdfe5; }
+.feature-disclosure > summary { cursor: pointer; display: flex; flex-direction: column; gap: 2px; padding: 15px 17px; font-weight: 750; background: #f3f8fa; list-style-position: inside; }
+.feature-disclosure > summary small { color: var(--subtle); font-weight: 450; font-size: .78rem; padding-left: 19px; }
+.feature-disclosure[open] > summary { border-bottom: 1px solid var(--line); }
+.feature-disclosure > .write-form { padding: 18px; }
+.secondary-panel { padding: 0; }
+.secondary-panel > .feature-disclosure { border: 0; border-radius: inherit; }
+.secondary-panel > .feature-disclosure > summary { padding: 21px 23px; background: transparent; font-size: 1.03rem; }
+.secondary-panel > .feature-disclosure > summary small { font-size: .83rem; }
+.secondary-panel > .feature-disclosure[open] > :not(summary) { margin-left: 23px; margin-right: 23px; }
+.secondary-panel > .feature-disclosure[open] > :last-child { margin-bottom: 23px; }
+.compact-details { margin-top: 12px; font-size: .8rem; color: var(--subtle); }
+.compact-details > summary { cursor: pointer; font-size: .8rem; color: var(--accent-dark); font-weight: 700; padding: 4px 0; }
+.technical-detail { margin: -2px 0 0; }
+.technical-detail label { margin-top: 10px; }
+.inventory-details { border-top: 1px solid #e5edf1; padding-top: 12px; margin-top: 18px; }
+.inventory-details .table-wrap { margin-top: 12px; }
+.note, .muted { color: var(--subtle); }
+.note { font-size: .79rem; margin: 8px 0 15px; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 18px; }
+.controls label { display: grid; gap: 6px; font-size: .82rem; color: #476071; }
+.metric-evidence { display: block; font-size: .71rem; color: var(--subtle); overflow-wrap: anywhere; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; }
+table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+th, td { padding: 10px 9px; border-bottom: 1px solid #e6edf2; text-align: left; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+th { color: #4f6573; background: #f4f8fa; font-size: .75rem; }
+td.title { min-width: 180px; white-space: normal; }
+.state { display: inline-block; flex: 0 0 auto; font-size: .75rem; font-weight: 750; padding: 4px 8px; border-radius: 999px; background: #eff2f5; color: #6b7785; }
+.state.active { color: #166448; background: #e6f4eb; }
+.state.paused, .state.pending { color: #925c17; background: #fff2dd; }
+.state.absent { color: #697a89; }
+.row-action { padding: 6px 10px; font-size: .77rem; }
+.empty { margin: 8px 0 0; color: var(--subtle); }
+.chart { display: grid; gap: 8px; margin: 10px 0 16px; }
 .chart[hidden] { display: none; }
-.chart-row {
-  display: grid;
-  grid-template-columns: minmax(90px, 180px) minmax(120px, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-}
-.chart-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #c8ced7;
-}
-.chart-progress {
-  width: 100%;
-  height: 12px;
-  border: 0;
-  border-radius: 999px;
-  overflow: hidden;
-  appearance: none;
-  -webkit-appearance: none;
-  background: #252b34;
-}
-.chart-progress::-webkit-progress-bar {
-  background: #252b34;
-  border-radius: 999px;
-}
-.chart-progress::-webkit-progress-value {
-  background: #8ca6cf;
-  border-radius: 999px;
-}
-.chart-progress::-moz-progress-bar {
-  background: #8ca6cf;
-  border-radius: 999px;
-}
-.chart-value {
-  min-width: 7.5em;
-  text-align: right;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-  color: #b7bec8;
-}
-.table-wrap { overflow-x: auto; }
-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-th, td {
-  padding: 10px 9px;
-  border-bottom: 1px solid #2d333d;
-  text-align: left;
-  white-space: nowrap;
-}
-th { color: #b7bec8; font-size: 0.86rem; }
-td.title {
-  min-width: 220px;
-  white-space: normal;
-}
-.state {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 3px 8px;
-  background: #252b34;
-}
-.state.active { color: #82db9e; }
-.state.paused, .state.pending { color: #f2c36b; }
-.state.absent { color: #aeb5c0; }
-.empty { color: #9da6b2; margin-bottom: 0; }
-.note { margin: 10px 0 22px; font-size: 0.88rem; }
+.chart-row { display: grid; grid-template-columns: minmax(90px,180px) minmax(120px,1fr) auto; align-items: center; gap: 10px; }
+.chart-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #455b6a; }
+.chart-progress { width: 100%; height: 12px; border: 0; border-radius: 999px; overflow: hidden; appearance: none; background: #e5edf2; }
+.chart-progress::-webkit-progress-bar { background: #e5edf2; border-radius: 999px; }
+.chart-progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; }
+.chart-progress::-moz-progress-bar { background: var(--accent); border-radius: 999px; }
+.chart-value { min-width: 7.5em; text-align: right; font-variant-numeric: tabular-nums; color: var(--subtle); }
+@media (min-width: 1060px) { .management-panel { position: sticky; top: 18px; } }
+@media (max-width: 1100px) { .cards { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+@media (max-width: 920px) { .workspace { grid-template-columns: minmax(0,1fr); } }
 @media (max-width: 640px) {
-  header { align-items: flex-start; flex-direction: column; }
+  main { padding: 18px 12px 42px; }
+  .app-header { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .cards { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+  .cards article { padding: 12px; }
+  .panel { padding: 16px; border-radius: 12px; }
+  .section-heading { flex-wrap: wrap; }
+  .section-label { text-align: left; }
+  .write-actions button { flex: 1 1 auto; }
+  .write-actions button.danger { margin-left: 0; }
   .chart-row { grid-template-columns: minmax(70px, 110px) minmax(0, 1fr); }
-  .chart-value {
-    grid-column: 2;
-    min-width: 0;
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
+  .chart-value { grid-column: 2; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 }
 """
-
 _DASHBOARD_JS = """
 const byId = (id) => document.getElementById(id);
+
+// Optional presentational controls must not affect headless core write/recovery tests.
+const optionalById = (id) => {
+  if (typeof document === "undefined" || typeof document.getElementById !== "function") return null;
+  try { return document.getElementById(id); } catch (_error) { return null; }
+};
 
 const display = (value) => value === null || value === undefined ? "—" : String(value);
 const WRITE_TOKEN_STORAGE_KEY = "mark-dashboard-write-token";
@@ -673,6 +665,7 @@ let generationTextDraft = null;
 let pendingRecoveryBlocked = false;
 let createInFlight = false;
 let latestAdsById = new Map();
+const adCardElements = new Map();
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -876,6 +869,10 @@ function setWriteStatus(message, kind = "warning") {
 function renderWriteAvailability() {
   byId("write-panel").hidden = !writeUiAvailable;
   byId("write-unavailable").hidden = writeUiAvailable;
+  // Hide navigation that points to a form absent from a standalone read-only view.
+  const createNavigation = typeof optionalById === "function"
+    ? optionalById("nav-create") : null;
+  if (createNavigation) createNavigation.hidden = !writeUiAvailable;
   if (!writeUiAvailable) return;
   if (pendingRecoveryBlocked) {
     byId("write-session-note").hidden = true;
@@ -983,6 +980,24 @@ function renderSyncStatus(sync, recovery) {
   }
   view.textContent = headline + baseline + recoveryNote
     + " Das Alter einzelner Zähler ist separat ausgewiesen.";
+
+  const short = optionalById("sync-overview");
+  if (short) {
+    const open = recovery && typeof recovery === "object" ? recovery.unresolved_count : null;
+    if (Number.isSafeInteger(open) && open > 0) {
+      short.textContent = open + " offene Synchronisierung(en) prüfen";
+      short.className = "section-label warning";
+    } else if (state === "failed") {
+      short.textContent = "Aktualisierung prüfen";
+      short.className = "section-label warning";
+    } else if (latest && (state === "success_empty" || state === "success_nonempty")) {
+      short.textContent = "Stand: " + ageDescription(latest.completed_at);
+      short.className = "section-label";
+    } else {
+      short.textContent = "Stand unbekannt";
+      short.className = "section-label";
+    }
+  }
 }
 
 function metricCellWithEvidence(value, evidence) {
@@ -1020,6 +1035,17 @@ function managedBaselineFor(ad) {
   };
 }
 
+function highlightManagedCard(adId) {
+  for (const [id, card] of adCardElements) {
+    card.className = id === adId ? "ad-card selected" : "ad-card";
+  }
+}
+
+function revealCreateForm() {
+  const disclosure = optionalById("create-disclosure");
+  if (disclosure) disclosure.open = true;
+}
+
 function clearManagedSelection() {
   managedAdBaseline = null;
   byId("manage-ad-select").value = "";
@@ -1027,6 +1053,7 @@ function clearManagedSelection() {
   byId("manage-title").value = "";
   byId("manage-description").value = "";
   byId("manage-state").textContent = "—";
+  highlightManagedCard("");
 }
 
 function populateManageForm(ad) {
@@ -1038,6 +1065,7 @@ function populateManageForm(ad) {
     ? managedAdBaseline.description
     : "";
   byId("manage-state").textContent = ad.lifecycle_state ?? "—";
+  highlightManagedCard(ad.ad_id);
   byId("manage-form").scrollIntoView({behavior: "smooth", block: "nearest"});
 }
 
@@ -1119,6 +1147,54 @@ function renderAds(ads) {
     picker.value = previouslySelected;
   } else {
     clearManagedSelection();
+  }
+  const cards = optionalById("ad-cards");
+  adCardElements.clear();
+  if (cards && typeof cards.replaceChildren === "function") {
+    cards.replaceChildren();
+    const empty = optionalById("ad-cards-empty");
+    if (empty) empty.hidden = ads.length !== 0;
+    const ordered = [
+      ...ads.filter((ad) => ad.present !== false),
+      ...ads.filter((ad) => ad.present === false),
+    ];
+    for (const ad of ordered) {
+      const card = document.createElement("article");
+      card.className = "ad-card";
+      const heading = document.createElement("div");
+      heading.className = "ad-card-head";
+      const name = document.createElement("div");
+      const title = document.createElement("h3");
+      title.textContent = ad.title || "Ohne Titel";
+      const id = document.createElement("p");
+      id.className = "ad-id";
+      id.textContent = "ID " + ad.ad_id;
+      name.append(title, id);
+      const state = document.createElement("span");
+      state.className = "state " + (ad.lifecycle_state ?? "");
+      const stateLabels = {active: "Aktiv", paused: "Pausiert", absent: "Entfernt", pending: "Offen"};
+      state.textContent = stateLabels[ad.lifecycle_state] ?? (ad.lifecycle_state || "Unbekannt");
+      heading.append(name, state);
+      const footer = document.createElement("div");
+      footer.className = "ad-card-footer";
+      const views = document.createElement("span");
+      views.className = "ad-views";
+      views.textContent = "Aufrufe: " + display(ad.views);
+      footer.append(views);
+      if (writeUiReady() && (ad.present || pendingForAd(ad.ad_id) !== null)) {
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "ad-card-action";
+        action.textContent = ad.present ? "Bearbeiten" : "Recovery prüfen";
+        action.title = (ad.title || "Ohne Titel") + " verwalten";
+        action.addEventListener("click", () => populateManageForm(ad));
+        footer.append(action);
+      }
+      card.append(heading, footer);
+      cards.append(card);
+      adCardElements.set(ad.ad_id, card);
+    }
+    highlightManagedCard(picker.value);
   }
   const body = byId("ads-body");
   body.replaceChildren();
@@ -2222,6 +2298,10 @@ function applyGenerationTextToCreate() {
   }
   title.value = generationTextDraft.title;
   description.value = generationTextDraft.description;
+  if (typeof document !== "undefined" && typeof document.getElementById === "function") {
+    const create = document.getElementById("create-disclosure");
+    if (create) create.open = true;
+  }
   byId("generation-status").textContent =
     "Entwurf lokal übernommen. Prüfen, Kategorie und Preis ergänzen und Veröffentlichung separat auslösen.";
 }
@@ -2248,6 +2328,10 @@ function applyGenerationImageToCreate() {
       new File([generationImageBlob], "mark-ki-entwurf.png", {type: "image/png"}),
     );
     files.files = selected.files;
+    if (typeof document !== "undefined" && typeof document.getElementById === "function") {
+    const create = document.getElementById("create-disclosure");
+    if (create) create.open = true;
+  }
     byId("generation-status").textContent =
       "Bild lokal in die Dateiauswahl übernommen, nicht hochgeladen/veröffentlicht.";
   } catch (error) {
@@ -2287,6 +2371,8 @@ async function load() {
       `${summary.replies_total_known} / ${summary.replies_observed_ads} Ads`;
     writeUiAvailable = dashboardConfig.write_ui_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
+    const genNavigation = optionalById("nav-generation");
+    if (genNavigation) genNavigation.hidden = !generationUiAvailable;
     await refreshPendingWrites();
     renderWriteAvailability();
     renderGenerationAvailability();
@@ -2317,6 +2403,18 @@ async function load() {
   }
 }
 
+const newAdNavigation = optionalById("nav-create");
+if (newAdNavigation) newAdNavigation.addEventListener("click", revealCreateForm);
+const analyticsNavigation = optionalById("nav-analytics");
+if (analyticsNavigation) analyticsNavigation.addEventListener("click", () => {
+  const disclosure = optionalById("analytics-disclosure");
+  if (disclosure) disclosure.open = true;
+});
+const generationNavigation = optionalById("nav-generation");
+if (generationNavigation) generationNavigation.addEventListener("click", () => {
+  const disclosure = optionalById("generation-disclosure");
+  if (disclosure) disclosure.open = true;
+});
 byId("reload").addEventListener("click", load);
 byId("metric-select").addEventListener("change", loadAnalytics);
 byId("dimension-select").addEventListener("change", loadAnalytics);
