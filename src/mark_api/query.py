@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from typing import Mapping
 from datetime import datetime
 
 from .domain import AdSnapshot, LifecycleState, ReactionSnapshot
+from .storage import LOCAL_CATALOG_SOURCE, SnapshotStore
 from .storage import SnapshotStore
+from .storage_owner import StorageOwnerClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,38 +94,81 @@ def _last_metric_with_evidence(
 class MarkQueryService:
     """Read-only projections over the append-only SQLite history."""
 
-    def __init__(self, store: SnapshotStore) -> None:
+    def __init__(self, store: SnapshotStore | StorageOwnerClient) -> None:
         self._store = store
 
     def latest_ads(self) -> tuple[AdView, ...]:
         rows: list[AdView] = []
-        for ad_id in self._store.tracked_ad_ids():
-            history = self._store.ad_history(ad_id)
-            if not history:
-                continue
-            latest = history[-1]
-            metrics = {
-                field_name: _last_metric_with_evidence(history, field_name)
-                for field_name in ("views", "watch_count", "reply_count")
-            }
-            rows.append(
-                AdView(
-                    ad_id=ad_id,
-                    lifecycle_state=latest.lifecycle_state,
-                    present=latest.lifecycle_state is not LifecycleState.ABSENT,
-                    observed_at=latest.observed_at,
-                    source=latest.source,
-                    title=_last_not_none(history, "title"),
-                    description=_last_not_none(history, "description"),
-                    views=metrics["views"][0],
-                    watch_count=metrics["watch_count"][0],
-                    reply_count=metrics["reply_count"][0],
-                    metric_evidence={
-                        field_name: evidence
-                        for field_name, (_, evidence) in metrics.items()
-                    },
-                )
+        # The independent UID broker exposes only typed paginated IPC
+        # history reads, never raw SQL or a direct SQLite connection.
+        # Direct SnapshotStore keeps its close-on-error paginated iterator.
+        if isinstance(self._store, StorageOwnerClient):
+            rows_by_id = (
+                (ad_id, self._store.ad_history(ad_id))
+                for ad_id in self._store.tracked_ad_ids()
             )
+            history_source = nullcontext(rows_by_id)
+        else:
+            history_source = closing(self._store.ad_histories())
+        with history_source as histories:
+            for ad_id, history in histories:
+                if not history:
+                    continue
+                owner_history = tuple(
+                    item for item in history
+                    if item.source != LOCAL_CATALOG_SOURCE
+                )
+                catalog_history = tuple(
+                    item for item in history
+                    if item.source == LOCAL_CATALOG_SOURCE
+                )
+                owner = owner_history[-1] if owner_history else None
+                latest = owner if owner is not None else history[-1]
+                metrics: dict[str, tuple[int | None, MetricEvidence | None]] = {}
+                for field_name in ("views", "watch_count", "reply_count"):
+                    value, evidence = _last_metric_with_evidence(
+                        owner_history if owner_history else history,
+                        field_name,
+                    )
+                    if value is None and owner_history:
+                        value, evidence = _last_metric_with_evidence(
+                            catalog_history, field_name,
+                        )
+                        if evidence is not None:
+                            evidence = MetricEvidence(
+                                observed_at=evidence.observed_at,
+                                source=evidence.source,
+                                last_known=True,
+                            )
+                    metrics[field_name] = value, evidence
+                rows.append(
+                    AdView(
+                        ad_id=ad_id,
+                        lifecycle_state=(
+                            owner.lifecycle_state if owner is not None
+                            else LifecycleState.UNKNOWN
+                        ),
+                        present=(
+                            owner is not None
+                            and owner.lifecycle_state is not LifecycleState.ABSENT
+                        ),
+                        observed_at=latest.observed_at,
+                        source=latest.source,
+                        title=_last_not_none(
+                            owner_history if owner_history else history, "title",
+                        ),
+                        description=_last_not_none(
+                            owner_history if owner_history else history, "description",
+                        ),
+                        views=metrics["views"][0],
+                        watch_count=metrics["watch_count"][0],
+                        reply_count=metrics["reply_count"][0],
+                        metric_evidence={
+                            field_name: evidence
+                            for field_name, (_, evidence) in metrics.items()
+                        },
+                    )
+                )
         return tuple(rows)
 
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
@@ -135,7 +181,10 @@ class MarkQueryService:
         history = self._store.inbound_message_history(ad_id)
         if not history:
             return None
-        conversations, messages = self._store.inbound_message_counts(ad_id)
+        # Use the same pinned event generation for counts and provenance.
+        # A concurrent import after the history read must not inflate totals.
+        conversations = len({event.conversation_id for event in history})
+        messages = len(history)
         return EmailReactionView(
             ad_id=ad_id,
             conversation_count=conversations,

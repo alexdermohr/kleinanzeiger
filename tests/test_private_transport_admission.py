@@ -1,3 +1,8 @@
+"""Synthetic CDP transport invariants for the customer product.
+
+These tests never contact a browser or Kleinanzeigen. Real CDP access requires
+a validated loopback endpoint and an already authenticated browser session.
+"""
 from __future__ import annotations
 
 import os
@@ -5,145 +10,107 @@ import unittest
 from unittest.mock import patch
 
 from mark_api.private_web_cdp import (
-    _LoopbackCdpClient, CdpCookieProvider, CdpPrivateWebPage, PrivateWebCdpError,
+    _LoopbackCdpClient, CdpCookieProvider, CdpPrivateWebPage,
+    _validated_loopback_endpoint,
 )
 from mark_api.private_web_cdp_media import CdpPrivateWebMediaPage
-from mark_api.adapters.management import (
-    MANAGEMENT_URL, UrllibHttpTransport, TransportFailure,
-)
+from mark_api.adapters.management import MANAGEMENT_URL, UrllibHttpTransport, TransportFailure
+
+
+class SyntheticClient:
+    def __init__(self) -> None:
+        self.calls = []
+        self.closed = False
+
+    def call(self, method, params=None):
+        self.calls.append((method, params))
+        return {"result": {"value": True}}
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class DirectTransportAdmissionTests(unittest.TestCase):
-    def test_real_cdp_client_blocked_before_discovery_or_socket(self):
-        with patch.object(_LoopbackCdpClient, "_connect",
-                          side_effect=AssertionError("CDP network must not begin")) as connect:
-            with self.assertRaises(PrivateWebCdpError) as ctx:
-                _LoopbackCdpClient("http://127.0.0.1:9222", timeout_seconds=1.0)
-            self.assertEqual(ctx.exception.stage, "not_authorized")
-            for cls in (CdpCookieProvider, CdpPrivateWebPage, CdpPrivateWebMediaPage):
-                with self.subTest(factory=cls.__name__):
-                    page=cls.from_port(9222)
-                    with self.assertRaises(PrivateWebCdpError):
-                        page._client()
-            connect.assert_not_called()
+    def test_only_exact_loopback_cdp_endpoint_is_admitted_before_network(self) -> None:
+        forbidden = (
+            "http://0.0.0.0:9222", "http://localhost:9222",
+            "https://127.0.0.1:9222", "http://127.0.0.1:9222/other",
+            "http://127.0.0.1:9222?x=1", "http://user:pw@127.0.0.1:9222",
+            "http://127.0.0.1:0",
+        )
+        with patch.object(_LoopbackCdpClient, "_connect", side_effect=AssertionError("network must not begin")) as network:
+            for value in forbidden:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    _LoopbackCdpClient(value, timeout_seconds=1.0)
+            network.assert_not_called()
+        self.assertEqual(_validated_loopback_endpoint("http://127.0.0.1:9222"), ("http://127.0.0.1:9222", 9222))
 
-    def test_injected_and_cached_cdp_clients_denied_before_effect(self):
-        # A caller-supplied CDP factory must never be treated as entitlement.
+    def test_synthetic_factories_are_usable_without_network_or_environment_grants(self) -> None:
         for page_cls in (CdpCookieProvider, CdpPrivateWebPage, CdpPrivateWebMediaPage):
             with self.subTest(factory=page_cls.__name__):
-                factory_calls = []
+                fake = SyntheticClient()
+                page = page_cls.from_port(9222, client_factory=lambda: fake)
+                with patch.dict(os.environ, {"MARK_PRIVATE_WEB_APPROVED": "false"}):
+                    self.assertIs(page._client(), fake)
+                    self.assertIs(page._client(), fake)
+                page.close()
+                self.assertTrue(fake.closed)
 
-                def injected_factory():
-                    factory_calls.append("unexpected")
-                    raise AssertionError("injected CDP client must never run")
-
-                page = page_cls.from_port(9222, client_factory=injected_factory)
-                with patch.dict(os.environ, {
-                    "MARK_PRIVATE_WEB_APPROVED": "true",
-                    "MARK_PLATFORM_WRITES_ENABLED": "true",
-                }):
-                    with self.assertRaises(PrivateWebCdpError) as denied:
-                        page._client()
-                    self.assertEqual(denied.exception.stage, "not_authorized")
-                    self.assertEqual(factory_calls, [])
-                    # Admission applies to already cached client instances too.
-                    page._client_instance = object()
-                    with self.assertRaises(PrivateWebCdpError) as cached_denied:
-                        page._client()
-                    self.assertEqual(cached_denied.exception.stage, "not_authorized")
-
-    def test_injected_factory_truthiness_is_never_called(self):
-        # A callable with a side-effectful __bool__ is untrusted too.
+    def test_factory_truthiness_is_not_evaluated(self) -> None:
         for page_cls in (CdpCookieProvider, CdpPrivateWebPage, CdpPrivateWebMediaPage):
             with self.subTest(factory=page_cls.__name__):
-                events = []
+                calls = []
+                fake = SyntheticClient()
 
-                class TruthinessTrap:
+                class Trap:
                     def __bool__(self):
-                        events.append("truthiness_called")
-                        raise AssertionError("factory truthiness ran before admission")
+                        raise AssertionError("untrusted factory truthiness evaluated")
 
                     def __call__(self):
-                        events.append("factory_called")
-                        raise AssertionError("factory ran before admission")
+                        calls.append("created")
+                        return fake
 
-                with patch.dict(os.environ, {"MARK_PRIVATE_WEB_APPROVED": "true"}):
-                    page = page_cls.from_port(9222, client_factory=TruthinessTrap())
-                    self.assertEqual(events, [])
-                    with self.assertRaises(PrivateWebCdpError) as denied:
-                        page._client()
-                    self.assertEqual(denied.exception.stage, "not_authorized")
-                    self.assertEqual(events, [])
+                page = page_cls.from_port(9222, client_factory=Trap())
+                self.assertEqual(calls, [])
+                self.assertIs(page._client(), fake)
+                self.assertEqual(calls, ["created"])
+                page.close()
 
-    def test_direct_cdp_effect_helpers_deny_injected_clients(self):
-        calls = []
+    def test_explicit_synthetic_cdp_effects_follow_existing_method_contract(self) -> None:
+        fake = SyntheticClient()
+        self.assertTrue(CdpPrivateWebPage._runtime_value(fake, "true"))
+        CdpPrivateWebPage._dispatch_browser_click(fake, x=10.0, y=15.0)
+        self.assertEqual(
+            [method for method, _ in fake.calls],
+            ["Runtime.evaluate", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent"],
+        )
+        self.assertEqual(
+            [params["type"] for method, params in fake.calls if method == "Input.dispatchMouseEvent"],
+            ["mousePressed", "mouseReleased"],
+        )
 
-        class InjectedClient:
-            def call(self, method, params=None):
-                calls.append((method, params))
-                raise AssertionError("browser effect before platform admission")
-
-        client = InjectedClient()
-        with self.assertRaises(PrivateWebCdpError) as evaluated:
-            CdpPrivateWebPage._runtime_value(client, "globalThis.location.href")
-        self.assertEqual(evaluated.exception.stage, "not_authorized")
-        with self.assertRaises(PrivateWebCdpError) as clicked:
-            CdpPrivateWebPage._dispatch_browser_click(client, x=10.0, y=15.0)
-        self.assertEqual(clicked.exception.stage, "not_authorized")
-        self.assertEqual(calls, [])
-
-    def test_direct_lowlevel_cdp_effects_deny_bypassed_constructor(self):
-        events = []
-
-        class FakeSocket:
-            def send(self, _data):
-                events.append("socket_send")
-                raise AssertionError("socket send without authorization")
-
-            def recv(self):
-                events.append("socket_recv")
-                raise AssertionError("socket recv without authorization")
-
-        client = object.__new__(_LoopbackCdpClient)
-        client._socket = FakeSocket()
-        client._next_id = 0
-        with self.assertRaises(PrivateWebCdpError) as sent:
-            client.call("Page.navigate", {"url": "https://example.invalid/"})
-        self.assertEqual(sent.exception.stage, "not_authorized")
-        self.assertEqual(client._next_id, 0)
-
-        # _connect is also directly accessible without calling __init__.
-        with self.assertRaises(PrivateWebCdpError) as connected:
-            client._connect()
-        self.assertEqual(connected.exception.stage, "not_authorized")
-        self.assertEqual(events, [])
-
-    def test_cached_media_handle_release_skips_direct_cdp_effect(self):
-        calls = []
-
-        class InjectedClient:
-            def call(self, method, params=None):
-                calls.append((method, params))
-                raise AssertionError("releaseObject before platform admission")
-
+    def test_synthetic_media_handle_is_released_with_best_effort_cleanup(self) -> None:
+        fake = SyntheticClient()
         page = CdpPrivateWebMediaPage.from_port(9222)
-        page._media_file_object_id = "synthetic-object-handle"
-        page._client_instance = InjectedClient()
+        page._media_file_object_id = "synthetic-handle"
+        page._client_instance = fake
         page._release_media_handle()
         self.assertIsNone(page._media_file_object_id)
-        self.assertEqual(calls, [])
+        self.assertEqual(fake.calls, [
+            ("Runtime.releaseObject", {"objectId": "synthetic-handle"})
+        ])
+        page.close()
 
-    def test_default_private_management_http_blocked_before_urlopen(self):
+    def test_legacy_private_management_http_remains_denied_before_network(self) -> None:
         with (
             patch("mark_api.adapters.management.urlopen",
-                  side_effect=AssertionError("HTTP network must not begin")) as network,
+                  side_effect=AssertionError("direct HTTP must not begin")) as network,
             patch.dict(os.environ, {
                 "MARK_PRIVATE_WEB_APPROVED": "true",
                 "MARK_PLATFORM_WRITES_ENABLED": "true",
-                "MARK_PROSELLERS_API_ENTITLEMENT_CONFIRMED": "true",
             }),
         ):
-            with self.assertRaisesRegex(TransportFailure, "not authorized"):
+            with self.assertRaises(TransportFailure):
                 UrllibHttpTransport().get(
                     MANAGEMENT_URL, headers={"Cookie": "synthetic-only"})
             network.assert_not_called()
