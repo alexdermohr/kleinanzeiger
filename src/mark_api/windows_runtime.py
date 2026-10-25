@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import os
 import stat
+import socketserver
 from pathlib import Path
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -118,3 +119,15 @@ def require_private_windows_directory(path: str | os.PathLike[str], *, create: b
     ):
         raise OSError("private Windows directory is unsafe")
     return destination
+
+
+class _UnavailableUnixStreamServer(socketserver.BaseServer):
+    """Never silently substitute TCP for Linux authenticated Unix sockets."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise OSError("Linux protected Unix socket server unavailable on Windows")
+
+
+UnixStreamServerBase = getattr(
+    socketserver, "UnixStreamServer", _UnavailableUnixStreamServer,
+)

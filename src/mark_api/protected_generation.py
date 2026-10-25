@@ -7,6 +7,8 @@ platform mutations exist on this channel.
 """
 from __future__ import annotations
 
+from .windows_runtime import UnixStreamServerBase
+
 import argparse
 import hashlib
 import json
@@ -121,7 +123,7 @@ class _GenerationHandler(socketserver.StreamRequestHandler):
             service._cost_lock.release()
 
 
-class ProtectedGenerationServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class ProtectedGenerationServer(socketserver.ThreadingMixIn, UnixStreamServerBase):
     """One dedicated worker UID, private socket, UID-authenticated requests."""
 
     daemon_threads = False

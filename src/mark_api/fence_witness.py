@@ -9,6 +9,8 @@ browser/runtime UID. A working unit test under one UID is not that OS proof.
 """
 from __future__ import annotations
 
+from .windows_runtime import UnixStreamServerBase
+
 from .container_draft import container_draft_denied
 
 import argparse
@@ -1030,7 +1032,7 @@ class _WitnessUnixHandler(socketserver.StreamRequestHandler):
         raise FenceWitnessError("operation is not exposed by this socket")
 
 
-class _WitnessUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class _WitnessUnixServer(socketserver.ThreadingMixIn, UnixStreamServerBase):
     # A persistent runtime session must not keep serve_forever() blocked
     # when PID 1 receives SIGTERM. Track and terminate active socket sessions
     # explicitly rather than merely spawning unbounded daemon threads.
