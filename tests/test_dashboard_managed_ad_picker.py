@@ -45,7 +45,7 @@ const document = {
   querySelectorAll: () => [],
 };
 const window = {addEventListener() {}};
-const source = fs.readFileSync(0, "utf8");
+const source = fs.readFileSync(0, "utf8").replace(/\r\n/g, "\n");
 const end = source.indexOf("\nconsumeWriteToken();\nload();");
 assert.ok(end > 0, "Dashboard setup marker must exist");
 
