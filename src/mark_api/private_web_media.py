@@ -268,7 +268,7 @@ def _copy_validated_descriptor(
         ):
             raise ValueError("media source must be a regular file")
 
-        source_flags = os.O_RDONLY
+        source_flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
         if hasattr(os, "O_CLOEXEC"):
             source_flags |= os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
@@ -287,7 +287,7 @@ def _copy_validated_descriptor(
                 raise ValueError("media source changed during validation")
 
             destination = os.path.join(directory, name)
-            destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
             if hasattr(os, "O_CLOEXEC"):
                 destination_flags |= os.O_CLOEXEC
             destination_fd = os.open(destination, destination_flags, 0o600)
@@ -759,7 +759,7 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
                     continue
                 fd = os.open(
                     entry.path,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, 'O_BINARY', 0),
                 )
                 try:
                     prefix = os.read(fd, 12)
@@ -914,7 +914,7 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
             )
             fd = os.open(
                 temp_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0),
                 0o600,
             )
             try:

@@ -10,7 +10,9 @@
 ## Native Windows-Installation (ab v0.1.1)
 
 Windows 11 x64 benötigt **kein WSL**: das native Paket enthält
-Installieren.cmd und Starten.cmd. Anleitung:
+Installieren.cmd, Starten.cmd, Sichern.cmd und Wiederherstellen.cmd.
+Letzteres nimmt ausschließlich verifizierte Backups in eine **noch nicht
+existierende** lokale Datenbank auf, niemals einen A6-Altbestand. Anleitung:
 [docs/windows-installation.md](docs/windows-installation.md).
 Die normale Windows-Version besitzt vollständige Read/Write/Media-Funktionen;
 die separate Linux-A6-Mehr-UID-/Landlock-Provisionierung ist nicht Windows-native.

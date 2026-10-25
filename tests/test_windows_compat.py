@@ -46,6 +46,79 @@ class WindowsInstalledProductTests(unittest.TestCase):
             second.close()
             _ACTIVE_CDP_TARGET_CLAIMS.pop(id(second), None)
 
+    def test_attached_browser_read_and_unknown_write_fence(self):
+        import json
+        from mark_api.private_web_cdp import _LoopbackCdpClient, PrivateWebCdpError
+
+        class PageList:
+            def __init__(self, url):
+                self.url = url
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return None
+            def geturl(self):
+                return self.url
+            def read(self, *_):
+                return json.dumps([{
+                    "type": "page",
+                    "webSocketDebuggerUrl": (
+                        "ws://127.0.0.1:24722/devtools/page/win-synthetic"
+                    ),
+                }]).encode("utf-8")
+
+        class FakeTcp:
+            def close(self):
+                pass
+
+        class FakeWs:
+            def __init__(self):
+                self.sent = []
+                self.closed = False
+            def send(self, msg):
+                self.sent.append(json.loads(msg))
+            def recv(self):
+                return json.dumps({
+                    "id": self.sent[-1]["id"],
+                    "result": {"cookies": []},
+                })
+            def close(self):
+                self.closed = True
+
+        sockets = []
+        def ws_factory(*_args, **_kwargs):
+            sock = FakeWs()
+            sockets.append(sock)
+            return sock
+
+        client = _LoopbackCdpClient(
+            "http://127.0.0.1:24722",
+            timeout_seconds=1,
+            opener=lambda url, timeout: PageList(url),
+            tcp_socket_factory=lambda *args, **kwargs: FakeTcp(),
+            websocket_factory=ws_factory,
+        )
+        self.assertEqual(client.call("Network.getCookies")["cookies"], [])
+        client.close()
+        self.assertTrue(sockets[0].closed)
+
+        # A matching CDP ACK for mouse input does not establish platform
+        # settlement: a second cooperating Windows writer remains denied.
+        unsafe = _LoopbackCdpClient(
+            "http://127.0.0.1:24722",
+            timeout_seconds=1,
+            opener=lambda url, timeout: PageList(url),
+            tcp_socket_factory=lambda *args, **kwargs: FakeTcp(),
+            websocket_factory=ws_factory,
+        )
+        unsafe.call("Input.dispatchMouseEvent", {
+            "type": "mousePressed", "x": 1, "y": 2, "button": "left",
+        })
+        with self.assertRaises(PrivateWebCdpError):
+            unsafe.close()
+        with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
+            _reserve_exclusive_cdp_target(24722)
+
     def test_sqlite_exclusive_writer(self):
         with tempfile.TemporaryDirectory() as root:
             db = Path(root) / "anzeigen.sqlite"

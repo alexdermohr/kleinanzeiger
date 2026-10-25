@@ -27,6 +27,26 @@ Das Skript initialisiert sie nur bei einer wirklich neuen Installation.
 Nachfolgende Starts verwenden denselben Datenbestand. Keine Altbestandsdateien
 einschließlich -wal/-shm ungeprüft in den Ordner kopieren.
 
+## Windows-Datensicherung und Wiederherstellung
+
+Im Kundenordner **Sichern.cmd** doppelklicken. Die SQLite-Sicherung wird
+über die SQLite-Online-Backup-API einschließlich bereits bestätigter WAL-
+Transaktionen erstellt und auf Schema, Integrität und SHA-256 kontrolliert.
+Sicherung und zugehörige `.manifest.json`-Datei liegen unter
+`%LOCALAPPDATA%\Kleinanzeiger\Backups`; beide Dateien zusammen behalten.
+Offene beziehungsweise unklare Write-Operationen bleiben als solche
+im Backup erhalten und werden nicht automatisch erneut ausgeführt.
+
+**Wiederherstellen.cmd** nur verwenden, wenn Kleinanzeiger vollständig
+beendet ist und die Ziel-Datenbank `anzeigen.sqlite` **nicht** mehr
+vorhanden ist. Auch zugehörige `-wal`, `-shm` und `-journal`-Dateien
+dürfen nicht vorhanden sein. Vorhandene Dateien nie automatisch ersetzen.
+Die Wiederherstellung verlangt Dateiauswahl und die Eingabe `JA`,
+prüft Backup und Manifest und erstellt ausschließlich eine neue SQLite-Datei.
+Unbekannte oder eventuell kompromittierte Altbestände sind davon
+nicht freigegeben. Nach erfolgreicher Wiederherstellung normal über
+**Starten.cmd** starten, ohne `--init-db`.
+
 ## Optionale KI-Funktionen
 
 Die KI-Python-Abhängigkeiten sind beim Windows-Kunden-Wheel optional.

@@ -37,6 +37,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Windows kernel exclusion, SQLite lock, staged-media restart
         run: python -m unittest discover -s tests -p test_windows_compat.py -v
+      - name: Windows installed backup and create-only restore
+        run: python -m unittest discover -s tests -p test_windows_backup.py -v
+      - name: Installed Windows binary media round-trip
+        run: python -m unittest discover -s tests -p test_windows_binary_media.py -v
       - name: Installed full dashboard and write lifecycle
         run: python -m unittest discover -s tests -p test_dashboard_full_lifecycle_e2e.py -v
       - name: Installed synthetic create and media lifecycle
@@ -52,7 +56,7 @@ jobs:
           $wheel = @(Get-ChildItem -Path dist -Filter 'kleinanzeiger-*.whl')
           if ($wheel.Count -ne 1) { throw 'Expected exactly one Wheel' }
           Copy-Item $wheel[0].FullName $staging
-          Copy-Item scripts\Installieren.cmd, scripts\Starten.cmd, scripts\windows-install.ps1, scripts\windows-start.ps1 $staging
+          Copy-Item scripts\Installieren.cmd, scripts\Starten.cmd, scripts\Sichern.cmd, scripts\Wiederherstellen.cmd, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1 $staging
           Copy-Item docs\windows-installation.md (Join-Path $staging 'Windows-Installation.md')
           $digest = (Get-FileHash $wheel[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           "$digest  $($wheel[0].Name)" | Set-Content -Path (Join-Path $staging 'SHA256SUMS.txt') -Encoding ascii
@@ -60,6 +64,19 @@ jobs:
           $zipHash = (Get-FileHash 'Kleinanzeiger-v0.1.1-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Output "Windows Wheel SHA256 $digest"
           Write-Output "Windows customer ZIP SHA256 $zipHash"
+      - name: Verify customer install script against packaged and hashed wheel
+        if: matrix.python-version == '3.12'
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:RUNNER_TEMP 'kleinanzeiger-windows'
+          & (Join-Path $staging 'windows-install.ps1')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installed = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger\.venv\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
+            throw 'Customer installation did not produce the venv Python executable'
+          }
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.1'"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Retain exact accepted Windows customer ZIP
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

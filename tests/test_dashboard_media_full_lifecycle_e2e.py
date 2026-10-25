@@ -81,7 +81,16 @@ class SyntheticConfirmedMediaService:
         sources = self.stager.resolve(media_refs)
         assert len(sources) == 1 and len(media_refs) == 1
         assert Path(sources[0].path).read_bytes() == self.expected_image
-        assert stat.S_IMODE(os.stat(sources[0].path).st_mode) == 0o600
+        if os.name == "nt":
+            # Windows uses per-user ACLs rather than POSIX mode 0600.
+            file_info = os.stat(sources[0].path, follow_symlinks=False)
+            assert stat.S_ISREG(file_info.st_mode)
+            assert not (
+                getattr(file_info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            )
+        else:
+            assert stat.S_IMODE(os.stat(sources[0].path).st_mode) == 0o600
         self.effects.append(media_refs)
         if self.confirmed:
             observed = AdSnapshot(
