@@ -143,6 +143,13 @@ jobs:
           test -s "$stage/unpacked/KI-einrichten.cmd"
           zip_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
           printf '%s  %s\n' "$zip_sha" "Kleinanzeiger-v0.1.2-Windows.zip" > "$stage/Kleinanzeiger-v0.1.2-Windows.sha256"
+          wheel="$stage/unpacked/kleinanzeiger-0.1.2-py3-none-any.whl"
+          wheel_sha="$(sha256sum "$wheel" | cut -d' ' -f1)"
+          zip_bytes="$(stat -c%s "$zip")"
+          wheel_bytes="$(stat -c%s "$wheel")"
+          printf '{"version":"0.1.2","tag":"%s","source_commit":"%s","workflow_run_id":"%s","windows_zip":{"filename":"Kleinanzeiger-v0.1.2-Windows.zip","bytes":%s,"sha256":"%s"},"wheel":{"filename":"kleinanzeiger-0.1.2-py3-none-any.whl","bytes":%s,"sha256":"%s"}}\n' \
+            "$GITHUB_REF_NAME" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$zip_bytes" "$zip_sha" "$wheel_bytes" "$wheel_sha" > "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json"
+          jq -e '.version == "0.1.2" and (.source_commit | length == 40)' "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json" >/dev/null
           cat > "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" <<'EOF'
           # Kleinanzeiger v0.1.2 – Windows
 
@@ -165,6 +172,8 @@ jobs:
             --notes-file "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" \
             "$zip" \
             "$stage/Kleinanzeiger-v0.1.2-Windows.sha256" \
+            "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json" \
+            "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" \
             "$stage/unpacked/Windows-Installation.md" \
             "$stage/unpacked/SHA256SUMS.txt" \
             "$stage/unpacked/kleinanzeiger-0.1.2-py3-none-any.whl"
