@@ -39,12 +39,12 @@ if (!(Test-Path -LiteralPath $installedPython -PathType Leaf) -or !(Test-Python 
   }
   if (!$python) {
     $candidates = @()
-    foreach ($home in @($env:LOCALAPPDATA, $env:ProgramFiles, [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'))) {
-      if ($home) {
-        $candidates += Join-Path $home 'Programs\Python\Python313\python.exe'
-        $candidates += Join-Path $home 'Programs\Python\Python312\python.exe'
-        $candidates += Join-Path $home 'Python313\python.exe'
-        $candidates += Join-Path $home 'Python312\python.exe'
+    foreach ($candidateRoot in @($env:LOCALAPPDATA, $env:ProgramFiles, [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'))) {
+      if ($candidateRoot) {
+        $candidates += Join-Path $candidateRoot 'Programs\Python\Python313\python.exe'
+        $candidates += Join-Path $candidateRoot 'Programs\Python\Python312\python.exe'
+        $candidates += Join-Path $candidateRoot 'Python313\python.exe'
+        $candidates += Join-Path $candidateRoot 'Python312\python.exe'
       }
     }
     foreach ($name in @('python.exe', 'python3.exe')) {

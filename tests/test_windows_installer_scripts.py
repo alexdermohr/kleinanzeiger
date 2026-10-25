@@ -24,6 +24,11 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertNotIn("Remove-Item -LiteralPath $state", script)
         self.assertNotIn("Restore", script)
 
+    def test_no_powershell_home_reserved_variable_write(self):
+        for filename in ("windows-install.ps1", "windows-chrome.ps1"):
+            code = (SCRIPTS / filename).read_text(encoding="utf-8")
+            self.assertNotRegex(code, r"(?i)\$home\b", filename)
+
     def test_chrome_has_official_signed_download_fallback(self):
         chrome = (SCRIPTS / "windows-chrome.ps1").read_text(encoding="utf-8")
         start = (SCRIPTS / "windows-start.ps1").read_text(encoding="utf-8")

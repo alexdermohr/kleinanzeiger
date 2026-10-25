@@ -1,8 +1,8 @@
 # Shared Chrome detection and the official, user-local Chrome-for-Testing fallback.
 function Find-KleinanzeigerChrome([string]$StateDirectory) {
   $candidates = @()
-  foreach ($home in @($env:ProgramFiles, [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), $env:LOCALAPPDATA)) {
-    if ($home) { $candidates += Join-Path $home 'Google\Chrome\Application\chrome.exe' }
+  foreach ($candidateRoot in @($env:ProgramFiles, [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), $env:LOCALAPPDATA)) {
+    if ($candidateRoot) { $candidates += Join-Path $candidateRoot 'Google\Chrome\Application\chrome.exe' }
   }
   foreach ($key in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
                      'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe')) {
