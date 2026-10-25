@@ -192,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
 
     server = runtime.write_server
     stopped = Event()
+    stop_requested = False
     sync_failed = Event()
     interval = float(config.get("sync_interval_seconds", 0))
     sync_worker: Thread | None = None
@@ -237,7 +238,8 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 2
     def stop(_signum, _frame) -> None:
-        stopped.set()
+        nonlocal stop_requested
+        stop_requested = True
     previous_term = signal.signal(signal.SIGTERM, stop)
     previous_int = signal.signal(signal.SIGINT, stop)
     thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05},
@@ -248,7 +250,9 @@ def main(argv: list[str] | None = None) -> int:
             sync_worker.start()
         print(json.dumps({"ready": True, "uid": os.geteuid(),
                           "port": server.server_port}, separators=(",", ":")), flush=True)
-        stopped.wait()
+        while not stop_requested and not stopped.wait(0.2):
+            pass
+        stopped.set()  # Wake the sync worker outside the signal handler.
         server.shutdown()
         if hasattr(server, "wait_for_active_handlers"):
             if not server.wait_for_active_handlers(10):

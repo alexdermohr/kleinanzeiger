@@ -265,9 +265,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     stopped = Event()
+    stop_requested = False
 
     def request_stop(_signal, _frame):
-        stopped.set()
+        nonlocal stop_requested
+        stop_requested = True
 
     previous_term = signal.signal(signal.SIGTERM, request_stop)
     previous_int = signal.signal(signal.SIGINT, request_stop)
@@ -275,7 +277,8 @@ def main(argv: list[str] | None = None) -> int:
         runtime.authority.start()
         print(json.dumps({"ready": True, "uid": os.geteuid()},
                          separators=(",", ":")), flush=True)
-        stopped.wait()
+        while not stop_requested and not stopped.wait(0.2):
+            pass
         runtime.close()
         return 0
     except Exception:

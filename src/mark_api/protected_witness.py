@@ -154,9 +154,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     stopped = Event()
+    stop_requested = False
 
     def on_stop(_sig, _frame):
-        stopped.set()
+        nonlocal stop_requested
+        stop_requested = True
 
     previous_term = signal.signal(signal.SIGTERM, on_stop)
     previous_int = signal.signal(signal.SIGINT, on_stop)
@@ -167,7 +169,9 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("witness listeners unavailable")
         print(json.dumps({"ready": True, "uid": os.geteuid()},
                          separators=(",", ":")), flush=True)
-        while not stopped.wait(0.2):
+        while not stop_requested and not stopped.wait(0.2):
+            if stop_requested:
+                break
             if (not all(t.is_alive() for t in threads)
                     or runtime.server._owner._fatal.is_set()
                     or runtime.server._authority._fatal.is_set()):
