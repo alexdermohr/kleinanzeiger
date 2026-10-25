@@ -48,24 +48,6 @@ class WindowsMediaBinaryRoundtripTests(unittest.TestCase):
             self.assertEqual(Path(verified_source.path).read_bytes(), source_bytes)
             self.assertEqual(_read_local_source(verified_source), source_bytes)
 
-            # Windows os.lstat(path) and os.fstat(descriptor) can expose
-            # different metadata even for the same underlying file.
-            before = os.lstat(verified_source.path)
-            descriptor = os.open(
-                verified_source.path, os.O_RDONLY | getattr(os, "O_BINARY", 0)
-            )
-            try:
-                opened = os.fstat(descriptor)
-            finally:
-                os.close(descriptor)
-            identity_fields = (
-                "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"
-            )
-            differences = [
-                name for name in identity_fields
-                if getattr(before, name) != getattr(opened, name)
-            ]
-            print("WINDOWS_MEDIA_STAT_FSTAT_DIFFERENT_FIELDS", differences, flush=True)
             prepared = _prepare_local_media((verified_source,))
             try:
                 self.assertEqual(len(prepared.paths), 1)
