@@ -1195,6 +1195,66 @@ class PrivateWebWriteApiRuntime:
         host, port = self._server.server_address
         return str(host), int(port)
 
+    def sync_owner_inventory(self) -> int:
+        """One explicit owner read through the writer's pinned CDP target.
+
+        Existing write serialization and periodic read journaling also protect
+        this user-requested sync; no second CDP claim or platform write occurs.
+        """
+        if not self._operation_lock.acquire(blocking=False):
+            raise PrivateWebRuntimeSetupError("owner inventory busy")
+        try:
+            if self._stopping or self._closed:
+                raise PrivateWebRuntimeClosedError("owner inventory runtime closing")
+            session = getattr(self._content_runtime, "_cdp_session", None)
+            if session is None:
+                raise PrivateWebRuntimeSetupError("pinned owner session unavailable")
+            try:
+                recovery = self._store.sync_recovery_status()
+                if recovery.get("unresolved_count") != 0:
+                    raise PrivateWebRuntimeSetupError(
+                        "previous inventory outcome requires reconciliation"
+                    )
+            except PrivateWebRuntimeSetupError:
+                raise
+            except Exception:
+                raise PrivateWebRuntimeSetupError(
+                    "inventory recovery state unavailable"
+                ) from None
+
+            from .periodic_sync import PeriodicOwnerSync
+
+            content = self._content_runtime
+            owner = self
+
+            class _BorrowedOwnerInventory:
+                def read_inventory(self, *, stop_requested=None):
+                    if (
+                        (callable(stop_requested) and stop_requested())
+                        or owner._stopping or owner._closed
+                    ):
+                        raise PrivateWebInventoryReadCancelled(
+                            "owner inventory read cancelled before browser"
+                        )
+                    return content.read_inventory()
+
+                def close(self):
+                    # The write runtime owns the shared pinned CDP session.
+                    return None
+
+            sync = PeriodicOwnerSync(
+                store=self._store,
+                cdp_port=session.port,
+                timeout_seconds=session.timeout_seconds,
+                runtime_factory=lambda **_kwargs: _BorrowedOwnerInventory(),
+            )
+            result = sync.run_once()
+            if not result.is_success:
+                raise PrivateWebRuntimeSetupError("owner inventory read failed")
+            return len(result.value or ())
+        finally:
+            self._operation_lock.release()
+
     @property
     def media_reconciliation_required(self) -> bool:
         runtime = self._media_runtime
