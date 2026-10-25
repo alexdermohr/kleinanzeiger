@@ -1,71 +1,78 @@
-# Kleinanzeiger v0.1.1 – Windows 11 (nativ, ohne WSL)
+# Kleinanzeiger v0.1.2 – Windows 11
 
-Windows 11 x64, Python 3.12 oder 3.13 und Google Chrome werden benötigt.
-Kein WSL, Ubuntu oder Docker erforderlich.
+Native Windows-Anwendung ohne WSL, Ubuntu oder Docker.
 
-## Installation
+Der bisherige praktische Windows-Test wurde vom Entwickler durchgeführt.
+Eine unabhängige Kundenabnahme und echte Schreibaktionen im Kundenkonto
+sind damit nicht belegt.
 
-1. Python von https://www.python.org/downloads/windows/ mit Python Launcher
-   (py.exe) installieren, falls noch nicht vorhanden.
-2. Das Windows-ZIP herunterladen und vollständig entpacken.
-3. Installieren.cmd doppelklicken: Das SHA256-geprüfte Wheel wird unter
-   %LOCALAPPDATA%\Kleinanzeiger\.venv installiert.
-4. Starten.cmd doppelklicken: Ein neues, isoliertes Chrome-Profil öffnet sich
-   nur mit dem Debugging-Port 127.0.0.1:9222.
-5. Im neu gestarteten Chrome selbst anmelden, nur die eigene
-   Anzeigenverwaltungsseite offen halten, im Fenster ENTER drücken.
-6. Die anschließend angezeigte lokale Dashboard-URL im Browser öffnen.
+## Automatisch installieren
 
-Das Produkt bietet Synchronisation, Anzeigenverwaltung mit Create/Publish
-inklusive Bildern, Titel/Beschreibung, Pause/Aktivierung, Löschen, Kennzahlen,
-Historie, lokale Reaktions-E-Mails und KI-Entwürfe.
+1. Windows-ZIP vollständig in einen eigenen Ordner entpacken.
+2. **Installieren.cmd** doppelklicken. Es prüft die Wheel-Prüfsumme,
+   richtet Python und die Abhängigkeiten ein und stellt bei Bedarf
+   Google Chrome bereit. Falls Python 3.12/3.13 fehlt, lädt es den
+   offiziellen, auf SHA-256 und Herstellersignatur geprüften Installer
+   für Python 3.13.17 von python.org. Fehlt Chrome, wird eine signierte
+   Chrome-for-Testing-Laufzeit von Google für diesen Benutzer bezogen.
+   Internetverbindung erforderlich, keine WSL- oder Docker-Installation.
+3. **Starten.cmd** doppelklicken; das separate Chrome-Fenster öffnet sich.
+4. Dort selbst beim eigenen Kleinanzeigen-Konto anmelden und im
+   Startfenster ENTER drücken. Lokale Dashboard-URL öffnen.
+5. Unter **Bestehende Anzeige** mit **Vorhandene Anzeige auswählen**
+   eine synchronisierte Anzeige wählen. ID, Titel, Beschreibung und
+   Status werden übernommen. Keine manuelle Anzeigen-ID nötig.
 
-## Daten und erneuter Start
+Die Vollversion umfasst Anzeigen-Synchronisation, Erstellen und
+Veröffentlichen, Bearbeiten, Pause/Aktivieren/Löschen, Bilder,
+Dashboard, Historie, Rankings, Analytics und lokale E-Mail-Reaktionen.
 
-Die SQLite-Datenbank liegt unter %LOCALAPPDATA%\Kleinanzeiger\anzeigen.sqlite.
-Das Skript initialisiert sie nur bei einer wirklich neuen Installation.
-Nachfolgende Starts verwenden denselben Datenbestand. Keine Altbestandsdateien
-einschließlich -wal/-shm ungeprüft in den Ordner kopieren.
+## Update von v0.1.1
 
-## Windows-Datensicherung und Wiederherstellung
+1. Anwendung und deren Chrome-Fenster vollständig beenden.
+2. Im alten Ordner **Sichern.cmd** ausführen und Backup sowie
+   zugehörige .manifest.json-Datei sicher aufbewahren.
+3. Neues ZIP in **einen neuen Ordner** entpacken.
+4. Dort **Installieren.cmd** ausführen, anschließend **Starten.cmd**.
 
-Im Kundenordner **Sichern.cmd** doppelklicken. Die SQLite-Sicherung wird
-über die SQLite-Online-Backup-API einschließlich bereits bestätigter WAL-
-Transaktionen erstellt und auf Schema, Integrität und SHA-256 kontrolliert.
-Sicherung und zugehörige `.manifest.json`-Datei liegen unter
-`%LOCALAPPDATA%\Kleinanzeiger\Backups`; beide Dateien zusammen behalten.
-Offene beziehungsweise unklare Write-Operationen bleiben als solche
-im Backup erhalten und werden nicht automatisch erneut ausgeführt.
+Daten liegen weiterhin unter %LOCALAPPDATA%\Kleinanzeiger:
+anzeigen.sqlite (inkl. WAL/SHM), vorbereitete Medien, offene und
+ungeklärte Write-Vorgänge, ChromeProfile und Backups bleiben erhalten.
+Der Installer löscht sie nicht und führt keine Wiederherstellung aus.
 
-**Wiederherstellen.cmd** nur verwenden, wenn Kleinanzeiger vollständig
-beendet ist und die Ziel-Datenbank `anzeigen.sqlite` **nicht** mehr
-vorhanden ist. Auch zugehörige `-wal`, `-shm` und `-journal`-Dateien
-dürfen nicht vorhanden sein. Vorhandene Dateien nie automatisch ersetzen.
-Die Wiederherstellung verlangt Dateiauswahl und die Eingabe `JA`,
-prüft Backup und Manifest und erstellt ausschließlich eine neue SQLite-Datei.
-Unbekannte oder eventuell kompromittierte Altbestände sind davon
-nicht freigegeben. Nach erfolgreicher Wiederherstellung normal über
-**Starten.cmd** starten, ohne `--init-db`.
+**Wiederherstellen.cmd** funktioniert ausschließlich, wenn die
+Zieldatenbank und ihre -wal/-shm/-journal-Dateien fehlen. Niemals
+bestehende Daten überschreiben.
 
-## Optionale KI-Funktionen
+## KI anschließen (optional)
 
-Die KI-Python-Abhängigkeiten sind beim Windows-Kunden-Wheel optional.
-Mit eigenem API-Schlüssel (OPENAI_API_KEY) und Startoption
---enable-generation können Texte und Bilder als bearbeitbare Entwürfe
-generiert werden. Jeder kostenpflichtige Aufruf erfordert Einzelbestätigung;
-eine Generierung veröffentlicht keine Anzeigen automatisch.
+1. Eigenen API-Schlüssel auf https://platform.openai.com/api-keys
+   erstellen und im OpenAI-Konto Abrechnung und Limits prüfen.
+   Ein ChatGPT-Abo ist kein API-Guthaben.
+2. **KI-einrichten.cmd** ausführen; Schlüssel verdeckt eingeben.
+   Er wird mit Windows-DPAPI benutzergebunden verschlüsselt
+   unter %LOCALAPPDATA%\Kleinanzeiger\openai-key.dpapi gespeichert.
+   Nicht in Quellcode, Dashboard oder Paket-Archiv hinterlegen.
+3. Mit **Starten.cmd** neu starten. Bei vorhandenem Schlüssel aktiviert
+   der Starter automatisch die vorhandenen KI-Funktionen. Im Dashboard
+   Text- und Bildentwürfe erzeugen und in das Formular übernehmen.
+4. Jeder kostenpflichtige API-Aufruf benötigt eine separate ausdrückliche
+   Bestätigung. Entwürfe veröffentlichen niemals automatisch.
 
-## Grenzen
+Die Funktion kann durch Entfernen der Datei openai-key.dpapi bei
+beendeter Anwendung deaktiviert werden. Ohne Schlüssel bleibt der
+Rest des Produkts uneingeschränkt verwendbar. Nur Daten an OpenAI
+übergeben, die hierfür freigegeben sind.
 
-Windows nutzt eigene betriebssystemweite CDP- und SQLite-Exklusivsperren.
-Dies ist die normale Vollproduktinstallation und keine Linux-A6-
-Root-/Mehr-UID-/Landlock-Provisionierung. Sichere Altbestandsmigration bleibt
-gesperrt: https://github.com/alexdermohr/kleinanzeiger/issues/76
+## Hinweise
 
-Der CDP-Port darf keinesfalls im Netzwerk exponiert werden. Nur das separate
-Chrome-Profil verwenden. Es werden keine bestehenden Chrome-Profile übernommen
-und weder Login noch MFA oder CAPTCHA automatisiert.
+Bei Download-Fehlern Erreichbarkeit von python.org,
+googlechromelabs.github.io, storage.googleapis.com und pypi.org
+prüfen. SHA- oder Signaturkontrollen nicht deaktivieren.
+CDP darf nur auf 127.0.0.1 und ausschließlich im separaten
+Chrome-Profil betrieben werden. Login, MFA und CAPTCHA bleiben
+manuelle Schritte.
 
-Die Produktkette wird mit synthetischen Plattform- und Providergegenstellen
-getestet, ohne echte Anzeigenveröffentlichungen oder kostenpflichtige
-KI-Aufrufe. Erforderliche Rechte des Kundenaccounts sind gesondert zu prüfen.
+Die Plattformoperationen wurden synthetisch getestet, nicht im
+Kundenkonto schreibend abgenommen. Die Linux-A6-Migration
+https://github.com/alexdermohr/kleinanzeiger/issues/76 bleibt getrennt.

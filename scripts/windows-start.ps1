@@ -1,21 +1,43 @@
-$ErrorActionPreference='Stop'
-$state=Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
-$python=Join-Path $state '.venv\Scripts\python.exe'
-$db=Join-Path $state 'anzeigen.sqlite'
-if (!(Test-Path $python -PathType Leaf)) { throw 'Zuerst Installieren.cmd ausfuehren.' }
-$chromeLocations=@()
-foreach($folder in @([Environment]::GetFolderPath('ProgramFiles'),[Environment]::GetFolderPath('ProgramFilesX86'),$env:LOCALAPPDATA)) {
-  if($folder) { $chromeLocations += Join-Path $folder 'Google\Chrome\Application\chrome.exe' }
-}
-$chrome=$chromeLocations | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
-if (!$chrome) { throw 'Google Chrome muss installiert sein.' }
-$profile=Join-Path $state 'ChromeProfile'
+$ErrorActionPreference = 'Stop'
+$base = $PSScriptRoot
+$state = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
+$python = Join-Path $state '.venv\Scripts\python.exe'
+$db = Join-Path $state 'anzeigen.sqlite'
+if (!(Test-Path -LiteralPath $python -PathType Leaf)) { throw 'Zuerst Installieren.cmd ausfuehren.' }
+. (Join-Path $base 'windows-chrome.ps1')
+$chrome = Find-KleinanzeigerChrome -StateDirectory $state
+if (!$chrome) { throw 'Chrome fehlt. Bitte Installieren.cmd erneut starten, um Chrome automatisch nachzuladen.' }
+$profile = Join-Path $state 'ChromeProfile'
 New-Item -ItemType Directory -Path $profile -Force | Out-Null
-$args='--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="{0}" https://www.kleinanzeigen.de/m-meine-anzeigen.html' -f $profile
-Start-Process -FilePath $chrome -ArgumentList $args
-Write-Host 'Im neuen Chrome-Fenster anmelden und nur die Anzeigenverwaltung offen lassen.'
+$chromeArgs = '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="' + $profile + '" https://www.kleinanzeigen.de/m-meine-anzeigen.html'
+Start-Process -FilePath $chrome -ArgumentList $chromeArgs
+Write-Host 'Im neuen, isolierten Chrome-Fenster bei Kleinanzeigen anmelden.'
 Read-Host 'Nach erfolgreichem Login ENTER druecken'
-$extra=@()
-if (!(Test-Path $db -PathType Leaf)) { $extra+='--init-db' }
-& $python -m mark_api.launcher --db $db --cdp-port 9222 @extra
-if ($LASTEXITCODE -ne 0) { throw 'Produktstart fehlgeschlagen. Chrome/CDP/Login pruefen.' }
+$extra = @()
+if (!(Test-Path -LiteralPath $db -PathType Leaf)) { $extra += '--init-db' }
+$keyFile = Join-Path $state 'openai-key.dpapi'
+if (Test-Path -LiteralPath $keyFile -PathType Leaf) {
+  try {
+    $encrypted = (Get-Content -LiteralPath $keyFile -Raw).Trim()
+    $secret = ConvertTo-SecureString -String $encrypted
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+    try {
+      $key = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+      if ([string]::IsNullOrWhiteSpace($key)) { throw 'API-Key ist leer.' }
+      $env:OPENAI_API_KEY = $key
+      $extra += '--enable-generation'
+    } finally {
+      [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+      Remove-Variable key -ErrorAction SilentlyContinue
+    }
+  } catch {
+    Write-Warning 'KI-Zugang nicht lesbar. Bitte KI-einrichten.cmd erneut ausfuehren.'
+    Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
+  }
+}
+try {
+  & $python -m mark_api.launcher --db $db --cdp-port 9222 @extra
+  if ($LASTEXITCODE -ne 0) { throw 'Produktstart fehlgeschlagen. Chrome/CDP/Login und KI-Konfiguration pruefen.' }
+} finally {
+  Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
+}
