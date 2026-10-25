@@ -24,6 +24,7 @@ from .private_web import (
     _validated_ad_id,
 )
 from .results import ReadResult, ReadStatus
+from .windows_runtime import WindowsCdpTargetClaim
 
 _KLEINANZEIGEN_ORIGIN = "https://www.kleinanzeigen.de"
 _EDITOR_PATH = "/p-anzeige-bearbeiten.html"
@@ -40,11 +41,11 @@ _CDP_CANCEL_RECV_POLL_SECONDS = 0.25
 # reason to admit the next browser client. Keep the kernel claim and socket
 # strongly referenced until this process exits (when the kernel releases it).
 # No arbitrary in-process retry or cleanup can remove this quarantine.
-_QUARANTINED_CDP_TARGETS: list[tuple[socket.socket, object]] = []
+_QUARANTINED_CDP_TARGETS: list[tuple[socket.socket | WindowsCdpTargetClaim, object]] = []
 # Strong claim ownership starts BEFORE HTTP discovery and remains independent
 # of page/client GC. Only an explicitly successful transport close unregisters
 # it. UNKNOWN outcomes keep this claim for the remaining process lifetime.
-_ACTIVE_CDP_TARGET_CLAIMS: dict[int, socket.socket] = {}
+_ACTIVE_CDP_TARGET_CLAIMS: dict[int, socket.socket | WindowsCdpTargetClaim] = {}
 
 
 class _RejectRedirectHandler(HTTPRedirectHandler):
@@ -145,7 +146,7 @@ def _validated_https_origin(origin: str) -> str:
     return f"https://{parsed.hostname}"
 
 
-def _reserve_exclusive_cdp_target(port: int) -> socket.socket:
+def _reserve_exclusive_cdp_target(port: int) -> socket.socket | WindowsCdpTargetClaim:
     """Reserve one CDP browser target before any discovery or navigation.
 
     Linux abstract UNIX sockets enforce a non-blocking exclusive claim across
@@ -156,6 +157,13 @@ def _reserve_exclusive_cdp_target(port: int) -> socket.socket:
     This is neither an official platform entitlement nor protection against
     external browser users or processes ignoring this protocol.
     """
+    if os.name == "nt":
+        try:
+            claim = WindowsCdpTargetClaim(port)
+            _ACTIVE_CDP_TARGET_CLAIMS[id(claim)] = claim
+            return claim
+        except (OSError, AttributeError, ValueError):
+            raise PrivateWebCdpWriteNotAttemptedError("target_busy") from None
     claim = None
     try:
         claim = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -299,12 +307,18 @@ class _LoopbackCdpClient:
             raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
         expected = bytes([0]) + b"mark-api-cdp-target-v1:" + str(port).encode("ascii")
         try:
-            if (
-                not isinstance(reservation, socket.socket)
-                or _ACTIVE_CDP_TARGET_CLAIMS.get(id(reservation)) is not reservation
-                or reservation.fileno() < 0
-                or reservation.getsockname() != expected
-            ):
+            if os.name == "nt":
+                live = (
+                    isinstance(reservation, WindowsCdpTargetClaim)
+                    and reservation.port == port and reservation.is_live()
+                )
+            else:
+                live = (
+                    isinstance(reservation, socket.socket)
+                    and reservation.fileno() >= 0
+                    and reservation.getsockname() == expected
+                )
+            if not live or _ACTIVE_CDP_TARGET_CLAIMS.get(id(reservation)) is not reservation:
                 raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
         except (OSError, AttributeError, ValueError, TypeError):
             raise PrivateWebCdpWriteNotAttemptedError("target_unowned") from None

@@ -12,7 +12,10 @@ from __future__ import annotations
 from .container_draft import container_draft_denied
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows imports only; A6 witness is Linux-only.
+    fcntl = None
 from contextlib import closing
 from datetime import datetime, timezone
 import hashlib

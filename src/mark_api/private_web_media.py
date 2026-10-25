@@ -19,6 +19,7 @@ from typing import Protocol
 from .domain import AdCreateRequest
 from .results import ReadResult
 from .ports import WriteNotAttemptedError
+from .windows_runtime import require_private_windows_directory
 from .private_web import (
     PrivateWebCreateSnapshot,
     PrivateWebCreateWriter,
@@ -439,6 +440,11 @@ class PrivateWebMediaRefResolver:
 
 
 def _fsync_directory(path: str) -> None:
+    if os.name == "nt":
+        # Windows flushes staged file handles. NTFS metadata journaling is
+        # not a Linux fsync(dir) attestation; interrupted writes remain fenced
+        # in the durable operation journal, never retried blindly.
+        return
     flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -536,6 +542,25 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
             )
             self._directory_path = self._temporary_directory.name
             self._persistent = False
+        elif os.name == "nt":
+            # The regular Windows launcher runs in the user's profile, not
+            # in the independently attested Linux A6 multi-UID environment.
+            directory_path = require_private_windows_directory(directory, create=True)
+            marker = directory_path / self._DURABLE_DIRECTORY_MARKER
+            try:
+                with marker.open("xb") as ready:
+                    ready.flush()
+                    os.fsync(ready.fileno())
+            except FileExistsError:
+                info = marker.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode) or info.st_size != 0
+                    or getattr(info, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                ):
+                    raise ValueError("Windows media readiness marker is invalid")
+            self._directory_path = str(directory_path)
+            self._persistent = True
         else:
             raw_directory = os.fspath(directory)
             if (
@@ -715,7 +740,14 @@ class PrivateWebMediaHandleStore(PrivateWebMediaRefResolver):
                 ):
                     raise RuntimeError("persistent media handle directory is invalid")
                 file_stat = entry.stat(follow_symlinks=False)
-                if not stat.S_ISREG(file_stat.st_mode):
+                if (
+                    not stat.S_ISREG(file_stat.st_mode)
+                    or (
+                        os.name == "nt"
+                        and getattr(file_stat, "st_file_attributes", 0)
+                        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                    )
+                ):
                     raise RuntimeError("persistent media handle is invalid")
                 if file_stat.st_size <= 0:
                     if ref in protected:
