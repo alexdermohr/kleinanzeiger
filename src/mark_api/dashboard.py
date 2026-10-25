@@ -245,7 +245,10 @@ _DASHBOARD_HTML = """<!doctype html>
         <h1>Kleinanzeiger</h1>
         <p>Alle Anzeigen auf einen Blick. Einfach bearbeiten und auswerten.</p>
       </div>
-      <button id="reload" class="reload-button" type="button">↻ Aktualisieren</button>
+      <div class="header-actions">
+        <button id="sync-now" class="reload-button" type="button" hidden>Mit Kleinanzeigen abgleichen</button>
+        <button id="reload" class="reload-button" type="button">Ansicht neu laden</button>
+      </div>
     </header>
 
     <nav class="quick-nav" aria-label="Bereiche">
@@ -534,6 +537,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 [hidden] { display: none !important; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 .reload-button { white-space: nowrap; background: var(--surface); color: var(--accent-dark); padding: 10px 16px; }
+.header-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .quick-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 23px; }
 .quick-nav a { text-decoration: none; color: #486879; font-weight: 700; font-size: .84rem; padding: 9px 14px; border: 1px solid transparent; border-radius: 999px; }
 .quick-nav a:first-child { color: var(--accent-dark); background: #e0f0f3; }
@@ -654,6 +658,8 @@ const pendingWrites = new Map();
 // Only this page session may remember an observed terminal result.
 const pendingAckOnly = new Map();
 let writeUiAvailable = false;
+let manualSyncAvailable = false;
+let syncInFlight = false;
 let writeToken = null;
 let generationToken = null;
 let generationUiAvailable = false;
@@ -2346,6 +2352,42 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
   });
 }
 
+async function syncNow() {
+  if (!manualSyncAvailable || !writeUiReady() || syncInFlight) return;
+  syncInFlight = true;
+  const button = byId("sync-now");
+  button.disabled = true;
+  const status = byId("status");
+  status.textContent = "Gleiche Anzeigen mit Kleinanzeigen ab …";
+  try {
+    const response = await fetch("/api/dashboard/sync", {
+      method: "POST",
+      headers: {
+        "Origin": window.location.origin,
+        "X-Mark-Dashboard-Write": "1",
+        "X-Mark-Dashboard-Token": writeToken,
+      },
+      cache: "no-store",
+    });
+    const result = await response.json();
+    if (!response.ok || result.status !== "success"
+      || !Number.isSafeInteger(result.current_ads) || result.current_ads < 0) {
+      throw new Error("Abgleich nicht bestätigt");
+    }
+    const reloaded = await load();
+    if (!reloaded) {
+      status.textContent = "Bestand abgeglichen, aber lokale Ansicht konnte nicht neu geladen werden. Bitte Ansicht neu laden.";
+      return;
+    }
+    status.textContent = result.current_ads + " Anzeigen aus dem Kundenkonto abgeglichen.";
+  } catch (_error) {
+    status.textContent = "Abgleich fehlgeschlagen. Vorhandene Anzeigen bleiben gespeichert; bitte Anmeldung und Verbindungsstatus prüfen.";
+  } finally {
+    syncInFlight = false;
+    button.disabled = !writeUiReady();
+  }
+}
+
 async function load() {
   const status = byId("status");
   status.textContent = "Lade lokale Daten …";
@@ -2370,11 +2412,15 @@ async function load() {
     byId("replies").textContent =
       `${summary.replies_total_known} / ${summary.replies_observed_ads} Ads`;
     writeUiAvailable = dashboardConfig.write_ui_available === true;
+    manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
+    byId("sync-now").hidden = !manualSyncAvailable;
+    byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     const genNavigation = optionalById("nav-generation");
     if (genNavigation) genNavigation.hidden = !generationUiAvailable;
     await refreshPendingWrites();
     renderWriteAvailability();
+    byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     renderGenerationAvailability();
     renderAds(ads);
     renderSyncStatus(summary.sync_status, summary.sync_recovery);
@@ -2398,8 +2444,10 @@ async function load() {
 
     await loadAnalytics();
     status.textContent = "";
+    return true;
   } catch (error) {
     status.textContent = `Fehler beim Laden: ${error.message}`;
+    return false;
   }
 }
 
@@ -2416,6 +2464,7 @@ if (generationNavigation) generationNavigation.addEventListener("click", () => {
   if (disclosure) disclosure.open = true;
 });
 byId("reload").addEventListener("click", load);
+byId("sync-now").addEventListener("click", syncNow);
 byId("metric-select").addEventListener("change", loadAnalytics);
 byId("dimension-select").addEventListener("change", loadAnalytics);
 byId("create-form").addEventListener("submit", submitCreate);
@@ -2796,6 +2845,7 @@ def _handler_factory(
     generation_access: DashboardGenerationAccess | None,
     *,
     public_origin_port: int | None = None,
+    sync_once: Callable[[], int] | None = None,
 ):
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "mark-api-readonly/0.1"
@@ -3329,6 +3379,7 @@ def _handler_factory(
                             {"generation_ui_available": True}
                             if generation_access is not None else {}
                         ),
+                        **({"manual_sync_available": True} if sync_once is not None else {}),
                     },
                 )
                 return
@@ -3712,7 +3763,40 @@ def _handler_factory(
                     return
                 self._send(200, result, "image/png")
 
+        def _manual_sync(self) -> None:
+            target = urlsplit(self.path)
+            if (
+                sync_once is None or target.path != "/api/dashboard/sync"
+                or target.query or target.fragment
+            ):
+                self._send_json(404, {"error": "not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error": "write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error": "sync_idempotency_not_supported"})
+                return
+            try:
+                self._read_proxy_body("empty")
+            except ValueError:
+                self._send_json(400, {"error": "sync_request_body_not_allowed"})
+                return
+            try:
+                count = sync_once()
+            except Exception:
+                # Never leak CDP credentials, browser state or local paths.
+                self._send_json(503, {"error": "owner_inventory_refresh_failed"})
+                return
+            if type(count) is not int or count < 0:
+                self._send_json(503, {"error": "owner_inventory_refresh_failed"})
+                return
+            self._send_json(200, {"status": "success", "current_ads": count})
+
         def do_POST(self) -> None:
+            if urlsplit(self.path).path == "/api/dashboard/sync":
+                self._manual_sync()
+                return
             if urlsplit(self.path).path == "/api/dashboard/generate":
                 self._generate_draft()
                 return
@@ -3752,6 +3836,7 @@ def create_server(
     write_proxy: DashboardWriteProxy | None = None,
     generation_access: DashboardGenerationAccess | None = None,
     public_origin_port: int | None = None,
+    sync_once: Callable[[], int] | None = None,
 ) -> LoopbackDashboardServer:
     if host != "127.0.0.1":
         raise ValueError("dashboard must bind to 127.0.0.1")
@@ -3769,6 +3854,8 @@ def create_server(
 
     if generation_access is not None and not isinstance(generation_access, DashboardGenerationAccess):
         raise TypeError("generation_access must be DashboardGenerationAccess or None")
+    if sync_once is not None and (not callable(sync_once) or write_proxy is None):
+        raise ValueError("manual sync requires an authenticated local Write session")
     if write_proxy is not None and (
         isinstance(store, StorageOwnerClient) or write_proxy.owner_reconciliation_enabled
     ):
@@ -3784,6 +3871,7 @@ def create_server(
         _handler_factory(
             store, query, analytics, write_proxy, generation_access,
             public_origin_port=public_origin_port,
+            sync_once=sync_once,
         ),
     )
 
