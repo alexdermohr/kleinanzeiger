@@ -63,8 +63,14 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _verified_connection(path: Path) -> sqlite3.Connection:
+def _verified_connection(
+    path: Path, *, immutable: bool = False,
+) -> sqlite3.Connection:
+    # Live sources must read their WAL; serialized backup images are standalone
+    # and must never create or consume a sidecar during verification.
     uri = "file:" + quote(str(path), safe="/") + "?mode=ro"
+    if immutable:
+        uri += "&immutable=1"
     conn = sqlite3.connect(uri, uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     try:
@@ -158,7 +164,7 @@ def backup_native_windows(source_db: Path, backup_db: Path) -> dict[str, object]
                 image = snapshot.serialize()
         digest = _create_only_verified_image(image, target)
         # Read back the published file, not only the in-memory image.
-        with closing(_verified_connection(target)) as copied:
+        with closing(_verified_connection(target, immutable=True)) as copied:
             if _counts(copied) != counts:
                 raise WindowsBackupError("backup evidence counts changed")
         manifest = {
@@ -222,13 +228,13 @@ def restore_native_windows(backup_db: Path, destination: Path) -> str:
     if _sha256(source) != manifest["sha256"]:
         raise WindowsBackupError("backup hash mismatch")
     try:
-        with closing(_verified_connection(source)) as original:
+        with closing(_verified_connection(source, immutable=True)) as original:
             expected_counts = _counts(original)
             if expected_counts != manifest["counts"]:
                 raise WindowsBackupError("backup recovery records do not match manifest")
             image = original.serialize()
         digest = _create_only_verified_image(image, target)
-        with closing(_verified_connection(target)) as restored:
+        with closing(_verified_connection(target, immutable=True)) as restored:
             if _counts(restored) != expected_counts:
                 raise WindowsBackupError("restore recovery records changed")
         return digest
