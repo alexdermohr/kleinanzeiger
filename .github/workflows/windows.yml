@@ -48,12 +48,22 @@ jobs:
       - name: Installed synthetic text/image generation dashboard
         run: python -m unittest discover -s tests -p test_generation_dashboard.py -v
       - name: Installed ad selector and Windows installer contract
-        shell: pwsh
+        shell: python
         run: |
-          python -m unittest discover -s tests -p test_dashboard_managed_ad_picker.py -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s tests -p test_windows_installer_scripts.py -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          import subprocess
+          import sys
+          for pattern in ("test_dashboard_managed_ad_picker.py", "test_windows_installer_scripts.py"):
+              result = subprocess.run(
+                  [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern, "-v"],
+                  capture_output=True, text=True, check=False
+              )
+              print(result.stdout, flush=True)
+              print(result.stderr, file=sys.stderr, flush=True)
+              if result.returncode:
+                  summary = (result.stdout + "\n" + result.stderr)[-6000:]
+                  summary = summary.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print("::error file=tests/" + pattern + ",title=Windows acceptance failure::" + summary, flush=True)
+                  raise SystemExit(result.returncode)
       - name: Parse customer PowerShell scripts
         shell: pwsh
         run: |
