@@ -5099,6 +5099,7 @@ class Element {
 }
 
 const elements = new Map([
+  ["manage-ad-select", new Element()],
   ["manage-ad-id", new Element()],
   ["manage-title", new Element()],
   ["manage-description", new Element()],
@@ -5238,6 +5239,7 @@ class Element {
 }
 
 const elements = new Map([
+  ["manage-ad-select", new Element()],
   ["manage-ad-id", new Element()],
   ["manage-title", new Element()],
   ["manage-description", new Element()],
@@ -5371,6 +5373,7 @@ class Element {
 }
 
 const elements = new Map([
+  ["manage-ad-select", new Element()],
   ["manage-ad-id", new Element()],
   ["manage-title", new Element()],
   ["manage-description", new Element()],
@@ -5516,6 +5519,7 @@ class Element {
 const elements = new Map([
   ["ads-body", new Element("tbody")],
   ["empty", new Element("p")],
+  ["manage-ad-select", new Element("select")],
   ["manage-ad-id", new Element("input")],
   ["manage-title", new Element("input")],
   ["manage-description", new Element("textarea")],
