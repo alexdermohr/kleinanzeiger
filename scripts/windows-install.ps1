@@ -2,12 +2,12 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $base = $PSScriptRoot
 $state = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
-$wheel = Join-Path $base 'kleinanzeiger-0.1.2-py3-none-any.whl'
+$wheel = Join-Path $base 'kleinanzeiger-0.1.3-py3-none-any.whl'
 $sums = Join-Path $base 'SHA256SUMS.txt'
 if (!(Test-Path -LiteralPath $wheel -PathType Leaf) -or !(Test-Path -LiteralPath $sums -PathType Leaf)) {
   throw 'Paket oder SHA256SUMS.txt fehlen. Bitte das gesamte Windows-ZIP entpacken.'
 }
-$entry = @(Get-Content -LiteralPath $sums | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?kleinanzeiger-0\.1\.2-py3-none-any\.whl$' })
+$entry = @(Get-Content -LiteralPath $sums | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?kleinanzeiger-0\.1\.3-py3-none-any\.whl$' })
 if ($entry.Count -ne 1) { throw 'Keine eindeutige Wheel-Pruefsumme gefunden.' }
 $expected = ($entry[0] -split '\s+')[0].ToLowerInvariant()
 $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
