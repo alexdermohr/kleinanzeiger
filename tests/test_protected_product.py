@@ -19,6 +19,69 @@ from mark_api import protected_product as product
 
 
 class ProtectedProductTests(unittest.TestCase):
+
+
+    def test_free_role_uid_census_rejects_existing_host_login_without_running_process(self):
+        # A dormant host account may later log in under the trusted SQLite UID.
+        with patch.object(Path, "iterdir", return_value=iter(())), patch(
+            "pwd.getpwuid", return_value=("host-user",)
+        ), patch("grp.getgrgid", side_effect=KeyError):
+            with self.assertRaisesRegex(
+                product.ProtectedProductError, "host role identity already allocated",
+            ):
+                product._uids_free()
+
+    def test_free_role_uid_census_rejects_existing_host_group_without_process(self):
+        # Group access to owner/frontend RPC directories also crosses trust.
+        with patch.object(Path, "iterdir", return_value=iter(())), patch(
+            "pwd.getpwuid", side_effect=KeyError
+        ), patch("grp.getgrgid", return_value=("host-group",)):
+            with self.assertRaisesRegex(
+                product.ProtectedProductError, "host role identity already allocated",
+            ):
+                product._uids_free(include_generator=True)
+
+    def test_free_role_uid_census_allows_unallocated_ids_without_processes(self):
+        with patch.object(Path, "iterdir", return_value=iter(())), patch(
+            "pwd.getpwuid", side_effect=KeyError
+        ), patch("grp.getgrgid", side_effect=KeyError):
+            self.assertIsNone(product._uids_free(include_generator=True))
+
+    def test_free_role_uid_census_rejects_supplementary_group_only(self):
+        synthetic_proc = Path("/proc/198766")
+        status = (
+            "Uid:\t1001\t1001\t1001\t1001\n"
+            "Gid:\t1001\t1001\t1001\t1001\n"
+            "Groups:\t50043\n"
+        )
+        with patch.object(Path, "iterdir", return_value=iter((synthetic_proc,))), patch.object(
+            Path, "read_text", return_value=status,
+        ), patch("pwd.getpwuid", side_effect=KeyError), patch(
+            "grp.getgrgid", side_effect=KeyError,
+        ):
+            with self.assertRaisesRegex(
+                product.ProtectedProductError, "service role identity already holds a process",
+            ):
+                product._uids_free()
+
+    def test_free_role_uid_census_rejects_process_group_collision(self):
+        # UID-only /proc census is insufficient for a process with role GID.
+        synthetic_proc = Path("/proc/198765")
+        status = (
+            "Uid:\t1001\t1001\t1001\t1001\n"
+            "Gid:\t50046\t50046\t50046\t50046\n"
+            "Groups:\t50046 999\n"
+        )
+        with patch.object(Path, "iterdir", return_value=iter((synthetic_proc,))), patch.object(
+            Path, "read_text", return_value=status,
+        ), patch("pwd.getpwuid", side_effect=KeyError), patch(
+            "grp.getgrgid", side_effect=KeyError,
+        ):
+            with self.assertRaisesRegex(
+                product.ProtectedProductError, "service role identity already holds a process",
+            ):
+                product._uids_free()
+
     def test_nonroot_cannot_create_state_or_start_a_role(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "must-not-create"

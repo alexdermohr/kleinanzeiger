@@ -15,12 +15,14 @@ import argparse
 import ctypes
 from contextlib import closing
 import fcntl
+import grp
 import importlib.util
 from http.client import HTTPConnection
 import json
 import os
 from pathlib import Path
 import platform
+import pwd
 import secrets
 import select
 import signal
@@ -275,24 +277,46 @@ def _private_network() -> int:
 
 
 def _uids_free(*, include_generator: bool = False) -> None:
-    # Necessary check before a fresh start, not a substitute for independently
-    # witnessed host-/PID-namespace history and writable FD/MAP_SHARED cutover.
+    # A new root-provisioned role UID/GID must not collide with an existing
+    # host account, group or process. Otherwise that unrelated principal
+    # could subsequently read private Owner/Witness files or reach RPC sockets.
+    # This necessary fresh-install admission is NOT old-inode host cutover proof.
     target = {FRONTEND, WITNESS, ACTOR, INGRESS, OWNER}
     if include_generator:
         target.add(GENERATOR)
+    for role_id in sorted(target):
+        for lookup in (pwd.getpwuid, grp.getgrgid):
+            try:
+                lookup(role_id)
+            except KeyError:
+                pass
+            except (OSError, ValueError):
+                raise ProtectedProductError("host role identity census incomplete") from None
+            else:
+                raise ProtectedProductError("host role identity already allocated")
+
     for proc in Path("/proc").iterdir():
         if not proc.name.isdecimal():
             continue
         try:
-            line = next(row for row in (proc / "status").read_text().splitlines()
-                        if row.startswith("Uid:"))
-            owners = {int(x) for x in line.split()[1:]}
+            status = (proc / "status").read_text().splitlines()
+            identities: set[int] = set()
+            for field, count in (("Uid", 4), ("Gid", 4), ("Groups", None)):
+                values = [
+                    row.partition(":")[2].split()
+                    for row in status if row.startswith(field + ":")
+                ]
+                if (len(values) != 1 or
+                        (count is not None and len(values[0]) != count) or
+                        any(not item.isdecimal() for item in values[0])):
+                    raise ValueError("invalid process identities")
+                identities.update(int(item) for item in values[0])
         except FileNotFoundError:
             continue
-        except (OSError, ValueError, StopIteration):
+        except (OSError, ValueError):
             raise ProtectedProductError("process identity census incomplete") from None
-        if target & owners:
-            raise ProtectedProductError("service UID already holds a process")
+        if target & identities:
+            raise ProtectedProductError("service role identity already holds a process")
 
 
 def _initialize(root: Path) -> None:
