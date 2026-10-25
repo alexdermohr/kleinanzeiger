@@ -1,7 +1,7 @@
 name: Native Windows installed customer acceptance
 on:
   push:
-    branches: [main, feat/kleinanzeiger-native-windows-20261025]
+    branches: [main, feat/kleinanzeiger-native-windows-20261025, fix/manage-ad-selector-20261025]
   pull_request:
   workflow_dispatch:
 permissions:
