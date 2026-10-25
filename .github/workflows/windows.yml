@@ -2,6 +2,7 @@ name: Native Windows installed customer acceptance
 on:
   push:
     branches: [main, feat/kleinanzeiger-native-windows-20261025, fix/manage-ad-selector-20261025]
+    tags: ['v0.1.2']
   pull_request:
   workflow_dispatch:
 permissions:
@@ -111,3 +112,59 @@ jobs:
           path: Kleinanzeiger-v0.1.2-Windows.zip
           if-no-files-found: error
           retention-days: 30
+
+  publish-windows-release:
+    name: publish-windows-v0.1.2
+    if: github.ref == 'refs/tags/v0.1.2'
+    needs: native-windows
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Verify tested ZIP and publish immutable versioned release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = 'v0.1.2'
+          stage="$RUNNER_TEMP/kleinanzeiger-release-v0.1.2"
+          mkdir -p "$stage" "$stage/unpacked"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "kleinanzeiger-windows-$GITHUB_SHA" --dir "$stage"
+          zip="$stage/Kleinanzeiger-v0.1.2-Windows.zip"
+          test -s "$zip"
+          unzip -t "$zip"
+          unzip -q "$zip" -d "$stage/unpacked"
+          (cd "$stage/unpacked" && sha256sum -c SHA256SUMS.txt)
+          test -s "$stage/unpacked/kleinanzeiger-0.1.2-py3-none-any.whl"
+          test -s "$stage/unpacked/Windows-Installation.md"
+          test -s "$stage/unpacked/Installieren.cmd"
+          test -s "$stage/unpacked/KI-einrichten.cmd"
+          zip_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
+          printf '%s  %s\n' "$zip_sha" "Kleinanzeiger-v0.1.2-Windows.zip" > "$stage/Kleinanzeiger-v0.1.2-Windows.sha256"
+          cat > "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" <<'EOF'
+          # Kleinanzeiger v0.1.2 – Windows
+
+          - Vorhandene eigene Anzeigen direkt auswählen, ohne manuelle Anzeigen-ID
+          - Automatischer Python- und Chrome-Setup bei fehlenden Voraussetzungen
+          - Einfache, benutzergebundene Einrichtung optionaler KI-Text- und Bildentwürfe
+          - Vorhandene Daten, Chrome-Profil und offene Write-Recovery-Zustände bleiben beim Update erhalten
+
+          Installation und Update: Windows-Installation.md lesen, Installieren.cmd ausführen,
+          anschließend Starten.cmd. Optional KI-einrichten.cmd starten.
+          Keine echten Plattform-Schreibaktionen oder kostenpflichtige KI-Aufrufe wurden
+          während der synthetischen technischen Abnahme ausgelöst.
+          EOF
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Refusing to overwrite an existing release" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title 'Kleinanzeiger v0.1.2 – Windows' \
+            --notes-file "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" \
+            "$zip" \
+            "$stage/Kleinanzeiger-v0.1.2-Windows.sha256" \
+            "$stage/unpacked/Windows-Installation.md" \
+            "$stage/unpacked/SHA256SUMS.txt" \
+            "$stage/unpacked/kleinanzeiger-0.1.2-py3-none-any.whl"
