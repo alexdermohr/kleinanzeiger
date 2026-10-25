@@ -2,7 +2,6 @@ name: Native Windows installed customer acceptance
 on:
   push:
     branches: [main, feat/kleinanzeiger-native-windows-20261025, fix/manage-ad-selector-20261025]
-    tags: ['v0.1.2']
   pull_request:
   workflow_dispatch:
 permissions:
@@ -115,7 +114,7 @@ jobs:
 
   publish-windows-release:
     name: publish-windows-v0.1.2
-    if: github.ref == 'refs/tags/v0.1.2'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: native-windows
     runs-on: ubuntu-latest
     permissions:
@@ -128,7 +127,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$GITHUB_REF_NAME" = 'v0.1.2'
+          test "$GITHUB_REF_NAME" = 'main'
+          release_tag='v0.1.2'
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'v0.1.2 already published; leaving unchanged'
+            exit 0
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" >/dev/null 2>&1; then
+            echo 'v0.1.2 tag exists without a release; refusing to replace'
+            exit 1
+          fi
           stage="$RUNNER_TEMP/kleinanzeiger-release-v0.1.2"
           mkdir -p "$stage" "$stage/unpacked"
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "kleinanzeiger-windows-$GITHUB_SHA" --dir "$stage"
@@ -148,7 +156,7 @@ jobs:
           zip_bytes="$(stat -c%s "$zip")"
           wheel_bytes="$(stat -c%s "$wheel")"
           printf '{"version":"0.1.2","tag":"%s","source_commit":"%s","workflow_run_id":"%s","windows_zip":{"filename":"Kleinanzeiger-v0.1.2-Windows.zip","bytes":%s,"sha256":"%s"},"wheel":{"filename":"kleinanzeiger-0.1.2-py3-none-any.whl","bytes":%s,"sha256":"%s"}}\n' \
-            "$GITHUB_REF_NAME" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$zip_bytes" "$zip_sha" "$wheel_bytes" "$wheel_sha" > "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json"
+            "$release_tag" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$zip_bytes" "$zip_sha" "$wheel_bytes" "$wheel_sha" > "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json"
           jq -e '.version == "0.1.2" and (.source_commit | length == 40)' "$stage/Kleinanzeiger-v0.1.2-Release-Manifest.json" >/dev/null
           cat > "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" <<'EOF'
           # Kleinanzeiger v0.1.2 – Windows
@@ -163,11 +171,7 @@ jobs:
           Keine echten Plattform-Schreibaktionen oder kostenpflichtige KI-Aufrufe wurden
           während der synthetischen technischen Abnahme ausgelöst.
           EOF
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Refusing to overwrite an existing release" >&2
-            exit 1
-          fi
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+          gh release create "$release_tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title 'Kleinanzeiger v0.1.2 – Windows' \
             --notes-file "$stage/Kleinanzeiger-v0.1.2-Release-Notes.md" \
             "$zip" \
