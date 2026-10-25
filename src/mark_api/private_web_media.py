@@ -1124,3 +1124,120 @@ class PrivateWebCreateMediaStager:
         except PrivateWebMediaUnknownError:
             # Reconcile by readback only; never retry file selection.
             pass
+        except Exception:
+            # An unclassified page/provider failure may have happened after
+            # file-input mutation began. Reconcile by readback, never retry.
+            pass
+
+        try:
+            after = self._page.read_create_media()
+        except Exception:
+            # Once file selection may have happened, even readback failure
+            # is ambiguous. Never retry the file-input action.
+            raise PrivateWebMediaUnknownError("media_readback") from None
+
+        if (
+            not isinstance(after, PrivateWebCreateMediaSnapshot)
+            or after.state is not PrivateWebEditorState.READY
+            or after.files != prepared.files
+        ):
+            raise PrivateWebMediaUnknownError("media_readback")
+        return after
+
+    def stage_create_media(
+        self,
+        request: AdCreateRequest,
+        sources: tuple[PrivateWebMediaSource, ...],
+    ) -> PrivateWebCreateMediaSnapshot:
+        if not isinstance(request, AdCreateRequest):
+            raise TypeError("request must be AdCreateRequest")
+
+        # Public staging owns its preparation and keeps the historical
+        # staging-only lifecycle. The publish writer uses _stage_prepared_media
+        # with its own preparation so those exact stable files remain alive
+        # through the subsequent media-aware submit.
+        prepared = _prepare_local_media(sources)
+        try:
+            return self._stage_prepared_media(request, prepared)
+        finally:
+            prepared.close()
+
+
+class PrivateWebCreateMediaWriter:
+    """Publish one create request with explicit media through a separate gate.
+
+    Local sources are stabilized before any browser access. The writer owns
+    those stable files through the media-aware submit. The ordinary media-free
+    create writer is reused only to prepare and revalidate the form; the CDP
+    page owns its separate browser-facing copies until page.close().
+    """
+
+    def __init__(self, page: PrivateWebCreateMediaPublishPage) -> None:
+        self._page = page
+
+    @staticmethod
+    def _close_after_error(prepared: _PreparedPrivateWebMedia) -> None:
+        # Cleanup is secondary to an already classified writer outcome. Never
+        # let a local cleanup failure replace a pre-submit or submit-unknown
+        # classification and thereby accidentally authorize a retry.
+        try:
+            prepared.close()
+        except Exception:
+            pass
+
+    def create_ad(
+        self,
+        request: AdCreateRequest,
+        sources: tuple[PrivateWebMediaSource, ...],
+    ) -> None:
+        if not isinstance(request, AdCreateRequest):
+            raise TypeError("request must be AdCreateRequest")
+
+        # One writer-owned stable preparation lives through submit. The stager
+        # borrows it without taking cleanup ownership; the CDP page separately
+        # creates browser-facing copies that remain alive until page.close().
+        # This phase is entirely local and precedes every browser mutation, so
+        # validation/copy failures are provably safe to classify as not attempted.
+        try:
+            prepared = _prepare_local_media(sources)
+        except (TypeError, ValueError):
+            raise PrivateWebWriteNotAttemptedError(
+                "prepare_create_media"
+            ) from None
+        try:
+            PrivateWebCreateWriter(self._page).prepare_create(request)
+
+            staged = PrivateWebCreateMediaStager(
+                self._page
+            )._stage_prepared_media(
+                request,
+                prepared,
+            )
+            if staged.files != prepared.files:
+                raise PrivateWebMediaUnknownError("media_readback")
+
+            try:
+                self._page.submit_create_media(staged)
+            except PrivateWebSubmitUnknownError:
+                raise
+            except WriteNotAttemptedError:
+                raise PrivateWebWriteNotAttemptedError(
+                    "submit_create_media"
+                ) from None
+            except Exception:  # noqa: BLE001 - submit may already have reached UI.
+                raise PrivateWebSubmitUnknownError(
+                    "submit_create_media"
+                ) from None
+        except Exception:
+            self._close_after_error(prepared)
+            raise
+
+        try:
+            prepared.close()
+        except Exception:
+            # submit_create_media returned after the one-shot browser-input
+            # path. A cleanup failure must therefore remain non-retryable even
+            # though it says nothing authoritative about platform persistence.
+            raise PrivateWebSubmitUnknownError(
+                "submit_create_media"
+            ) from None
