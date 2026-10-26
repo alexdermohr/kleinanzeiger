@@ -3,6 +3,7 @@ from __future__ import annotations
 from .container_draft import container_draft_denied
 
 import argparse
+import _thread
 import math
 import os
 import secrets
@@ -54,6 +55,22 @@ _PRODUCT_CLOSE_TOTAL_SECONDS = 12.0
 
 class ProductLauncherError(RuntimeError):
     """The user-facing product launcher could not start or stop safely."""
+
+
+def _watch_local_stop_stdin(stream: object, request_stop: Callable[[], None]) -> None:
+    """Request normal SIGINT cleanup only for STOP or an unexpectedly closed parent pipe.
+
+    Enabled exclusively by --stop-on-stdin. The GUI owns stdin; HTTP clients
+    cannot trigger shutdown, and arbitrary pipe contents are ignored.
+    """
+    try:
+        for line in stream:  # type: ignore[union-attr]
+            if line.strip() == "STOP":
+                request_stop()
+                return
+    except (OSError, ValueError):
+        pass
+    request_stop()
 
 
 def _require_private_web_authorization() -> None:
@@ -790,6 +807,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Enable guarded text/image draft generation in this product dashboard; every provider call still requires individual cost consent.",
     )
     parser.add_argument(
+        "--stop-on-stdin",
+        action="store_true",
+        help="Allow the owning local Windows control window to request the existing graceful SIGINT shutdown using its private stdin pipe.",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=float,
         default=5.0,
@@ -1063,6 +1085,20 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _on_sigterm)
     signal.signal(signal.SIGINT, _on_sigterm)
     try:
+        if args.stop_on_stdin:
+            # Private child-process pipe only: no HTTP endpoint, no token, no
+            # second management API. Interrupt the main thread so the existing
+            # owner shutdown/fence-preserving path does all cleanup.
+            try:
+                Thread(
+                    target=_watch_local_stop_stdin,
+                    args=(sys.stdin, _thread.interrupt_main),
+                    daemon=True,
+                    name="kleinanzeiger-parent-stop",
+                ).start()
+            except RuntimeError:
+                print("kleinanzeiger: private stop control unavailable", file=sys.stderr)
+                return 2
         startup_worker = Thread(
             target=_start_owner, daemon=True, name="mark-owner-start",
         )
