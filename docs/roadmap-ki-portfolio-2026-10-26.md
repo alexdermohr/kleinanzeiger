@@ -185,3 +185,11 @@ sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
   50er-Seiten und exact-ID-Revisionsabfragen implementiert. Diese lokalen
   Angaben sind keine bestätigten Plattformverkäufe. Nachrichtenintegration
   und native Windows-Abnahme bleiben offen. Siehe docs/portfolio-verkaeufe.md.
+
+- **P4 Teilimplementation:** Read-only 7/30/90-Tage-Controlling
+  mit EML-Belegzählung, aktuellem manuellem Verkaufsstand und
+  separat ausgewiesenen USD-KI-Schätzungen sowie CSV-Export.
+  10.000 synthetische Anzeigen ohne Vollbestands-JSON getestet.
+  Keine behauptete Kausalität, kein automatischer Preis-/Titeltest;
+  diese folgen erst nach zusätzlichen unabhängigen Datenquellen.
+  Siehe docs/portfolio-controlling.md; noch kein Release.

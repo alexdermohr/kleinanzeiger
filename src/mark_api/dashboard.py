@@ -34,6 +34,7 @@ from .analytics import (
 )
 from .portfolio_drafts import drafts_page
 from .portfolio_sales import SaleError, sale_detail, sales_page, sale_totals, update_manual_sale
+from .portfolio_reporting import PortfolioReportError, report as portfolio_report
 from .portfolio_jobs import (
     PortfolioJobError, apply_approved_local, change_state, create_job, details as job_details,
     list_jobs, matching_draft_skus, process_one, recover_interrupted, review_items,
@@ -296,6 +297,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <a id="nav-drafts" href="#drafts-panel">Artikelentwürfe</a>
       <a id="nav-jobs" href="#jobs-panel" hidden>KI-Stapelaufträge</a>
       <a id="nav-sales" href="#sales-panel" hidden>Verkäufe & Lager</a>
+      <a id="nav-report" href="#report-panel" hidden>Controlling</a>
       <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
       <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
     </nav>
@@ -615,6 +617,37 @@ _DASHBOARD_HTML = """<!doctype html>
           <span id="sale-page-label">Seite 1</span>
           <button id="sale-next" type="button">Weiter</button>
         </div>
+      </details>
+    </section>
+
+    <section id="report-panel" class="panel secondary-panel" hidden>
+      <details id="report-disclosure" class="feature-disclosure">
+        <summary><span>Portfolio-Controlling</span><small>Nachrichtenverlauf, manuelle Verkäufe und KI-Kosten getrennt sehen</small></summary>
+        <div class="controls">
+          <label>Berichtszeitraum (Kalendertage in UTC)
+            <select id="report-days">
+              <option value="7">Letzte 7 Tage</option>
+              <option value="30">Letzte 30 Tage</option>
+              <option value="90">Letzte 90 Tage</option>
+            </select>
+          </label>
+          <button id="report-refresh" type="button">Bericht berechnen</button>
+          <button id="report-download" type="button" disabled>Tageszahlen als CSV</button>
+        </div>
+        <p id="report-feedback" role="status" aria-live="polite"></p>
+        <p id="report-summary" class="note">Noch kein Bericht geladen.</p>
+        <p id="report-sales-summary" class="muted"></p>
+        <p id="report-ai-summary" class="muted"></p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Kalendertag (UTC)</th><th>Importierte Eingangsnachrichten</th></tr></thead>
+          <tbody id="report-daily-body"></tbody>
+        </table></div>
+        <p class="muted">Angezeigt werden höchstens die letzten 14 Tageszeilen;
+        der CSV-Export enthält den vollständigen gewählten Zeitraum.
+        Die E-Mail-Importzahl ist keine vollständige Kleinanzeigen-Nachrichtenstatistik.
+        Erlöse sind der aktuelle manuelle Gesamtbestand, nicht einem Zeitraum
+        zugerechnete Verkäufe. KI-Ausgaben sind unbestätigte USD-Schätzungen,
+        keine Anbieterrechnung. Keine Kausal- oder Konversionsbehauptung.</p>
       </details>
     </section>
 
@@ -949,6 +982,9 @@ let saleEntries = new Map();
 let salePending = null;
 let saleLoadSeq = 0;
 let saleSaveBusy = false;
+let reportingAvailable = false;
+let reportData = null;
+let reportLoadSeq = 0;
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -2886,6 +2922,9 @@ async function load() {
     salesAvailable = jobsAvailable;
     byId("sales-panel").hidden = !salesAvailable;
     byId("nav-sales").hidden = !salesAvailable;
+    reportingAvailable = salesAvailable;
+    byId("report-panel").hidden = !reportingAvailable;
+    byId("nav-report").hidden = !reportingAvailable;
     renderWriteAvailability();
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     renderGenerationAvailability();
@@ -3616,6 +3655,107 @@ async function saveSaleState() {
     }
   }
 }
+async function loadPortfolioReport() {
+  if (!reportingAvailable || !writeUiReady()) return false;
+  const selected=byId("report-days").value;
+  if (!["7","30","90"].includes(selected)) return false;
+  const seq=++reportLoadSeq;
+  byId("report-refresh").disabled=true;
+  byId("report-download").disabled=true;
+  byId("report-feedback").textContent="Berechne lokalen Bericht …";
+  try {
+    const data=await _jobGet("/api/portfolio/report?days="+selected);
+    if (seq!==reportLoadSeq || byId("report-days").value!==selected) return false;
+    if (!data || data.window_days!==Number(selected) ||
+        !Array.isArray(data.imported_messages_per_day) ||
+        data.imported_messages_per_day.length!==Number(selected) ||
+        data.platform_writes!==0 || data.revenue_period_attributed!==false) {
+      throw new Error("Ungültige Daten");
+    }
+    reportData=data;
+    byId("report-summary").textContent="Zeitraum "+data.start_day_utc+
+      " bis "+data.end_day_utc+" (UTC) · Eigene Anzeigen mit belegter Bestandshistorie: "+
+      data.own_ads_with_inventory_history+" · Lokal importierte Eingangsnachrichten: "+
+      data.imported_inbound_messages_window+" · Unterschiedliche importierte Gespräche: "+
+      data.imported_conversations_window;
+    const sale=data.manual_sales_current_all_time;
+    byId("report-sales-summary").textContent="Manueller Verkaufsstand (alle Zeiten): "+
+      sale.manually_sold+" als verkauft, "+sale.manually_reserved+
+      " reserviert · Erlöse "+sale.revenue_eur+" € · Bekannte Kosten "+
+      sale.known_cost_eur+" € · Bekannter Überschuss "+
+      sale.known_surplus_eur+" € für "+sale.known_surplus_sale_count+
+      " Verkäufe mit bekannten Kosten; bei "+sale.unknown_cost_count+
+      " weiteren Verkäufen fehlen Kosten.";
+    const cost=data.ai_usage_estimate_all_time;
+    byId("report-ai-summary").textContent=cost?
+      "KI-Schätzung (alle Zeiten, nicht abgerechnet): "+
+      (cost.usd_cent_estimate/100).toFixed(2)+" USD nach bestätigten Tokens; "+
+      (cost.usd_cent_reserved/100).toFixed(2)+" USD reserviert; "+
+      cost.unknown_outcomes+" unklare Ergebnisse." :
+      "Noch keine lokalen KI-Auftragskosten erfasst; kein Rechnungsabgleich.";
+    const body=byId("report-daily-body");
+    body.replaceChildren();
+    for (const item of data.imported_messages_per_day.slice(-14)) {
+      const row=document.createElement("tr");
+      for (const value of [item.day_utc,item.imported_messages]) {
+        const cell=document.createElement("td");
+        cell.textContent=String(value);
+        row.append(cell);
+      }
+      body.append(row);
+    }
+    byId("report-download").disabled=false;
+    byId("report-feedback").textContent=
+      "Lokal berechnet. Keine Veröffentlichung und keine Anbieteranfrage.";
+    return true;
+  } catch (_error) {
+    if (seq===reportLoadSeq) {
+      reportData=null;
+      byId("report-feedback").textContent=
+        "Bericht nicht verfügbar. Datengrundlage prüfen; keine Werte erfunden.";
+    }
+    return false;
+  } finally {
+    if (seq===reportLoadSeq) byId("report-refresh").disabled=false;
+  }
+}
+function downloadPortfolioReportCsv() {
+  if (!reportData || byId("report-days").value!==String(reportData.window_days)) return;
+  const rows=["tag_utc,importierte_eingangsnachrichten"];
+  for (const item of reportData.imported_messages_per_day) {
+    // Fixed ISO date and integer counts cannot start spreadsheet formulas.
+    if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(item.day_utc) ||
+        !Number.isSafeInteger(item.imported_messages) ||
+        item.imported_messages<0) return;
+    rows.push(item.day_utc+","+String(item.imported_messages));
+  }
+  const file=new Blob(["\\uFEFF"+rows.join("\\r\\n")+"\\r\\n"],
+                      {type:"text/csv;charset=utf-8"});
+  const url=URL.createObjectURL(file);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download="kleinanzeiger-nachrichten-"+
+    reportData.window_days+"-tage.csv";
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+byId("report-refresh").addEventListener("click",loadPortfolioReport);
+byId("report-days").addEventListener("change",() => {
+  reportData=null;
+  byId("report-download").disabled=true;
+  if (byId("report-disclosure").open) loadPortfolioReport();
+});
+byId("report-download").addEventListener("click",downloadPortfolioReportCsv);
+const reportNav=optionalById("nav-report");
+if (reportNav) reportNav.addEventListener("click",() => {
+  byId("report-disclosure").open=true;
+  loadPortfolioReport();
+});
+byId("report-disclosure").addEventListener("toggle",() => {
+  if (byId("report-disclosure").open)loadPortfolioReport();
+});
 const draftNavigation = optionalById("nav-drafts");
 if (draftNavigation) draftNavigation.addEventListener("click", () => {
   byId("drafts-disclosure").open = true;
@@ -4736,6 +4876,31 @@ def _handler_factory(
                     self._send_json(503, {"error": "database_unavailable"})
                     return
                 self._send_json(200,answer)
+                return
+            if path == "/api/portfolio/report":
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                try:
+                    if len(target.query)>24:
+                        raise ValueError("report query too large")
+                    options=parse_qs(target.query,keep_blank_values=True,
+                                    max_num_fields=2,encoding="utf-8",errors="strict")
+                    if set(options)!={"days"} or len(options["days"])!=1 or (
+                        options["days"][0] not in {"7","30","90"}
+                    ):
+                        raise ValueError("invalid report window")
+                    result=portfolio_report(store,days=int(options["days"][0]))
+                except (ValueError,UnicodeError,PortfolioReportError):
+                    self._send_json(400, {"error": "invalid_portfolio_report_query"})
+                    return
+                except (sqlite3.Error,OSError):
+                    self._send_json(503, {"error": "portfolio_report_unavailable"})
+                    return
+                self._send_json(200,result)
                 return
             if path in ("/api/portfolio/sales", "/api/portfolio/sales/totals",
                         "/api/portfolio/sales/detail"):
