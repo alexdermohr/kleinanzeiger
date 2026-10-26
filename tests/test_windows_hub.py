@@ -72,7 +72,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertLess(worker.index("if ($null -eq $download)"),
                         worker.index("Write-Output 'ALREADY_CURRENT'"))
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn("-SelfTest -ExpectedInstalledVersion '0.1.5'", workflow)
+        self.assertIn("-SelfTest -ExpectedInstalledVersion '0.1.6'", workflow)
 
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
@@ -163,10 +163,10 @@ except KeyboardInterrupt:
         meta = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.1.5"', meta)
-        self.assertIn("kleinanzeiger-0.1.5-py3-none-any.whl", script)
-        self.assertIn("Kleinanzeiger-v0.1.5-Windows.zip", workflow)
-        self.assertIn("publish-windows-v0.1.5", workflow)
+        self.assertIn('version = "0.1.6"', meta)
+        self.assertIn("kleinanzeiger-0.1.6-py3-none-any.whl", script)
+        self.assertIn("Kleinanzeiger-v0.1.6-Windows.zip", workflow)
+        self.assertIn("publish-windows-v0.1.6", workflow)
 
 
 if __name__ == "__main__":

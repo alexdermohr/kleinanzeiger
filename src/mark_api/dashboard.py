@@ -277,7 +277,36 @@ _DASHBOARD_HTML = """<!doctype html>
           </div>
           <span class="section-label" id="sync-overview">Lokaler Bestand</span>
         </div>
+        <div class="catalog-toolbar" aria-label="Anzeigen durchsuchen">
+          <label>Suche nach Titel oder Anzeigen-ID
+            <input id="catalog-search" type="search" maxlength="120" placeholder="Titel oder Anzeigen-ID" autocomplete="off">
+          </label>
+          <label>Status
+            <select id="catalog-status">
+              <option value="all">Alle Anzeigen</option>
+              <option value="active">Aktiv</option>
+              <option value="paused">Pausiert</option>
+              <option value="pending">Offen</option>
+              <option value="absent">Entfernt</option>
+              <option value="unknown">Unbekannt</option>
+            </select>
+          </label>
+          <button type="button" id="catalog-find">Suchen</button>
+        </div>
+        <div class="catalog-summary">
+          <span id="catalog-feedback" role="status" aria-live="polite">Lade Anzeigen …</span>
+          <span id="catalog-selected-count">0 ausgewählt</span>
+        </div>
+        <div class="catalog-selection-actions">
+          <button type="button" id="catalog-clear">Auswahl leeren</button>
+          <button type="button" id="catalog-export">Auswahl als CSV</button>
+        </div>
         <div id="ad-cards" class="ad-cards" role="list"></div>
+        <div class="catalog-pages">
+          <button id="catalog-prev" type="button">Zurück</button>
+          <span id="catalog-page-label">Seite 1</span>
+          <button id="catalog-next" type="button">Weiter</button>
+        </div>
         <p id="ad-cards-empty" class="empty" hidden>Hier erscheinen deine Anzeigen nach der Synchronisierung.</p>
         <details class="compact-details inventory-details">
           <summary>Alle Kennzahlen und Details anzeigen</summary>
@@ -286,6 +315,7 @@ _DASHBOARD_HTML = """<!doctype html>
         <table>
           <thead>
             <tr>
+              <th>Auswahl</th>
               <th>ID</th>
               <th>Titel</th>
               <th>Status</th>
@@ -556,6 +586,16 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .section-subtitle { margin: 3px 0 0; color: var(--subtle); font-size: .85rem; }
 .section-label { display: inline-flex; align-items: center; background: #e9f4f6; color: #21667a; border-radius: 999px; padding: 5px 9px; font-size: .72rem; font-weight: 700; text-align: right; }
 .section-label.warning { background: #fff1df; color: #8b5417; }
+.catalog-toolbar { display: grid; grid-template-columns: minmax(150px,1fr) minmax(140px,auto) auto; gap: 9px; align-items: end; margin-bottom: 11px; }
+.catalog-toolbar label { display: grid; gap: 5px; font-size: .78rem; font-weight: 650; color: var(--subtle); min-width: 0; }
+.catalog-toolbar input, .catalog-toolbar select { width: 100%; min-width: 0; }
+.catalog-toolbar button { white-space: nowrap; }
+.catalog-summary, .catalog-selection-actions, .catalog-pages { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.catalog-summary { justify-content: space-between; font-size: .78rem; color: var(--subtle); }
+.catalog-pages { justify-content: space-between; margin-top: 12px; }
+.catalog-pages button, .catalog-selection-actions button { font-size: .8rem; }
+.catalog-select { display: inline-flex; align-items: center; gap: 5px; font-size: .78rem; color: var(--subtle); }
+.catalog-select input { width: 16px; height: 16px; }
 .ad-cards { display: grid; gap: 10px; }
 .ad-card { padding: 15px; border: 1px solid var(--line); border-radius: 13px; background: #fbfcfd; display: grid; gap: 10px; }
 .ad-card.selected { border-color: #65a8b9; background: #f1fafb; box-shadow: 0 0 0 2px #dbf0f2; }
@@ -637,6 +677,8 @@ td.title { min-width: 180px; white-space: normal; }
   .section-heading { flex-wrap: wrap; }
   .section-label { text-align: left; }
   .write-actions button { flex: 1 1 auto; }
+  .catalog-toolbar { grid-template-columns: minmax(0,1fr); }
+  .catalog-toolbar button { width: 100%; }
   .write-actions button.danger { margin-left: 0; }
   .chart-row { grid-template-columns: minmax(70px, 110px) minmax(0, 1fr); }
   .chart-value { grid-column: 2; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
@@ -672,6 +714,15 @@ let pendingRecoveryBlocked = false;
 let createInFlight = false;
 let latestAdsById = new Map();
 const adCardElements = new Map();
+// Local selection only stages IDs for export; never grants or performs Writes.
+const catalogSelectedIds = new Set();
+let catalogRows = [];
+let catalogCursors = [""];
+let catalogPageIndex = 0;
+let catalogNextAfter = null;
+let catalogLoading = false;
+let catalogGeneration = 0;
+let catalogFilters = {search: "", status: "all"};
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -1132,8 +1183,140 @@ function managedContentChanges(adId) {
   return payload;
 }
 
+
+function renderCatalogSelection() {
+  const count = catalogSelectedIds.size;
+  byId("catalog-selected-count").textContent = count + " ausgewählt";
+  byId("catalog-clear").disabled = count === 0;
+  byId("catalog-export").disabled = count === 0;
+}
+
+function catalogCheckbox(ad) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "catalog-select";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = catalogSelectedIds.has(ad.ad_id);
+  checkbox.title = "Anzeige " + ad.ad_id + " in Arbeitsauswahl übernehmen";
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) catalogSelectedIds.add(ad.ad_id);
+    else catalogSelectedIds.delete(ad.ad_id);
+    for (const peer of Array.from(document.querySelectorAll(".catalog-select input"))) {
+      if (peer.title === checkbox.title) peer.checked = checkbox.checked;
+    }
+    renderCatalogSelection();
+  });
+  wrapper.append(checkbox);
+  return wrapper;
+}
+
+function renderCatalogNavigation() {
+  byId("catalog-prev").disabled = catalogLoading || catalogPageIndex === 0;
+  byId("catalog-next").disabled = catalogLoading || catalogNextAfter === null;
+  byId("catalog-find").disabled = catalogLoading;
+  byId("catalog-page-label").textContent = "Seite " + (catalogPageIndex + 1);
+  renderCatalogSelection();
+}
+
+async function loadCatalogPage({reset = false} = {}) {
+  if (reset) {
+    catalogCursors = [""];
+    catalogPageIndex = 0;
+    catalogNextAfter = null;
+  }
+  const generation = ++catalogGeneration;
+  catalogLoading = true;
+  renderCatalogNavigation();
+  byId("catalog-feedback").textContent = "Lade Anzeigen …";
+  const params = new URLSearchParams({
+    limit: "50",
+    after: catalogCursors[catalogPageIndex],
+    q: catalogFilters.search,
+    status: catalogFilters.status,
+  });
+  try {
+    const payload = await getJson("/api/catalog/ads?" + params.toString());
+    if (generation !== catalogGeneration) return false;
+    if (!payload || !Array.isArray(payload.ads) || payload.ads.length > 50
+        || typeof payload.has_more !== "boolean"
+        || (payload.has_more && (typeof payload.next_after !== "string" || !payload.next_after))) {
+      throw new Error("Ungültige Katalogantwort");
+    }
+    catalogNextAfter = payload.has_more ? payload.next_after : null;
+    catalogRows = payload.ads;
+    renderAds(payload.ads);
+    byId("catalog-feedback").textContent = payload.ads.length +
+      " Anzeigen auf dieser Seite" +
+      (catalogFilters.search || catalogFilters.status !== "all" ? " · gefiltert" : "");
+    return true;
+  } catch (_error) {
+    if (generation === catalogGeneration) {
+      byId("catalog-feedback").textContent =
+        "Anzeigen konnten nicht geladen werden. Vorhandene Daten bleiben erhalten.";
+      catalogNextAfter = null;
+    }
+    return false;
+  } finally {
+    if (generation === catalogGeneration) {
+      catalogLoading = false;
+      renderCatalogNavigation();
+    }
+  }
+}
+
+function searchCatalog() {
+  catalogFilters = {
+    search: byId("catalog-search").value.trim(),
+    status: byId("catalog-status").value,
+  };
+  return loadCatalogPage({reset: true});
+}
+
+function nextCatalogPage() {
+  if (catalogLoading || catalogNextAfter === null) return;
+  catalogCursors = catalogCursors.slice(0, catalogPageIndex + 1);
+  catalogCursors.push(catalogNextAfter);
+  catalogPageIndex += 1;
+  return loadCatalogPage();
+}
+
+function previousCatalogPage() {
+  if (catalogLoading || catalogPageIndex <= 0) return;
+  catalogPageIndex -= 1;
+  return loadCatalogPage();
+}
+
+function clearCatalogSelection() {
+  catalogSelectedIds.clear();
+  renderAds(catalogRows);
+}
+
+function exportCatalogSelection() {
+  if (!catalogSelectedIds.size) return;
+  const safe = (value) => {
+    // trimStart also recognizes leading whitespace before spreadsheet formulas.
+    const first = value.trimStart().charAt(0);
+    const normalized = first && "=+-@".includes(first) ? "'" + value : value;
+    return '"' + normalized.replaceAll('"','""') + '"';
+  };
+  const rows = ["anzeigen_id", ...Array.from(catalogSelectedIds).sort().map(safe)];
+  const separator = String.fromCharCode(13, 10);
+  const blob = new Blob([String.fromCharCode(65279) + rows.join(separator) + separator],
+                        {type: "text/csv;charset=utf-8"});
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  try {
+    link.href = url;
+    link.download = "kleinanzeiger-auswahl.csv";
+    link.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 function renderAds(ads) {
   latestAdsById = new Map(ads.map((ad) => [ad.ad_id, ad]));
+  catalogRows = ads;
   const picker = byId("manage-ad-select");
   const previouslySelected = picker.value;
   const eligibleIds = new Set();
@@ -1187,6 +1370,7 @@ function renderAds(ads) {
       views.className = "ad-views";
       views.textContent = "Aufrufe: " + display(ad.views);
       footer.append(views);
+      footer.append(catalogCheckbox(ad));
       if (writeUiReady() && (ad.present || pendingForAd(ad.ad_id) !== null)) {
         const action = document.createElement("button");
         action.type = "button";
@@ -1208,6 +1392,9 @@ function renderAds(ads) {
 
   for (const ad of ads) {
     const row = document.createElement("tr");
+    const selectionCell = document.createElement("td");
+    selectionCell.append(catalogCheckbox(ad));
+    row.append(selectionCell);
     row.append(td(ad.ad_id));
     row.append(td(ad.title, "title"));
 
@@ -1236,6 +1423,7 @@ function renderAds(ads) {
     row.append(actionCell);
     body.append(row);
   }
+  renderCatalogSelection();
 }
 
 function setOptions(select, values, placeholder = null) {
@@ -2394,9 +2582,8 @@ async function load() {
   byId("groups-csv").hidden = true;
   byId("ranking-csv").hidden = true;
   try {
-    const [summary, ads, metricsPayload, dimensionsPayload, contract, dashboardConfig] = await Promise.all([
+    const [summary, metricsPayload, dimensionsPayload, contract, dashboardConfig] = await Promise.all([
       getJson("/api/summary"),
-      getJson("/api/ads"),
       getJson("/api/analytics/metrics"),
       getJson("/api/analytics/dimensions"),
       getJson("/api/analytics/contract"),
@@ -2422,7 +2609,7 @@ async function load() {
     renderWriteAvailability();
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     renderGenerationAvailability();
-    renderAds(ads);
+    await loadCatalogPage();
     renderSyncStatus(summary.sync_status, summary.sync_recovery);
     renderAnalyticsContract(contract);
 
@@ -2464,6 +2651,18 @@ if (generationNavigation) generationNavigation.addEventListener("click", () => {
   if (disclosure) disclosure.open = true;
 });
 byId("reload").addEventListener("click", load);
+byId("catalog-find").addEventListener("click", searchCatalog);
+byId("catalog-search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    searchCatalog();
+  }
+});
+byId("catalog-status").addEventListener("change", searchCatalog);
+byId("catalog-prev").addEventListener("click", previousCatalogPage);
+byId("catalog-next").addEventListener("click", nextCatalogPage);
+byId("catalog-clear").addEventListener("click", clearCatalogSelection);
+byId("catalog-export").addEventListener("click", exportCatalogSelection);
 byId("sync-now").addEventListener("click", syncNow);
 byId("metric-select").addEventListener("change", loadAnalytics);
 byId("dimension-select").addEventListener("change", loadAnalytics);
@@ -3439,6 +3638,33 @@ def _handler_factory(
                 payload["sync_status"] = store.sync_status()
                 payload["sync_recovery"] = store.sync_recovery_status()
                 self._send_json(200, payload)
+                return
+            if path == "/api/catalog/ads":
+                # Observation-only, strict URL schema; never authorize a Write.
+                if len(target.query) > 512:
+                    self._send_json(400, {"error": "invalid_catalog_query"})
+                    return
+                try:
+                    filters = parse_qs(
+                        target.query, keep_blank_values=True, max_num_fields=8,
+                        encoding="utf-8", errors="strict",
+                    )
+                    if (set(filters) - {"limit", "after", "q", "status"}
+                            or any(len(values) != 1 for values in filters.values())):
+                        raise ValueError("invalid fields")
+                    count = filters.get("limit", ["50"])[0]
+                    if len(count) > 3 or not count.isdecimal():
+                        raise ValueError("invalid limit")
+                    result = query.catalog_page(
+                        limit=int(count),
+                        after=filters.get("after", [""])[0],
+                        search=filters.get("q", [""])[0],
+                        status=filters.get("status", ["all"])[0],
+                    )
+                except (UnicodeError, ValueError):
+                    self._send_json(400, {"error": "invalid_catalog_query"})
+                    return
+                self._send_json(200, result)
                 return
             if path == "/api/ads":
                 self._send_json(

@@ -97,11 +97,67 @@ class MarkQueryService:
     def __init__(self, store: SnapshotStore | StorageOwnerClient) -> None:
         self._store = store
 
+    @staticmethod
+    def _project_history(
+        ad_id: str, history: tuple[AdSnapshot, ...],
+    ) -> AdView | None:
+        """Same owner-versus-catalog, last-known metric semantics for both UIs."""
+        if not history:
+            return None
+        owner_history = tuple(
+            item for item in history if item.source != LOCAL_CATALOG_SOURCE
+        )
+        catalog_history = tuple(
+            item for item in history if item.source == LOCAL_CATALOG_SOURCE
+        )
+        owner = owner_history[-1] if owner_history else None
+        latest = owner if owner is not None else history[-1]
+        metrics: dict[str, tuple[int | None, MetricEvidence | None]] = {}
+        for field_name in ("views", "watch_count", "reply_count"):
+            value, evidence = _last_metric_with_evidence(
+                owner_history if owner_history else history, field_name,
+            )
+            if value is None and owner_history:
+                value, evidence = _last_metric_with_evidence(
+                    catalog_history, field_name,
+                )
+                if evidence is not None:
+                    evidence = MetricEvidence(
+                        observed_at=evidence.observed_at,
+                        source=evidence.source,
+                        last_known=True,
+                    )
+            metrics[field_name] = value, evidence
+        return AdView(
+            ad_id=ad_id,
+            lifecycle_state=(
+                owner.lifecycle_state if owner is not None
+                else LifecycleState.UNKNOWN
+            ),
+            present=(
+                owner is not None
+                and owner.lifecycle_state is not LifecycleState.ABSENT
+            ),
+            observed_at=latest.observed_at,
+            source=latest.source,
+            title=_last_not_none(
+                owner_history if owner_history else history, "title",
+            ),
+            description=_last_not_none(
+                owner_history if owner_history else history, "description",
+            ),
+            views=metrics["views"][0],
+            watch_count=metrics["watch_count"][0],
+            reply_count=metrics["reply_count"][0],
+            metric_evidence={
+                field_name: evidence
+                for field_name, (_, evidence) in metrics.items()
+            },
+        )
+
     def latest_ads(self) -> tuple[AdView, ...]:
         rows: list[AdView] = []
-        # The independent UID broker exposes only typed paginated IPC
-        # history reads, never raw SQL or a direct SQLite connection.
-        # Direct SnapshotStore keeps its close-on-error paginated iterator.
+        # Backward-compatible complete view for existing reports and APIs.
         if isinstance(self._store, StorageOwnerClient):
             rows_by_id = (
                 (ad_id, self._store.ad_history(ad_id))
@@ -112,64 +168,74 @@ class MarkQueryService:
             history_source = closing(self._store.ad_histories())
         with history_source as histories:
             for ad_id, history in histories:
-                if not history:
-                    continue
-                owner_history = tuple(
-                    item for item in history
-                    if item.source != LOCAL_CATALOG_SOURCE
-                )
-                catalog_history = tuple(
-                    item for item in history
-                    if item.source == LOCAL_CATALOG_SOURCE
-                )
-                owner = owner_history[-1] if owner_history else None
-                latest = owner if owner is not None else history[-1]
-                metrics: dict[str, tuple[int | None, MetricEvidence | None]] = {}
-                for field_name in ("views", "watch_count", "reply_count"):
-                    value, evidence = _last_metric_with_evidence(
-                        owner_history if owner_history else history,
-                        field_name,
-                    )
-                    if value is None and owner_history:
-                        value, evidence = _last_metric_with_evidence(
-                            catalog_history, field_name,
-                        )
-                        if evidence is not None:
-                            evidence = MetricEvidence(
-                                observed_at=evidence.observed_at,
-                                source=evidence.source,
-                                last_known=True,
-                            )
-                    metrics[field_name] = value, evidence
-                rows.append(
-                    AdView(
-                        ad_id=ad_id,
-                        lifecycle_state=(
-                            owner.lifecycle_state if owner is not None
-                            else LifecycleState.UNKNOWN
-                        ),
-                        present=(
-                            owner is not None
-                            and owner.lifecycle_state is not LifecycleState.ABSENT
-                        ),
-                        observed_at=latest.observed_at,
-                        source=latest.source,
-                        title=_last_not_none(
-                            owner_history if owner_history else history, "title",
-                        ),
-                        description=_last_not_none(
-                            owner_history if owner_history else history, "description",
-                        ),
-                        views=metrics["views"][0],
-                        watch_count=metrics["watch_count"][0],
-                        reply_count=metrics["reply_count"][0],
-                        metric_evidence={
-                            field_name: evidence
-                            for field_name, (_, evidence) in metrics.items()
-                        },
-                    )
-                )
+                item = self._project_history(ad_id, history)
+                if item is not None:
+                    rows.append(item)
         return tuple(rows)
+
+    def catalog_page(
+        self, *, after: str = "", limit: int = 50,
+        search: str = "", status: str = "all",
+    ) -> dict[str, object]:
+        """Return a small, ID-ordered, read-only page of own ad observations.
+
+        No platform transport, Write capability or SQL expression is accepted.
+        Native Windows SQLite reads *only* the required indexed ad-ID pages
+        and their histories, not every item before creating a result.
+        Filtering can scan more observed IDs but never exposes a giant JSON
+        or grants authority from a stale local observation.
+        """
+        if (
+            type(limit) is not int or not 1 <= limit <= 100
+            or type(after) is not str or len(after) > 160
+            or type(search) is not str or len(search) > 120
+            or type(status) is not str
+            or status not in {"all", *(state.value for state in LifecycleState)}
+            or any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF
+                   for char in (after + search))
+        ):
+            raise ValueError("invalid catalog filter or cursor")
+        needle = search.strip().casefold()
+        items: list[AdView] = []
+        def admit(ad_id: str, history: tuple[AdSnapshot, ...]) -> bool:
+            item = self._project_history(ad_id, history)
+            if item is None:
+                return False
+            if status != "all" and item.lifecycle_state.value != status:
+                return False
+            if needle and needle not in ad_id.casefold() and needle not in (item.title or "").casefold():
+                return False
+            items.append(item)
+            return len(items) > limit
+
+        if isinstance(self._store, StorageOwnerClient):
+            # The independent-UID owner exposes only typed history/ID methods,
+            # not a browser-accessible direct SQLite path.
+            for ad_id in self._store.tracked_ad_ids():
+                if ad_id > after and admit(ad_id, self._store.ad_history(ad_id)):
+                    break
+        else:
+            cursor = after
+            while True:
+                ids = self._store.catalog_ad_ids_page(after=cursor, limit=128)
+                if not ids:
+                    break
+                found_more = False
+                for ad_id in ids:
+                    if admit(ad_id, self._store.ad_history(ad_id)):
+                        found_more = True
+                        break
+                if found_more or len(ids) < 128:
+                    break
+                cursor = ids[-1]
+
+        more = len(items) > limit
+        visible = items[:limit]
+        return {
+            "ads": [ad_view_to_dict(item) for item in visible],
+            "next_after": visible[-1].ad_id if more else None,
+            "has_more": more,
+        }
 
     def ad_history(self, ad_id: str) -> tuple[AdSnapshot, ...]:
         return self._store.ad_history(ad_id)

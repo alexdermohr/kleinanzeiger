@@ -253,10 +253,10 @@ function Update-CustomerLabels {
 
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
-  $names = @(Get-ReleaseAssetNames '0.1.5')
-  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.5-Windows.zip' -or
-      $names[1] -ne 'Kleinanzeiger-v0.1.5-Windows.sha256' -or
-      $names[2] -ne 'Kleinanzeiger-v0.1.5-Release-Manifest.json') {
+  $names = @(Get-ReleaseAssetNames '0.1.6')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.6-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.6-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.6-Release-Manifest.json') {
     throw 'Release-Dateinamen sind nicht eindeutig.'
   }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
