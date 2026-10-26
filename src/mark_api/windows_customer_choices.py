@@ -16,6 +16,7 @@ import sqlite3
 import sys
 
 from .classification_cli import update_classification
+from .container_draft import container_draft_denied
 from .query import MarkQueryService
 from .storage import SnapshotStore
 
@@ -82,6 +83,9 @@ def apply_customer_labels(db: Path, encoded: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if container_draft_denied():
+        print("mark-api: unattested container draft cannot run Python entrypoints", file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(description="List locally evidenced Windows ad choices")
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--apply-labels", action="store_true")
@@ -93,11 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             # codepage and native-argument quote transformations.
             encoded = os.environ.pop("KLEINANZEIGER_LABEL_PAYLOAD", "")
             apply_customer_labels(args.db, encoded)
-        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
-            if (os.environ.get("GITHUB_ACTIONS") == "true"
-                    and os.environ.get("KLEINANZEIGER_TEST_DIAG") == "1"):
-                # Only exception type, never label values, paths or message body.
-                print("CI_CLASSIFY_ERROR:" + type(exc).__name__, file=sys.stderr)
+        except (OSError, sqlite3.Error, ValueError, TypeError):
             print("Kleinanzeiger: Vergleichslabels wurden nicht gespeichert.", file=sys.stderr)
             return 2
         print('{"status":"saved"}')

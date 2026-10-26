@@ -31,7 +31,6 @@ WORKER = ROOT / "scripts" / "windows-worker.ps1"
 class NativeWindowsCustomerWorkerTests(unittest.TestCase):
     def test_native_powershell_mail_import_and_group_labels(self) -> None:
         state = Path(os.environ["LOCALAPPDATA"]) / "Kleinanzeiger"
-        os.environ["KLEINANZEIGER_TEST_DIAG"] = "1"
         db = state / "anzeigen.sqlite"
         venv = state / ".venv" / "Scripts" / "python.exe"
         self.assertTrue(venv.is_file(), "customer-installed wheel required")
