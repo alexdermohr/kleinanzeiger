@@ -1721,7 +1721,7 @@ async function runCatalogBulkAction(action) {
   const from = action === "pause" ? "aktiv" : "pausiert";
   const to = action === "pause" ? "pausiert" : "aktiv";
   const lines = ads.map((ad) =>
-    ad.ad_id + " · " + ad.title.slice(0, 70) + " (" + from + " → " + to + ")"
+    ad.ad_id + " · " + ad.title.slice(0, 70) + " (" + from + " -> " + to + ")"
   );
   if (!window.confirm(
     "Diese " + ads.length + " eigenen Anzeigen wirklich " + verb + "?\\n\\n"
