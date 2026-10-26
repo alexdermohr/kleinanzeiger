@@ -31,6 +31,7 @@ WORKER = ROOT / "scripts" / "windows-worker.ps1"
 class NativeWindowsCustomerWorkerTests(unittest.TestCase):
     def test_native_powershell_mail_import_and_group_labels(self) -> None:
         state = Path(os.environ["LOCALAPPDATA"]) / "Kleinanzeiger"
+        os.environ["KLEINANZEIGER_TEST_DIAG"] = "1"
         db = state / "anzeigen.sqlite"
         venv = state / ".venv" / "Scripts" / "python.exe"
         self.assertTrue(venv.is_file(), "customer-installed wheel required")
@@ -56,6 +57,32 @@ class NativeWindowsCustomerWorkerTests(unittest.TestCase):
                 ],
                 input=data, capture_output=True, text=True, timeout=65, check=False,
             )
+
+        # Isolate Python wheel/SQLite code from the Windows PowerShell process.
+        # A separate synthetic ad ID prevents this diagnostic probe from
+        # modifying the user-action fixture later in this test.
+        store.append_ad_snapshot(
+            AdSnapshot(
+                ad_id="9876543210",
+                observed_at=datetime(2026, 10, 26, 8, tzinfo=timezone.utc),
+                source="management",
+                lifecycle_state=LifecycleState.ACTIVE,
+                title="Diagnose",
+            )
+        )
+        direct = base64.b64encode(json.dumps({
+            "ad_id": "9876543210", "labels": {"city": 'Łódź "Nord"'},
+        }, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        direct_env = {**os.environ, "KLEINANZEIGER_LABEL_PAYLOAD": direct}
+        direct_run = subprocess.run(
+            [str(venv), "-m", "mark_api.windows_customer_choices",
+             "--db", str(db), "--apply-labels"],
+            env=direct_env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(direct_run.returncode, 0, direct_run.stderr + direct_run.stdout)
+        self.assertEqual(
+            store.latest_classification_bounded("9876543210").city, 'Łódź "Nord"',
+        )
 
         labelled = worker("Classify", {
             "ad_id": "1234567890",

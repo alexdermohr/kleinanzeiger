@@ -10,6 +10,7 @@ import argparse
 import base64
 import binascii
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -87,9 +88,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.apply_labels:
         try:
-            encoded = sys.stdin.readline(65538).strip()
+            # Controller -> worker uses private stdin; worker -> Python uses a
+            # short-lived child environment entry to avoid Windows console
+            # codepage and native-argument quote transformations.
+            encoded = os.environ.pop("KLEINANZEIGER_LABEL_PAYLOAD", "")
             apply_customer_labels(args.db, encoded)
-        except (OSError, sqlite3.Error, ValueError, TypeError):
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            if (os.environ.get("GITHUB_ACTIONS") == "true"
+                    and os.environ.get("KLEINANZEIGER_TEST_DIAG") == "1"):
+                # Only exception type, never label values, paths or message body.
+                print("CI_CLASSIFY_ERROR:" + type(exc).__name__, file=sys.stderr)
             print("Kleinanzeiger: Vergleichslabels wurden nicht gespeichert.", file=sys.stderr)
             return 2
         print('{"status":"saved"}')
