@@ -237,9 +237,33 @@ function Update-CustomerLabels {
   # classifier, preserving Unicode, quotes and backslashes exactly.
   $json = ConvertTo-Json -InputObject $payload -Depth 5 -Compress
   $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-  $encoded | & $venvPython -m mark_api.windows_customer_choices --db $db --apply-labels
-  if ($LASTEXITCODE -ne 0) { throw 'Vergleichslabels konnten nicht gespeichert werden.' }
-  Write-Output 'LABELS_OK'
+  # Windows PowerShell 5.1 encodes pipeline input differently across consoles.
+  # A redirected private .NET stdin pipe sends ASCII/base64 exactly, with
+  # no labels or API secrets in process arguments or logging.
+  $info = [Diagnostics.ProcessStartInfo]::new()
+  $info.FileName = $venvPython
+  $info.Arguments = '-m mark_api.windows_customer_choices --db "' + $db + '" --apply-labels'
+  $info.UseShellExecute = $false
+  $info.CreateNoWindow = $true
+  $info.RedirectStandardInput = $true
+  $info.RedirectStandardOutput = $true
+  $info.RedirectStandardError = $true
+  $proc = [Diagnostics.Process]::new()
+  $proc.StartInfo = $info
+  try {
+    if (!$proc.Start()) { throw 'Klassifizierung konnte nicht gestartet werden.' }
+    $proc.StandardInput.WriteLine($encoded)
+    $proc.StandardInput.Close()
+    $result = $proc.StandardOutput.ReadToEnd()
+    $errors = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    if ($proc.ExitCode -ne 0 -or $result -notmatch '"status":"saved"') {
+      throw 'Vergleichslabels konnten nicht gespeichert werden.'
+    }
+    Write-Output 'LABELS_OK'
+  } finally {
+    $proc.Dispose()
+  }
 }
 
 if ($SelfTest) {
