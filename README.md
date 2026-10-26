@@ -129,7 +129,7 @@ Mehr-UID-Abnahme benutzt dieselbe produktive Frontend-Komposition. **Dieser
 zusätzliche Einstieg ist kein eigenständiger Host-Bootstrap und gibt weder
 den Draft-Container-Cutover noch einen Host-Restore frei.**
 
-Unter `Anzeigen verwalten` kann der Anwender eine Anzeige mit Kategorie, Titel, Beschreibung, Festpreis und Bildern erstellen oder eine bestehende eigene Anzeige ändern, pausieren, aktivieren und löschen. Externe Aktionen benötigen eine ausdrückliche Benutzerentscheidung; Idempotenz, Write-Bestätigung und unklare Ausgänge bleiben konservativ behandelt. Bei einem unbekannten Ausgang ist zunächst die vorhandene Reconciliation zu verwenden – **kein blinder erneuter Publish oder Delete**.
+Unter `Anzeigen verwalten` kann der Anwender eine Anzeige mit Kategorie, Titel, Beschreibung, Festpreis und Bildern erstellen oder eine bestehende eigene Anzeige ändern, pausieren, aktivieren und löschen. In **Meine Anzeigen** können nach expliziter Gesamtvorschau bis zu **10 eigene Anzeigen** kontrolliert **nacheinander pausiert oder aktiviert** werden, mit Readback vor jeder Aktion und Stop bei unklarem Ergebnis; keine automatischen Massenpublikationen, Preisänderungen oder Löschungen. Externe Aktionen benötigen eine ausdrückliche Benutzerentscheidung; Idempotenz, Write-Bestätigung und unklare Ausgänge bleiben konservativ behandelt. Bei einem unbekannten Ausgang ist zunächst die vorhandene Reconciliation zu verwenden – **kein blinder erneuter Publish oder Delete**.
 
 ## Text- und Bildentwürfe im selben Dashboard
 

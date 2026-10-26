@@ -345,6 +345,10 @@ _DASHBOARD_HTML = """<!doctype html>
         <div class="catalog-selection-actions">
           <button type="button" id="catalog-clear">Auswahl leeren</button>
           <button type="button" id="catalog-export">Auswahl als CSV</button>
+          <button type="button" id="catalog-bulk-pause" data-write-control hidden>Auswahl pausieren (max. 10)</button>
+          <button type="button" id="catalog-bulk-activate" data-write-control hidden>Auswahl aktivieren (max. 10)</button>
+          <button type="button" id="catalog-bulk-stop" hidden>Nach aktueller Anzeige stoppen</button>
+          <span id="catalog-bulk-progress" role="status" aria-live="polite"></span>
         </div>
         <div id="ad-cards" class="ad-cards" role="list"></div>
         <div class="catalog-pages">
@@ -969,8 +973,11 @@ let pendingRecoveryBlocked = false;
 let createInFlight = false;
 let latestAdsById = new Map();
 const adCardElements = new Map();
-// Local selection only stages IDs for export; never grants or performs Writes.
+// Local selection stages observed IDs; only an explicit confirmed bulk action may request protected Writes.
 const catalogSelectedIds = new Set();
+const catalogSelectedAds = new Map();
+let catalogBulkBusy = false;
+let catalogBulkStop = false;
 let catalogRows = [];
 let catalogCursors = [""];
 let catalogPageIndex = 0;
@@ -1232,7 +1239,7 @@ function renderWriteAvailability() {
   const ready = writeUiReady();
   byId("write-session-note").hidden = ready;
   for (const element of document.querySelectorAll("[data-write-control]")) {
-    element.disabled = !ready;
+    element.disabled = !ready || catalogBulkBusy;
   }
   if (ready && pendingWrites.size > 0) {
     setWriteStatus(
@@ -1480,7 +1487,23 @@ function renderCatalogSelection() {
   const exportControl = optionalById("catalog-export");
   if (label) label.textContent = count + " ausgewählt";
   if (clear) clear.disabled = count === 0;
-  if (exportControl) exportControl.disabled = count === 0;
+  if (exportControl) exportControl.disabled = count === 0 || catalogBulkBusy;
+  if (clear) clear.disabled = count === 0 || catalogBulkBusy;
+  const canWrite = writeUiReady() && !catalogBulkBusy
+    && !pendingRecoveryBlocked && pendingWrites.size === 0
+    && count >= 1 && count <= 10;
+  for (const id of ["catalog-bulk-pause", "catalog-bulk-activate"]) {
+    const control = optionalById(id);
+    if (control) {
+      control.hidden = !writeUiAvailable;
+      control.disabled = !canWrite;
+    }
+  }
+  const stop = optionalById("catalog-bulk-stop");
+  if (stop) {
+    stop.hidden = !catalogBulkBusy;
+    stop.disabled = !catalogBulkBusy || catalogBulkStop;
+  }
 }
 
 function catalogCheckbox(ad) {
@@ -1489,10 +1512,26 @@ function catalogCheckbox(ad) {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.checked = catalogSelectedIds.has(ad.ad_id);
+  checkbox.disabled = catalogBulkBusy;
   checkbox.title = "Anzeige " + ad.ad_id + " in Arbeitsauswahl übernehmen";
   checkbox.addEventListener("change", () => {
-    if (checkbox.checked) catalogSelectedIds.add(ad.ad_id);
-    else catalogSelectedIds.delete(ad.ad_id);
+    if (catalogBulkBusy) {
+      checkbox.checked = catalogSelectedIds.has(ad.ad_id);
+      return;
+    }
+    if (checkbox.checked) {
+      catalogSelectedIds.add(ad.ad_id);
+      catalogSelectedAds.set(ad.ad_id, Object.freeze({
+        ad_id: ad.ad_id,
+        title: typeof ad.title === "string" ? ad.title : "Ohne Titel",
+        present: ad.present === true,
+        lifecycle_state: ad.lifecycle_state,
+        observed_at: ad.observed_at,
+      }));
+    } else {
+      catalogSelectedIds.delete(ad.ad_id);
+      catalogSelectedAds.delete(ad.ad_id);
+    }
     for (const peer of Array.from(document.querySelectorAll(".catalog-select input"))) {
       if (peer.title === checkbox.title) peer.checked = checkbox.checked;
     }
@@ -1503,9 +1542,9 @@ function catalogCheckbox(ad) {
 }
 
 function renderCatalogNavigation() {
-  byId("catalog-prev").disabled = catalogLoading || catalogPageIndex === 0;
-  byId("catalog-next").disabled = catalogLoading || catalogNextAfter === null;
-  byId("catalog-find").disabled = catalogLoading;
+  byId("catalog-prev").disabled = catalogLoading || catalogBulkBusy || catalogPageIndex === 0;
+  byId("catalog-next").disabled = catalogLoading || catalogBulkBusy || catalogNextAfter === null;
+  byId("catalog-find").disabled = catalogLoading || catalogBulkBusy;
   byId("catalog-page-label").textContent = "Seite " + (catalogPageIndex + 1);
   renderCatalogSelection();
 }
@@ -1582,6 +1621,7 @@ async function changeCatalogPage({index, cursors, filters, reset = false}) {
 }
 
 function searchCatalog() {
+  if (catalogBulkBusy) return false;
   return changeCatalogPage({
     index: 0, cursors: [""], reset: true,
     filters: {
@@ -1592,7 +1632,7 @@ function searchCatalog() {
 }
 
 function nextCatalogPage() {
-  if (catalogLoading || catalogNextAfter === null) return;
+  if (catalogBulkBusy || catalogLoading || catalogNextAfter === null) return;
   const cursors = catalogCursors.slice(0, catalogPageIndex + 1);
   cursors.push(catalogNextAfter);
   return changeCatalogPage({
@@ -1601,7 +1641,7 @@ function nextCatalogPage() {
 }
 
 function previousCatalogPage() {
-  if (catalogLoading || catalogPageIndex <= 0) return;
+  if (catalogBulkBusy || catalogLoading || catalogPageIndex <= 0) return;
   return changeCatalogPage({
     index: catalogPageIndex - 1,
     cursors: catalogCursors.slice(), filters: catalogFilters,
@@ -1609,8 +1649,155 @@ function previousCatalogPage() {
 }
 
 function clearCatalogSelection() {
+  if (catalogBulkBusy) return;
   catalogSelectedIds.clear();
+  catalogSelectedAds.clear();
   renderAds(catalogRows);
+}
+
+function prepareCatalogBulkAction(action) {
+  if (action !== "pause" && action !== "activate") {
+    throw new Error("Unbekannte Sammelaktion.");
+  }
+  const ids = Array.from(catalogSelectedIds);
+  if (ids.length === 0 || ids.length > 10) {
+    throw new Error("Bitte 1 bis 10 Anzeigen auswählen. Größere Bestände in kontrollierten Stapeln bearbeiten.");
+  }
+  const sourceState = action === "pause" ? "active" : "paused";
+  const ads = [];
+  for (const id of ids) {
+    const ad = catalogSelectedAds.get(id);
+    if (!ad || !/^[0-9]{1,32}$/.test(id)
+        || ad.ad_id !== id || ad.present !== true
+        || typeof ad.observed_at !== "string" || !ad.observed_at
+        || ad.lifecycle_state !== sourceState) {
+      throw new Error("Auswahl enthält eine unpassende Anzeige. Bestand abgleichen und "
+        + (action === "pause" ? "aktive" : "pausierte") + " Anzeigen wählen.");
+    }
+    ads.push(ad);
+  }
+  return ads;
+}
+
+function showCatalogBulkProgress(message) {
+  const progress = optionalById("catalog-bulk-progress");
+  if (progress) progress.textContent = message;
+}
+
+// This read-only lookup rechecks the local observation for each own ad before
+// a new Write. It is not a remote freshness guarantee; backend owner and
+// replay/ambiguity fences remain authoritative. Missing data fails closed.
+async function verifyCatalogBulkAd(ad) {
+  const params = new URLSearchParams({
+    limit: "100", after: "", q: ad.ad_id, status: "all",
+  });
+  const payload = await getJson("/api/catalog/ads?" + params.toString());
+  if (!payload || !Array.isArray(payload.ads)) {
+    throw new Error("Katalogstatus nicht lesbar.");
+  }
+  const current = payload.ads.find((row) => row.ad_id === ad.ad_id);
+  if (!current || current.present !== true
+      || current.lifecycle_state !== ad.lifecycle_state
+      || current.title !== ad.title
+      || current.observed_at !== ad.observed_at) {
+    throw new Error("Katalogstand seit Auswahl verändert oder nicht mehr auffindbar.");
+  }
+}
+
+async function runCatalogBulkAction(action) {
+  if (catalogBulkBusy) return;
+  if (!writeUiReady() || pendingRecoveryBlocked || pendingWrites.size > 0) {
+    showCatalogBulkProgress("Vor Sammelaktionen zuerst die Sitzung und offene Writes klären.");
+    return;
+  }
+  let ads;
+  try {
+    ads = prepareCatalogBulkAction(action);
+  } catch (error) {
+    showCatalogBulkProgress(error.message);
+    return;
+  }
+  const verb = action === "pause" ? "pausieren" : "aktivieren";
+  const from = action === "pause" ? "aktiv" : "pausiert";
+  const to = action === "pause" ? "pausiert" : "aktiv";
+  const lines = ads.map((ad) =>
+    ad.ad_id + " · " + ad.title.slice(0, 70) + " (" + from + " → " + to + ")"
+  );
+  if (!window.confirm(
+    "Diese " + ads.length + " eigenen Anzeigen wirklich " + verb + "?\\n\\n"
+      + lines.join("\\n") + "\\n\\n"
+      + "Jede Änderung wird einzeln geprüft. Bei unklarem Ergebnis stoppt der Stapel. "
+      + "Keine automatische Wiederholung."
+  )) return;
+  catalogBulkBusy = true;
+  catalogBulkStop = false;
+  renderCatalogSelection();
+  renderCatalogNavigation();
+  let confirmed = 0;
+  let stopped = "";
+  try {
+    for (const ad of ads) {
+      if (catalogBulkStop) {
+        stopped = "Auf Wunsch nach der aktuellen Anzeige gestoppt.";
+        break;
+      }
+      if (!writeUiReady() || pendingRecoveryBlocked || pendingWrites.size > 0) {
+        stopped = "Ein Schreibvorgang ist noch offen. Keine weitere Plattformaktion.";
+        break;
+      }
+      try {
+        await verifyCatalogBulkAd(ad);
+      } catch (error) {
+        stopped = "Anzeige " + ad.ad_id + ": " + error.message + " Keine weitere Aktion.";
+        break;
+      }
+      if (catalogBulkStop) {
+        stopped = "Auf Wunsch vor der nächsten Anzeige gestoppt.";
+        break;
+      }
+      showCatalogBulkProgress(
+        "Sammelaktion " + verb + ": " + confirmed + "/" + ads.length
+          + " bestätigt · prüfe Anzeige " + ad.ad_id + " …"
+      );
+      const result = await runPlatformWrite(
+        "ad:" + ad.ad_id + ":" + action,
+        "POST",
+        "/api/write/ads/" + ad.ad_id + "/" + action,
+        null, {adId: ad.ad_id},
+      );
+      if (!confirmedWriteResult(result)) {
+        stopped = "Anzeige " + ad.ad_id + ": Ausgang unklar oder abgelehnt. "
+          + "Keine weitere Aktion; Recovery prüfen, nicht erneut senden.";
+        break;
+      }
+      confirmed += 1;
+      catalogSelectedIds.delete(ad.ad_id);
+      catalogSelectedAds.delete(ad.ad_id);
+      renderCatalogSelection();
+      if (pendingWrites.size > 0 || pendingRecoveryBlocked) {
+        stopped = "Ein lokaler Recovery-ACK ist noch offen. Keine weitere Aktion.";
+        break;
+      }
+    }
+  } catch (error) {
+    stopped = "Abbruch wegen unerwartetem Fehler: " + error.message;
+  } finally {
+    catalogBulkBusy = false;
+    catalogBulkStop = false;
+    renderCatalogSelection();
+    renderCatalogNavigation();
+  }
+  showCatalogBulkProgress(
+    confirmed + " von " + ads.length + " Anzeigen bestätigt"
+    + (stopped ? " · " + stopped : " · Stapel abgeschlossen.")
+  );
+}
+
+function stopCatalogBulkAction() {
+  if (!catalogBulkBusy) return;
+  catalogBulkStop = true;
+  showCatalogBulkProgress("Stoppt nach dem aktuell laufenden Einzelvorgang.");
+  renderCatalogSelection();
 }
 
 function exportCatalogSelection() {
@@ -3940,6 +4127,9 @@ byId("catalog-prev").addEventListener("click", previousCatalogPage);
 byId("catalog-next").addEventListener("click", nextCatalogPage);
 byId("catalog-clear").addEventListener("click", clearCatalogSelection);
 byId("catalog-export").addEventListener("click", exportCatalogSelection);
+byId("catalog-bulk-pause").addEventListener("click", () => runCatalogBulkAction("pause"));
+byId("catalog-bulk-activate").addEventListener("click", () => runCatalogBulkAction("activate"));
+byId("catalog-bulk-stop").addEventListener("click", stopCatalogBulkAction);
 byId("sync-now").addEventListener("click", syncNow);
 byId("metric-select").addEventListener("change", loadAnalytics);
 byId("dimension-select").addEventListener("change", loadAnalytics);
