@@ -142,6 +142,10 @@ kleinanzeiger --db /pfad/kleinanzeiger.sqlite --cdp-port 9222 --enable-generatio
 
 Der Starter gibt eine gemeinsame Dashboard-URL für Anzeigenverwaltung und Generierung aus. Text und Bilder entstehen zuerst als editierbare, unveröffentlichte Entwürfe und können in das Anzeigenformular übernommen werden. **Jeder einzelne kostenpflichtige Provideraufruf** benötigt eine erneute Bestätigung nach der sichtbaren Modell-/Kosteninformation. Durch die Übernahme wird keine Anzeige automatisch veröffentlicht. Synthetische Tests dürfen weder echte Kosten noch echte Plattformaktionen auslösen.
 
+## Interessenten und KI-Antwortentwürfe ohne automatischen Versand
+
+In **Meine Anzeigen** führt **Antwort vorbereiten** in das zentrale Formular **Interessenten & Antworten** mit bereits ausgewählter eigener Anzeigen-ID. Eine erhaltene Anfrage wird dort manuell eingegeben, ohne private Kontaktdaten oder Zahlungsinformationen. Ein neutraler Textbaustein funktioniert ohne KI und ohne Kosten. Optional erzeugt der vorhandene KI-Anbieter nach **erneuter Einzelfreigabe von Modellkosten und Textübertragung** einen bearbeitbaren Antwortentwurf. Vor dem KI-Aufruf wird die eigene Anzeige über die exakte lokale ID nochmals geprüft; Quota, Provider-Einzelnutzung, Fehlersperre und keine automatischen Retries gelten unverändert. Der Antworttext wird **nicht an Kleinanzeigen versendet**, sondern nur zur eigenständigen Prüfung und Übernahme kopiert. Es gibt **keinen vollständigen Plattform-Postfachabruf oder automatischen Nachrichtenversand**.
+
 ## Sichere Bestandssynchronisation
 
 Ein gesonderter read-only-Befehl nutzt das bestehende Sync-Journal und dokumentiert Zeitpunkt, Herkunft und Ausgang jeder Beobachtung; beschädigte oder nicht eindeutig bestätigte Zustände werden nicht als Erfolg gespeichert:

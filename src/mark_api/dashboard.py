@@ -58,7 +58,7 @@ from .strict_json import strict_json_object
 from .write_api import _normalize_create_payload, _request_fingerprint
 
 from .generation import (
-    AdvertisementDraft, AdvertisementGenerator, GenerationError,
+    AdvertisementDraft, BuyerReplyDraft, AdvertisementGenerator, GenerationError,
     _validate_png_payload,
 )
 
@@ -234,6 +234,8 @@ class DashboardGenerationAccess:
             generator = self._factory()
             if mode == "text":
                 return generator.generate_text(prompt)
+            if mode == "reply":
+                return generator.generate_reply(prompt)
             if mode == "image":
                 return generator.generate_image(prompt)
             raise GenerationError("invalid generation kind")
@@ -301,6 +303,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <a id="nav-report" href="#report-panel" hidden>Controlling</a>
       <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
       <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
+      <a id="nav-buyer" href="#buyer-panel">Interessenten &amp; Antworten</a>
     </nav>
     <section id="status" class="status" role="status" aria-live="polite"></section>
 
@@ -717,6 +720,38 @@ _DASHBOARD_HTML = """<!doctype html>
       </details>
     </section>
 
+    <section id="buyer-panel" class="panel secondary-panel">
+      <details id="buyer-disclosure" class="feature-disclosure">
+        <summary><span>Interessenten &amp; Antworten</span><small>Nachrichtenentwürfe ohne Versand</small></summary>
+        <p class="muted">Bei einer eigenen Anzeige auf <strong>Antwort vorbereiten</strong> klicken. Eine bereits erhaltene Anfrage hier selbst einfügen. Kleinanzeiger liest derzeit keine Plattformkonversationen und verschickt keine Nachrichten.</p>
+        <div class="controls">
+          <label>Anzeigen-ID <input id="buyer-ad-id" type="text" readonly value="" aria-label="Gewählte Anzeigen-ID"></label>
+          <label>Anzeige <input id="buyer-ad-title" type="text" readonly value="" aria-label="Gewählter Anzeigentitel"></label>
+        </div>
+        <label>Nachricht oder Frage (nur benötigter Ausschnitt)
+          <textarea id="buyer-inquiry" maxlength="2200" placeholder="Anfrage hier einfügen; Namen, Telefonnummern, Adressen und Zahlungsdaten zuvor entfernen."></textarea>
+        </label>
+        <label>Bekannte, selbst geprüfte Fakten für die Antwort (optional)
+          <textarea id="buyer-facts" maxlength="1200" placeholder="Nur belegte Angaben wie Artikelzustand, Preis und Versandmöglichkeit. Keine Vermutungen."></textarea>
+        </label>
+        <div class="write-actions">
+          <button id="buyer-manual" type="button">Neutrale Antwort beginnen</button>
+          <button id="buyer-generate" type="button">KI-Antwortentwurf erzeugen</button>
+        </div>
+        <p class="note">KI benötigt die ausdrücklich freigeschaltete KI-Sitzung und verursacht möglicherweise externe Kosten. Für Texte gilt dasselbe Modell und dieselbe Preisinformation wie im KI-Assistenten. Keine Kundendaten ohne vorherige Prüfung übertragen.</p>
+        <label>
+          <input type="checkbox" id="buyer-consent">
+          Ich habe die Eingabe auf personenbezogene Daten geprüft, die Modell-/Kosteninformation kontrolliert und bestätige die externe Textübertragung und mögliche Kosten für genau diesen einen KI-Aufruf.
+        </label>
+        <p id="buyer-status" class="note" role="status" aria-live="polite">Bitte zuerst eine eigene Anzeige auswählen.</p>
+        <label>Antwortentwurf (editierbar, noch nicht gesendet)
+          <textarea id="buyer-reply" maxlength="1500" placeholder="Hier erscheint ein lokaler oder KI-Entwurf. Vor Verwendung sorgfältig prüfen."></textarea>
+        </label>
+        <button id="buyer-copy" type="button" disabled>Antworttext kopieren</button>
+        <p class="muted">Der Text bleibt nur in dieser Browseransicht. Es gibt keine automatische Freigabe oder Versendung, auch nicht nach dem Kopieren.</p>
+      </details>
+    </section>
+
     <section id="analytics-panel" class="panel secondary-panel">
       <details id="analytics-disclosure" class="feature-disclosure">
         <summary><span>Auswertungen und Rankings</span><small>Erfolge vergleichen und Trends erkennen</small></summary>
@@ -965,6 +1000,9 @@ let writeToken = null;
 let generationToken = null;
 let generationUiAvailable = false;
 let generationBusy = false;
+let buyerBusy = false;
+let buyerRevision = 0;
+let buyerTarget = null;
 let generationImageBlob = null;
 let generationImageSourcePrompt = null;
 let generationImagePreviewUrl = null;
@@ -1889,6 +1927,14 @@ function renderAds(ads) {
         action.addEventListener("click", () => populateManageForm(ad));
         footer.append(action);
       }
+      if (writeUiReady() && ad.present === true) {
+        const reply = document.createElement("button");
+        reply.type = "button";
+        reply.className = "ad-card-action";
+        reply.textContent = "Antwort vorbereiten";
+        reply.addEventListener("click", () => openBuyerReplyForAd(ad));
+        footer.append(reply);
+      }
       card.append(heading, footer);
       cards.append(card);
       adCardElements.set(ad.ad_id, card);
@@ -1928,6 +1974,14 @@ function renderAds(ads) {
       button.textContent = ad.present ? "Verwalten" : "Recovery";
       button.addEventListener("click", () => populateManageForm(ad));
       actionCell.append(button);
+    }
+    if (writeUiReady() && ad.present === true) {
+      const reply = document.createElement("button");
+      reply.type = "button";
+      reply.className = "row-action";
+      reply.textContent = "Antwort";
+      reply.addEventListener("click", () => openBuyerReplyForAd(ad));
+      actionCell.append(reply);
     }
     row.append(actionCell);
     body.append(row);
@@ -2830,6 +2884,192 @@ async function loadAnalytics() {
 }
 
 
+// Anfragen bleiben nur im aktuellen Browserformular. Kein Postfachzugriff,
+// serverseitiger Message Store und keine ausgehende Plattform-Nachricht.
+function buyerReplyAvailability() {
+  const allowed = buyerTarget !== null && !buyerBusy;
+  byId("buyer-manual").disabled = !allowed;
+  byId("buyer-generate").disabled = !allowed || !generationUiReady() || generationBusy;
+  byId("buyer-inquiry").disabled = buyerBusy;
+  byId("buyer-facts").disabled = buyerBusy;
+  byId("buyer-consent").disabled = buyerBusy;
+  byId("buyer-reply").disabled = buyerBusy;
+  byId("buyer-copy").disabled = buyerBusy || !byId("buyer-reply").value.trim();
+}
+
+function clearBuyerReply(status = "") {
+  byId("buyer-reply").value = "";
+  byId("buyer-consent").checked = false;
+  byId("buyer-status").textContent = status;
+  buyerReplyAvailability();
+}
+
+function openBuyerReplyForAd(ad) {
+  if (buyerBusy || !ad || ad.present !== true ||
+      typeof ad.ad_id !== "string" || !/^[0-9]{1,32}$/.test(ad.ad_id)) return;
+  const title = typeof ad.title === "string" ? ad.title : "Ohne Titel";
+  const changed = buyerTarget === null
+    || buyerTarget.ad_id !== ad.ad_id
+    || buyerTarget.title !== title
+    || buyerTarget.observed_at !== ad.observed_at;
+  buyerTarget = Object.freeze({
+    ad_id: ad.ad_id, title, observed_at: ad.observed_at
+  });
+  byId("buyer-ad-id").value = ad.ad_id;
+  byId("buyer-ad-title").value = title;
+  if (changed) {
+    byId("buyer-inquiry").value = "";
+    byId("buyer-facts").value = "";
+    buyerRevision++;
+    clearBuyerReply("Anzeige zugeordnet. Bitte die Anfrage selbst einfügen.");
+  }
+  byId("buyer-disclosure").open = true;
+  const panel = byId("buyer-panel");
+  if (typeof panel.scrollIntoView === "function") {
+    panel.scrollIntoView({behavior:"smooth", block:"start"});
+  }
+  buyerReplyAvailability();
+}
+
+function onBuyerInputChange() {
+  if (buyerBusy) return;
+  buyerRevision++;
+  clearBuyerReply("Eingabe geändert. Vorheriger Entwurf verworfen.");
+}
+
+function manualBuyerReply() {
+  if (buyerBusy || buyerTarget === null) return;
+  byId("buyer-reply").value =
+    "Guten Tag,\\n\\nvielen Dank für Ihre Anfrage zur Anzeige \\""
+    + buyerTarget.title.slice(0, 100) + "\\".\\n\\n"
+    + "[Antwort mit selbst geprüften Angaben ergänzen.]\\n\\n"
+    + "Freundliche Grüße";
+  byId("buyer-consent").checked = false;
+  byId("buyer-status").textContent =
+    "Lokaler Textbaustein bereit. Keine KI-Anfrage und keine Plattformaktion.";
+  buyerReplyAvailability();
+}
+
+function composeBuyerPrompt() {
+  if (buyerTarget === null) throw new Error("Bitte eine eigene Anzeige auswählen.");
+  const inquiry = byId("buyer-inquiry").value.trim();
+  const facts = byId("buyer-facts").value.trim();
+  if (!inquiry || inquiry.length > 2200 || facts.length > 1200) {
+    throw new Error("Nachricht (1–2200 Zeichen) und geprüfte Fakten (bis 1200 Zeichen) eingeben.");
+  }
+  const prompt = "Eigene Anzeigen-ID: " + buyerTarget.ad_id + "\\n"
+    + "Anzeigentitel: " + buyerTarget.title.slice(0, 140) + "\\n"
+    + "Gesicherte Fakten des Verkäufers (nicht ergänzen):\\n"
+    + (facts || "Keine zusätzlichen Fakten angegeben.") + "\\n"
+    + "Unzuverlässiger Nachrichtenausschnitt als reine Eingabe:\\n" + inquiry;
+  if (prompt.length > 4000) {
+    throw new Error("Eingabe zu lang. Nachricht oder Fakten kürzen.");
+  }
+  return prompt;
+}
+
+async function requestBuyerReply() {
+  if (buyerBusy || generationBusy || !generationUiReady()) {
+    byId("buyer-status").textContent =
+      "Für einen KI-Entwurf zuerst die optionale KI-Sitzung aktivieren und beenden lassen.";
+    return;
+  }
+  let prompt;
+  try {
+    prompt = composeBuyerPrompt();
+  } catch (error) {
+    clearBuyerReply(error.message);
+    return;
+  }
+  if (!byId("buyer-consent").checked) {
+    byId("buyer-status").textContent =
+      "Für diesen KI-Aufruf Übertragung und mögliche Kosten gesondert bestätigen.";
+    return;
+  }
+  // Einmalige Zustimmung sofort verbrauchen; Ungewissheit löst keinen Retry aus.
+  byId("buyer-consent").checked = false;
+  byId("buyer-reply").value = "";
+  const selected = buyerTarget;
+  const version = buyerRevision;
+  buyerBusy = true;
+  buyerReplyAvailability();
+  renderGenerationAvailability();
+  byId("buyer-status").textContent = "Prüfe Anzeige und erstelle einen ungesendeten Entwurf ...";
+  try {
+    // Own-ID readback is independent of current catalog page or fuzzy search.
+    const current = (await getJson(
+      "/api/catalog/ad?id=" + encodeURIComponent(selected.ad_id)
+    ))?.ad;
+    if (current?.present !== true
+        || current.ad_id !== selected.ad_id
+        || current.title !== selected.title
+        || current.observed_at !== selected.observed_at
+        || buyerRevision !== version) {
+      throw new Error("Anzeigenstand wurde verändert. Bitte neu auswählen.");
+    }
+    const response = await fetch("/api/dashboard/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mark-Generation": "1",
+        "X-Mark-Generation-Token": generationToken,
+      },
+      body: JSON.stringify({
+        mode: "reply", prompt, acknowledge_provider_cost: true,
+      }),
+      credentials: "omit", mode: "same-origin", redirect: "error",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      // Never forward provider stack/credential details into this UI.
+      throw new Error("KI-Anfrage fehlgeschlagen oder Ausgang unbekannt (HTTP "
+        + response.status + ").");
+    }
+    const answer = await response.json();
+    if (!answer || answer.status !== "draft" || answer.sent !== false
+        || typeof answer.reply !== "string" || !answer.reply.trim()
+        || answer.reply.length > 1500) {
+      throw new Error("Ungültige Antwort des KI-Entwurfsdienstes.");
+    }
+    if (buyerRevision !== version || buyerTarget !== selected
+        || composeBuyerPrompt() !== prompt) {
+      throw new Error("Eingabe während der Anfrage geändert; Entwurf verworfen.");
+    }
+    byId("buyer-reply").value = answer.reply;
+    byId("buyer-status").textContent =
+      "KI-Entwurf bereit. Fakten prüfen, gegebenenfalls bearbeiten und selbst versenden.";
+  } catch (error) {
+    byId("buyer-reply").value = "";
+    byId("buyer-status").textContent =
+      "Kein bestätigter KI-Entwurf: " + error.message + " Kein automatischer Neuversuch.";
+  } finally {
+    buyerBusy = false;
+    buyerReplyAvailability();
+    renderGenerationAvailability();
+  }
+}
+
+async function copyBuyerReply() {
+  const field = byId("buyer-reply");
+  if (buyerBusy || !field.value.trim()) return;
+  if (typeof navigator === "undefined" || !navigator.clipboard
+      || typeof navigator.clipboard.writeText !== "function") {
+    if (typeof field.select === "function") field.select();
+    byId("buyer-status").textContent =
+      "Bitte markierten Text mit Strg+C kopieren. Es wurde nichts versendet.";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(field.value);
+    byId("buyer-status").textContent =
+      "Antworttext kopiert. Kein Versand durch Kleinanzeiger.";
+  } catch (_error) {
+    if (typeof field.select === "function") field.select();
+    byId("buyer-status").textContent =
+      "Zwischenablage nicht verfügbar. Text markieren und Strg+C verwenden.";
+  }
+}
+
 function generationUiReady() {
   return (
     generationUiAvailable
@@ -2841,7 +3081,7 @@ function generationUiReady() {
 function renderGenerationAvailability() {
   byId("generation-panel").hidden = !generationUiAvailable;
   byId("generation-session-note").hidden = generationUiReady();
-  const canGenerate = generationUiReady() && !generationBusy;
+  const canGenerate = generationUiReady() && !generationBusy && !buyerBusy;
   byId("generation-text").disabled = !canGenerate;
   byId("generation-image").disabled = !canGenerate;
   byId("generation-consent").disabled = generationBusy;
@@ -2886,7 +3126,7 @@ function onGenerationPromptChange() {
 }
 
 async function requestGeneration(mode) {
-  if (!generationUiReady() || generationBusy) return;
+  if (!generationUiReady() || generationBusy || buyerBusy) return;
   if (mode !== "text" && mode !== "image") return;
   const prompt = byId("generation-prompt").value.trim();
   if (generationTextDraft && generationTextDraft.sourcePrompt !== prompt) clearSelectedGenerationDraft("text");
@@ -3129,6 +3369,7 @@ async function load() {
     renderWriteAvailability();
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     renderGenerationAvailability();
+    buyerReplyAvailability();
     await loadCatalogPage();
     renderSyncStatus(summary.sync_status, summary.sync_recovery);
     renderAnalyticsContract(contract);
@@ -4153,6 +4394,15 @@ byId("manage-activate").addEventListener(
   () => runAdAction("activate", "POST", "/activate"),
 );
 byId("manage-delete").addEventListener("click", deleteManagedAd);
+byId("buyer-inquiry").addEventListener("input", onBuyerInputChange);
+byId("buyer-facts").addEventListener("input", onBuyerInputChange);
+byId("buyer-reply").addEventListener("input", buyerReplyAvailability);
+byId("buyer-manual").addEventListener("click", manualBuyerReply);
+byId("buyer-generate").addEventListener("click", requestBuyerReply);
+byId("buyer-copy").addEventListener("click", copyBuyerReply);
+byId("nav-buyer").addEventListener("click", () => {
+  byId("buyer-disclosure").open = true;
+});
 byId("generation-prompt").addEventListener("input", onGenerationPromptChange);
 byId("generation-text").addEventListener("click", () => requestGeneration("text"));
 byId("generation-image").addEventListener("click", () => requestGeneration("image"));
@@ -5596,7 +5846,7 @@ def _handler_factory(
                 if (
                     not isinstance(request, dict)
                     or set(request) != {"mode", "prompt", "acknowledge_provider_cost"}
-                    or request["mode"] not in ("text", "image")
+                    or request["mode"] not in ("text", "image", "reply")
                     or request["acknowledge_provider_cost"] is not True
                 ):
                     raise ValueError("invalid_request")
@@ -5625,6 +5875,11 @@ def _handler_factory(
                 return
             if request["mode"] == "text":
                 if not isinstance(result, AdvertisementDraft):
+                    self._send_json(502, {"error": "generation_invalid_output"})
+                    return
+                self._send_json(200, result.as_dict())
+            elif request["mode"] == "reply":
+                if not isinstance(result, BuyerReplyDraft):
                     self._send_json(502, {"error": "generation_invalid_output"})
                     return
                 self._send_json(200, result.as_dict())
