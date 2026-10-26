@@ -473,7 +473,7 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
         with urlopen(self.base + "/api/dashboard/config", timeout=2) as response:
             self.assertEqual(
                 json.loads(response.read()),
-                {"write_ui_available": True},
+                {"write_ui_available": True, "portfolio_jobs_available": True},
             )
 
         blocked = Request(

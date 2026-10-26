@@ -14,7 +14,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
     def test_installer_verifies_pinned_wheel_before_network_or_setup(self):
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
         self.assertIn("kleinanzeiger-0.1.8-py3-none-any.whl", script)
-        self.assertIn(r"kleinanzeiger-0\.1\.7-py3-none-any\.whl", script)
+        self.assertIn(r"kleinanzeiger-0\.1\.8-py3-none-any\.whl", script)
         self.assertNotIn(r"kleinanzeiger-0\.1\.3-py3-none-any\.whl", script)
         self.assertIn("SHA256SUMS.txt", script)
         self.assertLess(script.index("Get-FileHash"), script.index("Invoke-WebRequest"))
