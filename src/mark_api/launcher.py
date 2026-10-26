@@ -685,6 +685,12 @@ def build_product_launcher(
         }
         if generation_access is not None:
             dashboard_options["generation_access"] = generation_access
+        # Reuse the native product's shared, serialized CDP writer target;
+        # independent A6/witness frontends cannot expose this read shortcut.
+        if enable_writes and fence_witness is None:
+            manual_sync = getattr(write_runtime, "sync_owner_inventory", None)
+            if callable(manual_sync):
+                dashboard_options["sync_once"] = manual_sync
         if public_origin_port is not None:
             dashboard_options["public_origin_port"] = public_origin_port
         server = dashboard_factory(store, **dashboard_options)
