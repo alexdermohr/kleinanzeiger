@@ -44,6 +44,7 @@ const document={
 };
 const window={addEventListener(){}};
 const sent=[];
+let failNextOnce=false;
 const ad=(id,title,state="active")=>({
   ad_id:id,title,description:"Details",present:state!=="absent",
   lifecycle_state:state,views:12,watch_count:1,reply_count:0,
@@ -57,6 +58,10 @@ async function fetch(path){
   const status=u.searchParams.get("status");
   const search=u.searchParams.get("q");
   const after=u.searchParams.get("after");
+  if (after==="10001" && failNextOnce) {
+    failNextOnce=false;
+    throw new Error("synthetic transport failure");
+  }
   let answer;
   if(search==="Tisch" && status==="paused"){
     answer={ads:[ad("10002","Tisch","paused")],has_more:false,next_after:null};
@@ -86,6 +91,11 @@ elements.get("catalog-status").value="all";
   cb.checked=true;
   cb.listeners.change();
   assert.equal(elements.get("catalog-selected-count").textContent,"1 ausgewählt");
+  failNextOnce=true;
+  assert.equal(await vm.runInContext("nextCatalogPage()",context),false);
+  assert.equal(elements.get("catalog-page-label").textContent,"Seite 1");
+  assert.equal(elements.get("ad-cards").children.length,1);
+  assert.equal(elements.get("catalog-next").disabled,false);
   assert.equal(await vm.runInContext("nextCatalogPage()",context),true);
   assert.equal(elements.get("catalog-page-label").textContent,"Seite 2");
   assert.equal(elements.get("ad-cards").children.length,1);
@@ -108,7 +118,7 @@ elements.get("catalog-status").value="all";
 """
         result = subprocess.run(
             [shutil.which("node") or "node", "-e", harness],
-            input=_DASHBOARD_JS, text=True, capture_output=True,
+            input=_DASHBOARD_JS, text=True, encoding="utf-8", capture_output=True,
             timeout=25, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

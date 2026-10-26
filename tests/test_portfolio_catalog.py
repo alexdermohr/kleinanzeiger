@@ -150,6 +150,13 @@ class PortfolioCatalogTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertEqual(response, {"error": "invalid_catalog_query"})
         self.assertEqual(self.get("/api/catalog/ads?status=unknown")[0], 200)
+        # Percent encoding can be much longer than the decoded valid search.
+        self.assertEqual(
+            self.get("/api/catalog/ads?q=" + quote("猫" * 60))[0], 200,
+        )
+        self.assertEqual(
+            self.get("/api/catalog/ads?q=" + quote("😀" * 120))[0], 200,
+        )
 
     def test_corrupt_native_key_fails_closed(self) -> None:
         self.add("10001", "Vase")

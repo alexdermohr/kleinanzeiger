@@ -1264,26 +1264,55 @@ async function loadCatalogPage({reset = false} = {}) {
   }
 }
 
-function searchCatalog() {
-  catalogFilters = {
-    search: byId("catalog-search").value.trim(),
-    status: byId("catalog-status").value,
+// Navigation is transactional: on a failed GET, old rows and their page
+// label/cursor remain bound. A newer search must never be rolled back by an
+// older HTTP completion.
+async function changeCatalogPage({index, cursors, filters, reset = false}) {
+  const previous = {
+    index: catalogPageIndex, cursors: catalogCursors.slice(),
+    nextAfter: catalogNextAfter, filters: catalogFilters,
   };
-  return loadCatalogPage({reset: true});
+  catalogPageIndex = index;
+  catalogCursors = cursors;
+  catalogFilters = filters;
+  const request = loadCatalogPage({reset});
+  const generation = catalogGeneration;
+  const success = await request;
+  if (!success && generation === catalogGeneration) {
+    catalogPageIndex = previous.index;
+    catalogCursors = previous.cursors;
+    catalogNextAfter = previous.nextAfter;
+    catalogFilters = previous.filters;
+    renderCatalogNavigation();
+  }
+  return success;
+}
+
+function searchCatalog() {
+  return changeCatalogPage({
+    index: 0, cursors: [""], reset: true,
+    filters: {
+      search: byId("catalog-search").value.trim(),
+      status: byId("catalog-status").value,
+    },
+  });
 }
 
 function nextCatalogPage() {
   if (catalogLoading || catalogNextAfter === null) return;
-  catalogCursors = catalogCursors.slice(0, catalogPageIndex + 1);
-  catalogCursors.push(catalogNextAfter);
-  catalogPageIndex += 1;
-  return loadCatalogPage();
+  const cursors = catalogCursors.slice(0, catalogPageIndex + 1);
+  cursors.push(catalogNextAfter);
+  return changeCatalogPage({
+    index: catalogPageIndex + 1, cursors, filters: catalogFilters,
+  });
 }
 
 function previousCatalogPage() {
   if (catalogLoading || catalogPageIndex <= 0) return;
-  catalogPageIndex -= 1;
-  return loadCatalogPage();
+  return changeCatalogPage({
+    index: catalogPageIndex - 1,
+    cursors: catalogCursors.slice(), filters: catalogFilters,
+  });
 }
 
 function clearCatalogSelection() {
@@ -3641,7 +3670,9 @@ def _handler_factory(
                 return
             if path == "/api/catalog/ads":
                 # Observation-only, strict URL schema; never authorize a Write.
-                if len(target.query) > 512:
+                # 120 Unicode scalar characters may occupy up to 1,440
+                # percent-encoded bytes; include the independently bounded cursor.
+                if len(target.query) > 4096:
                     self._send_json(400, {"error": "invalid_catalog_query"})
                     return
                 try:
