@@ -14,13 +14,13 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.7</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.8</p>
 <h1>Kleinanzeiger – Benutzerhandbuch</h1>
 <p>Kleinanzeiger verwaltet Ihre eigenen Anzeigen, zeigt Kennzahlen, unterstützt Entwürfe mit KI und sichert lokale Daten. Alle häufigen Aufgaben starten über das Fenster <strong>Kleinanzeiger</strong>.</p>
-<nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
+<nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#stapel">Stapelaufträge</a><a href="#verkauf">Verkäufe & Lager</a><a href="#controlling">Controlling</a><a href="#vorlagen">Vorlagen</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
 <h2 id="install">1. Installation und erster Start</h2>
 <ol>
-<li>Das offizielle <strong>Kleinanzeiger-v0.1.7-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
+<li>Das offizielle <strong>Kleinanzeiger-v0.1.8-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
 <li><strong>Kleinanzeiger.cmd</strong> doppelklicken. Das Windows-Kontrollfenster erscheint.</li>
 <li><strong>Einrichten und starten</strong> klicken. Fehlendes Python 3.12/3.13 sowie Chrome werden bei Bedarf über geprüfte offizielle Dateien bereitgestellt. Eine Internetverbindung ist dafür nötig.</li>
 <li>Im eigens gestarteten Chrome-Fenster bei <strong>kleinanzeigen.de</strong> anmelden; gegebenenfalls die Konto-Bestätigung selbst durchführen. Kleinanzeiger speichert kein Kontopasswort.</li>
@@ -102,5 +102,39 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <li>Kleinanzeiger neu starten; Dashboard → <strong>Artikelentwürfe</strong> öffnen, suchen und bei Bedarf <strong>In neue Anzeige</strong> wählen. Danach Bilder selbst auswählen und die Veröffentlichung gesondert auslösen.</li>
 <li><strong>Entwürfe exportieren</strong> erstellt eine eigene CSV, ohne bestehende Dateien zu überschreiben.</li></ol>
 <p class="note">Artikelnummern (SKUs) sind keine Plattform-Anzeigen-IDs. Die optionale Bildspalte enthält ausschließlich Dateinamen als Hinweise; Bilder werden weder automatisch eingelesen noch hochgeladen. Duplikate mit unterschiedlichen Daten blockieren den gesamten Import, Excel-Formeln sind unzulässig.</p>
-<footer>Kleinanzeiger v0.1.7 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<h2 id="stapel">10. KI-Stapelaufträge für große lokale Artikelbestände</h2>
+<p>Unter <strong>Artikelentwürfe</strong> bis zu 5.000 Artikel einzeln über mehrere Seiten markieren. Alternativ unter <strong>KI-Stapelaufträge</strong> alle Treffer des zuletzt angewandten Entwurfsuchfilters wählen. Eine SKU ist eine eigene Artikelnummer und keine Kleinanzeigen-Anzeigen-ID.</p>
+<ol>
+<li>Eine gemeinsame Verbesserungsanweisung eingeben und ein <strong>USD-Gesamtbudget</strong> sowie mindestens <strong>0,20 USD pro möglicher KI-Anfrage</strong> reservieren. <strong>Auftrag lokal anlegen</strong> speichert nur den Auftrag; es entstehen noch keine KI-Kosten.</li>
+<li>Den gewünschten Auftrag auswählen und <strong>Auftrag freigeben</strong>. Erst mit zuvor eingerichtetem OpenAI-API-Schlüssel erscheint die ausdrücklich bestätigungspflichtige Generierung.</li>
+<li>Aktuelle Modellpreise prüfen, die externe Übertragung der Produktinformationen bestätigen und <strong>Nächsten Vorschlag</strong> oder <strong>KI-Stapelverarbeitung</strong> für maximal 10 nacheinander ausgeführte Anfragen wählen. Die Anzahl und die Budgetreservierung nochmals bestätigen. Im gestarteten Windows-Produkt sind maximal 100 versuchte Text-/Bild-KI-Anfragen pro Sitzung zugelassen; auch unklare Ergebnisse verbrauchen Kontingent.</li>
+<li>Ein laufender Stapel lässt sich nach dem gerade aktiven Aufruf <strong>stoppen</strong>. Bei Kommunikationsfehler, unklarem Ergebnis oder Budgetgrenze werden keine weiteren Anfragen automatisch gesendet. Bereits mögliche Gebühren bleiben abzuklären; niemals blind wiederholen.</li>
+<li>Vorhandene Titel und Beschreibungen mit den KI-Vorschlägen vergleichen, passende Vorschläge auswählen und einzeln <strong>freigeben</strong> oder <strong>ablehnen</strong>. <strong>Freigegebene Änderungen nur lokal übernehmen</strong> ändert nach zusätzlicher Bestätigung ausschließlich unveränderte Entwurfsdaten. Keine automatische Plattform-Veröffentlichung oder Massenänderung.</li>
+</ol>
+<p class="note">Die Budgetanzeige ist eine konservative, aus gemeldeten Provider-Tokens errechnete USD-Schätzung mit Sicherheitszuschlag, keine unabhängig geprüfte OpenAI-Rechnung und keine garantierte Kostenobergrenze. Das Produkt verarbeitet Titel und Texte; sensible Kontoinformationen gehören nicht in Produktbeschreibungen.</p>
+<h2 id="verkauf">11. Verkäufe, Reservierungen und Lager (lokal)</h2>
+<ol>
+<li>Den eigenen Anzeigenbestand über <strong>Mit Kleinanzeigen abgleichen</strong> aktualisieren.</li>
+<li>Im Dashboard <strong>Verkäufe &amp; Lager</strong> aufrufen und die gewünschte eigene Anzeige auswählen. Kleinanzeiger prüft den aktuellen lokalen Versionsstand.</li>
+<li>Den Zustand <strong>Verfügbar</strong>, <strong>Reserviert</strong> oder <strong>Verkauft</strong> setzen. Optional Lagerort und eine kurze eigene Notiz eintragen.</li>
+<li>Bei <strong>Verkauft</strong> den manuell bekannten Erlös und wahlweise Einkaufskosten eintragen. Ein leeres Kostenfeld bedeutet <strong>unbekannt</strong>, nicht null. <strong>Lokalen Verkaufsstand speichern</strong> bestätigen.</li>
+</ol>
+<p class="note">Dies sind eigene lokale Verkaufsvermerke, keine bestätigten Kleinanzeigen-Verkäufe und keine Plattform-Statusänderungen. E-Mails allein bestätigen weder Käufer noch Verkauf. Keine vertraulichen Kundendaten in Notizen speichern.</p>
+<h2 id="controlling">12. Portfolio-Controlling und CSV-Berichte</h2>
+<ol>
+<li>Im Dashboard <strong>Controlling</strong> öffnen, <strong>7, 30 oder 90 Tage</strong> auswählen und <strong>Bericht berechnen</strong> anklicken.</li>
+<li>Importierte E-Mail-Nachrichten, unterschiedliche importierte Gespräche und Tageswerte im gewählten Zeitraum mit dem Quellenhinweis prüfen.</li>
+<li>Manuelle Verkaufs-/Reservierungsbestände, bekannte Erlöse und Kosten sowie geschätzte KI-Ausgaben getrennt lesen. <strong>Tageszahlen als CSV</strong> exportiert nur die Tagesanzahlen.</li>
+</ol>
+<p class="note">Der Zeitfilter betrifft importierte Nachrichten, nicht die zeitliche Zuordnung manueller Verkäufe. Unbekannte Kosten sind kein Gewinn von null. KI-Ausgaben in USD sind Schätzungen, Erlöse in EUR werden nicht ohne Kurs umgerechnet. Es gibt noch keine verlässlich belegte Postfach-Vollstatistik, keine Preisoptimierung und keinen Kausalitätsnachweis.</p>
+<h2 id="vorlagen">13. Wiederverwendbare KI-Arbeitsvorlagen und Prüfhinweise</h2>
+<ol>
+<li>Im Bereich <strong>KI-Stapelaufträge</strong> → <strong>Arbeitsvorlagen &amp; Prüfhinweise</strong> eine passende Anweisung eingeben und mit <strong>Aktuelle Anweisung speichern</strong> unter einem eindeutigen Namen sichern.</li>
+<li>Eine von maximal <strong>100 Vorlagen</strong> auswählen und <strong>Als Auftragstext übernehmen</strong> bestätigen. Vorlagen lassen sich mit Revisionsprüfung ändern und nach Bestätigung löschen.</li>
+<li>Bei Bedarf die passiv angezeigten Hinweise für offene KI-Vorschläge, unklare KI-Ergebnisse, fehlende Verkaufskosten und Reservierungen älter als 14 Tage prüfen.</li>
+</ol>
+<p>Die Vorlage startet keinen Auftrag. Prüfhinweise führen keine Plattformaktionen und keine kostenpflichtige KI-Verarbeitung aus. Wiederkehrende autonome Arbeitsregeln sind noch nicht enthalten.</p>
+<h2>14. Grenzen der aktuellen Ausgabe</h2>
+<p><strong>Noch nicht enthalten:</strong> Kontogebundene vollständige Nachrichtenkonversationen und ein kontrollierter Nachrichtenversand, automatische Plattform-Stapeländerungen/-veröffentlichungen, wiederkehrende KI-Autopilot-Regeln, eine unabhängig geprüfte Provider-Abrechnung sowie eine Freigabe auf Ihrem tatsächlichen Windows-Kunden-PC. Diese Funktionen dürfen nicht mit vorhandenen lokalen Notizen, KI-Vorschlägen oder simulierten Tests verwechselt werden.</p>
+<footer>Kleinanzeiger v0.1.8 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>

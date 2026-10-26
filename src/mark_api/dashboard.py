@@ -2923,7 +2923,7 @@ async function load() {
     writeUiAvailable = dashboardConfig.write_ui_available === true;
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
-    jobsAvailable = false;
+    jobsAvailable = dashboardConfig.portfolio_jobs_available === true;
     byId("job-provider-control").hidden =
       !(jobsAvailable && generationUiAvailable);
     byId("sync-now").hidden = !manualSyncAvailable;
@@ -2931,17 +2931,6 @@ async function load() {
     const genNavigation = optionalById("nav-generation");
     if (genNavigation) genNavigation.hidden = !generationUiAvailable;
     await refreshPendingWrites();
-    // Probe the authenticated local-only job read route, without changing
-    // the established /api/dashboard/config wire contract or guessing that
-    // independently protected owner frontends expose the local SQLite job API.
-    if (writeUiReady()) {
-      try {
-        const available = await _jobGet("/api/portfolio/jobs?limit=1");
-        jobsAvailable = available && Array.isArray(available.jobs);
-      } catch (_error) {
-        jobsAvailable = false;
-      }
-    }
     byId("jobs-panel").hidden = !jobsAvailable;
     byId("nav-jobs").hidden = !jobsAvailable;
     salesAvailable = jobsAvailable;
@@ -4862,6 +4851,11 @@ def _handler_factory(
                     200,
                     {
                         "write_ui_available": write_proxy is not None,
+                        **(
+                            {"portfolio_jobs_available": True}
+                            if type(store) is SnapshotStore and write_proxy is not None
+                            else {}
+                        ),
                         **(
                             {"generation_ui_available": True}
                             if generation_access is not None else {}

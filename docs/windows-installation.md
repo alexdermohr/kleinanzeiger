@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.7 – Windows 11
+# Kleinanzeiger v0.1.8 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -60,6 +60,10 @@ Anzeigen werden weiterhin ausdrücklich über **Bearbeiten** verwaltet.
 Über **Mit Kleinanzeigen abgleichen** werden eigene Anzeigen direkt aus der
 angemeldeten Browser-Sitzung neu gelesen. **Ansicht neu laden** aktualisiert
 hingegen ausschließlich die lokal gespeicherte Darstellung.
+
+## Lokale KI-Stapelaufträge
+
+Im Dashboard **KI-Stapelaufträge** öffnen. Bis zu 5.000 lokale CSV-/XLSX-Entwürfe zu einem Auftrag sammeln, Originale und Vorschläge prüfen, einzeln freigeben und nur lokal übernehmen. Optional können nach eigener Modell-, Datenübertragungs- und Budgetbestätigung bis zu zehn KI-Aufrufe nacheinander ausgeführt werden; weitere Aufrufe lassen sich stoppen. Es werden keine Anzeigen automatisch massenhaft veröffentlicht oder gelöscht. Providerkosten sind nur konservativ geschätzt und nicht garantiert.
 
 ## Bestehende Daten und Updates
 

@@ -18,7 +18,7 @@ lokaler Mehrfachauswahl. Ein CSV-Export enthält ausschließlich ausgewählte
 Anzeigen-IDs; Auswahl löst **keine** Plattformaktion aus. Die frühere
 `/api/ads`-Schnittstelle bleibt für bisherige Integrationen kompatibel.
 
-## Native Windows-Kundenanwendung (ab v0.1.7)
+## Native Windows-Kundenanwendung (ab v0.1.8)
 
 Die vollständige Windows-11-x64-Ausgabe benötigt **kein WSL**.
 Das signatur- und prüfsummengebundene Windows-Paket ist unter

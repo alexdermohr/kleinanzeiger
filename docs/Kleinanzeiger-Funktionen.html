@@ -14,7 +14,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.7</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.8</p>
 <h1>Funktionsübersicht</h1>
 <p>Die folgende Übersicht unterscheidet Bedienoberfläche, unterstützte Funktion und praktische Grenzen.</p>
 <table><tr><th>Bereich</th><th>Funktion</th><th>Wo bedienen?</th></tr>
@@ -28,24 +28,39 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <tr><td>E-Mail</td><td>Eigene lokal gespeicherte <code>.eml</code>-Benachrichtigungen importieren und Reaktionen zuordnen</td><td>Kleinanzeiger-Fenster → E-Mails importieren, bei beendetem Produkt</td></tr>
 <tr><td>Vergleichsmerkmale</td><td>Bildtyp, Stadt, Texttyp, Titeltyp pro vorhandener oder E-Mail-belegter Anzeige zuweisen und löschen</td><td>Kleinanzeiger-Fenster → Anzeigen vergleichen, bei beendetem Produkt</td></tr>
 <tr><td>KI-Texte</td><td>Promptbasierte Titel und Beschreibungen als bearbeitbare, unveröffentlichte Entwürfe</td><td>KI einrichten → Dashboard → KI-Assistent</td></tr>
+<tr><td>KI-Stapelaufträge</td><td>Bis 5.000 eigene Entwürfe pro Auftrag, sichere Freigaben, 1 oder bis 10 ausdrücklich bestätigte KI-Vorschläge nacheinander, lokale Übernahme ohne Plattformänderung</td><td>Dashboard → KI-Stapelaufträge</td></tr>
 <tr><td>KI-Bilder</td><td>Bildentwürfe generieren und in lokale Bildauswahl übernehmen</td><td>Dashboard → KI-Assistent → Als Anzeigenbild übernehmen</td></tr>
+<tr><td>Verkäufe &amp; Lager</td><td>Eigene Anzeigen lokal als verfügbar, reserviert oder verkauft verwalten, Lagerorte, manuelle Erlöse und bekannte Kosten mit Revisionsprüfung dokumentieren; keine Plattformänderung</td><td>Dashboard → Verkäufe &amp; Lager</td></tr>
+<tr><td>Controlling</td><td>7-/30-/90-Tage-Berichte über importierte Nachrichten und Gespräche, täglicher CSV-Export, getrennte manuelle Verkaufszahlen und geschätzte KI-Kosten</td><td>Dashboard → Controlling</td></tr>
+<tr><td>KI-Arbeitsvorlagen</td><td>Bis zu 100 lokale Vorlagen mit Änderungsprüfung; auf Wunsch in Auftragstexte übernehmen, ohne KI-Aufruf</td><td>Dashboard → KI-Stapelaufträge → Arbeitsvorlagen &amp; Prüfhinweise</td></tr>
+<tr><td>Passive Prüfhinweise</td><td>Offene KI-Vorschläge, unklare KI-Ergebnisse, Verkäufe ohne bekannte Kosten und alte Reservierungen anzeigen</td><td>Dashboard → Arbeitsvorlagen &amp; Prüfhinweise</td></tr>
 <tr><td>Backup</td><td>SQLite-Online-Sicherung einschließlich bestätigter WAL-Inhalte, SHA-256 und Manifest</td><td>Kleinanzeiger-Fenster → Sicherung erstellen</td></tr>
 <tr><td>Restore</td><td>Nur in neue Datenbank, nie über bestehende Kundendaten</td><td>Kleinanzeiger-Fenster → Weitere Optionen → Sicherung wiederherstellen</td></tr>
 <tr><td>Hilfe</td><td>Benutzerhandbuch und vollständige Featureliste im Kundenpaket</td><td>Kleinanzeiger-Fenster → Handbuch / Funktionen</td></tr></table>
 <h2>Wichtige Betriebsregeln</h2>
 <ul>
-<li>Die seitenübergreifende Arbeitsauswahl exportiert nur IDs; Bulk-Write und KI-Stapelaufträge sind späterer Roadmap-Umfang.</li>
+<li>Der Anzeigenkatalog exportiert nur Plattform-IDs. KI-Stapelaufträge bearbeiten getrennte lokale Artikelentwürfe. Plattform-Massenwrites bleiben ein noch nicht fertiger Roadmap-Schritt.</li>
 <li>Wirkliche Schreibaktionen werden bewusst vom Nutzer ausgelöst und bei unklarem Ausgang nicht blind wiederholt.</li>
 <li>E-Mail-Import und Labelpflege erfolgen als getrennte lokale SQLite-Aktionen nur bei beendetem Kleinanzeiger; danach den Start erneut ausführen.</li>
 <li>Für einen Vergleich müssen Werte vorhanden und Anzeigen einer Dimension zugeordnet sein. Reaktions- und E-Mail-Metriken bleiben getrennt.</li>
 <li>Die Auswahl einer Metrik erzeugt ein deskriptives Ranking, keine automatische Qualitäts- oder Kausalitätsbehauptung.</li>
-<li>Jeder kostenpflichtige KI-Aufruf erfordert eine ausdrückliche Einzelbestätigung. KI-Ergebnisse veröffentlichen nicht automatisch.</li>
+<li>Kostenpflichtige KI-Aufrufe erfordern eine bewusste Freigabe für eine Einzelanfrage oder maximal zehn nacheinander ausgeführte Anfragen. KI-Ergebnisse veröffentlichen nicht automatisch.</li>
 <li>Vor Updates werden vorhandene Daten gesichert; Restore ersetzt keine bestehende Datenbank.</li>
 </ul>
+<p><strong>Weiterhin nicht verfügbar:</strong> vollständiges Konto-Nachrichtenpostfach mit Versand, automatische Massenänderungen an Plattformanzeigen, periodische Autopiloten, echte Provider-Rechnungsabstimmung und Kunden-PC-Endabnahme.</p>
 <h2>Abnahme und Grenzen</h2>
 <p>Die technische Windows-Veröffentlichung wird auf dem veröffentlichten Commit mit Windows- und Wheel-Tests sowie zustandsbehafteten synthetischen Plattform- und KI-Gegenstellen geprüft. Daraus folgt keine reale Kundenkontoprüfung und keine Testveröffentlichung auf einer echten Anzeige. Ein Login erfolgt ausschließlich durch den Benutzer.</p>
 
 <h2>CSV-/Excel-Artikelimport und lokale Entwürfe</h2>
 <p>Bis zu 5000 Artikel je CSV-/XLSX-Datei mit frei belegten, erkannten Pflichtspalten als <strong>unveröffentlichte Entwürfe</strong> vorbereiten. Vorschau mit SHA-256 und Duplikatprüfung, automatisches Backup vor atomarem Import, CSV-Export und paginierte Entwürfe-Liste im Dashboard. Ein ausdrücklicher Klick übernimmt einen Entwurf ins vorhandene Neuanzeigenformular, ohne eine Anzeige zu veröffentlichen. Bilddateinamen bleiben reine Hinweise; keine Massenveröffentlichung und keine kostenpflichtige KI bei Import.</p>
-<footer>Kleinanzeiger v0.1.7 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<h2>KI-Stapelaufträge auf lokalen Artikeldaten</h2>
+<p>Bis zu 5.000 lokale SKUs pro Auftrag (auch filterbar), dauerhafte Aufträge,
+Pause/Fortsetzen/Abbrechen, KI-Vorschläge mit Originalvergleich, Einzel-Freigabe
+und rein lokale atomare Übernahme. Optional lassen sich nach ausdrücklicher
+Budget- und Datentransferbestätigung bis zu zehn API-Generierungen nacheinander
+auslösen (Windows-Sitzung maximal 100 versuchte Anfragen); Stop und UNKNOWN
+beenden automatische Folgeaufrufe. OpenAI-Preise werden nur konservativ geschätzt,
+nicht als garantierte Abrechnung dargestellt. <strong>Nicht enthalten:</strong> Plattform-
+Massenveröffentlichung, automatisches Bulk-Löschen oder ungeprüfte Kontoänderungen.</p>
+<footer>Kleinanzeiger v0.1.8 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>

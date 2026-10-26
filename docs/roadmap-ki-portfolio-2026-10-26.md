@@ -166,7 +166,7 @@ sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
   geschützter Merge noch blockiert. v0.1.7 nicht als veröffentlicht
   kennzeichnen.
 - **P2:** Auf dem isolierten Entwicklungsbranch
-  feat/portfolio-ai-batch-source-20261026: lokale durable 5000er-Jobs,
+  feat/portfolio-ai-batch-20261026: lokale durable 5000er-Jobs,
   idempotente Auswahl, Budgetreserven, UNKNOWN-Quarantäne,
   50er-Vorschauen, Freigaben und atomare lokale Anwendung.
   Die zentrale Windows-Browseroberfläche bietet zusätzlich einzeln
