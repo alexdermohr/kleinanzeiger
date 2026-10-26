@@ -59,13 +59,13 @@ class NativeWindowsCustomerWorkerTests(unittest.TestCase):
 
         labelled = worker("Classify", {
             "ad_id": "1234567890",
-            "labels": {"city": 'Lübeck "Nord"', "image_type": 'Detail "Makro"'},
+            "labels": {"city": 'Łódź "Nord"', "image_type": 'Detail "Makro"'},
         })
         self.assertEqual(labelled.returncode, 0, labelled.stderr + labelled.stdout)
         self.assertIn("LABELS_OK", labelled.stdout)
         current = store.latest_classification_bounded("1234567890")
         self.assertIsNotNone(current)
-        self.assertEqual(current.city, 'Lübeck "Nord"')
+        self.assertEqual(current.city, 'Łódź "Nord"')
         self.assertEqual(current.image_type, 'Detail "Makro"')
 
         message = EmailMessage(policy=policy.default)
@@ -90,7 +90,7 @@ class NativeWindowsCustomerWorkerTests(unittest.TestCase):
         self.assertEqual(reactions[0].ad_id, "1234567890")
         backups = state / "Backups"
         self.assertTrue(list(backups.glob("*.sqlite.manifest.json")))
-        self.assertEqual(store.latest_classification_bounded("1234567890").city, 'Lübeck "Nord"')
+        self.assertEqual(store.latest_classification_bounded("1234567890").city, 'Łódź "Nord"')
 
 
 if __name__ == "__main__":
