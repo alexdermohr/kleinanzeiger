@@ -193,3 +193,9 @@ sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
   Keine behauptete Kausalität, kein automatischer Preis-/Titeltest;
   diese folgen erst nach zusätzlichen unabhängigen Datenquellen.
   Siehe docs/portfolio-controlling.md; noch kein Release.
+
+- **P5 Teilimplementation:** Bis zu 100 lokale KI-Arbeitsvorlagen,
+  Name/Anweisung mit CAS-Version und Idempotenz, sowie nur bei Bedarf
+  sichtbare lokale Hinweise zu Prüfaufträgen, UNKNOWN und fehlenden
+  Verkaufskosten. Kein Hintergrundjob, kein automatischer Provideraufruf
+  oder Plattformwrite. Siehe docs/portfolio-vorlagen.md; noch kein Release.

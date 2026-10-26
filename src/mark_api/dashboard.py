@@ -35,6 +35,7 @@ from .analytics import (
 from .portfolio_drafts import drafts_page
 from .portfolio_sales import SaleError, sale_detail, sales_page, sale_totals, update_manual_sale
 from .portfolio_reporting import PortfolioReportError, report as portfolio_report
+from .portfolio_templates import WorkTemplateError, attention_counts, list_templates, mutate_template
 from .portfolio_jobs import (
     PortfolioJobError, apply_approved_local, change_state, create_job, details as job_details,
     list_jobs, matching_draft_skus, process_one, recover_interrupted, review_items,
@@ -501,6 +502,27 @@ _DASHBOARD_HTML = """<!doctype html>
         <label>Gemeinsamer Verbesserungsauftrag
           <textarea id="job-instruction" maxlength="1500" rows="3" placeholder="Nur nachgewiesene Artikelmerkmale verwenden, Titel präzisieren, nichts hinzuerfinden."></textarea>
         </label>
+        <details id="work-templates-disclosure" class="feature-disclosure">
+          <summary><span>Arbeitsvorlagen & Prüfhinweise</span><small>Häufig genutzte KI-Anweisungen lokal speichern und offene Arbeiten anzeigen</small></summary>
+          <p class="muted">Gespeicherte Vorlagen erstellen weder Aufträge noch KI-Anfragen.
+          Vorschläge und unklare Ergebnisse müssen weiterhin einzeln geprüft werden.</p>
+          <div class="controls">
+            <label>Gespeicherte Vorlage
+              <select id="work-template-select"><option value="">Neue Vorlage</option></select>
+            </label>
+            <button id="work-template-use" type="button">Als Auftragstext übernehmen</button>
+            <button id="work-template-refresh" type="button">Aktualisieren</button>
+          </div>
+          <div class="controls">
+            <label>Vorlagenname (maximal 60 Zeichen)
+              <input id="work-template-name" type="text" maxlength="60" autocomplete="off" placeholder="Sachlich und kurz">
+            </label>
+            <button id="work-template-save" type="button">Aktuelle Anweisung speichern</button>
+            <button id="work-template-delete" type="button">Vorlage löschen</button>
+          </div>
+          <p id="work-template-feedback" role="status" aria-live="polite"></p>
+          <p id="work-attention" class="muted" role="status" aria-live="polite" hidden></p>
+        </details>
         <div class="controls">
           <label>Reserviertes Gesamtbudget (USD)
             <input id="job-budget-eur" type="number" min="0" max="1000000" step="0.01" value="2.00">
@@ -985,6 +1007,9 @@ let saleSaveBusy = false;
 let reportingAvailable = false;
 let reportData = null;
 let reportLoadSeq = 0;
+let workTemplates = [];
+let workTemplatePending = null;
+let workTemplateBusy = false;
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -3483,6 +3508,128 @@ if (jobsNavigation) jobsNavigation.addEventListener("click",() => {
 byId("jobs-disclosure").addEventListener("toggle",() => {
   if (byId("jobs-disclosure").open && !jobsLoaded) loadJobs();
 });
+async function loadWorkTemplates() {
+  if (!jobsAvailable || !writeUiReady()) return false;
+  try {
+    const [items,attention]=await Promise.all([
+      _jobGet("/api/portfolio/templates"),
+      _jobGet("/api/portfolio/attention"),
+    ]);
+    if (!items || !Array.isArray(items.templates) || items.templates.length>100) {
+      throw new Error("Ungültige Vorlagenliste");
+    }
+    workTemplates=items.templates;
+    const select=byId("work-template-select");
+    const before=select.value;
+    select.replaceChildren();
+    const empty=document.createElement("option");
+    empty.value="";
+    empty.textContent="Neue Vorlage";
+    select.append(empty);
+    for (const tpl of workTemplates) {
+      const entry=document.createElement("option");
+      entry.value=tpl.template_id;
+      entry.textContent=tpl.name;
+      select.append(entry);
+    }
+    select.value=workTemplates.some(t=>t.template_id===before)?before:"";
+    const counts=[
+      ["Unklare KI-Vorgänge",attention.unknown_ki_outcomes],
+      ["Vorschläge zur Prüfung",attention.proposals_to_review],
+      ["Verkäufe ohne bekannte Kosten",attention.manual_sales_missing_cost],
+      ["Über 14 Tage reservierte lokale Anzeigen",attention.old_local_reservations],
+    ];
+    const warnings=counts.filter(([,n])=>Number.isSafeInteger(n)&&n>0);
+    const notice=byId("work-attention");
+    notice.hidden=warnings.length===0;
+    notice.textContent=warnings.map(([label,n])=>label+": "+n).join(" · ");
+    byId("work-template-feedback").textContent=
+      workTemplates.length+" lokale Arbeitsvorlagen verfügbar.";
+    return true;
+  } catch (_error) {
+    byId("work-template-feedback").textContent=
+      "Lokale Vorlagen/Prüfhinweise nicht verfügbar; Daten bleiben unverändert.";
+    return false;
+  }
+}
+function selectedWorkTemplate() {
+  const id=byId("work-template-select").value;
+  return workTemplates.find(t=>t.template_id===id)||null;
+}
+function useWorkTemplate() {
+  const tpl=selectedWorkTemplate();
+  if (!tpl) {
+    byId("work-template-feedback").textContent="Zuerst eine Vorlage auswählen.";
+    return;
+  }
+  if (byId("job-instruction").value.trim() && !window.confirm(
+      "Vorhandenen Auftragstext durch die gespeicherte Vorlage ersetzen?")) return;
+  byId("job-instruction").value=tpl.instruction;
+  byId("work-template-name").value=tpl.name;
+  byId("work-template-feedback").textContent=
+    "Vorlage lokal eingefügt; Auftrag und KI-Kosten werden nicht automatisch gestartet.";
+}
+async function mutateWorkTemplate(remove=false) {
+  if (workTemplateBusy || !jobsAvailable || !writeUiReady()) return;
+  const selected=selectedWorkTemplate();
+  const payload={
+    template_id:selected?.template_id||null,
+    name:remove?null:byId("work-template-name").value.trim(),
+    instruction:remove?null:byId("job-instruction").value.trim(),
+    expected_revision:selected?.revision||0,
+    delete:remove,
+  };
+  if (remove && !selected) {
+    byId("work-template-feedback").textContent="Bitte zuerst eine Vorlage auswählen.";
+    return;
+  }
+  if (remove && !window.confirm("Diese lokale Arbeitsvorlage löschen?")) return;
+  if (!remove && selected && !window.confirm(
+      "Die gespeicherte Vorlage '"+selected.name+"' aktualisieren?")) return;
+  const fingerprint=JSON.stringify(payload);
+  if (workTemplatePending?.fingerprint!==fingerprint) {
+    workTemplatePending={fingerprint,key:_newJobRequestKey()};
+  }
+  workTemplateBusy=true;
+  byId("work-template-save").disabled=true;
+  byId("work-template-delete").disabled=true;
+  try {
+    const response=await fetch("/api/portfolio/templates/mutate",{
+      method:"POST",cache:"no-store",
+      headers:{..._jobHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({...payload,request_key:workTemplatePending.key}),
+    });
+    if (!response.ok) {
+      throw new Error("Vorlagenstand nicht bestätigt. Zuerst prüfen, keine neue Anfrage erzeugen.");
+    }
+    const result=await response.json();
+    if (result.platform_writes!==0) throw new Error("Unerwartete Antwort");
+    workTemplatePending=null;
+    const newId=remove?"":result.template_id;
+    await loadWorkTemplates();
+    byId("work-template-select").value=newId;
+    if (remove) byId("work-template-name").value="";
+    byId("work-template-feedback").textContent=
+      remove?"Vorlage lokal gelöscht.":"Arbeitsanweisung als lokale Vorlage gespeichert.";
+  } catch (error) {
+    byId("work-template-feedback").textContent=error.message;
+  } finally {
+    workTemplateBusy=false;
+    byId("work-template-save").disabled=false;
+    byId("work-template-delete").disabled=false;
+  }
+}
+byId("work-template-refresh").addEventListener("click",loadWorkTemplates);
+byId("work-template-select").addEventListener("change",() => {
+  const item=selectedWorkTemplate();
+  byId("work-template-name").value=item?.name||"";
+});
+byId("work-template-use").addEventListener("click",useWorkTemplate);
+byId("work-template-save").addEventListener("click",()=>mutateWorkTemplate(false));
+byId("work-template-delete").addEventListener("click",()=>mutateWorkTemplate(true));
+byId("work-templates-disclosure").addEventListener("toggle",() => {
+  if (byId("work-templates-disclosure").open)loadWorkTemplates();
+});
 function renderSaleChoices() {
   const select=byId("sale-ad-select");
   const previous=select.value;
@@ -4877,6 +5024,24 @@ def _handler_factory(
                     return
                 self._send_json(200,answer)
                 return
+            if path in ("/api/portfolio/templates", "/api/portfolio/attention"):
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                if target.query or target.fragment or target.path!=self.path:
+                    self._send_json(400, {"error": "invalid_local_work_query"})
+                    return
+                try:
+                    result=(list_templates(store) if path.endswith("/templates")
+                            else attention_counts(store))
+                except (sqlite3.Error,OSError):
+                    self._send_json(503, {"error":"local_work_storage_unavailable"})
+                    return
+                self._send_json(200,result)
+                return
             if path == "/api/portfolio/report":
                 if type(store) is not SnapshotStore or write_proxy is None:
                     self._send_json(404, {"error": "not_found"})
@@ -5436,7 +5601,43 @@ def _handler_factory(
                 return
             self._send_json(200,reply)
 
+        def _portfolio_template_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/templates/mutate"
+                    or target.query or target.fragment or target.path!=self.path
+                    or type(store) is not SnapshotStore or write_proxy is None):
+                self._send_json(404, {"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error":"template_key_required_in_json"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                answer=mutate_template(store,payload)
+            except WorkTemplateError as err:
+                conflict=str(err) in (
+                    "request key conflict","duplicate template name",
+                    "template revision changed; reload",
+                )
+                self._send_json(409 if conflict else 400,{"error":
+                    "template_conflict" if conflict else "invalid_template"})
+                return
+            except (ValueError,UnicodeError,TypeError):
+                self._send_json(400, {"error":"invalid_template"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503, {"error":"local_work_storage_unavailable"})
+                return
+            self._send_json(200,answer)
+
         def do_POST(self) -> None:
+            if urlsplit(self.path).path=="/api/portfolio/templates/mutate":
+                self._portfolio_template_command()
+                return
             if urlsplit(self.path).path=="/api/portfolio/sales/update":
                 self._portfolio_sale_command()
                 return
