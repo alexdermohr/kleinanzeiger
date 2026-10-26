@@ -179,3 +179,9 @@ sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
   echte autorisierte Plattform-Massenwrites, P3, P4, P5 sowie
   Kunden-PC-Endabnahme. Siehe docs/portfolio-ki-auftraege.md.
   Der Vaterrechner fotolabor bleibt unangetastet.
+
+- **P3 in Entwicklung:** Lokale manuelle Verkauf-/Reserviert-Vermerke,
+  Lagerort, Erlös, bekannte Kosten und Teilgewinn sowie authentifizierte
+  50er-Seiten und exact-ID-Revisionsabfragen implementiert. Diese lokalen
+  Angaben sind keine bestätigten Plattformverkäufe. Nachrichtenintegration
+  und native Windows-Abnahme bleiben offen. Siehe docs/portfolio-verkaeufe.md.

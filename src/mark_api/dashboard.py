@@ -33,6 +33,7 @@ from .analytics import (
     group_metric_ranking_to_dict,
 )
 from .portfolio_drafts import drafts_page
+from .portfolio_sales import SaleError, sale_detail, sales_page, sale_totals, update_manual_sale
 from .portfolio_jobs import (
     PortfolioJobError, apply_approved_local, change_state, create_job, details as job_details,
     list_jobs, matching_draft_skus, process_one, recover_interrupted, review_items,
@@ -294,6 +295,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <a id="nav-create" href="#create-disclosure">Neue Anzeige</a>
       <a id="nav-drafts" href="#drafts-panel">Artikelentwürfe</a>
       <a id="nav-jobs" href="#jobs-panel" hidden>KI-Stapelaufträge</a>
+      <a id="nav-sales" href="#sales-panel" hidden>Verkäufe & Lager</a>
       <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
       <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
     </nav>
@@ -564,6 +566,55 @@ _DASHBOARD_HTML = """<!doctype html>
         <p class="muted">Es werden weder Anzeigen veröffentlicht noch bestehende Kleinanzeigen
         geändert. Die Übernahme prüft alle Originaldaten erneut und bricht bei Konflikten
         ohne Teiländerung ab. Vor umfangreichen lokalen Änderungen eine Sicherung erstellen.</p>
+      </details>
+    </section>
+
+    <section id="sales-panel" class="panel secondary-panel" hidden>
+      <details id="sales-disclosure" class="feature-disclosure">
+        <summary><span>Verkäufe & Lager</span><small>Eigene Anzeigen reservieren, Verkaufserlöse und Lagerorte notieren</small></summary>
+        <p class="muted">Diese Angaben sind ausdrücklich manuelle lokale Notizen,
+          keine bestätigten Verkaufsbelege von Kleinanzeigen. Änderungen
+          hier verändern niemals eine Plattformanzeige oder senden Nachrichten.</p>
+        <div class="controls">
+          <label>Anzeige aus der gerade angezeigten Katalogseite wählen
+            <select id="sale-ad-select"><option value="">Zuerst Meine Anzeigen laden</option></select>
+          </label>
+          <label>Lokaler Verkaufsstatus
+            <select id="sale-state">
+              <option value="available">Noch verfügbar</option>
+              <option value="reserved">Reserviert</option>
+              <option value="sold">Verkauft (manuelle Angabe)</option>
+            </select>
+          </label>
+        </div>
+        <div class="controls">
+          <label>Verkaufserlös in Euro (nur bei Verkauft)
+            <input id="sale-revenue" type="number" min="0" step="1" placeholder="Erlös">
+          </label>
+          <label>Bekannte Kosten in Euro (optional)
+            <input id="sale-cost" type="number" min="0" step="1" placeholder="Unbekannt">
+          </label>
+        </div>
+        <div class="controls">
+          <label>Lagerort (optional)
+            <input id="sale-location" type="text" maxlength="120" autocomplete="off" placeholder="Regal, Fach">
+          </label>
+          <label>Eigene Notiz (ohne private Käuferdaten)
+            <input id="sale-note" type="text" maxlength="240" autocomplete="off">
+          </label>
+        </div>
+        <button id="sale-save" type="button">Lokalen Verkaufsstand speichern</button>
+        <p id="sale-feedback" role="status" aria-live="polite"></p>
+        <p id="sale-totals" class="note">Noch keine lokalen Verkaufszahlen.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Anzeige</th><th>Lokaler Status</th><th>Erlös €</th><th>Bekannte Kosten €</th><th>Nachrichten (importiert)</th><th>Lagerort</th></tr></thead>
+          <tbody id="sales-body"></tbody>
+        </table></div>
+        <div class="catalog-pages">
+          <button id="sale-prev" type="button">Zurück</button>
+          <span id="sale-page-label">Seite 1</span>
+          <button id="sale-next" type="button">Weiter</button>
+        </div>
       </details>
     </section>
 
@@ -890,6 +941,14 @@ let jobReviewSelected = new Set();
 let jobPendingRequest = null;
 let jobBatchBusy = false;
 let jobBatchStop = false;
+let salesAvailable = false;
+let salesPage = 0;
+let salesCursors = [""];
+let salesNextAfter = null;
+let saleEntries = new Map();
+let salePending = null;
+let saleLoadSeq = 0;
+let saleSaveBusy = false;
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -1417,6 +1476,7 @@ async function loadCatalogPage({reset = false} = {}) {
     catalogNextAfter = payload.has_more ? payload.next_after : null;
     catalogRows = payload.ads;
     renderAds(payload.ads);
+    renderSaleChoices();
     byId("catalog-feedback").textContent = payload.ads.length +
       " Anzeigen auf dieser Seite" +
       (catalogFilters.search || catalogFilters.status !== "all" ? " · gefiltert" : "");
@@ -2823,6 +2883,9 @@ async function load() {
     }
     byId("jobs-panel").hidden = !jobsAvailable;
     byId("nav-jobs").hidden = !jobsAvailable;
+    salesAvailable = jobsAvailable;
+    byId("sales-panel").hidden = !salesAvailable;
+    byId("nav-sales").hidden = !salesAvailable;
     renderWriteAvailability();
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     renderGenerationAvailability();
@@ -3381,6 +3444,178 @@ if (jobsNavigation) jobsNavigation.addEventListener("click",() => {
 byId("jobs-disclosure").addEventListener("toggle",() => {
   if (byId("jobs-disclosure").open && !jobsLoaded) loadJobs();
 });
+function renderSaleChoices() {
+  const select=byId("sale-ad-select");
+  const previous=select.value;
+  select.replaceChildren();
+  const placeholder=document.createElement("option");
+  placeholder.value="";
+  placeholder.textContent="Anzeige wählen …";
+  select.append(placeholder);
+  for (const ad of catalogRows) {
+    if (typeof ad.ad_id!=="string" || !/^[0-9]{1,32}$/.test(ad.ad_id)) continue;
+    const option=document.createElement("option");
+    option.value=ad.ad_id;
+    option.textContent=ad.ad_id+" · "+String(ad.title||"");
+    select.append(option);
+  }
+  if (catalogRows.some(ad=>ad.ad_id===previous)) {
+    select.value=previous;
+  } else {
+    select.value="";
+  }
+  loadSelectedSale();
+}
+async function loadSelectedSale() {
+  // The selected ad may be on any result page, while the sales ledger
+  // itself may have thousands of rows. Always fetch its exact revision.
+  const id=byId("sale-ad-select").value;
+  const seq=++saleLoadSeq;
+  if (!id || !salesAvailable || !writeUiReady()) {
+    fillSaleForm();
+    return;
+  }
+  byId("sale-save").disabled=true;
+  let verified=false;
+  try {
+    const response=await _jobGet("/api/portfolio/sales/detail?"+
+      new URLSearchParams({ad_id:id}).toString());
+    if (seq!==saleLoadSeq || byId("sale-ad-select").value!==id) return;
+    if (response.sale && response.sale.ad_id!==id) {
+      throw new Error("Verkaufsstand passt nicht zur Anzeigen-ID.");
+    }
+    if (response.sale) saleEntries.set(id,response.sale);
+    else saleEntries.delete(id);
+    fillSaleForm();
+    verified=true;
+  } catch (_error) {
+    if (seq===saleLoadSeq) {
+      byId("sale-feedback").textContent=
+        "Einzelanzeige nicht geprüft. Speichern bis zur Neuladung gesperrt.";
+      return;
+    }
+  } finally {
+    if (seq===saleLoadSeq) byId("sale-save").disabled=!verified;
+  }
+}
+function fillSaleForm() {
+  const id=byId("sale-ad-select").value;
+  const entry=saleEntries.get(id);
+  byId("sale-state").value=entry?.state||"available";
+  byId("sale-revenue").value=entry?.revenue_eur===null ||
+    entry?.revenue_eur===undefined ? "" : String(entry.revenue_eur);
+  byId("sale-cost").value=entry?.cost_eur===null ||
+    entry?.cost_eur===undefined ? "" : String(entry.cost_eur);
+  byId("sale-location").value=entry?.location||"";
+  byId("sale-note").value=entry?.note||"";
+  salePending=null;
+}
+async function loadSales() {
+  if (!salesAvailable || !writeUiReady()) return false;
+  try {
+    const [list,totals]=await Promise.all([
+      _jobGet("/api/portfolio/sales?"+new URLSearchParams({
+        limit:"50",after:salesCursors[salesPage],
+      }).toString()),
+      _jobGet("/api/portfolio/sales/totals"),
+    ]);
+    if (!list || !Array.isArray(list.sales) || list.sales.length>50) {
+      throw new Error("Ungültige lokale Verkaufsdaten.");
+    }
+    saleEntries=new Map(list.sales.map(item=>[item.ad_id,item]));
+    salesNextAfter=list.has_more ? list.next_after : null;
+    byId("sale-prev").disabled=salesPage===0;
+    byId("sale-next").disabled=!salesNextAfter;
+    byId("sale-page-label").textContent="Seite "+(salesPage+1);
+    byId("sale-totals").textContent="Manuell als verkauft markiert: "+
+      totals.sold+" · Reserviert: "+totals.reserved+
+      " · Erlös "+totals.revenue_eur+" € · Bekannte Kosten "+
+      totals.known_cost_eur+" € · Bekannter Überschuss "+
+      totals.known_profit_eur+" € aus "+totals.known_profit_count+
+      " Verkäufen mit vollständigen Angaben · Fehlende Kosten bei "+
+      totals.unknown_cost_count+" Verkäufen";
+    const body=byId("sales-body");
+    body.replaceChildren();
+    for (const item of list.sales) {
+      const tr=document.createElement("tr");
+      for (const val of [
+        item.ad_id+" · "+item.title,item.state,
+        item.revenue_eur===null?"—":item.revenue_eur,
+        item.cost_eur===null?"unbekannt":item.cost_eur,
+        item.imported_inbound_messages,item.location
+      ]) {
+        const cell=document.createElement("td");
+        cell.textContent=String(val);
+        tr.append(cell);
+      }
+      body.append(tr);
+    }
+    await loadSelectedSale();
+    byId("sale-feedback").textContent=list.total+" lokal dokumentierte Anzeigen.";
+    return true;
+  } catch (_error) {
+    byId("sale-feedback").textContent="Lokale Verkaufsübersicht nicht verfügbar. Daten bleiben bestehen.";
+    return false;
+  }
+}
+function _saleWholeEur(id,required) {
+  const raw=byId(id).value.trim();
+  if (!raw && !required) return null;
+  if (!/^[0-9]{1,8}$/.test(raw) || Number(raw)>99999999) {
+    throw new Error("Nur ganze Eurobeträge zwischen 0 und 99999999 verwenden.");
+  }
+  return Number(raw);
+}
+async function saveSaleState() {
+  if (!salesAvailable || !writeUiReady() || saleSaveBusy ||
+      byId("sale-save").disabled) return;
+  saleSaveBusy=true;
+  byId("sale-save").disabled=true;
+  try {
+    const id=byId("sale-ad-select").value;
+    if (!/^[0-9]{1,32}$/.test(id)) throw new Error("Anzeige aus der Liste wählen.");
+    const state=byId("sale-state").value;
+    if (!["available","reserved","sold"].includes(state)) throw new Error("Ungültiger Status.");
+    const sold=state==="sold";
+    const payload={
+      ad_id:id,state,
+      revenue_eur:sold?_saleWholeEur("sale-revenue",true):null,
+      cost_eur:sold?_saleWholeEur("sale-cost",false):null,
+      location:byId("sale-location").value.trim(),
+      note:byId("sale-note").value.trim(),
+      expected_revision:saleEntries.get(id)?.revision||0,
+    };
+    const fingerprint=JSON.stringify(payload);
+    if (salePending?.fingerprint!==fingerprint) {
+      salePending={fingerprint,key:_newJobRequestKey()};
+    }
+    if (state==="sold" && !window.confirm(
+        "Verkauf ausschließlich lokal als eigene Angabe dokumentieren? "+
+        "Die Anzeige wird NICHT bei Kleinanzeigen als verkauft markiert.")) return;
+    const response=await fetch("/api/portfolio/sales/update",{
+      method:"POST",cache:"no-store",
+      headers:{..._jobHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({...payload,request_key:salePending.key}),
+    });
+    if (!response.ok) throw new Error("Speichern nicht bestätigt. Eintrag prüfen; nicht blind neu anlegen.");
+    const result=await response.json();
+    if (result.ad_id!==id || result.platform_writes!==0) {
+      throw new Error("Verkaufsstand nicht eindeutig bestätigt.");
+    }
+    salePending=null;
+    byId("sale-feedback").textContent="Lokaler Eintrag gespeichert. Keine Plattformaktion.";
+    await loadSales();
+  } catch (error) {
+    byId("sale-feedback").textContent=error.message;
+  } finally {
+    saleSaveBusy=false;
+    // A manual reload can reconcile a lost HTTP answer before any new
+    // idempotency key is generated; a retry keeps the identical key/payload.
+    if (byId("sale-ad-select").value && salesAvailable && writeUiReady()) {
+      byId("sale-save").disabled=false;
+    }
+  }
+}
 const draftNavigation = optionalById("nav-drafts");
 if (draftNavigation) draftNavigation.addEventListener("click", () => {
   byId("drafts-disclosure").open = true;
@@ -3394,6 +3629,28 @@ byId("draft-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") { event.preventDefault(); searchDrafts(); }
 });
 byId("draft-prev").addEventListener("click", previousDraftsPage);
+byId("sale-ad-select").addEventListener("change",loadSelectedSale);
+byId("sale-save").addEventListener("click",saveSaleState);
+byId("sale-next").addEventListener("click",() => {
+  if (!salesNextAfter) return;
+  salesCursors=[...salesCursors.slice(0,salesPage+1),salesNextAfter];
+  salesPage++;
+  loadSales();
+});
+byId("sale-prev").addEventListener("click",() => {
+  if (salesPage===0)return;
+  salesPage--;
+  salesCursors=salesCursors.slice(0,salesPage+1);
+  loadSales();
+});
+const saleNav=optionalById("nav-sales");
+if (saleNav) saleNav.addEventListener("click",() => {
+  byId("sales-disclosure").open=true;
+  loadSales();
+});
+byId("sales-disclosure").addEventListener("toggle",() => {
+  if (byId("sales-disclosure").open)loadSales();
+});
 byId("draft-next").addEventListener("click", nextDraftsPage);
 byId("catalog-find").addEventListener("click", searchCatalog);
 byId("catalog-search").addEventListener("keydown", (event) => {
@@ -4480,6 +4737,46 @@ def _handler_factory(
                     return
                 self._send_json(200,answer)
                 return
+            if path in ("/api/portfolio/sales", "/api/portfolio/sales/totals",
+                        "/api/portfolio/sales/detail"):
+                # Account-evidenced manual ledger, inaccessible to unauthenticated
+                # read-only frontends or cross-origin pages.
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                if len(target.query)>256:
+                    self._send_json(400, {"error":"invalid_sales_query"})
+                    return
+                try:
+                    options=parse_qs(target.query,keep_blank_values=True,
+                                    max_num_fields=3,encoding="utf-8",errors="strict")
+                    if path.endswith("/totals"):
+                        if options:raise ValueError("unknown fields")
+                        answer=sale_totals(store)
+                    elif path.endswith("/detail"):
+                        if set(options)!={"ad_id"} or len(options["ad_id"])!=1:
+                            raise ValueError("invalid detail params")
+                        answer={"sale":sale_detail(store,options["ad_id"][0])}
+                    else:
+                        if (set(options)-{"after","limit"} or
+                                any(len(v)!=1 for v in options.values())):
+                            raise ValueError("invalid fields")
+                        count=options.get("limit",["50"])[0]
+                        if len(count)>2 or not count.isdecimal():
+                            raise ValueError("invalid page length")
+                        answer=sales_page(store,limit=int(count),
+                            after=options.get("after",[""])[0])
+                except (ValueError,UnicodeError,SaleError):
+                    self._send_json(400, {"error":"invalid_sales_query"})
+                    return
+                except (sqlite3.Error,OSError):
+                    self._send_json(503, {"error":"sales_storage_unavailable"})
+                    return
+                self._send_json(200,answer)
+                return
             if path == "/api/ads":
                 self._send_json(
                     200,
@@ -4943,7 +5240,41 @@ def _handler_factory(
                 return
             self._send_json(200,result)
 
+        def _portfolio_sale_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/sales/update"
+                    or target.query or target.fragment
+                    or target.path!=self.path or type(store) is not SnapshotStore
+                    or write_proxy is None):
+                self._send_json(404, {"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error":"ledger_key_required_in_body"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                reply=update_manual_sale(store,payload)
+            except SaleError as exc:
+                conflict=str(exc) in ("sale entry changed; reload","request key conflict")
+                self._send_json(409 if conflict else 400,{"error":
+                    "sales_revision_conflict" if conflict else "invalid_sale_entry"})
+                return
+            except (ValueError,UnicodeError,TypeError):
+                self._send_json(400, {"error":"invalid_sale_entry"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503, {"error":"sales_storage_unavailable"})
+                return
+            self._send_json(200,reply)
+
         def do_POST(self) -> None:
+            if urlsplit(self.path).path=="/api/portfolio/sales/update":
+                self._portfolio_sale_command()
+                return
             if urlsplit(self.path).path.startswith("/api/portfolio/jobs/"):
                 self._portfolio_job_command()
                 return
