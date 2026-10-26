@@ -33,6 +33,14 @@ from .analytics import (
     group_metric_ranking_to_dict,
 )
 from .portfolio_drafts import drafts_page
+from .portfolio_jobs import (
+    PortfolioJobError, apply_approved_local, change_state, create_job, details as job_details,
+    list_jobs, matching_draft_skus, process_one, recover_interrupted, review_items,
+    settle_unknown,
+)
+from .portfolio_provider import (
+    PROVIDER_REQUIRED_RESERVE_CENTS, generate_metered_proposal,
+)
 from .query import (
     MarkQueryService,
     ad_snapshot_to_dict,
@@ -229,6 +237,35 @@ class DashboardGenerationAccess:
         finally:
             self._lock.release()
 
+    def generate_one_portfolio_proposal(
+        self, store: SnapshotStore, job_id: str,
+    ) -> dict[str, object]:
+        """Bounded per-click paid request with SQLite claim and no blind replay."""
+        if not self._lock.acquire(blocking=False):
+            raise DashboardGenerationBusy("generation already in progress")
+        try:
+            if self._used >= self._max_requests:
+                raise DashboardGenerationLimit("generation session call limit reached")
+            progress=job_details(store,job_id,limit=1)
+            if progress["state"]!="running":
+                raise PortfolioJobError("job must be explicitly started")
+            if progress["estimate_cents"]<PROVIDER_REQUIRED_RESERVE_CENTS:
+                raise PortfolioJobError("minimum 20 USD cents per provider claim required")
+            if not progress["counts"].get("queued",0):
+                raise PortfolioJobError("no remaining queued articles")
+            if (progress["actual_cents"]+progress["reserved_cents"]
+                    +progress["estimate_cents"]>progress["budget_cents"]):
+                raise PortfolioJobError("job budget too small for next request")
+            # Consume the session allowance BEFORE potentially billable work.
+            self._used+=1
+            return process_one(
+                store,job_id,
+                lambda original,instruction: generate_metered_proposal(
+                    self._factory(),original,instruction),
+            )
+        finally:
+            self._lock.release()
+
 
 _DASHBOARD_HTML = """<!doctype html>
 <html lang="de">
@@ -256,6 +293,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <a href="#workspace">Meine Anzeigen</a>
       <a id="nav-create" href="#create-disclosure">Neue Anzeige</a>
       <a id="nav-drafts" href="#drafts-panel">Artikelentwürfe</a>
+      <a id="nav-jobs" href="#jobs-panel" hidden>KI-Stapelaufträge</a>
       <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
       <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
     </nav>
@@ -432,7 +470,7 @@ _DASHBOARD_HTML = """<!doctype html>
         </div>
         <p id="draft-feedback" role="status" aria-live="polite">Entwürfe anzeigen …</p>
         <div class="table-wrap"><table>
-          <thead><tr><th>Artikelnummer</th><th>Bezeichnung</th><th>Preis</th><th>Kategorie</th><th>Aktion</th></tr></thead>
+          <thead><tr><th>Wählen</th><th>Artikelnummer</th><th>Bezeichnung</th><th>Preis</th><th>Kategorie</th><th>Aktion</th></tr></thead>
           <tbody id="drafts-body"></tbody>
         </table></div>
         <div class="catalog-pages">
@@ -440,6 +478,92 @@ _DASHBOARD_HTML = """<!doctype html>
           <span id="draft-page-label">Seite 1</span>
           <button id="draft-next" type="button">Weiter</button>
         </div>
+      </details>
+    </section>
+
+    <section id="jobs-panel" class="panel secondary-panel" hidden>
+      <details id="jobs-disclosure" class="feature-disclosure">
+        <summary><span>KI-Stapelaufträge</span><small>Lokale Artikel auswählen, Bearbeitung vorbereiten und Vorschläge freigeben</small></summary>
+        <p class="muted">Bis zu 5.000 eigene Artikelentwürfe pro Auftrag. Die lokale Auftragsverwaltung
+        ruft ohne ausdrücklichen Einzelauftrag keine KI auf und führt keine Änderungen
+        auf Kleinanzeigen aus. Vorgeschlagene Änderungen bleiben bis zur Freigabe getrennt.</p>
+        <div class="controls">
+          <label><input id="job-all-matching" type="checkbox">
+            Alle lokalen Entwürfe aus dem zuletzt angewandten Suchfilter wählen (max. 5.000)
+          </label>
+          <span id="job-selected-count">0 Entwürfe einzeln ausgewählt</span>
+          <button id="job-clear-selection" type="button">Auswahl löschen</button>
+        </div>
+        <label>Gemeinsamer Verbesserungsauftrag
+          <textarea id="job-instruction" maxlength="1500" rows="3" placeholder="Nur nachgewiesene Artikelmerkmale verwenden, Titel präzisieren, nichts hinzuerfinden."></textarea>
+        </label>
+        <div class="controls">
+          <label>Reserviertes Gesamtbudget (USD)
+            <input id="job-budget-eur" type="number" min="0" max="1000000" step="0.01" value="2.00">
+          </label>
+          <label>Budgetreserve je möglicher KI-Anfrage (USD)
+            <input id="job-estimate-eur" type="number" min="0.20" max="1000000" step="0.01" value="0.20">
+          </label>
+          <button id="job-create" type="button">Auftrag lokal anlegen</button>
+        </div>
+        <p class="muted">„Auftrag freigeben“ startet keine Anfrage. Das Budget reserviert
+        USD-Cent; die aus Provider-Tokens berechneten Kosten sind konservativ
+        geschätzt, keine verifizierte Anbieterrechnung und keine garantierte
+        Kostenobergrenze. Offizielle Preisliste: developers.openai.com/api/docs/pricing.
+        Eine kostenpflichtige Anfrage erfordert jeweils gesonderte Bestätigung.</p>
+        <div id="job-provider-control" hidden>
+          <label><input id="job-provider-consent" type="checkbox">
+            Für die nachfolgend ausgewählte Einzelanfrage oder die begrenzte Anzahl
+            im Stapel bestätige ich die externe Übertragung von Artikelangaben,
+            Modell gpt-5.6-terra, die veröffentlichte API-Preisliste und
+            möglicherweise anfallende, nicht exakt garantierbare USD-Kosten.</label>
+          <button id="job-generate-next" type="button">
+            Nächsten Vorschlag mit KI erzeugen (kostenpflichtig)
+          </button>
+          <div class="controls">
+            <label>Vorschläge nacheinander erzeugen (maximal 10 je Auftragsschritt)
+              <input id="job-batch-count" type="number" min="1" max="10" step="1" value="10">
+            </label>
+            <button id="job-generate-batch" type="button">KI-Stapelverarbeitung starten</button>
+            <button id="job-batch-stop" type="button" disabled>Nach der laufenden Anfrage stoppen</button>
+          </div>
+          <p class="muted">Für den bestätigten Stapel wird jeder Artikel einzeln und nacheinander
+          verarbeitet. Bei Abbruch, unklarem Ergebnis, Kostenlimit oder Browser-Schließung
+          startet kein weiterer Aufruf. Nicht abgeschlossene Anfragen werden nicht wiederholt.</p>
+          <p id="job-provider-status" role="status" aria-live="polite"></p>
+        </div>
+        <p id="jobs-feedback" role="status" aria-live="polite"></p>
+        <div class="controls">
+          <label>Vorhandener Auftrag
+            <select id="job-choice"><option value="">Aufträge laden …</option></select>
+          </label>
+          <button id="job-refresh" type="button">Aufträge aktualisieren</button>
+        </div>
+        <p id="job-progress" class="note" role="status" aria-live="polite"></p>
+        <div class="write-actions">
+          <button id="job-start" type="button">Auftrag freigeben</button>
+          <button id="job-pause" type="button">Pausieren</button>
+          <button id="job-resume" type="button">Fortsetzen</button>
+          <button id="job-cancel" type="button">Abbrechen</button>
+          <button id="job-recover" type="button">Unterbrochene Anfrage sichern</button>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Wählen</th><th>Artikel</th><th>Bisheriger Titel</th><th>Vorschlag</th><th>Status</th></tr></thead>
+          <tbody id="job-items-body"></tbody>
+        </table></div>
+        <div class="catalog-pages">
+          <button id="job-prev" type="button">Zurück</button>
+          <span id="job-page-label">Seite 1</span>
+          <button id="job-next" type="button">Weiter</button>
+        </div>
+        <div class="write-actions">
+          <button id="job-approve" type="button">Ausgewählte Vorschläge freigeben</button>
+          <button id="job-reject" type="button">Ausgewählte Vorschläge ablehnen</button>
+          <button id="job-apply-local" type="button">Freigegebene Änderungen nur lokal übernehmen</button>
+        </div>
+        <p class="muted">Es werden weder Anzeigen veröffentlicht noch bestehende Kleinanzeigen
+        geändert. Die Übernahme prüft alle Originaldaten erneut und bricht bei Konflikten
+        ohne Teiländerung ab. Vor umfangreichen lokalen Änderungen eine Sicherung erstellen.</p>
       </details>
     </section>
 
@@ -754,6 +878,18 @@ let draftNextAfter = null;
 let draftSearch = "";
 let draftBusy = false;
 let draftLoaded = false;
+const draftSelectedSkus = new Set();
+let jobsAvailable = false;
+let jobsLoaded = false;
+let jobActiveId = "";
+let jobPageIndex = 0;
+let jobCursors = [""];
+let jobNextAfter = null;
+let jobBusy = false;
+let jobReviewSelected = new Set();
+let jobPendingRequest = null;
+let jobBatchBusy = false;
+let jobBatchStop = false;
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -2666,6 +2802,11 @@ async function load() {
     writeUiAvailable = dashboardConfig.write_ui_available === true;
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
+    jobsAvailable = dashboardConfig.portfolio_jobs_available === true;
+    byId("jobs-panel").hidden = !jobsAvailable;
+    byId("nav-jobs").hidden = !jobsAvailable;
+    byId("job-provider-control").hidden =
+      !(jobsAvailable && generationUiAvailable);
     byId("sync-now").hidden = !manualSyncAvailable;
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     const genNavigation = optionalById("nav-generation");
@@ -2734,6 +2875,26 @@ function renderDraftRows(items) {
   body.replaceChildren();
   for (const draft of items) {
     const row = document.createElement("tr");
+    const choose = document.createElement("td");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.title = "Entwurf " + draft.sku + " für KI-Auftrag wählen";
+    checkbox.checked = draftSelectedSkus.has(draft.sku);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        if (draftSelectedSkus.size >= 5000) {
+          checkbox.checked = false;
+          byId("draft-feedback").textContent = "Maximal 5.000 Entwürfe wählen.";
+          return;
+        }
+        draftSelectedSkus.add(draft.sku);
+      } else {
+        draftSelectedSkus.delete(draft.sku);
+      }
+      renderJobSelection();
+    });
+    choose.append(checkbox);
+    row.append(choose);
     for (const field of ["sku", "title", "price_eur", "category"]) {
       const cell = document.createElement("td");
       cell.textContent = String(draft[field] ?? "");
@@ -2749,6 +2910,7 @@ function renderDraftRows(items) {
     row.append(actions);
     body.append(row);
   }
+  renderJobSelection();
 }
 
 async function loadDraftsPage() {
@@ -2827,6 +2989,387 @@ if (generationNavigation) generationNavigation.addEventListener("click", () => {
   if (disclosure) disclosure.open = true;
 });
 byId("reload").addEventListener("click", load);
+
+function renderJobSelection() {
+  byId("job-selected-count").textContent =
+    draftSelectedSkus.size + " Entwürfe einzeln ausgewählt";
+}
+function _jobEuros(id, allowZero) {
+  const raw = byId(id).value.trim();
+  if (!/^[0-9]{1,7}(?:[.,][0-9]{1,2})?$/.test(raw)) {
+    throw new Error("Budget in Euro mit höchstens zwei Nachkommastellen eingeben.");
+  }
+  const cents = Math.round(Number(raw.replace(",", ".")) * 100);
+  if (!Number.isSafeInteger(cents) || cents > 100000000
+      || (!allowZero && cents < 1)) {
+    throw new Error("Ungültiger Kostenbetrag.");
+  }
+  return cents;
+}
+function _newJobRequestKey() {
+  const bytes = new Uint8Array(32);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, x => x.toString(16).padStart(2, "0")).join("");
+}
+function _jobHeaders() {
+  return {"X-Mark-Dashboard-Write": "1",
+          "X-Mark-Dashboard-Token": writeToken};
+}
+async function _jobGet(path) {
+  const response = await fetch(path, {cache: "no-store",headers: _jobHeaders()});
+  if (!response.ok) throw new Error("KI-Auftragsdaten konnten nicht gelesen werden.");
+  return response.json();
+}
+async function _jobPost(name, payload) {
+  if (!jobsAvailable || !writeUiReady()) throw new Error("Kleinanzeiger bitte regulär starten.");
+  const response = await fetch("/api/portfolio/jobs/" + name, {
+    method: "POST", cache: "no-store",
+    headers: {..._jobHeaders(),"Content-Type":"application/json"},
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error("Aktion abgelehnt: Vorgang oder Originaldaten prüfen.");
+  return response.json();
+}
+async function loadJobs() {
+  if (!jobsAvailable || !writeUiReady()) return false;
+  try {
+    const data = await _jobGet("/api/portfolio/jobs?limit=50");
+    if (!data || !Array.isArray(data.jobs)) throw new Error("Ungültige Antwort.");
+    const selector = byId("job-choice");
+    const prior = jobActiveId;
+    selector.replaceChildren();
+    for (const job of data.jobs) {
+      const option = document.createElement("option");
+      option.value = job.job_id;
+      option.textContent = job.created_at.slice(0,16).replace("T"," ") +
+        " · " + job.total + " Artikel · " + job.state;
+      selector.append(option);
+    }
+    const choice = data.jobs.some(j => j.job_id === prior) ? prior :
+      (data.jobs[0]?.job_id || "");
+    jobActiveId = choice;
+    selector.value = choice;
+    jobsLoaded = true;
+    byId("jobs-feedback").textContent = data.jobs.length +
+      " letzte lokale KI-Aufträge · keine automatische KI-Ausführung";
+    if (choice) await loadJobDetails(true);
+    else {
+      byId("job-items-body").replaceChildren();
+      byId("job-progress").textContent = "Noch keine KI-Aufträge gespeichert.";
+    }
+    return true;
+  } catch (_error) {
+    byId("jobs-feedback").textContent =
+      "Auftragsübersicht nicht verfügbar; gespeicherte Daten bleiben unverändert.";
+    return false;
+  }
+}
+async function loadJobDetails(reset = false) {
+  if (!jobActiveId || !writeUiReady() || jobBusy) return false;
+  if (reset) {
+    jobPageIndex = 0;
+    jobCursors = [""];
+    jobNextAfter = null;
+    jobReviewSelected.clear();
+  }
+  jobBusy = true;
+  try {
+    const params = new URLSearchParams({
+      job_id: jobActiveId, limit: "50", after: jobCursors[jobPageIndex],
+    });
+    const job = await _jobGet("/api/portfolio/jobs/detail?" + params.toString());
+    if (!job || job.job_id !== jobActiveId || !Array.isArray(job.items)) {
+      throw new Error("Auftrag nicht gefunden");
+    }
+    jobNextAfter = job.has_more ? job.next_after : null;
+    const c = job.counts || {};
+    byId("job-progress").textContent = "Status: " + job.state +
+      " · " + job.total + " Artikel · " + (c.queued || 0) + " offen · " +
+      (c.proposed || 0) + " Vorschläge · " + (c.approved || 0) +
+      " freigegeben · " + (c.unknown || 0) + " unklar · Budget " +
+      (job.actual_cents/100).toFixed(2) + " USD geschätzt, " +
+      (job.reserved_cents/100).toFixed(2) + " USD reserviert von " +
+      (job.budget_cents/100).toFixed(2) + " USD";
+    const body=byId("job-items-body");
+    body.replaceChildren();
+    for (const item of job.items) {
+      const row=document.createElement("tr");
+      const review=document.createElement("td");
+      const check=document.createElement("input");
+      check.type="checkbox";
+      check.title="Vorschlag für " + item.sku + " wählen";
+      check.disabled= !["proposed","approved","rejected"].includes(item.phase);
+      check.checked=jobReviewSelected.has(item.sku);
+      check.addEventListener("change",() => {
+        if (check.checked) jobReviewSelected.add(item.sku);
+        else jobReviewSelected.delete(item.sku);
+      });
+      review.append(check);row.append(review);
+      for (const value of [item.sku,item.original?.title || "",
+                            item.proposal?.title || "Noch kein Vorschlag",item.phase]) {
+        const cell=document.createElement("td");
+        cell.textContent=String(value);
+        row.append(cell);
+      }
+      if (item.proposal) {
+        const more=document.createElement("details");
+        const title=document.createElement("summary");
+        title.textContent="Beschreibungen vergleichen";
+        const old=document.createElement("p");
+        old.textContent="Bisher: " + (item.original?.description || "");
+        const proposed=document.createElement("p");
+        proposed.textContent="Vorschlag: " + item.proposal.description;
+        more.append(title,old,proposed);
+        row.lastChild.append(more);
+      }
+      body.append(row);
+    }
+    byId("job-page-label").textContent="Seite " + (jobPageIndex+1);
+    byId("job-prev").disabled=jobPageIndex===0;
+    byId("job-next").disabled=!jobNextAfter;
+    return true;
+  } catch (_error) {
+    byId("jobs-feedback").textContent="Auftrag konnte nicht geladen werden.";
+    return false;
+  } finally {
+    jobBusy=false;
+  }
+}
+async function createJob() {
+  if (jobBusy) return;
+  try {
+    const mode=byId("job-all-matching").checked ? "all" : "selected";
+    const selected=mode==="selected" ? Array.from(draftSelectedSkus).sort() : [];
+    if (mode==="selected" && (selected.length<1 || selected.length>5000)) {
+      throw new Error("Mindestens einen Entwurf auswählen.");
+    }
+    const instruction=byId("job-instruction").value.trim();
+    if (!instruction || instruction.length>1500) {
+      throw new Error("Bitte den Verbesserungsauftrag eingeben.");
+    }
+    const body = {
+      mode, skus:selected,search:mode==="all"?draftSearch:"",
+      instruction,budget_cents:_jobEuros("job-budget-eur",true),
+      estimate_cents:_jobEuros("job-estimate-eur",false)
+    };
+    const fingerprint=JSON.stringify(body);
+    if (jobPendingRequest?.fingerprint !== fingerprint) {
+      jobPendingRequest={fingerprint,key:_newJobRequestKey()};
+    }
+    const answer=await _jobPost("create",{
+      ...body,request_key:jobPendingRequest.key
+    });
+    jobPendingRequest=null;
+    jobActiveId=answer.job_id;
+    byId("jobs-feedback").textContent=answer.total +
+      " Entwürfe im lokalen Auftrag gespeichert. Noch keine KI-Anfragen gestellt.";
+    await loadJobs();
+  } catch (error) {
+    byId("jobs-feedback").textContent=error.message;
+  }
+}
+async function jobAction(name, payload) {
+  if (jobBusy || !jobActiveId) return;
+  try {
+    await _jobPost(name,{job_id:jobActiveId,...payload});
+    byId("jobs-feedback").textContent="Lokaler Vorgang bestätigt. Keine Plattformänderung.";
+    await loadJobs();
+  } catch (error) {
+    byId("jobs-feedback").textContent=error.message;
+  }
+}
+function jobReview(approve) {
+  if (!jobReviewSelected.size) {
+    byId("jobs-feedback").textContent="Zuerst Vorschläge in der Tabelle auswählen.";
+    return;
+  }
+  jobAction("review",{skus:Array.from(jobReviewSelected),approve});
+}
+async function applyJobLocally() {
+  if (!jobActiveId) return;
+  if (!window.confirm("Freigegebene Titel und Beschreibungen ausschließlich in deinen lokalen Entwürfen ändern? Bitte vorher im Startfenster eine Sicherung erstellen. Es wird nichts veröffentlicht.")) return;
+  await jobAction("apply-local",{});
+}
+async function generateJobNext() {
+  const consent=byId("job-provider-consent");
+  const status=byId("job-provider-status");
+  if (!writeUiReady() || !jobsAvailable || !generationUiAvailable ||
+      !generationToken || !jobActiveId) {
+    status.textContent="Die KI-Sitzung muss im Kleinanzeiger-Startfenster eingerichtet sein.";
+    return;
+  }
+  if (!consent.checked) {
+    status.textContent="Zuerst die Modellkosten für genau diese einzelne Anfrage bestätigen.";
+    return;
+  }
+  if (!window.confirm("Eine einzelne möglicherweise kostenpflichtige KI-Anfrage jetzt ausführen? Keine automatische Wiederholung, keine Veröffentlichung.")) {
+    consent.checked=false;
+    return;
+  }
+  const button=byId("job-generate-next");
+  button.disabled=true;
+  consent.checked=false;
+  status.textContent="Erzeuge genau einen Vorschlag. Externe API-Kosten sind möglich …";
+  try {
+    const response=await fetch("/api/portfolio/jobs/generate-next",{
+      method:"POST",cache:"no-store",
+      headers:{
+        ..._jobHeaders(),
+        "X-Mark-Generation":"1",
+        "X-Mark-Generation-Token":generationToken,
+        "Content-Type":"application/json",
+      },
+      body:JSON.stringify({
+        job_id:jobActiveId,
+        acknowledge_provider_cost:true,
+      }),
+    });
+    const data=await response.json();
+    if (!response.ok || data.claimed!==true) {
+      throw new Error("Kein eindeutiges Ergebnis. Auftrag prüfen und keinesfalls blind erneut starten.");
+    }
+    status.textContent="Ein KI-Vorschlag gespeichert; vor Übernahme prüfen und freigeben.";
+    await loadJobs();
+  } catch (_error) {
+    status.textContent="KI-Ergebnis oder Kosten unklar. Auftrag prüfen, unklare Anfrage klären und nicht blind wiederholen.";
+    await loadJobs();
+  } finally {
+    button.disabled=false;
+  }
+}
+async function generateJobBatch() {
+  const status=byId("job-provider-status");
+  const consent=byId("job-provider-consent");
+  if (jobBatchBusy) return;
+  if (!writeUiReady() || !jobsAvailable || !generationUiAvailable ||
+      !generationToken || !jobActiveId) {
+    status.textContent="Bitte Kleinanzeiger mit aktivierter KI-Sitzung starten.";
+    return;
+  }
+  if (!consent.checked) {
+    status.textContent="Zuerst Modell und mögliche Kosten des gesamten Stapels bestätigen.";
+    return;
+  }
+  const countValue=byId("job-batch-count").value.trim();
+  if (!/^(?:[1-9]|10)$/.test(countValue)) {
+    status.textContent="Bitte 1 bis 10 Anfragen wählen.";
+    return;
+  }
+  const count=Number(countValue);
+  const job=jobActiveId;
+  const reserve=_jobEuros("job-estimate-eur",false)*count;
+  if (!window.confirm("Bis zu " + count + " einzelne kostenpflichtige KI-Anfragen " +
+      "für diesen Auftrag ausführen? Voraussichtliche Budgetreservierung bis " +
+      (reserve/100).toFixed(2) + " USD. Echte Anbieterabrechnung kann abweichen. " +
+      "Keine Plattformänderung und keine Wiederholung unklarer Aufrufe.")) {
+    consent.checked=false;
+    return;
+  }
+  consent.checked=false;
+  jobBatchBusy=true;
+  jobBatchStop=false;
+  byId("job-generate-batch").disabled=true;
+  byId("job-generate-next").disabled=true;
+  byId("job-batch-stop").disabled=false;
+  let done=0;
+  try {
+    for (let index=0;index<count&&!jobBatchStop;index++) {
+      if (!writeUiReady() || !generationUiAvailable || !generationToken) break;
+      status.textContent=(index+1)+" von "+count+" KI-Vorschlägen wird erzeugt …";
+      let response;
+      try {
+        response=await fetch("/api/portfolio/jobs/generate-next",{
+          method:"POST",cache:"no-store",
+          headers:{
+            ..._jobHeaders(),
+            "X-Mark-Generation":"1",
+            "X-Mark-Generation-Token":generationToken,
+            "Content-Type":"application/json",
+          },
+          body:JSON.stringify({job_id:job,acknowledge_provider_cost:true}),
+        });
+      } catch (_error) {
+        status.textContent="Verbindung unterbrochen. Ergebnis kann unbekannt sein; kein automatischer Folgeaufruf.";
+        break;
+      }
+      if (!response.ok) {
+        status.textContent=(response.status===429?
+          "KI-Sitzungslimit erreicht; kein weiterer Aufruf." :
+          "KI-Auftrag angehalten. Ergebnis/Kosten prüfen; keine automatische Wiederholung.");
+        break;
+      }
+      try {
+        const result=await response.json();
+        if (result.claimed!==true) throw new Error("unconfirmed result");
+        done++;
+      } catch (_error) {
+        status.textContent="Antwort nicht bestätigt. Vorgang prüfen; keine Wiederholung.";
+        break;
+      }
+      if (jobBatchStop) break;
+    }
+    // Job state is durable even if the browser loses a response; this read
+    // is never authority to retry a potentially billed provider request.
+    await loadJobs();
+    if (done===count) status.textContent=done+" Vorschläge lokal gespeichert. Jetzt prüfen und freigeben.";
+    else if (jobBatchStop) status.textContent=done+" Vorschläge gespeichert; Stapel nach laufender Anfrage gestoppt.";
+  } finally {
+    jobBatchBusy=false;
+    byId("job-generate-batch").disabled=false;
+    byId("job-generate-next").disabled=false;
+    byId("job-batch-stop").disabled=true;
+  }
+}
+function nextJobPage() {
+  if (!jobNextAfter || jobBusy) return;
+  jobCursors=[...jobCursors.slice(0,jobPageIndex+1),jobNextAfter];
+  jobPageIndex++;
+  jobReviewSelected.clear();
+  loadJobDetails();
+}
+function prevJobPage() {
+  if (jobPageIndex===0 || jobBusy) return;
+  jobPageIndex--;
+  jobCursors=jobCursors.slice(0,jobPageIndex+1);
+  jobReviewSelected.clear();
+  loadJobDetails();
+}
+byId("job-clear-selection").addEventListener("click", () => {
+  draftSelectedSkus.clear();
+  for (const checkbox of byId("drafts-body").querySelectorAll("input[type=checkbox]")) {
+    checkbox.checked = false;
+  }
+  renderJobSelection();
+});
+byId("job-create").addEventListener("click",createJob);
+byId("job-generate-next").addEventListener("click",generateJobNext);
+byId("job-generate-batch").addEventListener("click",generateJobBatch);
+byId("job-batch-stop").addEventListener("click",()=>{ jobBatchStop=true; });
+byId("job-refresh").addEventListener("click",loadJobs);
+byId("job-choice").addEventListener("change",() => {
+  jobActiveId=byId("job-choice").value;
+  loadJobDetails(true);
+});
+for (const action of ["start","pause","resume","cancel"]) {
+  byId("job-"+action).addEventListener("click",() => {
+    if (action==="cancel" && !window.confirm("Diesen lokalen KI-Auftrag abbrechen?")) return;
+    jobAction("state",{action});
+  });
+}
+byId("job-recover").addEventListener("click",() => jobAction("recover",{}));
+byId("job-approve").addEventListener("click",() => jobReview(true));
+byId("job-reject").addEventListener("click",() => jobReview(false));
+byId("job-apply-local").addEventListener("click",applyJobLocally);
+byId("job-next").addEventListener("click",nextJobPage);
+byId("job-prev").addEventListener("click",prevJobPage);
+const jobsNavigation=optionalById("nav-jobs");
+if (jobsNavigation) jobsNavigation.addEventListener("click",() => {
+  byId("jobs-disclosure").open=true;
+  if (!jobsLoaded) loadJobs();
+});
+byId("jobs-disclosure").addEventListener("toggle",() => {
+  if (byId("jobs-disclosure").open && !jobsLoaded) loadJobs();
+});
 const draftNavigation = optionalById("nav-drafts");
 if (draftNavigation) draftNavigation.addEventListener("click", () => {
   byId("drafts-disclosure").open = true;
@@ -3765,6 +4308,11 @@ def _handler_factory(
                     {
                         "write_ui_available": write_proxy is not None,
                         **(
+                            {"portfolio_jobs_available": True}
+                            if type(store) is SnapshotStore and write_proxy is not None
+                            else {}
+                        ),
+                        **(
                             {"generation_ui_available": True}
                             if generation_access is not None else {}
                         ),
@@ -3890,6 +4438,41 @@ def _handler_factory(
                     self._send_json(503, {"error": "database_unavailable"})
                     return
                 self._send_json(200, drafts)
+                return
+            if path in ("/api/portfolio/jobs", "/api/portfolio/jobs/detail"):
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                if len(target.query)>256:
+                    self._send_json(400, {"error": "invalid_job_query"})
+                    return
+                try:
+                    options=parse_qs(target.query,keep_blank_values=True,
+                                    max_num_fields=4,encoding="utf-8",errors="strict")
+                    allowed={"limit"} if path.endswith("/jobs") else {"job_id","limit","after"}
+                    if (set(options)-allowed or
+                            any(len(v)!=1 for v in options.values())):
+                        raise ValueError("invalid fields")
+                    page_size=options.get("limit",["50"])[0]
+                    if len(page_size)>2 or not page_size.isdecimal():
+                        raise ValueError("invalid limit")
+                    limit=int(page_size)
+                    if path.endswith("/jobs"):
+                        answer={"jobs":list_jobs(store,limit=limit)}
+                    else:
+                        answer=job_details(
+                            store,options["job_id"][0],
+                            after=options.get("after",[""])[0],limit=limit)
+                except (ValueError,UnicodeError,KeyError,PortfolioJobError):
+                    self._send_json(400, {"error": "invalid_job_query"})
+                    return
+                except (sqlite3.Error,OSError,TypeError):
+                    self._send_json(503, {"error": "database_unavailable"})
+                    return
+                self._send_json(200,answer)
                 return
             if path == "/api/ads":
                 self._send_json(
@@ -4244,7 +4827,120 @@ def _handler_factory(
                 return
             self._send_json(200, {"status": "success", "current_ads": count})
 
+
+        def _portfolio_job_command(self) -> None:
+            # Same-origin, per-session token. Local drafts only: no provider
+            # calls and no forwarding to the platform Write API.
+            target=urlsplit(self.path)
+            commands={
+                "/api/portfolio/jobs/create",
+                "/api/portfolio/jobs/state",
+                "/api/portfolio/jobs/review",
+                "/api/portfolio/jobs/apply-local",
+                "/api/portfolio/jobs/recover",
+                "/api/portfolio/jobs/settle-unknown",
+                "/api/portfolio/jobs/generate-next",
+            }
+            if (target.path not in commands or target.query or target.fragment
+                    or target.path!=self.path or type(store) is not SnapshotStore
+                    or write_proxy is None):
+                self._send_json(404, {"error": "not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error": "write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error": "request_key_must_be_in_json"})
+                return
+            try:
+                if self.headers.get("Content-Type","").split(";",1)[0].strip().lower()!="application/json":
+                    raise ValueError("invalid content type")
+                size=self._content_length(max_bytes=512*1024)
+                if size<1:
+                    raise ValueError("empty job command")
+                previous_timeout=self.connection.gettimeout()
+                self.connection.settimeout(_PROXY_BODY_READ_TIMEOUT_SECONDS)
+                try:
+                    raw=self.rfile.read(size)
+                finally:
+                    self.connection.settimeout(previous_timeout)
+                if len(raw)!=size:
+                    raise ValueError("truncated job command")
+                payload=strict_json_object(raw)
+                if target.path.endswith("/generate-next"):
+                    if generation_access is None:
+                        self._send_json(404,{"error":"generation_unavailable"})
+                        return
+                    if not self._generation_session_authorized():
+                        self._send_json(403,{"error":"generation_session_required"})
+                        return
+                    if (set(payload)!={"job_id","acknowledge_provider_cost"}
+                            or payload["acknowledge_provider_cost"] is not True):
+                        raise PortfolioJobError("explicit single-call consent required")
+                    result=generation_access.generate_one_portfolio_proposal(
+                        store,payload["job_id"])
+                elif target.path.endswith("/create"):
+                    if set(payload)!={"mode","skus","search","instruction",
+                                     "budget_cents","estimate_cents","request_key"}:
+                        raise PortfolioJobError("invalid job creation fields")
+                    if payload["mode"]=="all" and payload["skus"]==[]:
+                        skus=matching_draft_skus(store,search=payload["search"])
+                    elif payload["mode"]=="selected" and payload["search"]=="":
+                        skus=payload["skus"]
+                    else:
+                        raise PortfolioJobError("invalid job selection")
+                    result=create_job(store,skus,instruction=payload["instruction"],
+                                      request_key=payload["request_key"],
+                                      budget_cents=payload["budget_cents"],
+                                      estimate_cents=payload["estimate_cents"])
+                elif target.path.endswith("/state"):
+                    if set(payload)!={"job_id","action"}:
+                        raise PortfolioJobError("invalid state command")
+                    result=change_state(store,payload["job_id"],payload["action"])
+                elif target.path.endswith("/review"):
+                    if set(payload)!={"job_id","skus","approve"}:
+                        raise PortfolioJobError("invalid review command")
+                    result=review_items(store,payload["job_id"],payload["skus"],
+                                        approve=payload["approve"])
+                elif target.path.endswith("/apply-local"):
+                    if set(payload)!={"job_id"}:
+                        raise PortfolioJobError("invalid local application")
+                    result=apply_approved_local(store,payload["job_id"])
+                elif target.path.endswith("/recover"):
+                    if set(payload)!={"job_id"}:
+                        raise PortfolioJobError("invalid recovery command")
+                    result=recover_interrupted(store,payload["job_id"])
+                else:
+                    if set(payload)!={"job_id","sku","actual_cents","explicitly_checked"}:
+                        raise PortfolioJobError("invalid reconciliation command")
+                    result=settle_unknown(store,payload["job_id"],payload["sku"],
+                        actual_cents=payload["actual_cents"],
+                        explicitly_checked=payload["explicitly_checked"])
+            except DashboardGenerationBusy:
+                self._send_json(409, {"error":"generation_in_progress"})
+                return
+            except DashboardGenerationLimit:
+                self._send_json(429, {"error":"generation_session_limit"})
+                return
+            except (ValueError,UnicodeError,KeyError,TypeError,RecursionError,
+                    PortfolioJobError,TimeoutError):
+                self._send_json(400, {"error": "invalid_portfolio_job_command"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503, {"error": "database_unavailable"})
+                return
+            except Exception:
+                # A provider may charge even if this request failed. The
+                # persisted claim is UNKNOWN, never automatically retried.
+                self._send_json(502, {"error":"provider_outcome_unknown",
+                    "automatic_retry_authorized":False})
+                return
+            self._send_json(200,result)
+
         def do_POST(self) -> None:
+            if urlsplit(self.path).path.startswith("/api/portfolio/jobs/"):
+                self._portfolio_job_command()
+                return
             if urlsplit(self.path).path == "/api/dashboard/sync":
                 self._manual_sync()
                 return

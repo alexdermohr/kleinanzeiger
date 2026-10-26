@@ -155,3 +155,27 @@ sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
   bauen; KI-Kosten und Plattformänderungen bleiben getrennt
   und vor jedem tatsächlich kostenpflichtigen oder schreibenden Schritt
   ausdrücklich budget- und benutzergebunden.
+
+
+## Umsetzungslage nach dem P1-/P2-Fortsetzungsauftrag (26.10.2026)
+
+- **P0:** v0.1.6 offiziell veröffentlicht.
+- **P1:** PR #219, geprüfter Branch-HEAD
+  eca4d716bb010bd0c44f781b15a633ea98a58eb1.
+  Windows-, Wheel- und Quell-CI grün, Review-Funde geklärt;
+  geschützter Merge noch blockiert. v0.1.7 nicht als veröffentlicht
+  kennzeichnen.
+- **P2:** Auf dem isolierten Entwicklungsbranch
+  feat/portfolio-ai-batch-source-20261026: lokale durable 5000er-Jobs,
+  idempotente Auswahl, Budgetreserven, UNKNOWN-Quarantäne,
+  50er-Vorschauen, Freigaben und atomare lokale Anwendung.
+  Die zentrale Windows-Browseroberfläche bietet zusätzlich einzeln
+  oder je bestätigter Serie bis zu 10 sequenzielle kostenpflichtige
+  KI-Entwürfe an (maximal 100 Provider-Versuche je Produktsitzung).
+  Tokenverbrauch wird konservativ in USD geschätzt, ist keine
+  unabhängige Rechnung. **Nicht ausgeliefert**, bis Native CI,
+  Release und P1-Abhängigkeit geklärt sind.
+- **Weiter offen:** Provider-Rechnungsnachweise/hartes Budget,
+  echte autorisierte Plattform-Massenwrites, P3, P4, P5 sowie
+  Kunden-PC-Endabnahme. Siehe docs/portfolio-ki-auftraege.md.
+  Der Vaterrechner fotolabor bleibt unangetastet.
