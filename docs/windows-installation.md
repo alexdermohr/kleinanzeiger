@@ -1,82 +1,61 @@
-# Kleinanzeiger v0.1.3 – Windows 11
+# Kleinanzeiger v0.1.4 – Windows 11
 
-Native Windows-Anwendung ohne WSL, Ubuntu oder Docker.
+## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
-Der bisherige praktische Windows-Test wurde vom Entwickler durchgeführt.
-Eine unabhängige Kundenabnahme und echte Schreibaktionen im Kundenkonto
-sind damit nicht belegt.
+1. Das vollständige Windows-ZIP in einen eigenen Ordner entpacken.
+2. **Kleinanzeiger.cmd** doppelklicken. Das Kleinanzeiger-Fenster öffnet sich.
+3. **Einrichten und starten** anklicken. Falls Python 3.12/3.13 fehlt, wird
+   es aus einer offiziellen, SHA-256- und signaturgeprüften Python-Datei
+   automatisch bereitgestellt. Kleinanzeiger und seine Abhängigkeiten werden
+   isoliert installiert. Fehlendes Chrome wird signiert von Google geladen.
+4. Im geöffneten separaten Chrome-Profil **bei Kleinanzeigen anmelden**.
+   Danach gegebenenfalls im Kleinanzeiger-Fenster erneut **Starten** klicken.
+   Das Dashboard öffnet sich automatisch.
+5. Danach den Desktop-Eintrag **Kleinanzeiger** benutzen. Der ursprünglich
+   entpackte Installationsordner wird für den normalen Start nicht benötigt.
 
-## Automatisch installieren
+Keine Konsoleingaben, manuelles Python, Docker, WSL, Ubuntu oder Kopieren
+technischer Dashboard-URLs erforderlich.
 
-1. Windows-ZIP vollständig in einen eigenen Ordner entpacken.
-2. **Installieren.cmd** doppelklicken. Es prüft die Wheel-Prüfsumme,
-   richtet Python und die Abhängigkeiten ein und stellt bei Bedarf
-   Google Chrome bereit. Falls Python 3.12/3.13 fehlt, lädt es den
-   offiziellen, auf SHA-256 und Herstellersignatur geprüften Installer
-   für Python 3.13.17 von python.org. Fehlt Chrome, wird eine signierte
-   Chrome-for-Testing-Laufzeit von Google für diesen Benutzer bezogen.
-   Internetverbindung erforderlich, keine WSL- oder Docker-Installation.
-3. **Starten.cmd** doppelklicken; das separate Chrome-Fenster öffnet sich.
-4. Dort selbst beim eigenen Kleinanzeigen-Konto anmelden und im
-   Startfenster ENTER drücken. Lokale Dashboard-URL öffnen.
-5. Unter **Meine Anzeigen** auf **Bearbeiten** klicken. Rechts erscheinen Titel,
-   Beschreibung und Status zur Bearbeitung. Alternativ im Dropdown
-   **Vorhandene Anzeige auswählen** die gewünschte Anzeige wählen.
-   Die Anzeigen-ID wird automatisch und sicher übernommen.
-6. **Neue Anzeige** öffnet das Erstellformular. **Auswertungen** und die
-   optionale **KI** lassen sich bei Bedarf aufklappen. Technische Details
-   liegen in den jeweiligen Info-Bereichen, nicht mehr im Arbeitsfluss.
+## Alles an einem Ort
 
-Die Vollversion umfasst Anzeigen-Synchronisation, Erstellen und
-Veröffentlichen, Bearbeiten, Pause/Aktivieren/Löschen, Bilder,
-Dashboard, Historie, Rankings, Analytics und lokale E-Mail-Reaktionen.
+Das Kleinanzeiger-Fenster bietet:
 
-## Update von v0.1.1 oder v0.1.2
+- **Kleinanzeiger starten / beenden**: öffnet das Konto und danach das
+  Dashboard automatisch. Beenden nutzt den privaten stdin-Kanal und den
+  vorhandenen kontrollierten Shutdown. Laufende Änderungen zuvor abschließen.
+- **Installieren / aktualisieren**: prüft das offizielle GitHub-Release,
+  ZIP-/Wheel-SHA-256 und Manifest. Vor einem Update wird automatisch ein
+  SQLite-Backup mit Manifest erstellt.
+- **Sicherung erstellen**: sichert vorhandene Daten online, ohne eine
+  Datenbankdatei manuell zu kopieren.
+- **KI einrichten**: eigenen OpenAI-API-Schlüssel verdeckt eingeben oder
+  entfernen. Er wird per Windows-DPAPI an das lokale Benutzerkonto gebunden.
+  Jeder externe kostenpflichtige Text-/Bildaufruf benötigt weiterhin eine
+  eigene Bestätigung im Dashboard.
+- **Kleinanzeigen-Konto öffnen**: für die erste Anmeldung und MFA im
+  getrennten Chrome-Profil.
+- **Weitere Optionen / Wiederherstellen**: nur bei noch nicht vorhandener
+  Datenbank samt WAL/SHM/Journal, mit ausdrücklicher Zustimmung und
+  Manifestprüfung.
 
-1. Anwendung und deren Chrome-Fenster vollständig beenden.
-2. Im alten Ordner **Sichern.cmd** ausführen und Backup sowie
-   zugehörige .manifest.json-Datei sicher aufbewahren.
-3. Neues ZIP in **einen neuen Ordner** entpacken.
-4. Dort **Installieren.cmd** ausführen, anschließend **Starten.cmd**.
+Das Dashboard bleibt die zentrale Arbeitsfläche: Anzeigenkarten auswählen,
+rechts bearbeiten, neue Anzeigen erstellen sowie Analytics und KI-Entwürfe
+bei Bedarf aufklappen.
 
-Daten liegen weiterhin unter %LOCALAPPDATA%\Kleinanzeiger:
-anzeigen.sqlite (inkl. WAL/SHM), vorbereitete Medien, offene und
-ungeklärte Write-Vorgänge, ChromeProfile und Backups bleiben erhalten.
-Der Installer löscht sie nicht und führt keine Wiederherstellung aus.
+Über **Mit Kleinanzeigen abgleichen** werden eigene Anzeigen direkt aus der
+angemeldeten Browser-Sitzung neu gelesen. **Ansicht neu laden** aktualisiert
+hingegen ausschließlich die lokal gespeicherte Darstellung.
 
-**Wiederherstellen.cmd** funktioniert ausschließlich, wenn die
-Zieldatenbank und ihre -wal/-shm/-journal-Dateien fehlen. Niemals
-bestehende Daten überschreiben.
+## Bestehende Daten und Updates
 
-## KI anschließen (optional)
+Die stabil installierten Programmdateien liegen unter
+%LOCALAPPDATA%\Kleinanzeiger\App, die Datenbank unter
+%LOCALAPPDATA%\Kleinanzeiger\anzeigen.sqlite. Backupdateien,
+WAL/SHM, Recovery-Anfragen, Medien und das separate ChromeProfile bleiben
+beim Update erhalten. Laufende Dashboard-/Write-Prozesse blockieren ein
+Update, bis die bisherige Anwendung kontrolliert beendet ist.
 
-1. Eigenen API-Schlüssel auf https://platform.openai.com/api-keys
-   erstellen und im OpenAI-Konto Abrechnung und Limits prüfen.
-   Ein ChatGPT-Abo ist kein API-Guthaben.
-2. **KI-einrichten.cmd** ausführen; Schlüssel verdeckt eingeben.
-   Er wird mit Windows-DPAPI benutzergebunden verschlüsselt
-   unter %LOCALAPPDATA%\Kleinanzeiger\openai-key.dpapi gespeichert.
-   Nicht in Quellcode, Dashboard oder Paket-Archiv hinterlegen.
-3. Mit **Starten.cmd** neu starten. Bei vorhandenem Schlüssel aktiviert
-   der Starter automatisch die vorhandenen KI-Funktionen. Im Dashboard
-   Text- und Bildentwürfe erzeugen und in das Formular übernehmen.
-4. Jeder kostenpflichtige API-Aufruf benötigt eine separate ausdrückliche
-   Bestätigung. Entwürfe veröffentlichen niemals automatisch.
-
-Die Funktion kann durch Entfernen der Datei openai-key.dpapi bei
-beendeter Anwendung deaktiviert werden. Ohne Schlüssel bleibt der
-Rest des Produkts uneingeschränkt verwendbar. Nur Daten an OpenAI
-übergeben, die hierfür freigegeben sind.
-
-## Hinweise
-
-Bei Download-Fehlern Erreichbarkeit von python.org,
-googlechromelabs.github.io, storage.googleapis.com und pypi.org
-prüfen. SHA- oder Signaturkontrollen nicht deaktivieren.
-CDP darf nur auf 127.0.0.1 und ausschließlich im separaten
-Chrome-Profil betrieben werden. Login, MFA und CAPTCHA bleiben
-manuelle Schritte.
-
-Die Plattformoperationen wurden synthetisch getestet, nicht im
-Kundenkonto schreibend abgenommen. Die Linux-A6-Migration
-https://github.com/alexdermohr/kleinanzeiger/issues/76 bleibt getrennt.
+Die technische Prüfung nutzt synthetische Plattformgegenstellen: keine
+echten Anzeigenänderungen, kein unbestätigter kostenpflichtiger KI-Aufruf.
+Die separate Linux-A6-Altbestandsmigration (#76) ist kein Windows-Blocker.

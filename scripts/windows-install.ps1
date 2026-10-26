@@ -2,12 +2,12 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $base = $PSScriptRoot
 $state = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
-$wheel = Join-Path $base 'kleinanzeiger-0.1.3-py3-none-any.whl'
+$wheel = Join-Path $base 'kleinanzeiger-0.1.4-py3-none-any.whl'
 $sums = Join-Path $base 'SHA256SUMS.txt'
 if (!(Test-Path -LiteralPath $wheel -PathType Leaf) -or !(Test-Path -LiteralPath $sums -PathType Leaf)) {
   throw 'Paket oder SHA256SUMS.txt fehlen. Bitte das gesamte Windows-ZIP entpacken.'
 }
-$entry = @(Get-Content -LiteralPath $sums | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?kleinanzeiger-0\.1\.3-py3-none-any\.whl$' })
+$entry = @(Get-Content -LiteralPath $sums | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?kleinanzeiger-0\.1\.4-py3-none-any\.whl$' })
 if ($entry.Count -ne 1) { throw 'Keine eindeutige Wheel-Pruefsumme gefunden.' }
 $expected = ($entry[0] -split '\s+')[0].ToLowerInvariant()
 $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -109,4 +109,4 @@ if (!$chrome) {
   if (!$chrome) { throw 'Chrome konnte nicht bereitgestellt werden.' }
 }
 Write-Host 'Installation/Aktualisierung abgeschlossen. Bestehende Daten und Chrome-Profil bleiben erhalten.'
-Write-Host 'Jetzt Starten.cmd ausfuehren. Fuer optionale KI: KI-einrichten.cmd.'
+Write-Host 'Zum Starten und Einrichten Kleinanzeiger.cmd verwenden.'

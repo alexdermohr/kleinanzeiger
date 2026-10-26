@@ -13,9 +13,9 @@ SCRIPTS = ROOT / "scripts"
 class WindowsInstallerContractTests(unittest.TestCase):
     def test_installer_verifies_pinned_wheel_before_network_or_setup(self):
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
-        self.assertIn("kleinanzeiger-0.1.3-py3-none-any.whl", script)
-        self.assertIn(r"kleinanzeiger-0\.1\.3-py3-none-any\.whl", script)
-        self.assertNotIn(r"kleinanzeiger-0\.1\.2-py3-none-any\.whl", script)
+        self.assertIn("kleinanzeiger-0.1.4-py3-none-any.whl", script)
+        self.assertIn(r"kleinanzeiger-0\.1\.4-py3-none-any\.whl", script)
+        self.assertNotIn(r"kleinanzeiger-0\.1\.3-py3-none-any\.whl", script)
         self.assertIn("SHA256SUMS.txt", script)
         self.assertLess(script.index("Get-FileHash"), script.index("Invoke-WebRequest"))
         self.assertIn("python-3.13.17-amd64.exe", script)
@@ -40,7 +40,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("Find-KleinanzeigerChrome", start)
         self.assertIn("127.0.0.1", start)
         self.assertIn("ChromeProfile", start)
-        self.assertIn("Starten.cmd", (ROOT / "docs/windows-installation.md").read_text(encoding="utf-8"))
+        self.assertIn("Kleinanzeiger.cmd", (ROOT / "docs/windows-installation.md").read_text(encoding="utf-8"))
 
     def test_user_bound_optional_key_does_not_trigger_unapproved_generation(self):
         configure = (SCRIPTS / "windows-ki-einrichten.ps1").read_text(encoding="utf-8")
@@ -51,16 +51,16 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("ConvertTo-SecureString", start)
         self.assertIn("--enable-generation", start)
         self.assertIn("Remove-Item Env:OPENAI_API_KEY", start)
-        self.assertIn("KI-einrichten.cmd", (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8"))
+        self.assertIn("windows-center.ps1", (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8"))
 
     def test_release_copy_manifest_and_version_are_consistent(self):
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.1.3"', metadata)
-        self.assertIn("Kleinanzeiger-v0.1.3-Windows.zip", workflow)
+        self.assertIn('version = "0.1.4"', metadata)
+        self.assertIn("Kleinanzeiger-v0.1.4-Windows.zip", workflow)
         for filename in (
-            "Installieren.cmd", "Starten.cmd", "KI-einrichten.cmd",
-            "windows-install.ps1", "windows-start.ps1", "windows-chrome.ps1",
+            "Kleinanzeiger.cmd",
+            "windows-install.ps1", "windows-center.ps1", "windows-worker.ps1", "windows-start.ps1", "windows-chrome.ps1",
             "windows-ki-einrichten.ps1",
         ):
             self.assertTrue((SCRIPTS / filename).is_file(), filename)
