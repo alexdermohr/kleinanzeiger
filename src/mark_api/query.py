@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
+import re
 from typing import Mapping
 from datetime import datetime
 
@@ -172,6 +173,17 @@ class MarkQueryService:
                 if item is not None:
                     rows.append(item)
         return tuple(rows)
+
+    def catalog_ad(self, ad_id: str) -> dict[str, object] | None:
+        """Read exactly one locally observed ad by indexed ID; no write authority.
+
+        This avoids scanning pages or materializing the whole 10k+ portfolio
+        during per-ad status checks. Historical owner provenance stays intact.
+        """
+        if type(ad_id) is not str or re.fullmatch(r"[0-9]{1,32}", ad_id) is None:
+            raise ValueError("invalid catalog ad id")
+        item = self._project_history(ad_id, self._store.ad_history(ad_id))
+        return ad_view_to_dict(item) if item is not None else None
 
     def catalog_page(
         self, *, after: str = "", limit: int = 50,

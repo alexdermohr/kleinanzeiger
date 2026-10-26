@@ -44,7 +44,11 @@ const elements=new Map();
 const document={
   getElementById(id) {if(!elements.has(id))elements.set(id,new Element(id));return elements.get(id);},
   createElement(tag) {return new Element(tag);},
-  querySelectorAll() {return [];}
+  querySelectorAll(selector) {
+    if(selector==="[data-write-control]")return [
+      this.getElementById("manage-pause"),this.getElementById("create-submit")];
+    return [];
+  }
 };
 let confirmCount=0, preview="", allowConfirm=true, writes=[], reads=[];
 const window={
@@ -62,12 +66,10 @@ const ad=(id,state="active",title="Anzeige "+id)=>({
 });
 let inventory=[], reply=()=>({response:{status:200},payload:{operation_receipt:{outcome:"confirmed"}}});
 window.read=(path)=>{
-  assert.ok(path.startsWith("/api/catalog/ads?"),path);
+  assert.ok(path.startsWith("/api/catalog/ad?id="),path);
   const qs=new URL(path,"http://127.0.0.1").searchParams;
-  assert.equal(qs.get("status"),"all");
-  assert.equal(qs.get("limit"),"100");
   reads.push(path);
-  return {ads:inventory.filter(a=>a.ad_id===qs.get("q")),has_more:false,next_after:null};
+  return {ad:inventory.find(a=>a.ad_id===qs.get("id"))??null};
 };
 window.write=async(scope,method,path,payload,opts)=>{
   assert.equal(confirmCount,1);
@@ -88,6 +90,8 @@ function prepare(ads) {
     assert.equal(method,"POST");
     assert.equal(payload,null);
     assert.equal(scope,"ad:"+opts.adId+":"+path.split("/").pop());
+    assert.equal(elements.get("manage-pause").disabled,true,
+      "other write controls must be disabled throughout the bulk job");
     writes.push(path);
     return reply(opts.adId);
   };
@@ -107,6 +111,8 @@ const run=(action)=>vm.runInContext('runCatalogBulkAction('+JSON.stringify(actio
   assert.equal(reads.length,2);
   assert.match(progress(),/2 von 2/);
   assert.equal(vm.runInContext("catalogSelectedIds.size",context),0);
+  assert.equal(elements.get("manage-pause").disabled,false,
+    "parallel write controls must be re-enabled after a settled batch");
 
   prepare([ad("123","paused"),ad("456","paused")]);
   await run("activate");
@@ -151,8 +157,8 @@ const run=(action)=>vm.runInContext('runCatalogBulkAction('+JSON.stringify(actio
   assert.match(progress(),/offline/);
   window.read=(path)=>{
     reads.push(path);
-    const q=new URL(path,"http://127.0.0.1").searchParams.get("q");
-    return {ads:inventory.filter(a=>a.ad_id===q)};
+    const id=new URL(path,"http://127.0.0.1").searchParams.get("id");
+    return {ad:inventory.find(a=>a.ad_id===id)??null};
   };
 
   prepare([ad("123"),ad("456")]);

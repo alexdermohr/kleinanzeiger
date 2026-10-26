@@ -1688,14 +1688,12 @@ function showCatalogBulkProgress(message) {
 // a new Write. It is not a remote freshness guarantee; backend owner and
 // replay/ambiguity fences remain authoritative. Missing data fails closed.
 async function verifyCatalogBulkAd(ad) {
-  const params = new URLSearchParams({
-    limit: "100", after: "", q: ad.ad_id, status: "all",
-  });
-  const payload = await getJson("/api/catalog/ads?" + params.toString());
-  if (!payload || !Array.isArray(payload.ads)) {
-    throw new Error("Katalogstatus nicht lesbar.");
-  }
-  const current = payload.ads.find((row) => row.ad_id === ad.ad_id);
+  // Indexed, exact-ID local owner history; a partial fuzzy search might
+  // miss a valid ID among hundreds of matching titles in a large portfolio.
+  const payload = await getJson(
+    "/api/catalog/ad?id=" + encodeURIComponent(ad.ad_id)
+  );
+  const current = payload?.ad;
   if (!current || current.present !== true
       || current.lifecycle_state !== ad.lifecycle_state
       || current.title !== ad.title
@@ -1731,6 +1729,7 @@ async function runCatalogBulkAction(action) {
   )) return;
   catalogBulkBusy = true;
   catalogBulkStop = false;
+  renderWriteAvailability();
   renderCatalogSelection();
   renderCatalogNavigation();
   let confirmed = 0;
@@ -1784,6 +1783,7 @@ async function runCatalogBulkAction(action) {
   } finally {
     catalogBulkBusy = false;
     catalogBulkStop = false;
+    renderWriteAvailability();
     renderCatalogSelection();
     renderCatalogNavigation();
   }
@@ -5110,6 +5110,28 @@ def _handler_factory(
                 payload["sync_status"] = store.sync_status()
                 payload["sync_recovery"] = store.sync_recovery_status()
                 self._send_json(200, payload)
+                return
+            if path == "/api/catalog/ad":
+                # Indexed lookup of one owned local observation, never a
+                # platform fetch, bulk scan, writer or ownership capability.
+                if len(target.query) > 128:
+                    self._send_json(400, {"error": "invalid_catalog_ad"})
+                    return
+                try:
+                    filters = parse_qs(
+                        target.query, keep_blank_values=True, max_num_fields=2,
+                        encoding="utf-8", errors="strict",
+                    )
+                    if set(filters) != {"id"} or len(filters["id"]) != 1:
+                        raise ValueError("invalid fields")
+                    ad = query.catalog_ad(filters["id"][0])
+                except (UnicodeError, ValueError):
+                    self._send_json(400, {"error": "invalid_catalog_ad"})
+                    return
+                if ad is None:
+                    self._send_json(404, {"error": "unknown_catalog_ad"})
+                else:
+                    self._send_json(200, {"ad": ad})
                 return
             if path == "/api/catalog/ads":
                 # Observation-only, strict URL schema; never authorize a Write.
