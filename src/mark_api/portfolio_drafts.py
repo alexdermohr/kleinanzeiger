@@ -398,3 +398,64 @@ def drafts_page(store: SnapshotStore, *, after: str = "", search: str = "", limi
         ).fetchall()
     visible = records[:limit]
     data = []
+    for rec in visible:
+        try:
+            category, images = json.loads(rec[3]), json.loads(rec[5])
+            if rec[6] != "draft" or not isinstance(category, list) or not isinstance(images, list):
+                raise ValueError("invalid stored draft")
+            data.append({"sku": rec[0], "title": rec[1], "description": rec[2],
+                         "category": " > ".join(category), "price_eur": rec[4],
+                         "images": images, "status": "draft", "published": False})
+        except (TypeError, ValueError):
+            raise sqlite3.DatabaseError("invalid draft data") from None
+    return {"drafts": data, "has_more": len(records) > limit,
+            "next_after": visible[-1][0] if len(records) > limit else None, "total": total}
+
+
+def _excel_csv_text(value: object) -> object:
+    if isinstance(value, str):
+        leading = value.lstrip()
+        if (value.startswith("'") or leading.startswith(("=", "+", "-", "@"))
+                or value.startswith(("\t", "\r", "\n"))):
+            return "'" + value
+    return value
+
+
+def export_drafts(store: SnapshotStore, target: Path) -> dict[str, object]:
+    """Write a complete, Excel-safe CSV through a private stage, create-only.
+
+    The target is published as a hardlink only after the full CSV has been
+    flushed; no existing customer CSV can be replaced and partial exports are
+    removed on failures.
+    """
+    if target.suffix.casefold() != ".csv" or not target.is_absolute():
+        raise DraftImportError("Exportziel muss eine absolute CSV-Datei sein.")
+    with closing(store._connect()) as conn:
+        if not _has_table(conn):
+            records = []
+        else:
+            records = conn.execute(
+                "SELECT sku,title,description,category_json,price_eur,images_json "
+                "FROM portfolio_drafts ORDER BY sku COLLATE BINARY"
+            ).fetchall()
+    stage = target.with_name("." + target.name + "." + secrets.token_hex(10) + ".part")
+    try:
+        with stage.open("x", encoding="utf-8-sig", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow((*_FIELDS, _EXPORT_MARKER))
+            for row in records:
+                category = " > ".join(json.loads(row[3]))
+                images = ";".join(json.loads(row[5]))
+                writer.writerow(tuple(_excel_csv_text(x) for x in
+                                      (row[0], row[1], row[2], category, row[4], images)) + ("v1",))
+            file.flush()
+            os.fsync(file.fileno())
+        os.link(stage, target)
+    except (OSError, ValueError, TypeError):
+        raise DraftImportError("Entwuerfe konnten nicht exportiert werden.") from None
+    finally:
+        try:
+            stage.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return {"status": "exported", "rows": len(records), "filename": target.name}
