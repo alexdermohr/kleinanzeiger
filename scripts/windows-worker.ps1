@@ -232,29 +232,12 @@ function Update-CustomerLabels {
     throw 'Kleinanzeiger muss vor der Vergleichszuordnung eingerichtet werden.'
   }
   $payload = Read-UiPayload
-  $adId = [string]$payload.ad_id
-  if ([string]::IsNullOrWhiteSpace($adId) -or $adId.Length -gt 160 -or
-      $null -eq $payload.labels) {
-    throw 'Bitte eine gespeicherte Anzeige auswaehlen.'
-  }
-  $argv = @('-m','mark_api.classification_cli','--db',$db,'--ad-id',$adId)
-  $hasChanges = $false
-  foreach ($field in @('image_type','city','text_type','title_type')) {
-    $property = $payload.labels.PSObject.Properties[$field]
-    if ($null -eq $property) { continue }
-    $value = $property.Value
-    if ($value -isnot [string] -and $null -ne $value) { throw 'Vergleichslabel ungueltig.' }
-    $flag = $field.Replace('_','-')
-    if ($null -eq $value -or [string]::IsNullOrWhiteSpace($value)) {
-      $argv += @('--clear',$flag)
-    } else {
-      if ($value.Length -gt 120) { throw 'Vergleichslabel ist zu lang.' }
-      $argv += @(('--' + $flag), $value.Trim())
-    }
-    $hasChanges = $true
-  }
-  if (!$hasChanges) { throw 'Keine Vergleichslabels geaendert.' }
-  & $venvPython @argv
+  # Legacy Windows PowerShell 5.1 strips embedded native argv double quotes.
+  # Re-encode validated local JSON as ASCII and pipe it to the existing-data
+  # classifier, preserving Unicode, quotes and backslashes exactly.
+  $json = ConvertTo-Json -InputObject $payload -Depth 5 -Compress
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+  $encoded | & $venvPython -m mark_api.windows_customer_choices --db $db --apply-labels
   if ($LASTEXITCODE -ne 0) { throw 'Vergleichslabels konnten nicht gespeichert werden.' }
   Write-Output 'LABELS_OK'
 }

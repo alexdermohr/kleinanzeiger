@@ -1,17 +1,20 @@
-"""Existing-data-only choices for the Windows customer control center.
+"""Local customer ad choices and explicitly requested classification updates.
 
-This command never initializes a missing database, runs a platform action,
-or grants Write authority. Only user-local, previously evidenced ad IDs
-(including email-only IDs) can become classification targets.
+Never creates a missing database, contacts the platform, or grants platform
+Write authority. Label writes reuse the existing append-only classification
+contract and accept private UTF-8 JSON through base64-encoded standard input.
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 from pathlib import Path
 import sqlite3
 import sys
 
+from .classification_cli import update_classification
 from .query import MarkQueryService
 from .storage import SnapshotStore
 
@@ -43,10 +46,54 @@ def list_customer_choices(db: Path) -> list[dict[str, object]]:
     return sorted(by_id.values(), key=lambda row: str(row["ad_id"]))
 
 
+def apply_customer_labels(db: Path, encoded: str) -> None:
+    """Preserve quotes, slashes, and Unicode without PS5.1 argv round-trips."""
+    if not isinstance(encoded, str) or not encoded or len(encoded) > 65536:
+        raise ValueError("invalid classification input")
+    try:
+        body = base64.b64decode(encoded.encode("ascii"), validate=True)
+        if len(body) > 32768:
+            raise ValueError("input too large")
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeError, binascii.Error, ValueError, TypeError):
+        raise ValueError("invalid classification input") from None
+    if type(payload) is not dict or set(payload) != {"ad_id", "labels"}:
+        raise ValueError("invalid classification shape")
+    ad_id = payload["ad_id"]
+    values = payload["labels"]
+    if type(ad_id) is not str or not ad_id.strip() or len(ad_id) > 160:
+        raise ValueError("invalid classification id")
+    if type(values) is not dict or not values or set(values) - set(_LABEL_FIELDS):
+        raise ValueError("invalid classification fields")
+    labels: dict[str, str] = {}
+    clears: list[str] = []
+    for name, value in values.items():
+        if value is not None and type(value) is not str:
+            raise ValueError("invalid label")
+        if value is None or not value.strip():
+            clears.append(name)
+        elif len(value) <= 120:
+            labels[name] = value
+        else:
+            raise ValueError("label too long")
+    store = SnapshotStore(db, create_if_missing=False, require_existing_schema=True)
+    update_classification(store, ad_id=ad_id, labels=labels, clears=clears)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="List locally evidenced Windows ad choices")
     parser.add_argument("--db", type=Path, required=True)
+    parser.add_argument("--apply-labels", action="store_true")
     args = parser.parse_args(argv)
+    if args.apply_labels:
+        try:
+            encoded = sys.stdin.readline(65538).strip()
+            apply_customer_labels(args.db, encoded)
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            print("Kleinanzeiger: Vergleichslabels wurden nicht gespeichert.", file=sys.stderr)
+            return 2
+        print('{"status":"saved"}')
+        return 0
     try:
         rows = list_customer_choices(args.db)
     except (OSError, sqlite3.Error, ValueError, TypeError):

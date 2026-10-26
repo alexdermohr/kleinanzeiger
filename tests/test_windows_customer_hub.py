@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import base64
 import json
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ from mark_api.classification_cli import update_classification
 from mark_api.domain import AdSnapshot, InboundMessageEvent, LifecycleState
 from mark_api.email_import_cli import _parser as email_parser
 from mark_api.storage import SnapshotStore
-from mark_api.windows_customer_choices import list_customer_choices, main
+from mark_api.windows_customer_choices import apply_customer_labels, list_customer_choices, main
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -65,6 +66,33 @@ class CustomerHubTests(unittest.TestCase):
                 self.assertEqual(main(["--db", str(db)]), 0)
             self.assertEqual(json.loads(out.getvalue())["ads"], records)
 
+    def test_unicode_quoted_label_round_trip_and_invalid_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "anzeigen.sqlite"
+            store = SnapshotStore(db)
+            store.append_ad_snapshot(
+                AdSnapshot(
+                    ad_id="33333", observed_at=NOW, source="management",
+                    lifecycle_state=LifecycleState.ACTIVE,
+                )
+            )
+            payload = {"ad_id": "33333", "labels": {
+                "city": 'Lübeck "Nord"', "text_type": 'kurz \\"sachlich\\"',
+            }}
+            encoded = base64.b64encode(
+                json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
+            apply_customer_labels(db, encoded)
+            labels = store.latest_classification_bounded("33333")
+            self.assertEqual(labels.city, 'Lübeck "Nord"')
+            self.assertEqual(labels.text_type, 'kurz \\"sachlich\\"')
+            with self.assertRaises(ValueError):
+                apply_customer_labels(db, "not base64")
+            with self.assertRaises(ValueError):
+                apply_customer_labels(db, base64.b64encode(
+                    b'{"ad_id":"33333","labels":{"unknown":"x"}}'
+                ).decode("ascii"))
+
     def test_customer_actions_delegate_to_existing_validated_cli(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
         hub = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
@@ -72,7 +100,8 @@ class CustomerHubTests(unittest.TestCase):
         self.assertIn("Import-CustomerMail", worker)
         self.assertIn("Update-CustomerLabels", worker)
         self.assertIn("mark_api.email_import_cli", worker)
-        self.assertIn("mark_api.classification_cli", worker)
+        self.assertIn("--apply-labels", worker)
+        self.assertIn("mark_api.windows_customer_choices", worker)
         self.assertIn("Assert-KleinanzeigerStopped", worker)
         self.assertIn("Save-Backup", worker)
         self.assertIn("Read-UiPayload", worker)
