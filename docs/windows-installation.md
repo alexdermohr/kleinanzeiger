@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.5 – Windows 11
+# Kleinanzeiger v0.1.6 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -45,6 +45,15 @@ Das Kleinanzeiger-Fenster bietet:
 Das Dashboard bleibt die zentrale Arbeitsfläche: Anzeigenkarten auswählen,
 rechts bearbeiten, neue Anzeigen erstellen sowie Analytics und KI-Entwürfe
 bei Bedarf aufklappen.
+
+Für größere Bestände zeigt **Meine Anzeigen** nur 50 Anzeigen pro Seite.
+Über **Suche nach Titel oder Anzeigen-ID** und **Status** kann der
+lokale Bestand gefiltert werden. **Weiter / Zurück** blättert seitenweise.
+Die Auswahlkästchen lassen sich über Seiten hinweg sammeln; **Auswahl
+als CSV** speichert ausschließlich die ausgewählten Anzeigen-IDs.
+**Auswahl leeren** setzt sie zurück. Diese Mehrfachauswahl verändert keine
+Plattformanzeige und führt noch keine KI-Massenaktion aus. Einzelne
+Anzeigen werden weiterhin ausdrücklich über **Bearbeiten** verwaltet.
 
 Über **Mit Kleinanzeigen abgleichen** werden eigene Anzeigen direkt aus der
 angemeldeten Browser-Sitzung neu gelesen. **Ansicht neu laden** aktualisiert

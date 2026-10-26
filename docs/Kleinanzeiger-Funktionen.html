@@ -14,13 +14,14 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.5</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.6</p>
 <h1>Funktionsübersicht</h1>
 <p>Die folgende Übersicht unterscheidet Bedienoberfläche, unterstützte Funktion und praktische Grenzen.</p>
 <table><tr><th>Bereich</th><th>Funktion</th><th>Wo bedienen?</th></tr>
 <tr><td>Installation</td><td>Python/Chrome bereitstellen, Wheel installieren und Update prüfen</td><td>Kleinanzeiger-Fenster → Einrichten / aktualisieren</td></tr>
 <tr><td>Konto</td><td>Eigenes Kleinanzeigen-Konto im getrennten Chrome-Profil anmelden</td><td>Kleinanzeiger-Fenster → Konto öffnen</td></tr>
 <tr><td>Anzeigen</td><td>Eigene Anzeigen lesen, Karten auswählen, Titel/Beschreibung ändern, pausieren, aktivieren, löschen</td><td>Dashboard → Meine Anzeigen / Anzeige bearbeiten</td></tr>
+<tr><td>Anzeigenkatalog</td><td>50er-Seiten, Titel-/ID-Suche, Statusfilter, seitenübergreifende lokale Mehrfachauswahl, ID-CSV-Export ohne Plattformänderung</td><td>Dashboard → Meine Anzeigen</td></tr>
 <tr><td>Veröffentlichen</td><td>Neue Anzeige erstellen, Festpreis, Kategorie und JPG-/PNG-/WebP-Bilder angeben</td><td>Dashboard → Neue Anzeige erstellen</td></tr>
 <tr><td>Synchronisation</td><td>Echten Besitzerbestand neu einlesen oder nur lokale Ansicht laden</td><td>Dashboard → Mit Kleinanzeigen abgleichen / Ansicht neu laden</td></tr>
 <tr><td>Auswertungen</td><td>Aufrufe, Merker, Antworten, Reaktionen und Quellenzeiten; Gruppen- und Anzeigenrankings, CSV-Export</td><td>Dashboard → Auswertungen und Rankings</td></tr>
@@ -33,6 +34,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <tr><td>Hilfe</td><td>Benutzerhandbuch und vollständige Featureliste im Kundenpaket</td><td>Kleinanzeiger-Fenster → Handbuch / Funktionen</td></tr></table>
 <h2>Wichtige Betriebsregeln</h2>
 <ul>
+<li>Die seitenübergreifende Arbeitsauswahl exportiert nur IDs; Bulk-Write und KI-Stapelaufträge sind späterer Roadmap-Umfang.</li>
 <li>Wirkliche Schreibaktionen werden bewusst vom Nutzer ausgelöst und bei unklarem Ausgang nicht blind wiederholt.</li>
 <li>E-Mail-Import und Labelpflege erfolgen als getrennte lokale SQLite-Aktionen nur bei beendetem Kleinanzeiger; danach den Start erneut ausführen.</li>
 <li>Für einen Vergleich müssen Werte vorhanden und Anzeigen einer Dimension zugeordnet sein. Reaktions- und E-Mail-Metriken bleiben getrennt.</li>
@@ -43,5 +45,5 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <h2>Abnahme und Grenzen</h2>
 <p>Die technische Windows-Veröffentlichung wird auf dem veröffentlichten Commit mit Windows- und Wheel-Tests sowie zustandsbehafteten synthetischen Plattform- und KI-Gegenstellen geprüft. Daraus folgt keine reale Kundenkontoprüfung und keine Testveröffentlichung auf einer echten Anzeige. Ein Login erfolgt ausschließlich durch den Benutzer.</p>
 
-<footer>Kleinanzeiger v0.1.5 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.6 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>

@@ -3273,6 +3273,31 @@ class SnapshotStore:
         history = self.ad_history(ad_id)
         return history[-1] if history else None
 
+    def catalog_ad_ids_page(
+        self, *, after: str = "", limit: int = 128,
+    ) -> tuple[str, ...]:
+        """Indexed, bounded keyset page of distinct locally observed ad IDs.
+
+        A catalog view never grants ownership or Write authority. The
+        native-key certificate prevents corrupt SQLite storage classes from
+        disappearing silently behind a cursor.
+        """
+        if (
+            type(after) is not str or len(after) > 160
+            or any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in after)
+            or type(limit) is not int or not 1 <= limit <= 256
+        ):
+            raise ValueError("invalid catalog cursor or limit")
+        with closing(self._connect()) as connection:
+            self._assert_native_history_ad_ids(connection, "ad_snapshots")
+            rows = connection.execute(
+                """SELECT DISTINCT ad_id FROM ad_snapshots
+                   WHERE ad_id > ?
+                   ORDER BY ad_id COLLATE BINARY ASC LIMIT ?""",
+                (after, limit),
+            ).fetchall()
+        return tuple(self._required_observation_ad_id(row["ad_id"]) for row in rows)
+
     def tracked_ad_ids(self) -> tuple[str, ...]:
         """Return every ad ID ever observed by this store."""
         with self._connect() as connection:

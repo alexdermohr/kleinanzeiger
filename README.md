@@ -7,7 +7,18 @@
 - **Distribution:** `kleinanzeiger`; bestehende interne Module `mark_api` und `mark-api-*`-Kommandos bleiben kompatibel
 - **Technischer Lieferstatus:** Erst die bestandenen Tests, der Installationsnachweis, ein unabhängiger Sicherheitsreview und ein freigegebener Merge des konkreten Liefercommits ergeben die Produktabnahme. Kein Ersatz durch ein rein lokales Dashboard.
 
-## Native Windows-Kundenanwendung (ab v0.1.5)
+## KI-Portfolio-Ausbau für hunderte bis tausende Anzeigen
+
+Der verbindliche priorisierte Umsetzungsplan mit P0–P5, Lastgates und
+anschließenden KI-/Massenaufträgen liegt in
+[docs/roadmap-ki-portfolio-2026-10-26.md](docs/roadmap-ki-portfolio-2026-10-26.md).
+**P0:** Anzeigen im Dashboard mit indexierten Katalogseiten (jeweils maximal
+50 sichtbar), Titelsuche, ID-Suche, Statusfilter und seitenübergreifender
+lokaler Mehrfachauswahl. Ein CSV-Export enthält ausschließlich ausgewählte
+Anzeigen-IDs; Auswahl löst **keine** Plattformaktion aus. Die frühere
+`/api/ads`-Schnittstelle bleibt für bisherige Integrationen kompatibel.
+
+## Native Windows-Kundenanwendung (ab v0.1.6)
 
 Die vollständige Windows-11-x64-Ausgabe benötigt **kein WSL**.
 Das signatur- und prüfsummengebundene Windows-Paket ist unter
@@ -16,7 +27,8 @@ Das ZIP vollständig entpacken und **Kleinanzeiger.cmd** starten.
 Das zentrale Windows-Fenster bietet Installation, Update, Start/Stop,
 Konto-Anmeldung, Backup/Restore, KI-Einrichtung, **lokalen EML-Import** und
 **Vergleichslabels (Bildtyp/Stadt/Texttyp/Titeltyp) mit Anzeigenauswahl**.
-Das Dashboard bündelt Anzeigenkarten, sämtliche Create/Media/Content/State/Delete-
+Das Dashboard bündelt einen such- und filterbaren Anzeigenkatalog,
+Seitenwechsel, lokale Mehrfachauswahl, sämtliche Create/Media/Content/State/Delete-
 Funktionen, manuellen Live-Abgleich, Analytics und optionale KI-Entwürfe.
 Vollständiges **HTML-Benutzerhandbuch** und **HTML-Funktionsübersicht** liegen im
 Windows-ZIP und sind im Kontrollfenster direkt erreichbar.

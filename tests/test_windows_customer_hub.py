@@ -115,8 +115,8 @@ class CustomerHubTests(unittest.TestCase):
         self.assertIn("test_windows_customer_hub.py", workflow)
         self.assertIn("Kleinanzeiger-Handbuch.html", workflow)
         self.assertIn("Kleinanzeiger-Funktionen.html", workflow)
-        self.assertIn("'0.1.5'", workflow)
-        self.assertIn("0.1.5", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertIn("'0.1.6'", workflow)
+        self.assertIn("0.1.6", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(
             email_parser().parse_args(["--db", "ads.sqlite", "x.eml"]).emails,
             [Path("x.eml")],
