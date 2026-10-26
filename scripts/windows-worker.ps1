@@ -2,7 +2,8 @@ param(
   [ValidateSet('Install','OnlineUpdate','Backup','Restore')][string]$Action = 'Install',
   [string]$PackageDirectory = $PSScriptRoot,
   [string]$BackupName = '',
-  [switch]$SelfTest
+  [switch]$SelfTest,
+  [string]$ExpectedInstalledVersion = ''
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -15,10 +16,19 @@ $backupRoot = Join-Path $state 'Backups'
 function Get-InstalledVersion {
   if (!(Test-Path -LiteralPath $venvPython -PathType Leaf)) { return $null }
   try {
-    $result = & $venvPython -c 'import importlib.metadata as m; print(m.version("kleinanzeiger"))' 2>$null
+    $result = & $venvPython -c "import importlib.metadata as m; print(m.version('kleinanzeiger'))" 2>$null
     if ($LASTEXITCODE -eq 0 -and $result) { return ([string]$result).Trim() }
   } catch { }
   return $null
+}
+
+function Get-ReleaseAssetNames([string]$version) {
+  $prefix = 'Kleinanzeiger-v' + $version + '-'
+  return @(
+    ($prefix + 'Windows.zip')
+    ($prefix + 'Windows.sha256')
+    ($prefix + 'Release-Manifest.json')
+  )
 }
 
 function Assert-KleinanzeigerStopped {
@@ -124,11 +134,9 @@ function Download-VerifiedRelease {
   $version = $Matches['version']
   $current = Get-InstalledVersion
   if ($current -and [version]$version -le [version]$current) {
-    Write-Output 'ALREADY_CURRENT'
     return $null
   }
-  $prefix = 'Kleinanzeiger-v' + $version + '-'
-  $names = @($prefix+'Windows.zip', $prefix+'Windows.sha256', $prefix+'Release-Manifest.json')
+  $names = @(Get-ReleaseAssetNames $version)
   $downloadRoot = 'https://github.com/alexdermohr/kleinanzeiger/releases/download/v' + $version + '/'
   $dir = Join-Path $env:TEMP ('kleinanzeiger-update-' + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -168,6 +176,15 @@ function Download-VerifiedRelease {
 
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
+  $names = @(Get-ReleaseAssetNames '0.1.4')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.4-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.4-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.4-Release-Manifest.json') {
+    throw 'Release-Dateinamen sind nicht eindeutig.'
+  }
+  if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
+    throw 'Die installierte Version wurde vom Update-Worker nicht erkannt.'
+  }
   Write-Output 'WINDOWS_WORKER_SELFTEST_OK'
   return
 }
@@ -200,7 +217,11 @@ switch ($Action) {
     try {
       Write-Output 'Pruefe offizielle GitHub-Version ...'
       $download = Download-VerifiedRelease
-      if ($null -ne $download) { Install-Package $download.folder }
+      if ($null -eq $download) {
+        Write-Output 'ALREADY_CURRENT'
+      } else {
+        Install-Package $download.folder
+      }
     } finally {
       if ($null -ne $download -and (Test-Path -LiteralPath $download.temp)) {
         Remove-Item -LiteralPath $download.temp -Recurse -Force -ErrorAction SilentlyContinue

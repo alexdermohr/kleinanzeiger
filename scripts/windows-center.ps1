@@ -1,4 +1,4 @@
-﻿param([switch]$SelfTest)
+﻿param([switch]$SelfTest, [string]$ExpectedInstalledVersion = '')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -26,6 +26,7 @@ $python = Join-Path $state '.venv\Scripts\python.exe'
 $profile = Join-Path $state 'ChromeProfile'
 $keyFile = Join-Path $state 'openai-key.dpapi'
 $worker = Join-Path $base 'windows-worker.ps1'
+. (Join-Path $base 'windows-chrome.ps1')
 
 function Get-PackageVersion {
   $sums = Join-Path $base 'SHA256SUMS.txt'
@@ -40,7 +41,7 @@ function Get-PackageVersion {
 function Get-InstalledVersion {
   if (!(Test-Path -LiteralPath $python -PathType Leaf)) { return $null }
   try {
-    $result = & $python -c 'import importlib.metadata as m; print(m.version("kleinanzeiger"))' 2>$null
+    $result = & $python -c "import importlib.metadata as m; print(m.version('kleinanzeiger'))" 2>$null
     if ($LASTEXITCODE -eq 0 -and $result) { return ([string]$result).Trim() }
   } catch { }
   return $null
@@ -215,7 +216,6 @@ function Show-KiDialog {
 }
 
 function Open-Kleinanzeigen {
-  . (Join-Path $base 'windows-chrome.ps1')
   $chrome = Find-KleinanzeigerChrome -StateDirectory $state
   if (!$chrome) { throw 'Chrome fehlt. Bitte zuerst einrichten.' }
   New-Item -ItemType Directory -Path $profile -Force | Out-Null
@@ -500,6 +500,12 @@ $form.Add_Shown({
   }
 })
 if ($SelfTest) {
+  if (!(Get-Command -Name Find-KleinanzeigerChrome -CommandType Function -ErrorAction SilentlyContinue)) {
+    throw 'Chrome-Hilfe wurde nicht im gemeinsamen Fenster-Scope geladen.'
+  }
+  if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
+    throw 'Die installierte Version wurde vom Kontrollfenster nicht erkannt.'
+  }
   foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $base $file))) { throw "Fehlendes Skript: $file" }
   }

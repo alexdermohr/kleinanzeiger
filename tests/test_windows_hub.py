@@ -51,6 +51,29 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("ReleaseMutex()", gui)
         self.assertIn("if (!$SelfTest)", gui)
 
+    def test_reviewed_windows_launcher_paths_remain_in_shared_scope(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        self.assertLess(gui.index(". (Join-Path $base 'windows-chrome.ps1')"),
+                        gui.index("function Open-Kleinanzeigen"))
+        self.assertNotIn("function Open-Kleinanzeigen {\\n  . (Join-Path", gui)
+        self.assertIn("Get-Command -Name Find-KleinanzeigerChrome", gui)
+
+    def test_powershell_51_version_and_update_regressions(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
+        for script in (gui, worker):
+            self.assertIn('m.version(\'kleinanzeiger\')', script)
+            self.assertIn("ExpectedInstalledVersion", script)
+            self.assertNotIn('m.version("kleinanzeiger")', script)
+        self.assertIn("$names = @(Get-ReleaseAssetNames $version)", worker)
+        self.assertIn("if ($null -eq $download)", worker)
+        self.assertLess(worker.index("function Get-ReleaseAssetNames"),
+                        worker.index("function Download-VerifiedRelease"))
+        self.assertLess(worker.index("if ($null -eq $download)"),
+                        worker.index("Write-Output 'ALREADY_CURRENT'"))
+        workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
+        self.assertIn("-SelfTest -ExpectedInstalledVersion '0.1.4'", workflow)
+
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-VerifiedPackage", worker)

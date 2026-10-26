@@ -112,6 +112,11 @@ jobs:
           }
           & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.4'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Exercise the real Windows PowerShell 5.1 native-argument path after install.
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-center.ps1') -SelfTest -ExpectedInstalledVersion '0.1.4'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -SelfTest -ExpectedInstalledVersion '0.1.4'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Retain exact accepted Windows customer ZIP
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
