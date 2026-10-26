@@ -43,6 +43,14 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("Sicherung erstellen", encoded.decode("utf-8-sig"))
         self.assertIn("öffnen", encoded.decode("utf-8-sig"))
 
+    def test_only_one_control_window_can_manage_installation(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Local\\Kleinanzeiger-Control-Center", gui)
+        self.assertIn("if (!$newInstance)", gui)
+        self.assertIn("$form.Add_FormClosed({", gui)
+        self.assertIn("ReleaseMutex()", gui)
+        self.assertIn("if (!$SelfTest)", gui)
+
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-VerifiedPackage", worker)

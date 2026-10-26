@@ -3,6 +3,22 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+# A single user-session window owns installation, upgrades and the product child.
+# Multiple hubs would otherwise be able to update the same SQLite/Python files.
+$script:singleInstanceMutex = $null
+if (!$SelfTest) {
+  $newInstance = $false
+  $script:singleInstanceMutex = [System.Threading.Mutex]::new(
+    $true, 'Local\Kleinanzeiger-Control-Center', [ref]$newInstance)
+  if (!$newInstance) {
+    $script:singleInstanceMutex.Dispose()
+    $script:singleInstanceMutex = $null
+    [System.Windows.Forms.MessageBox]::Show(
+      'Kleinanzeiger ist bereits geöffnet. Bitte das vorhandene Fenster verwenden.',
+      'Kleinanzeiger') | Out-Null
+    return
+  }
+}
 $base = $PSScriptRoot
 $state = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
 $db = Join-Path $state 'anzeigen.sqlite'
@@ -452,6 +468,13 @@ $restore.Add_Click({
           [Windows.Forms.MessageBoxButtons]::YesNo) -eq [Windows.Forms.DialogResult]::Yes) {
     try { Start-Worker 'Restore' $false $selected }
     catch { Set-Status $_.Exception.Message $true }
+  }
+})
+$form.Add_FormClosed({
+  if ($script:singleInstanceMutex) {
+    try { $script:singleInstanceMutex.ReleaseMutex() } catch { }
+    $script:singleInstanceMutex.Dispose()
+    $script:singleInstanceMutex = $null
   }
 })
 $form.Add_FormClosing({
