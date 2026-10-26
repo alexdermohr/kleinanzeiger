@@ -6,11 +6,11 @@ Kleinanzeiger v0.1.7 – Windows 11. Diese Funktion erzeugt ausschließlich **lo
 
 1. Die Tabellenkalkulation mit den Spalten `sku,title,description,category,price_eur` anlegen. Optional `images` (Bilddateinamen als Hinweise).
 2. Unterstützte deutsche Überschriften: `Artikelnummer,Titel,Beschreibung,Kategorie,Preis,Bilder`. Das Mapping wird bei der Importvorschau angezeigt.
-3. Als **CSV mit UTF-8 und Komma** oder als **Excel XLSX** speichern. Eine Zeile = ein Artikel, maximal 5000 pro Datei, maximal 10 MB Dateigröße.
+3. Als **CSV mit UTF-8 und Komma oder Semikolon** (auch deutscher Excel-CSV-Export) oder als **Excel XLSX** speichern. Eine Zeile = ein Artikel, maximal 5000 pro Datei, maximal 10 MB Dateigröße.
 4. Im Windows-Kontrollfenster Kleinanzeiger gegebenenfalls erst **beenden**, dann **Artikel importieren** anklicken. Datei auswählen. Die Vorschau nennt neue, unveränderte und konfliktbehaftete Artikel sowie exemplarische Titel.
 5. Erst nach der ausdrücklichen Bestätigung wird ein SQLite-Backup angelegt. Der Import prüft unveränderte SHA-256-Dateidaten, schreibt die neuen Entwürfe in einer einzigen Datenbanktransaktion und veröffentlicht nichts.
 6. Kleinanzeiger erneut starten. Im Dashboard **Artikelentwürfe** öffnen und bei Bedarf nach Titel/SKU suchen, seitenweise blättern, eine Zeile auswählen und **In neue Anzeige** klicken. Der Entwurf füllt Kategorie, Titel, Beschreibung und Preis in das vorhandene Neuanzeigenformular; erst eine **weitere eigene Veröffentlichungshandlung** würde einen Plattform-Create auslösen.
-7. **Entwürfe exportieren** im Windows-Fenster erstellt eine neue CSV; bestehende Dateien werden nicht überschrieben.
+7. **Entwürfe exportieren** im Windows-Fenster erstellt eine neue CSV; bestehende Dateien werden nicht überschrieben. Exportierte Textfelder sind gegen Tabellenformeln geschützt; beim erneuten Import einer unveränderten Kleinanzeiger-Exportdatei werden auch ursprüngliche führende Apostrophe korrekt wiederhergestellt.
 
 ## Pflichtspalten
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import csv
+from contextlib import closing
 from io import StringIO
 import json
 import os
@@ -48,7 +49,7 @@ class ProductDraftTests(unittest.TestCase):
         checked = preview_import(self.store, source)
         self.assertEqual((checked["total"], checked["new"], checked["conflict"]), (1000, 1000, 0))
         self.assertEqual(checked["mapping"]["sku"], "Artikelnummer")
-        with sqlite3.connect(self.db) as raw:
+        with closing(sqlite3.connect(self.db)) as raw:
             self.assertIsNone(raw.execute(
                 "SELECT name FROM sqlite_master WHERE name='portfolio_drafts'"
             ).fetchone(), "dry-run must not mutate schema or data")
@@ -73,6 +74,55 @@ class ProductDraftTests(unittest.TestCase):
         # User-imported SKU is not a Kleinanzeigen ad ID or an owner assertion.
         self.assertEqual(self.store.tracked_ad_ids(), ())
         self.assertEqual(self.store.sync_status()["state"], "never_attempted")
+
+    def test_german_excel_semicolon_csv_and_decimal_comma(self) -> None:
+        filename = self.root / "deutscher-export.csv"
+        with filename.open("w", encoding="utf-8-sig", newline="") as output:
+            writer = csv.writer(output, delimiter=";")
+            writer.writerow(["Artikelnummer","Titel","Beschreibung","Kategorie","Preis","Bilder"])
+            writer.writerow(["VASE-001", 'Vase "Łódź"', "Sehr guter Zustand",
+                             "Haus & Garten > Dekoration", "29,00", "vorn.jpg;detail.png"])
+        preview = preview_import(self.store, filename)
+        self.assertEqual((preview["new"], preview["total"]), (1, 1))
+        import_drafts(self.store, filename, preview["sha256"])
+        self.assertEqual(drafts_page(self.store)["drafts"][0]["price_eur"], 29)
+        self.assertEqual(drafts_page(self.store)["drafts"][0]["images"],
+                         ["vorn.jpg", "detail.png"])
+
+    def test_windows_crlf_and_formula_safe_csv_round_trip_is_reversible(self) -> None:
+        source = self.root / "windows-lines.csv"
+        original_title = "+ Kleiderständer"
+        original_desc = "- guter Zustand\r\nAbholung möglich"
+        with source.open("w", encoding="utf-8-sig", newline="") as output:
+            writer = csv.writer(output, lineterminator="\r\n")
+            writer.writerow(["sku", "title", "description", "category", "price_eur"])
+            writer.writerow(["ART-0001", original_title, original_desc,
+                             "-Haus > Möbel", "30"])
+        preview = preview_import(self.store, source)
+        self.assertEqual(preview["total"], 1)
+        import_drafts(self.store, source, preview["sha256"])
+        draft = drafts_page(self.store)["drafts"][0]
+        self.assertEqual(draft["description"], "- guter Zustand\nAbholung möglich")
+        self.assertEqual(draft["title"], original_title)
+        exported = self.root / "safe-out.csv"
+        export_drafts(self.store, exported)
+        with exported.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(rows[0]["title"].startswith("'+"))
+        self.assertTrue(rows[0]["description"].startswith("'-"))
+        self.assertEqual(preview_import(self.store, exported)["unchanged"], 1)
+        # A second file with the original literal apostrophe must be preserved.
+        quoted = self.root / "quoted.csv"
+        with quoted.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["sku","title","description","category","price_eur"])
+            writer.writerow(["ART-0002", "'=Originaltitel", "Beschreibung",
+                             "Haus > Deko", "20"])
+        check = preview_import(self.store, quoted)
+        import_drafts(self.store, quoted, check["sha256"])
+        second_export = self.root / "second.csv"
+        export_drafts(self.store, second_export)
+        self.assertEqual(preview_import(self.store, second_export)["unchanged"], 2)
 
     def test_conflicts_are_all_or_nothing_even_when_after_valid_new_rows(self) -> None:
         source = self.make_csv(2)

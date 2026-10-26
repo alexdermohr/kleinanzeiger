@@ -2816,6 +2816,17 @@ function previousDraftsPage() {
 
 const newAdNavigation = optionalById("nav-create");
 if (newAdNavigation) newAdNavigation.addEventListener("click", revealCreateForm);
+const analyticsNavigation = optionalById("nav-analytics");
+if (analyticsNavigation) analyticsNavigation.addEventListener("click", () => {
+  const disclosure = optionalById("analytics-disclosure");
+  if (disclosure) disclosure.open = true;
+});
+const generationNavigation = optionalById("nav-generation");
+if (generationNavigation) generationNavigation.addEventListener("click", () => {
+  const disclosure = optionalById("generation-disclosure");
+  if (disclosure) disclosure.open = true;
+});
+byId("reload").addEventListener("click", load);
 const draftNavigation = optionalById("nav-drafts");
 if (draftNavigation) draftNavigation.addEventListener("click", () => {
   byId("drafts-disclosure").open = true;
@@ -2830,17 +2841,6 @@ byId("draft-search").addEventListener("keydown", (event) => {
 });
 byId("draft-prev").addEventListener("click", previousDraftsPage);
 byId("draft-next").addEventListener("click", nextDraftsPage);
-const analyticsNavigation = optionalById("nav-analytics");
-if (analyticsNavigation) analyticsNavigation.addEventListener("click", () => {
-  const disclosure = optionalById("analytics-disclosure");
-  if (disclosure) disclosure.open = true;
-});
-const generationNavigation = optionalById("nav-generation");
-if (generationNavigation) generationNavigation.addEventListener("click", () => {
-  const disclosure = optionalById("generation-disclosure");
-  if (disclosure) disclosure.open = true;
-});
-byId("reload").addEventListener("click", load);
 byId("catalog-find").addEventListener("click", searchCatalog);
 byId("catalog-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {

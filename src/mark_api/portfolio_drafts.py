@@ -31,6 +31,7 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 _MAX_DECOMPRESSED = 36 * 1024 * 1024
 _MAX_CELLS = 7
 _FIELDS = ("sku", "title", "description", "category", "price_eur", "images")
+_EXPORT_MARKER = "kleinanzeiger_export_format"
 _REQUIRED = _FIELDS[:-1]
 _ALIASES = {
     "sku": ("sku", "artikelnummer", "artikel_nr", "artikel-nr", "artnr", "product_id"),
@@ -39,6 +40,7 @@ _ALIASES = {
     "category": ("category", "kategorie", "kategoriepfad"),
     "price_eur": ("price_eur", "preis", "preis_eur", "festpreis"),
     "images": ("images", "bilder", "fotos", "bilddateien"),
+    _EXPORT_MARKER: (_EXPORT_MARKER,),
 }
 _SKU = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 _IMG = re.compile(r"[A-Za-z0-9ÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß ._()-]{0,180}\.(?:jpg|jpeg|png|webp)\Z", re.IGNORECASE)
@@ -163,7 +165,12 @@ def _draft(values: list[object], mapping: dict[str, int], row: int) -> ProductDr
     if not _SKU.fullmatch(sku):
         raise DraftImportError("Artikelnummer nur Buchstaben, Ziffern, Punkt, _ und -.", row=row, field="sku")
     title = _text(get("title"), "title", row, 65)
-    description = _text(get("description"), "description", row, 4000)
+    raw_description = get("description")
+    if isinstance(raw_description, str):
+        # Windows CSV retains CRLF inside quoted cells; normalize to the
+        # same line endings used by the existing single-ad creation form.
+        raw_description = raw_description.replace("\r\n", "\n").replace("\r", "\n")
+    description = _text(raw_description, "description", row, 4000)
     category = tuple(part.strip() for part in _text(get("category"), "category", row, 750).split(">"))
     if not 2 <= len(category) <= 6 or any(not name or len(name) > 120 for name in category):
         raise DraftImportError("Kategorie braucht 2 bis 6 nichtleere Teile.", row=row, field="category")
@@ -197,8 +204,13 @@ def _read_rows(path: Path, content: bytes) -> tuple[list[list[object]], str]:
     if path.suffix.casefold() == ".csv":
         try:
             decoded = content.decode("utf-8-sig")
+            # German Excel commonly exports CSV with semicolons and decimal
+            # commas. Pick the delimiter from the *header*, not product data
+            # such as semicolon-separated image filenames.
+            header = decoded.splitlines()[0] if decoded.splitlines() else ""
+            delimiter = ";" if header.count(";") > header.count(",") else ","
             with io.StringIO(decoded, newline="") as stream:
-                reader = csv.reader(stream, delimiter=",", strict=True)
+                reader = csv.reader(stream, delimiter=delimiter, strict=True)
                 values = []
                 for index, row in enumerate(reader):
                     if index > MAX_ROWS:
@@ -206,7 +218,7 @@ def _read_rows(path: Path, content: bytes) -> tuple[list[list[object]], str]:
                     values.append(list(row))
                 return values, "csv"
         except (UnicodeError, csv.Error):
-            raise DraftImportError("CSV muss UTF-8 mit Kommatrennung sein.", field="file") from None
+            raise DraftImportError("CSV muss UTF-8 mit Komma- oder Semikolontrennung sein.", field="file") from None
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             members = archive.infolist()
@@ -235,6 +247,25 @@ def _read_rows(path: Path, content: bytes) -> tuple[list[list[object]], str]:
         raise DraftImportError("XLSX konnte nicht sicher gelesen werden.", field="file") from None
 
 
+def _restore_csv_cell(value: object) -> object:
+    """Reverse only the prefix added by our own Excel-safe CSV writer.
+
+    Leading literal apostrophes are doubled on export; leading spreadsheet
+    operators are escaped. This is one-to-one for imported text values and
+    prevents XLSX/Excel evaluating formulas on exported CSV open.
+    """
+    if not isinstance(value, str):
+        return value
+    if value.startswith("''"):
+        return value[1:]
+    if value.startswith("'") and (
+        value[1:].lstrip().startswith(("=", "+", "-", "@"))
+        or value[1:].startswith(("\t", "\r", "\n"))
+    ):
+        return value[1:]
+    return value
+
+
 def parse_drafts(path: Path) -> tuple[list[ProductDraft], dict[str, str], str, str]:
     contents, digest = _read_file(path)
     raw, file_format = _read_rows(path, contents)
@@ -250,6 +281,14 @@ def parse_drafts(path: Path) -> tuple[list[ProductDraft], dict[str, str], str, s
         try:
             if len(values) > len(raw[0]):
                 raise DraftImportError("Mehr Datenzellen als Spalten in dieser Zeile.", row=row_no)
+            if file_format == "csv" and _EXPORT_MARKER in mapping:
+                marker_pos = mapping[_EXPORT_MARKER]
+                if marker_pos >= len(values) or values[marker_pos] != "v1":
+                    raise DraftImportError("Exportformat-Marker ungueltig.", row=row_no, field=_EXPORT_MARKER)
+                for field in ("title", "description", "category"):
+                    field_pos = mapping.get(field)
+                    if field_pos is not None and field_pos < len(values):
+                        values[field_pos] = _restore_csv_cell(values[field_pos])
             draft = _draft(values, mapping, row_no)
             if draft.sku in seen:
                 raise DraftImportError("Doppelte Artikelnummer in Importdatei.", row=row_no, field="sku")
@@ -359,63 +398,3 @@ def drafts_page(store: SnapshotStore, *, after: str = "", search: str = "", limi
         ).fetchall()
     visible = records[:limit]
     data = []
-    for rec in visible:
-        try:
-            category, images = json.loads(rec[3]), json.loads(rec[5])
-            if rec[6] != "draft" or not isinstance(category, list) or not isinstance(images, list):
-                raise ValueError("invalid stored draft")
-            data.append({"sku": rec[0], "title": rec[1], "description": rec[2],
-                         "category": " > ".join(category), "price_eur": rec[4],
-                         "images": images, "status": "draft", "published": False})
-        except (TypeError, ValueError):
-            raise sqlite3.DatabaseError("invalid draft data") from None
-    return {"drafts": data, "has_more": len(records) > limit,
-            "next_after": visible[-1][0] if len(records) > limit else None, "total": total}
-
-
-def _excel_csv_text(value: object) -> object:
-    if isinstance(value, str):
-        leading = value.lstrip()
-        if leading.startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")):
-            return "'" + value
-    return value
-
-
-def export_drafts(store: SnapshotStore, target: Path) -> dict[str, object]:
-    """Write a complete, Excel-safe CSV through a private stage, create-only.
-
-    The target is published as a hardlink only after the full CSV has been
-    flushed; no existing customer CSV can be replaced and partial exports are
-    removed on failures.
-    """
-    if target.suffix.casefold() != ".csv" or not target.is_absolute():
-        raise DraftImportError("Exportziel muss eine absolute CSV-Datei sein.")
-    with closing(store._connect()) as conn:
-        if not _has_table(conn):
-            records = []
-        else:
-            records = conn.execute(
-                "SELECT sku,title,description,category_json,price_eur,images_json "
-                "FROM portfolio_drafts ORDER BY sku COLLATE BINARY"
-            ).fetchall()
-    stage = target.with_name("." + target.name + "." + secrets.token_hex(10) + ".part")
-    try:
-        with stage.open("x", encoding="utf-8-sig", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow(_FIELDS)
-            for row in records:
-                category = " > ".join(json.loads(row[3]))
-                images = ";".join(json.loads(row[5]))
-                writer.writerow(tuple(_excel_csv_text(x) for x in
-                                      (row[0], row[1], row[2], category, row[4], images)))
-            file.flush()
-            os.fsync(file.fileno())
-        os.link(stage, target)
-    except (OSError, ValueError, TypeError):
-        raise DraftImportError("Entwuerfe konnten nicht exportiert werden.") from None
-    finally:
-        try:
-            stage.unlink(missing_ok=True)
-        except OSError:
-            pass
-    return {"status": "exported", "rows": len(records), "filename": target.name}
