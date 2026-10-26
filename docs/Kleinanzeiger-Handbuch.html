@@ -14,13 +14,13 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.6</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.7</p>
 <h1>Kleinanzeiger – Benutzerhandbuch</h1>
 <p>Kleinanzeiger verwaltet Ihre eigenen Anzeigen, zeigt Kennzahlen, unterstützt Entwürfe mit KI und sichert lokale Daten. Alle häufigen Aufgaben starten über das Fenster <strong>Kleinanzeiger</strong>.</p>
 <nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
 <h2 id="install">1. Installation und erster Start</h2>
 <ol>
-<li>Das offizielle <strong>Kleinanzeiger-v0.1.6-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
+<li>Das offizielle <strong>Kleinanzeiger-v0.1.7-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
 <li><strong>Kleinanzeiger.cmd</strong> doppelklicken. Das Windows-Kontrollfenster erscheint.</li>
 <li><strong>Einrichten und starten</strong> klicken. Fehlendes Python 3.12/3.13 sowie Chrome werden bei Bedarf über geprüfte offizielle Dateien bereitgestellt. Eine Internetverbindung ist dafür nötig.</li>
 <li>Im eigens gestarteten Chrome-Fenster bei <strong>kleinanzeigen.de</strong> anmelden; gegebenenfalls die Konto-Bestätigung selbst durchführen. Kleinanzeiger speichert kein Kontopasswort.</li>
@@ -94,5 +94,13 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <h2>8. Lieferumfang und Testgrenzen</h2>
 <p>Der Release umfasst vollständige Anzeigenverwaltung, Synchronisation, Analytics, E-Mail-Import, Klassifikation, KI-Entwürfe und Datensicherung. Der installierte Windows-Pfad wird mit synthetischen Browser-/Anbieter-Gegenstellen getestet. Reale Kundenaktionen und kostenpflichtige KI-Anfragen werden dabei nicht automatisch durchgeführt. Die persönliche Nutzung des eigenen Kontos benötigt eine gültige eigene Anmeldung.</p>
 
-<footer>Kleinanzeiger v0.1.6 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<h2 id="artikel">9. Große Artikelbestände aus CSV/Excel importieren</h2>
+<p>CSV (UTF-8) oder Excel XLSX mit <code>sku,title,description,category,price_eur</code> und optional <code>images</code> erstellen. Auch die deutschen Spalten <code>Artikelnummer,Titel,Beschreibung,Kategorie,Preis,Bilder</code> werden automatisch zugeordnet. Eine Datei kann maximal 5000 Artikel enthalten.</p>
+<ol><li>Kleinanzeiger im Kontrollfenster kontrolliert beenden und <strong>Artikel importieren</strong> wählen.</li>
+<li>Datei auswählen und <strong>Vorschau</strong> prüfen: Neue/identische Artikel, Konflikte und einige Beispielzeilen werden angezeigt.</li>
+<li>Nur bei korrekter Vorschau den Import bestätigen. Eine SQLite-Sicherung wird erstellt. Die Artikel werden atomar als <strong>unveröffentlichte Entwürfe</strong> gespeichert.</li>
+<li>Kleinanzeiger neu starten; Dashboard → <strong>Artikelentwürfe</strong> öffnen, suchen und bei Bedarf <strong>In neue Anzeige</strong> wählen. Danach Bilder selbst auswählen und die Veröffentlichung gesondert auslösen.</li>
+<li><strong>Entwürfe exportieren</strong> erstellt eine eigene CSV, ohne bestehende Dateien zu überschreiben.</li></ol>
+<p class="note">Artikelnummern (SKUs) sind keine Plattform-Anzeigen-IDs. Die optionale Bildspalte enthält ausschließlich Dateinamen als Hinweise; Bilder werden weder automatisch eingelesen noch hochgeladen. Duplikate mit unterschiedlichen Daten blockieren den gesamten Import, Excel-Formeln sind unzulässig.</p>
+<footer>Kleinanzeiger v0.1.7 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>

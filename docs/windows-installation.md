@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.6 – Windows 11
+# Kleinanzeiger v0.1.7 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -27,6 +27,8 @@ Das Kleinanzeiger-Fenster bietet:
 - **Installieren / aktualisieren**: prüft das offizielle GitHub-Release,
   ZIP-/Wheel-SHA-256 und Manifest. Vor einem Update wird automatisch ein
   SQLite-Backup mit Manifest erstellt.
+- **Artikel importieren**: CSV-/Excel-XLSX-Datei mit Artikelnummer, Titel, Beschreibung, Kategorie und vollem Europreis wählen. Die Vorprüfung zeigt Zuordnung, neue/identische Artikel und Konflikte. Nur nach Bestätigung werden die Datensätze mit automatischem Backup als lokale unveröffentlichte Entwürfe übernommen; niemals automatisch veröffentlicht.
+- **Entwürfe exportieren**: alle lokalen Artikelentwürfe als CSV zum Bearbeiten und erneuten Einlesen ausgeben. Export überschreibt keine bestehenden Dateien.
 - **E-Mails importieren**: importiert ausdrücklich ausgewählte lokale Kleinanzeigen-EML-Dateien (vorher die Anwendung beenden) und erstellt davor eine verifizierte Sicherung.
 - **Anzeigen vergleichen**: wählt bestehende oder durch E-Mail-Import belegte Anzeigen aus und pflegt Bildtyp, Stadt, Texttyp und Titeltyp für Gruppenrankings (ebenfalls bei beendetem Produkt).
 - **Handbuch / Funktionen**: öffnet die vollständigen HTML-Kundenunterlagen aus dem installierten Paket.
@@ -75,3 +77,7 @@ Die separate Linux-A6-Altbestandsmigration (#76) ist kein Windows-Blocker.
 Das vollständig integrierte Handbuch heißt `Kleinanzeiger-Handbuch.html`, die
 Funktionsübersicht `Kleinanzeiger-Funktionen.html`. Beide Dateien liegen im
 Windows-Paket und sind über das zentrale Kontrollfenster erreichbar.
+
+## Große Produktbestände als Entwürfe vorbereiten
+
+CSV (UTF-8) oder Excel XLSX mit den Pflichtspalten `sku,title,description,category,price_eur` und optional `images`. Deutsche Spaltennamen `Artikelnummer,Titel,Beschreibung,Kategorie,Preis,Bilder` werden automatisch zugeordnet. Kategorie als `Haus & Garten > Dekoration`, Preis als ganze Euro, bis 5000 Artikel je Datei, bis zehn Bilddateinamen (Semikolon-getrennt). Die Bilddateinamen sind nur Hinweise und noch keine Plattformuploads. Ein bestehender Artikel mit derselben SKU und abweichendem Inhalt wird ohne Änderung abgewiesen. Im Dashboard den Bereich **Artikelentwürfe** öffnen, suchen, seitenweise durchsehen und einen Entwurf mit ausdrücklichem Klick in das separate Neuanzeigenformular übernehmen. Dieser Schritt **veröffentlicht keine Anzeige** und erteilt keine Eigentümerfreigabe. Für Details siehe [Artikelimport](portfolio-import.md).

@@ -12,6 +12,7 @@ from mark_api import dashboard, classification_cli, email_import_cli
 from mark_api import local_smoke, private_web_runtime_smoke
 from mark_api import fence_witness, launcher, legacy_migration, storage_owner
 from mark_api import windows_customer_choices
+from mark_api import portfolio_import_cli
 
 
 class ContainerDraftGateTests(unittest.TestCase):
@@ -35,6 +36,7 @@ class ContainerDraftGateTests(unittest.TestCase):
                 (dashboard, dashboard.main),
                 (classification_cli, classification_cli.main),
                 (windows_customer_choices, windows_customer_choices.main),
+                (portfolio_import_cli, portfolio_import_cli.main),
                 (email_import_cli, email_import_cli.main),
                 (local_smoke, local_smoke.main),
                 (private_web_runtime_smoke, private_web_runtime_smoke.main),

@@ -69,7 +69,7 @@ $font = [System.Drawing.Font]::new('Segoe UI',10)
 $fontBold = [System.Drawing.Font]::new('Segoe UI',10,[Drawing.FontStyle]::Bold)
 $form = [System.Windows.Forms.Form]::new()
 $form.Text = 'Kleinanzeiger'
-$form.ClientSize = [System.Drawing.Size]::new(640,530)
+$form.ClientSize = [System.Drawing.Size]::new(640,590)
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.StartPosition = 'CenterScreen'
@@ -113,19 +113,21 @@ $ai = Add-Button 'KI einrichten' 28 273 282 43
 $account = Add-Button 'Kleinanzeigen-Konto öffnen' 330 273 282 43
 $mail = Add-Button 'E-Mails importieren' 28 330 282 43
 $labels = Add-Button 'Anzeigen vergleichen' 330 330 282 43
-$statusLabel = Add-Label 'Bereit.' 28 391 584 44 $font $muted
+$products = Add-Button 'Artikel importieren' 28 389 282 43
+$productsExport = Add-Button 'Entwürfe exportieren' 330 389 282 43
+$statusLabel = Add-Label 'Bereit.' 28 450 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
 $detailsLink.Text = 'Details'
-$detailsLink.SetBounds(541,414,71,26)
+$detailsLink.SetBounds(541,472,71,26)
 $detailsLink.LinkColor = $accent
 $form.Controls.Add($detailsLink)
 $detailsLink.Add_Click({
   $shown = $(if ($script:details) { $script:details } else { 'Keine zusätzlichen Informationen.' })
   [Windows.Forms.MessageBox]::Show($shown,'Kleinanzeiger – technische Details') | Out-Null
 })
-$advanced = Add-Button 'Weitere Optionen' 28 470 200 32
+$advanced = Add-Button 'Weitere Optionen' 28 529 200 32
 $advanced.Font = [System.Drawing.Font]::new('Segoe UI',8.5)
-$restore = Add-Button 'Sicherung wiederherstellen …' 248 470 280 32
+$restore = Add-Button 'Sicherung wiederherstellen …' 248 529 280 32
 $restore.Font = [System.Drawing.Font]::new('Segoe UI',8.5)
 $restore.Visible = $false
 $help = [System.Windows.Forms.LinkLabel]::new()
@@ -163,6 +165,8 @@ function Refresh-Controls {
   $ai.Enabled = !$busy
   $mail.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $labels.Enabled = !$busy -and (Test-Path -LiteralPath $db)
+  $products.Enabled = !$busy -and (Test-Path -LiteralPath $db)
+  $productsExport.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $account.Enabled = !$busy
   $restore.Enabled = !$busy -and !(Test-Path -LiteralPath $db)
 }
@@ -242,6 +246,89 @@ function Open-CustomerHelp([string]$fileName) {
     throw 'Hilfe-Datei fehlt. Bitte das vollstaendige Kundenpaket verwenden.'
   }
   Start-Process -FilePath $helpFile
+}
+
+
+function Invoke-PortfolioPreview([string]$selectedFile) {
+  if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw 'Kleinanzeiger ist nicht eingerichtet.'
+  }
+  $payload = @{path=$selectedFile}
+  $encoded = [Convert]::ToBase64String(
+    [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $payload -Compress)))
+  $env:KLEINANZEIGER_IMPORT_REQUEST = $encoded
+  try {
+    $raw = @(& $python -m mark_api.portfolio_import_cli --db $db --mode preview 2>$null) -join ''
+    if ($LASTEXITCODE -ne 0 -or !$raw) {
+      throw 'Importvorschau konnte nicht erstellt werden.'
+    }
+    return ConvertFrom-Json -InputObject $raw
+  } finally {
+    Remove-Item Env:KLEINANZEIGER_IMPORT_REQUEST -ErrorAction SilentlyContinue
+  }
+}
+
+function Show-ProductImport {
+  if (Test-ActiveProduct) {
+    Set-Status 'Vor dem Artikelimport Kleinanzeiger bitte beenden.' $true
+    return
+  }
+  $picker = [Windows.Forms.OpenFileDialog]::new()
+  $picker.Title = 'Artikel aus CSV oder Excel auswaehlen'
+  $picker.Filter = 'CSV- und Excel-Dateien (*.csv;*.xlsx)|*.csv;*.xlsx'
+  $picker.Multiselect = $false
+  try {
+    if ($picker.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK) { return }
+    $path = $picker.FileName
+    $preview = Invoke-PortfolioPreview $path
+    if ([string]$preview.status -ne 'preview') {
+      $issue = @($preview.issues)[0]
+      $place = $(if($issue -and $null -ne $issue.row){"Zeile $($issue.row)"}else{'Datei'})
+      [Windows.Forms.MessageBox]::Show(
+        "Import nicht moeglich: $place, $($issue.field) – $($issue.message)",
+        'Kleinanzeiger') | Out-Null
+      return
+    }
+    if (!$preview.can_import) {
+      [Windows.Forms.MessageBox]::Show(
+        "$($preview.conflict) Artikelnummern haben abweichende bereits gespeicherte Inhalte. Bitte Importdatei pruefen.",
+        'Kleinanzeiger') | Out-Null
+      return
+    }
+    $sample = (@($preview.samples) | Select-Object -First 4 |
+      ForEach-Object { $_.sku + ': ' + $_.title }) -join [Environment]::NewLine
+    $question = "Datei: $($preview.filename)" + [Environment]::NewLine +
+      "Artikel: $($preview.total), neu: $($preview.new), unveraendert: $($preview.unchanged)" +
+      [Environment]::NewLine + [Environment]::NewLine + $sample +
+      [Environment]::NewLine + [Environment]::NewLine +
+      "Lokal als unveroeffentlichte Entwuerfe importieren? Zuvor wird eine Sicherung erstellt."
+    if ([Windows.Forms.MessageBox]::Show(
+      $question,'Kleinanzeiger – Importvorschau',
+      [Windows.Forms.MessageBoxButtons]::YesNo) -ne
+      [Windows.Forms.DialogResult]::Yes) { return }
+    Start-Worker 'ImportProducts' $false '' @{path=$path;sha256=[string]$preview.sha256}
+  } finally { $picker.Dispose() }
+}
+
+function Show-ProductExport {
+  if (Test-ActiveProduct) {
+    Set-Status 'Vor dem Export Kleinanzeiger bitte beenden.' $true
+    return
+  }
+  $picker = [Windows.Forms.SaveFileDialog]::new()
+  $picker.Title = 'Artikelentwuerfe als CSV exportieren'
+  $picker.Filter = 'CSV-Datei (*.csv)|*.csv'
+  $picker.DefaultExt = 'csv'
+  $picker.AddExtension = $true
+  $picker.OverwritePrompt = $false
+  try {
+    if ($picker.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK) { return }
+    if (Test-Path -LiteralPath $picker.FileName) {
+      Set-Status 'Exportziel ist bereits vorhanden. Bitte neuen Dateinamen waehlen.' $true
+      return
+    }
+    Start-Worker 'ExportProducts' $false '' @{path=$picker.FileName}
+  } finally { $picker.Dispose() }
 }
 
 function Show-CustomerMailPicker {
@@ -403,6 +490,8 @@ function Start-Worker([string]$action,[bool]$launchAfter=$false,[string]$backupN
     'Restore' {'Stelle die Sicherung wieder her …'}
     'ImportMail' {'Importiere ausgewaehlte E-Mails …'}
     'Classify' {'Speichere Vergleichslabels …'}
+    'ImportProducts' {'Pruefe und importiere Artikelentwuerfe …'}
+    'ExportProducts' {'Exportiere Artikelentwuerfe …'}
   })
   Start-PipedProcess $info $action
   if ($null -ne $payload) {
@@ -533,6 +622,8 @@ function Finish-Process {
       'Restore' {'Sicherung erfolgreich wiederhergestellt.'}
       'ImportMail' {'E-Mails importiert. Anzeigen beim naechsten Start neu laden.'}
       'Classify' {'Vergleichslabels gespeichert. Auswertungen beim naechsten Start neu laden.'}
+      'ImportProducts' {'Artikelentwuerfe gespeichert. Im Dashboard nach dem Start ansehen.'}
+      'ExportProducts' {'Artikelentwuerfe als CSV exportiert.'}
     })
   }
   if ($script:nextLaunch) {
@@ -592,6 +683,8 @@ $update.Add_Click({
 $backup.Add_Click({ try { Start-Worker 'Backup' } catch { Set-Status $_.Exception.Message $true } })
 $mail.Add_Click({ try { Show-CustomerMailPicker } catch { Set-Status $_.Exception.Message $true } })
 $labels.Add_Click({ try { Show-CustomerLabels } catch { Set-Status $_.Exception.Message $true } })
+$products.Add_Click({ try { Show-ProductImport } catch { Set-Status $_.Exception.Message $true } })
+$productsExport.Add_Click({ try { Show-ProductExport } catch { Set-Status $_.Exception.Message $true } })
 $help.Add_Click({ try { Open-CustomerHelp 'Kleinanzeiger-Handbuch.html' } catch { Set-Status $_.Exception.Message $true } })
 $features.Add_Click({ try { Open-CustomerHelp 'Kleinanzeiger-Funktionen.html' } catch { Set-Status $_.Exception.Message $true } })
 $account.Add_Click({
@@ -681,7 +774,7 @@ if ($SelfTest) {
   }
   if ($form.Controls.Count -lt 12 -or $primary.Text -ne 'Kleinanzeiger starten' -or
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $restore -or
-      $null -eq $mail -or $null -eq $labels -or $null -eq $help -or $null -eq $features) {
+      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
   }
   $timer.Dispose()
