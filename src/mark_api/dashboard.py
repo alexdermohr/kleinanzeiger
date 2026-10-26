@@ -1185,10 +1185,15 @@ function managedContentChanges(adId) {
 
 
 function renderCatalogSelection() {
+  // Existing standalone/legacy Dashboard render harnesses have no portfolio
+  // toolbar. Selection remains inert rather than changing their Write flows.
   const count = catalogSelectedIds.size;
-  byId("catalog-selected-count").textContent = count + " ausgewählt";
-  byId("catalog-clear").disabled = count === 0;
-  byId("catalog-export").disabled = count === 0;
+  const label = optionalById("catalog-selected-count");
+  const clear = optionalById("catalog-clear");
+  const exportControl = optionalById("catalog-export");
+  if (label) label.textContent = count + " ausgewählt";
+  if (clear) clear.disabled = count === 0;
+  if (exportControl) exportControl.disabled = count === 0;
 }
 
 function catalogCheckbox(ad) {

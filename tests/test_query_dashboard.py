@@ -5567,7 +5567,9 @@ const absent = {
 };
 renderAds([absent]);
 const row = elements.get("ads-body").children[0];
-const actionCell = row.children[7];
+// The portfolio catalog adds a read-only checkbox column before the ID.
+assert.equal(row.children.length, 9);
+const actionCell = row.children[8];
 assert.equal(actionCell.children.length, 1);
 const recoveryButton = actionCell.children[0];
 assert.equal(recoveryButton.textContent, "Recovery");
@@ -5636,7 +5638,8 @@ globalThis.fetch = async (path, options) => {
     title: "Absent without pending",
   }]);
   const absentWithoutPending = elements.get("ads-body").children[0];
-  assert.equal(absentWithoutPending.children[7].children.length, 0);
+  assert.equal(absentWithoutPending.children.length, 9);
+  assert.equal(absentWithoutPending.children[8].children.length, 0);
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
