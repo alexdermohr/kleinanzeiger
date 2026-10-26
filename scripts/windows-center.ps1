@@ -623,7 +623,7 @@ function Finish-Process {
       'ImportMail' {'E-Mails importiert. Anzeigen beim naechsten Start neu laden.'}
       'Classify' {'Vergleichslabels gespeichert. Auswertungen beim naechsten Start neu laden.'}
       'ImportProducts' {'Artikelentwuerfe gespeichert. Im Dashboard nach dem Start ansehen.'}
-      'ExportProducts' {'Artikelentwuerfe als CSV exportiert.'}
+      'ExportProducts' {'Artikelentwuerfe exportiert. Grosse Bestaende liegen als CSV-Teile (-part002.csv usw.) im selben Ordner.'}
     })
   }
   if ($script:nextLaunch) {

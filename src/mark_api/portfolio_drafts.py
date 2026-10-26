@@ -422,11 +422,11 @@ def _excel_csv_text(value: object) -> object:
 
 
 def export_drafts(store: SnapshotStore, target: Path) -> dict[str, object]:
-    """Write a complete, Excel-safe CSV through a private stage, create-only.
+    """Export all local drafts to create-only, reimportable CSV parts.
 
-    The target is published as a hardlink only after the full CSV has been
-    flushed; no existing customer CSV can be replaced and partial exports are
-    removed on failures.
+    Each CSV respects importer limits: at most MAX_ROWS data rows and
+    MAX_FILE_BYTES including BOM. Chosen target is first part; additional
+    parts use -part002.csv etc. All parts are staged and synced first.
     """
     if target.suffix.casefold() != ".csv" or not target.is_absolute():
         raise DraftImportError("Exportziel muss eine absolute CSV-Datei sein.")
@@ -438,24 +438,75 @@ def export_drafts(store: SnapshotStore, target: Path) -> dict[str, object]:
                 "SELECT sku,title,description,category_json,price_eur,images_json "
                 "FROM portfolio_drafts ORDER BY sku COLLATE BINARY"
             ).fetchall()
-    stage = target.with_name("." + target.name + "." + secrets.token_hex(10) + ".part")
+    header_stream = io.StringIO(newline="")
+    csv.writer(header_stream).writerow((*_FIELDS, _EXPORT_MARKER))
+    header = header_stream.getvalue().encode("utf-8-sig")
+    staged: list[tuple[Path, Path]] = []
+    published: list[tuple[Path, Path]] = []
+    current: Any = None
+    current_rows = 0
+    current_bytes = 0
+
+    def open_part(index: int) -> Any:
+        destination = (target if index == 0 else
+                       target.with_name(f"{target.stem}-part{index + 1:03d}.csv"))
+        stage = destination.with_name(
+            "." + destination.name + "." + secrets.token_hex(10) + ".part"
+        )
+        stream = stage.open("xb")
+        staged.append((stage, destination))
+        stream.write(header)
+        return stream
+
+    def finish_part(stream: Any) -> None:
+        stream.flush()
+        os.fsync(stream.fileno())
+        stream.close()
+
     try:
-        with stage.open("x", encoding="utf-8-sig", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow((*_FIELDS, _EXPORT_MARKER))
-            for row in records:
-                category = " > ".join(json.loads(row[3]))
-                images = ";".join(json.loads(row[5]))
-                writer.writerow(tuple(_excel_csv_text(x) for x in
-                                      (row[0], row[1], row[2], category, row[4], images)) + ("v1",))
-            file.flush()
-            os.fsync(file.fileno())
-        os.link(stage, target)
-    except (OSError, ValueError, TypeError):
+        current = open_part(0)
+        current_bytes = len(header)
+        for row in records:
+            category = " > ".join(json.loads(row[3]))
+            images = ";".join(json.loads(row[5]))
+            line_stream = io.StringIO(newline="")
+            csv.writer(line_stream).writerow(
+                tuple(_excel_csv_text(value) for value in
+                      (row[0], row[1], row[2], category, row[4], images))
+                + ("v1",)
+            )
+            line = line_stream.getvalue().encode("utf-8")
+            if len(header) + len(line) > MAX_FILE_BYTES:
+                raise DraftImportError("Eine Artikelzeile ueberschreitet das CSV-Dateilimit.")
+            if current_rows >= MAX_ROWS or current_bytes + len(line) > MAX_FILE_BYTES:
+                finish_part(current)
+                current = None
+                current = open_part(len(staged))
+                current_rows = 0
+                current_bytes = len(header)
+            current.write(line)
+            current_rows += 1
+            current_bytes += len(line)
+        finish_part(current)
+        current = None
+        for stage, destination in staged:
+            os.link(stage, destination)
+            published.append((stage, destination))
+    except (OSError, ValueError, TypeError, UnicodeError, OverflowError, DraftImportError):
+        for stage, destination in reversed(published):
+            try:
+                if os.path.samefile(stage, destination):
+                    destination.unlink()
+            except OSError:
+                pass
         raise DraftImportError("Entwuerfe konnten nicht exportiert werden.") from None
     finally:
-        try:
-            stage.unlink(missing_ok=True)
-        except OSError:
-            pass
-    return {"status": "exported", "rows": len(records), "filename": target.name}
+        if current is not None:
+            current.close()
+        for stage, _ in staged:
+            try:
+                stage.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return {"status": "exported", "rows": len(records), "filename": target.name,
+            "files": [destination.name for _, destination in staged]}

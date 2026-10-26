@@ -75,6 +75,62 @@ class ProductDraftTests(unittest.TestCase):
         self.assertEqual(self.store.tracked_ad_ids(), ())
         self.assertEqual(self.store.sync_status()["state"], "never_attempted")
 
+    def test_export_over_five_thousand_creates_reimportable_parts_without_overwrite(self) -> None:
+        source = self.make_csv(5000)
+        check = preview_import(self.store, source)
+        self.assertEqual(import_drafts(self.store, source, check["sha256"])["inserted"], 5000)
+        extra = self.root / "one-more.csv"
+        extra.write_text(
+            "sku,title,description,category,price_eur\n"
+            "SKU-05000,Extra,Noch ein Artikel,Haus > Deko,19\n",
+            encoding="utf-8",
+        )
+        check = preview_import(self.store, extra)
+        self.assertEqual(import_drafts(self.store, extra, check["sha256"])["inserted"], 1)
+        target = self.root / "all-products.csv"
+        result = export_drafts(self.store, target)
+        self.assertEqual(result["rows"], 5001)
+        self.assertEqual(result["files"], ["all-products.csv", "all-products-part002.csv"])
+        counts = []
+        for name in result["files"]:
+            part = self.root / name
+            self.assertTrue(part.exists())
+            self.assertLessEqual(part.stat().st_size, 10 * 1024 * 1024)
+            preview = preview_import(self.store, part)
+            self.assertEqual(preview["unchanged"], preview["total"])
+            counts.append(preview["total"])
+        self.assertEqual(counts, [5000, 1])
+        conflict = self.root / "blocked-part002.csv"
+        conflict.write_text("customer-original", encoding="utf-8")
+        with self.assertRaises(DraftImportError):
+            export_drafts(self.store, self.root / "blocked.csv")
+        self.assertFalse((self.root / "blocked.csv").exists())
+        self.assertEqual(conflict.read_text(encoding="utf-8"), "customer-original")
+
+    def test_export_partitions_before_ten_megabytes(self) -> None:
+        # Two legal source files totaling more than 10 MB of export data.
+        for batch in range(2):
+            path = self.root / f"long-{batch}.csv"
+            with path.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.writer(output)
+                writer.writerow(["sku", "title", "description", "category", "price_eur"])
+                for n in range(1400):
+                    writer.writerow([f"LONG-{batch}-{n:05d}", "Artikel",
+                                     "x" * 3900, "Haus > Deko", "10"])
+            checked = preview_import(self.store, path)
+            self.assertEqual(import_drafts(self.store, path, checked["sha256"])["inserted"], 1400)
+        result = export_drafts(self.store, self.root / "large.csv")
+        self.assertEqual(result["rows"], 2800)
+        self.assertGreaterEqual(len(result["files"]), 2)
+        total = 0
+        for name in result["files"]:
+            part = self.root / name
+            self.assertLessEqual(part.stat().st_size, 10 * 1024 * 1024)
+            checked = preview_import(self.store, part)
+            self.assertEqual(checked["unchanged"], checked["total"])
+            total += checked["total"]
+        self.assertEqual(total, 2800)
+
     def test_german_excel_semicolon_csv_and_decimal_comma(self) -> None:
         filename = self.root / "deutscher-export.csv"
         with filename.open("w", encoding="utf-8-sig", newline="") as output:
