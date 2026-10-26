@@ -7,15 +7,27 @@
 - **Distribution:** `kleinanzeiger`; bestehende interne Module `mark_api` und `mark-api-*`-Kommandos bleiben kompatibel
 - **Technischer Lieferstatus:** Erst die bestandenen Tests, der Installationsnachweis, ein unabhängiger Sicherheitsreview und ein freigegebener Merge des konkreten Liefercommits ergeben die Produktabnahme. Kein Ersatz durch ein rein lokales Dashboard.
 
-## Native Windows-Installation (ab v0.1.1)
+## Native Windows-Kundenanwendung (ab v0.1.5)
 
-Windows 11 x64 benötigt **kein WSL**: das native Paket enthält
-Installieren.cmd, Starten.cmd, Sichern.cmd und Wiederherstellen.cmd.
-Letzteres nimmt ausschließlich verifizierte Backups in eine **noch nicht
-existierende** lokale Datenbank auf, niemals einen A6-Altbestand. Anleitung:
-[docs/windows-installation.md](docs/windows-installation.md).
-Die normale Windows-Version besitzt vollständige Read/Write/Media-Funktionen;
-die separate Linux-A6-Mehr-UID-/Landlock-Provisionierung ist nicht Windows-native.
+Die vollständige Windows-11-x64-Ausgabe benötigt **kein WSL**.
+Das signatur- und prüfsummengebundene Windows-Paket ist unter
+[Releases](https://github.com/alexdermohr/kleinanzeiger/releases) verfügbar.
+Das ZIP vollständig entpacken und **Kleinanzeiger.cmd** starten.
+Das zentrale Windows-Fenster bietet Installation, Update, Start/Stop,
+Konto-Anmeldung, Backup/Restore, KI-Einrichtung, **lokalen EML-Import** und
+**Vergleichslabels (Bildtyp/Stadt/Texttyp/Titeltyp) mit Anzeigenauswahl**.
+Das Dashboard bündelt Anzeigenkarten, sämtliche Create/Media/Content/State/Delete-
+Funktionen, manuellen Live-Abgleich, Analytics und optionale KI-Entwürfe.
+Vollständiges **HTML-Benutzerhandbuch** und **HTML-Funktionsübersicht** liegen im
+Windows-ZIP und sind im Kontrollfenster direkt erreichbar.
+Bei E-Mail-Import und Labelpflege wird der laufende Produktprozess
+kontrolliert beendet; der getrennte lokale SQLite-CLI-Pfad verwendet
+keine zusätzliche HTTP-/Browser-Plattformautorität.
+
+Kurzanleitung: [docs/windows-installation.md](docs/windows-installation.md).
+Kundenunterlagen: [Handbuch](docs/Kleinanzeiger-Handbuch.html) und
+[Funktionsübersicht](docs/Kleinanzeiger-Funktionen.html).
+Die separate Linux-A6-Migration gehört nicht zur Windows-Neuinstallation.
 
 ## Installation und Bedienstart
 

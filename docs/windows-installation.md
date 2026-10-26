@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.4 – Windows 11
+# Kleinanzeiger v0.1.5 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -27,6 +27,9 @@ Das Kleinanzeiger-Fenster bietet:
 - **Installieren / aktualisieren**: prüft das offizielle GitHub-Release,
   ZIP-/Wheel-SHA-256 und Manifest. Vor einem Update wird automatisch ein
   SQLite-Backup mit Manifest erstellt.
+- **E-Mails importieren**: importiert ausdrücklich ausgewählte lokale Kleinanzeigen-EML-Dateien (vorher die Anwendung beenden) und erstellt davor eine verifizierte Sicherung.
+- **Anzeigen vergleichen**: wählt bestehende oder durch E-Mail-Import belegte Anzeigen aus und pflegt Bildtyp, Stadt, Texttyp und Titeltyp für Gruppenrankings (ebenfalls bei beendetem Produkt).
+- **Handbuch / Funktionen**: öffnet die vollständigen HTML-Kundenunterlagen aus dem installierten Paket.
 - **Sicherung erstellen**: sichert vorhandene Daten online, ohne eine
   Datenbankdatei manuell zu kopieren.
 - **KI einrichten**: eigenen OpenAI-API-Schlüssel verdeckt eingeben oder
@@ -59,3 +62,7 @@ Update, bis die bisherige Anwendung kontrolliert beendet ist.
 Die technische Prüfung nutzt synthetische Plattformgegenstellen: keine
 echten Anzeigenänderungen, kein unbestätigter kostenpflichtiger KI-Aufruf.
 Die separate Linux-A6-Altbestandsmigration (#76) ist kein Windows-Blocker.
+
+Das vollständig integrierte Handbuch heißt `Kleinanzeiger-Handbuch.html`, die
+Funktionsübersicht `Kleinanzeiger-Funktionen.html`. Beide Dateien liegen im
+Windows-Paket und sind über das zentrale Kontrollfenster erreichbar.

@@ -69,7 +69,7 @@ $font = [System.Drawing.Font]::new('Segoe UI',10)
 $fontBold = [System.Drawing.Font]::new('Segoe UI',10,[Drawing.FontStyle]::Bold)
 $form = [System.Windows.Forms.Form]::new()
 $form.Text = 'Kleinanzeiger'
-$form.ClientSize = [System.Drawing.Size]::new(640,445)
+$form.ClientSize = [System.Drawing.Size]::new(640,530)
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.StartPosition = 'CenterScreen'
@@ -111,21 +111,33 @@ $update = Add-Button 'Installieren / aktualisieren' 28 216 282 43
 $backup = Add-Button 'Sicherung erstellen' 330 216 282 43
 $ai = Add-Button 'KI einrichten' 28 273 282 43
 $account = Add-Button 'Kleinanzeigen-Konto öffnen' 330 273 282 43
-$statusLabel = Add-Label 'Bereit.' 28 330 584 44 $font $muted
+$mail = Add-Button 'E-Mails importieren' 28 330 282 43
+$labels = Add-Button 'Anzeigen vergleichen' 330 330 282 43
+$statusLabel = Add-Label 'Bereit.' 28 391 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
 $detailsLink.Text = 'Details'
-$detailsLink.SetBounds(541,353,71,26)
+$detailsLink.SetBounds(541,414,71,26)
 $detailsLink.LinkColor = $accent
 $form.Controls.Add($detailsLink)
 $detailsLink.Add_Click({
   $shown = $(if ($script:details) { $script:details } else { 'Keine zusätzlichen Informationen.' })
   [Windows.Forms.MessageBox]::Show($shown,'Kleinanzeiger – technische Details') | Out-Null
 })
-$advanced = Add-Button 'Weitere Optionen' 28 396 200 32
+$advanced = Add-Button 'Weitere Optionen' 28 470 200 32
 $advanced.Font = [System.Drawing.Font]::new('Segoe UI',8.5)
-$restore = Add-Button 'Sicherung wiederherstellen …' 248 396 280 32
+$restore = Add-Button 'Sicherung wiederherstellen …' 248 470 280 32
 $restore.Font = [System.Drawing.Font]::new('Segoe UI',8.5)
 $restore.Visible = $false
+$help = [System.Windows.Forms.LinkLabel]::new()
+$help.Text = 'Handbuch'
+$help.SetBounds(451,37,87,24)
+$help.LinkColor = $accent
+$form.Controls.Add($help)
+$features = [System.Windows.Forms.LinkLabel]::new()
+$features.Text = 'Funktionen'
+$features.SetBounds(544,37,93,24)
+$features.LinkColor = $accent
+$form.Controls.Add($features)
 
 function Set-Status([string]$message,[bool]$failure=$false) {
   $statusLabel.Text = $message
@@ -149,6 +161,8 @@ function Refresh-Controls {
   $update.Enabled = !$busy
   $backup.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $ai.Enabled = !$busy
+  $mail.Enabled = !$busy -and (Test-Path -LiteralPath $db)
+  $labels.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $account.Enabled = !$busy
   $restore.Enabled = !$busy -and !(Test-Path -LiteralPath $db)
 }
@@ -215,6 +229,141 @@ function Show-KiDialog {
   }
 }
 
+
+function Open-CustomerHelp([string]$fileName) {
+  if ($fileName -notin @('Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html')) {
+    throw 'Unbekannte Hilfe-Datei.'
+  }
+  $helpFile = Join-Path $base $fileName
+  if (!(Test-Path -LiteralPath $helpFile -PathType Leaf)) {
+    $helpFile = Join-Path (Join-Path $base '..\docs') $fileName
+  }
+  if (!(Test-Path -LiteralPath $helpFile -PathType Leaf)) {
+    throw 'Hilfe-Datei fehlt. Bitte das vollstaendige Kundenpaket verwenden.'
+  }
+  Start-Process -FilePath $helpFile
+}
+
+function Show-CustomerMailPicker {
+  if (Test-ActiveProduct) {
+    Set-Status 'Zum E-Mail-Import Kleinanzeiger zuerst beenden.' $true
+    return
+  }
+  $picker = [System.Windows.Forms.OpenFileDialog]::new()
+  $picker.Title = 'Kleinanzeigen-Benachrichtigungen auswaehlen'
+  $picker.Filter = 'Gespeicherte E-Mails (*.eml)|*.eml'
+  $picker.Multiselect = $true
+  try {
+    if ($picker.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK) { return }
+    $selected = @($picker.FileNames)
+    if ($selected.Count -lt 1 -or $selected.Count -gt 100) {
+      Set-Status 'Bitte hoechstens 100 gespeicherte E-Mails waehlen.' $true
+      return
+    }
+    if ([Windows.Forms.MessageBox]::Show(
+      "$($selected.Count) lokale E-Mail-Datei(en) in die Auswertung importieren?",
+      'Kleinanzeiger', [Windows.Forms.MessageBoxButtons]::YesNo) -ne
+      [Windows.Forms.DialogResult]::Yes) { return }
+    Start-Worker 'ImportMail' $false '' @{paths=$selected}
+  } finally { $picker.Dispose() }
+}
+
+function Show-CustomerLabels {
+  if (Test-ActiveProduct) {
+    Set-Status 'Zum Bearbeiten der Vergleichslabels Kleinanzeiger zuerst beenden.' $true
+    return
+  }
+  if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw 'Kleinanzeiger ist noch nicht eingerichtet.'
+  }
+  $raw = & $python -m mark_api.windows_customer_choices --db $db 2>$null
+  if ($LASTEXITCODE -ne 0) { throw 'Gespeicherte Anzeigen konnten nicht gelesen werden.' }
+  $choices = @(($raw | ConvertFrom-Json).ads | Where-Object { $null -ne $_ })
+  if ($choices.Count -eq 0) {
+    Set-Status 'Zuerst Anzeigen abgleichen oder E-Mails importieren.'
+    return
+  }
+  $dialog = [Windows.Forms.Form]::new()
+  $dialog.Text = 'Vergleichslabels'
+  $dialog.ClientSize = [Drawing.Size]::new(570,388)
+  $dialog.StartPosition = 'CenterParent'
+  $dialog.FormBorderStyle = 'FixedDialog'
+  $dialog.MaximizeBox = $false
+  $dialog.Font = $font
+  $note = [Windows.Forms.Label]::new()
+  $note.Text = 'Anzeige auswaehlen und Merkmale fuer die Auswertungen erfassen.'
+  $note.SetBounds(20,17,525,30)
+  $dialog.Controls.Add($note)
+  $select = [Windows.Forms.ComboBox]::new()
+  $select.DropDownStyle = 'DropDownList'
+  $select.SetBounds(20,54,523,31)
+  foreach($item in $choices) {
+    $name = $(if($item.title){[string]$item.title}else{'Ohne Titel'})
+    if ($item.email_only) { $name = 'E-Mail: ' + $name }
+    [void]$select.Items.Add($name + '  ·  ' + [string]$item.ad_id)
+  }
+  $dialog.Controls.Add($select)
+  $inputs = @{}
+  $fieldMap = @(
+    @('image_type','Bildtyp'),
+    @('city','Stadt'),
+    @('text_type','Texttyp'),
+    @('title_type','Titeltyp')
+  )
+  for($n=0;$n -lt $fieldMap.Count;$n++) {
+    $field = [string]$fieldMap[$n][0]
+    $label = [Windows.Forms.Label]::new()
+    $label.Text = [string]$fieldMap[$n][1]
+    $label.SetBounds(20,(102 + $n*49),105,26)
+    $dialog.Controls.Add($label)
+    $entry = [Windows.Forms.TextBox]::new()
+    $entry.SetBounds(131,(99 + $n*49),410,30)
+    $dialog.Controls.Add($entry)
+    $inputs[$field] = $entry
+  }
+  $fill = {
+    if ($select.SelectedIndex -lt 0) { return }
+    $item = $choices[$select.SelectedIndex]
+    foreach($field in @('image_type','city','text_type','title_type')) {
+      $inputs[$field].Text = [string]$item.labels.$field
+    }
+  }
+  $select.Add_SelectedIndexChanged($fill)
+  $select.SelectedIndex = 0
+  $save = [Windows.Forms.Button]::new()
+  $save.Text = 'Vergleichslabels speichern'
+  $save.SetBounds(20,315,265,44)
+  $dialog.Controls.Add($save)
+  $cancel = [Windows.Forms.Button]::new()
+  $cancel.Text = 'Abbrechen'
+  $cancel.SetBounds(306,315,235,44)
+  $dialog.Controls.Add($cancel)
+  $cancel.Add_Click({ $dialog.Close() })
+  $save.Add_Click({
+    if ($select.SelectedIndex -lt 0) { return }
+    $item = $choices[$select.SelectedIndex]
+    $changes = @{}
+    foreach($field in @('image_type','city','text_type','title_type')) {
+      $before = [string]$item.labels.$field
+      $after = $inputs[$field].Text.Trim()
+      if ($before -cne $after) { $changes[$field] = $after }
+    }
+    if ($changes.Count -eq 0) {
+      [Windows.Forms.MessageBox]::Show('Keine Aenderungen vorhanden.','Kleinanzeiger') | Out-Null
+      return
+    }
+    try {
+      Start-Worker 'Classify' $false '' @{ad_id=[string]$item.ad_id;labels=$changes}
+      $dialog.DialogResult = [Windows.Forms.DialogResult]::OK
+      $dialog.Close()
+    } catch {
+      [Windows.Forms.MessageBox]::Show('Vergleichslabels konnten nicht gestartet werden.','Kleinanzeiger') | Out-Null
+    }
+  })
+  [void]$dialog.ShowDialog($form)
+  $dialog.Dispose()
+}
+
 function Open-Kleinanzeigen {
   $chrome = Find-KleinanzeigerChrome -StateDirectory $state
   if (!$chrome) { throw 'Chrome fehlt. Bitte zuerst einrichten.' }
@@ -238,21 +387,30 @@ function Start-PipedProcess([Diagnostics.ProcessStartInfo]$info,[string]$kind) {
   Refresh-Controls
 }
 
-function Start-Worker([string]$action,[bool]$launchAfter=$false,[string]$backupName='') {
+function Start-Worker([string]$action,[bool]$launchAfter=$false,[string]$backupName='', [object]$payload=$null) {
   $script:nextLaunch = $launchAfter
   $info = [System.Diagnostics.ProcessStartInfo]::new()
   $info.FileName = 'powershell.exe'
   $info.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
     $worker + '" -Action ' + $action + ' -PackageDirectory "' + $base + '"'
   if ($backupName) { $info.Arguments += ' -BackupName "' + $backupName + '"' }
+  if ($null -ne $payload) { $info.RedirectStandardInput = $true }
   $script:details = ''
   Set-Status $(switch($action){
     'Install' {'Richte Kleinanzeiger ein …'}
     'OnlineUpdate' {'Prüfe Updates und installiere sie bei Bedarf …'}
     'Backup' {'Sichere deine Anzeigen …'}
     'Restore' {'Stelle die Sicherung wieder her …'}
+    'ImportMail' {'Importiere ausgewaehlte E-Mails …'}
+    'Classify' {'Speichere Vergleichslabels …'}
   })
   Start-PipedProcess $info $action
+  if ($null -ne $payload) {
+    $json = ConvertTo-Json -InputObject $payload -Depth 5 -Compress
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+    $script:process.StandardInput.WriteLine($encoded)
+    $script:process.StandardInput.Close()
+  }
 }
 
 function Start-Product {
@@ -373,6 +531,8 @@ function Finish-Process {
       'OnlineUpdate' {'Update abgeschlossen. Kleinanzeiger kann gestartet werden.'}
       'Backup' {'Sicherung erfolgreich erstellt.'}
       'Restore' {'Sicherung erfolgreich wiederhergestellt.'}
+      'ImportMail' {'E-Mails importiert. Anzeigen beim naechsten Start neu laden.'}
+      'Classify' {'Vergleichslabels gespeichert. Auswertungen beim naechsten Start neu laden.'}
     })
   }
   if ($script:nextLaunch) {
@@ -430,6 +590,10 @@ $update.Add_Click({
   } catch { Set-Status $_.Exception.Message $true }
 })
 $backup.Add_Click({ try { Start-Worker 'Backup' } catch { Set-Status $_.Exception.Message $true } })
+$mail.Add_Click({ try { Show-CustomerMailPicker } catch { Set-Status $_.Exception.Message $true } })
+$labels.Add_Click({ try { Show-CustomerLabels } catch { Set-Status $_.Exception.Message $true } })
+$help.Add_Click({ try { Open-CustomerHelp 'Kleinanzeiger-Handbuch.html' } catch { Set-Status $_.Exception.Message $true } })
+$features.Add_Click({ try { Open-CustomerHelp 'Kleinanzeiger-Funktionen.html' } catch { Set-Status $_.Exception.Message $true } })
 $account.Add_Click({
   try { Open-Kleinanzeigen | Out-Null; Set-Status 'Bitte im Chrome-Fenster anmelden, dann Kleinanzeiger starten.' }
   catch { Set-Status $_.Exception.Message $true }
@@ -509,8 +673,15 @@ if ($SelfTest) {
   foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $base $file))) { throw "Fehlendes Skript: $file" }
   }
+  foreach ($file in @('Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html')) {
+    if (!(Test-Path -LiteralPath (Join-Path $base $file)) -and
+        !(Test-Path -LiteralPath (Join-Path (Join-Path $base '..\docs') $file))) {
+      throw "Hilfe-Datei fehlt: $file"
+    }
+  }
   if ($form.Controls.Count -lt 12 -or $primary.Text -ne 'Kleinanzeiger starten' -or
-      $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $restore) {
+      $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $restore -or
+      $null -eq $mail -or $null -eq $labels -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
   }
   $timer.Dispose()
