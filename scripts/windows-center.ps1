@@ -1,4 +1,4 @@
-param([switch]$SelfTest)
+﻿param([switch]$SelfTest)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing

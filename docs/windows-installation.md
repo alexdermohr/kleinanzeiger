@@ -43,6 +43,10 @@ Das Dashboard bleibt die zentrale Arbeitsfläche: Anzeigenkarten auswählen,
 rechts bearbeiten, neue Anzeigen erstellen sowie Analytics und KI-Entwürfe
 bei Bedarf aufklappen.
 
+Über **Mit Kleinanzeigen abgleichen** werden eigene Anzeigen direkt aus der
+angemeldeten Browser-Sitzung neu gelesen. **Ansicht neu laden** aktualisiert
+hingegen ausschließlich die lokal gespeicherte Darstellung.
+
 ## Bestehende Daten und Updates
 
 Die stabil installierten Programmdateien liegen unter

@@ -36,6 +36,13 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("windows-worker.ps1", workflow)
         self.assertIn("test_windows_hub.py", workflow)
 
+    def test_windows_powershell_51_displays_unicode_labels(self) -> None:
+        # Windows PowerShell 5.1 otherwise reads BOM-less UTF-8 as ANSI.
+        encoded = (SCRIPTS / "windows-center.ps1").read_bytes()
+        self.assertTrue(encoded.startswith(b"\xef\xbb\xbf"))
+        self.assertIn("Sicherung erstellen", encoded.decode("utf-8-sig"))
+        self.assertIn("öffnen", encoded.decode("utf-8-sig"))
+
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-VerifiedPackage", worker)

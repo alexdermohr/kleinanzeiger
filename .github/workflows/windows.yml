@@ -52,7 +52,7 @@ jobs:
         run: |
           import subprocess
           import sys
-          for pattern in ("test_dashboard_managed_ad_picker.py", "test_dashboard_workspace_ux.py", "test_windows_installer_scripts.py", "test_windows_hub.py"):
+          for pattern in ("test_dashboard_managed_ad_picker.py", "test_dashboard_workspace_ux.py", "test_dashboard_manual_sync.py", "test_windows_installer_scripts.py", "test_windows_hub.py"):
               result = subprocess.run(
                   [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern, "-v"],
                   capture_output=True, text=True, check=False
@@ -172,6 +172,7 @@ jobs:
           # Kleinanzeiger v0.1.4 – Windows
 
           - Ein einziges Kleinanzeiger-Fenster für Einrichtung, Start, Update, Backup und KI-Zugang
+          - Anzeigen ohne Neustart live mit Kleinanzeigen abgleichen; lokale Ansicht getrennt neu laden
           - Nach Installation stabiler Desktop-Start, Dashboard wird automatisch geöffnet
           - Automatische Sicherung vor Updates; geschützte Daten bleiben erhalten
           - Vorhandene Daten, Chrome-Profil und offene Write-Recovery-Zustände bleiben beim Update erhalten
