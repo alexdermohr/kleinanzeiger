@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $base = $PSScriptRoot
 $state = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
-$wheel = Join-Path $base 'kleinanzeiger-0.1.4-py3-none-any.whl'
+$wheel = Join-Path $base 'kleinanzeiger-0.1.5-py3-none-any.whl'
 $sums = Join-Path $base 'SHA256SUMS.txt'
 if (!(Test-Path -LiteralPath $wheel -PathType Leaf) -or !(Test-Path -LiteralPath $sums -PathType Leaf)) {
   throw 'Paket oder SHA256SUMS.txt fehlen. Bitte das gesamte Windows-ZIP entpacken.'

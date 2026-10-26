@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Install','OnlineUpdate','Backup','Restore')][string]$Action = 'Install',
+  [ValidateSet('Install','OnlineUpdate','Backup','Restore','ImportMail','Classify')][string]$Action = 'Install',
   [string]$PackageDirectory = $PSScriptRoot,
   [string]$BackupName = '',
   [switch]$SelfTest,
@@ -51,6 +51,7 @@ function Get-VerifiedPackage([string]$folder) {
   $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actual -ne $matched.Groups['digest'].Value.ToLowerInvariant()) { throw 'Wheel-Pruefsumme ungueltig.' }
   foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1',
+       'Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html',
        'windows-install.ps1','windows-start.ps1','windows-chrome.ps1',
        'windows-ki-einrichten.ps1','windows-backup.ps1','windows-restore.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $folder $name) -PathType Leaf)) {
@@ -78,7 +79,7 @@ function Save-Backup {
 function Publish-AppFiles([string]$folder) {
   New-Item -ItemType Directory -Path $appRoot -Force | Out-Null
   $files = @(Get-ChildItem -LiteralPath $folder -File | Where-Object {
-    $_.Extension -in @('.ps1','.cmd','.whl','.txt','.md')
+    $_.Extension -in @('.ps1','.cmd','.whl','.txt','.md','.html')
   })
   foreach ($file in $files) {
     if ([IO.Path]::GetFullPath($file.DirectoryName).TrimEnd('\') -ieq
@@ -174,12 +175,96 @@ function Download-VerifiedRelease {
   }
 }
 
+function Read-UiPayload {
+  # The controller sends UTF-8 JSON over a private ASCII/base64 stdin pipe,
+  # never through command-line arguments, a temporary file, or a log.
+  $line = [Console]::In.ReadLine()
+  if (!$line -or $line.Length -gt 131072 -or $line -cnotmatch '^[A-Za-z0-9+/]+={0,2}$') {
+    throw 'Bedienanfrage fehlt oder ist ungueltig.'
+  }
+  try {
+    $bytes = [Convert]::FromBase64String($line)
+    if ($bytes.Length -gt 65536) { throw 'too large' }
+    $payload = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString($bytes))
+    if ($null -eq $payload -or $payload -is [array]) { throw 'invalid object' }
+    return $payload
+  } catch {
+    throw 'Die Bedienanfrage konnte nicht gelesen werden.'
+  }
+}
+
+function Import-CustomerMail {
+  Assert-KleinanzeigerStopped
+  if (!(Test-Path -LiteralPath $db -PathType Leaf) -or
+      !(Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+    throw 'Kleinanzeiger muss vor dem E-Mail-Import eingerichtet werden.'
+  }
+  $payload = Read-UiPayload
+  $paths = @($payload.paths)
+  if ($paths.Count -lt 1 -or $paths.Count -gt 100) {
+    throw 'Bitte 1 bis 100 EML-Dateien waehlen.'
+  }
+  $verified = @()
+  [int64]$totalBytes = 0
+  foreach ($raw in $paths) {
+    if ($raw -isnot [string] -or [string]::IsNullOrWhiteSpace($raw) -or
+        !$raw.EndsWith('.eml',[StringComparison]::OrdinalIgnoreCase) -or
+        ![IO.Path]::IsPathRooted($raw) -or
+        !(Test-Path -LiteralPath $raw -PathType Leaf)) {
+      throw 'Nur vorhandene lokale EML-Dateien importieren.'
+    }
+    $file = Get-Item -LiteralPath $raw
+    if ($file.Length -gt 5MB) { throw 'Eine E-Mail ist groesser als 5 MB.' }
+    $totalBytes += $file.Length
+    if ($totalBytes -gt 25MB) { throw 'E-Mail-Auswahl ist groesser als 25 MB.' }
+    $verified += $file.FullName
+  }
+  Save-Backup
+  & $venvPython -m mark_api.email_import_cli --db $db @verified
+  if ($LASTEXITCODE -ne 0) { throw 'E-Mail-Import fehlgeschlagen; vorhandene Daten bleiben erhalten.' }
+  Write-Output 'MAIL_IMPORT_OK'
+}
+
+function Update-CustomerLabels {
+  Assert-KleinanzeigerStopped
+  if (!(Test-Path -LiteralPath $db -PathType Leaf) -or
+      !(Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+    throw 'Kleinanzeiger muss vor der Vergleichszuordnung eingerichtet werden.'
+  }
+  $payload = Read-UiPayload
+  $adId = [string]$payload.ad_id
+  if ([string]::IsNullOrWhiteSpace($adId) -or $adId.Length -gt 160 -or
+      $null -eq $payload.labels) {
+    throw 'Bitte eine gespeicherte Anzeige auswaehlen.'
+  }
+  $argv = @('-m','mark_api.classification_cli','--db',$db,'--ad-id',$adId)
+  $hasChanges = $false
+  foreach ($field in @('image_type','city','text_type','title_type')) {
+    $property = $payload.labels.PSObject.Properties[$field]
+    if ($null -eq $property) { continue }
+    $value = $property.Value
+    if ($value -isnot [string] -and $null -ne $value) { throw 'Vergleichslabel ungueltig.' }
+    $flag = $field.Replace('_','-')
+    if ($null -eq $value -or [string]::IsNullOrWhiteSpace($value)) {
+      $argv += @('--clear',$flag)
+    } else {
+      if ($value.Length -gt 120) { throw 'Vergleichslabel ist zu lang.' }
+      $argv += @(('--' + $flag), $value.Trim())
+    }
+    $hasChanges = $true
+  }
+  if (!$hasChanges) { throw 'Keine Vergleichslabels geaendert.' }
+  & $venvPython @argv
+  if ($LASTEXITCODE -ne 0) { throw 'Vergleichslabels konnten nicht gespeichert werden.' }
+  Write-Output 'LABELS_OK'
+}
+
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
-  $names = @(Get-ReleaseAssetNames '0.1.4')
-  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.4-Windows.zip' -or
-      $names[1] -ne 'Kleinanzeiger-v0.1.4-Windows.sha256' -or
-      $names[2] -ne 'Kleinanzeiger-v0.1.4-Release-Manifest.json') {
+  $names = @(Get-ReleaseAssetNames '0.1.5')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.5-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.5-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.5-Release-Manifest.json') {
     throw 'Release-Dateinamen sind nicht eindeutig.'
   }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
@@ -190,6 +275,8 @@ if ($SelfTest) {
 }
 switch ($Action) {
   'Backup' { Save-Backup }
+  'ImportMail' { Import-CustomerMail }
+  'Classify' { Update-CustomerLabels }
   'Restore' {
     Assert-KleinanzeigerStopped
     foreach ($suffix in @('','-wal','-shm','-journal')) {

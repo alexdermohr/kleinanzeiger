@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kleinanzeiger – Benutzerhandbuch</title><style>
+:root{font-family:Segoe UI,Arial,sans-serif;color:#223845;background:#f3f6f9;line-height:1.55}
+body{margin:0 auto;max-width:920px;padding:28px 28px 80px}
+main{background:white;border-radius:16px;padding:32px 40px;box-shadow:0 3px 18px #27394710}
+h1{font-size:2rem;margin:.4rem 0}h2{border-bottom:1px solid #dbe5e9;margin-top:2rem;padding-bottom:.3rem}
+h3{margin-top:1.3rem}p,li{max-width:78ch}li{margin:.25rem 0}
+nav{padding:12px 16px;border-radius:9px;background:#e7f2f4}
+nav a{margin-right:15px;color:#126c7b}code{font-family:Consolas,monospace;background:#f3f6f8;padding:1px 4px}
+table{border-collapse:collapse;width:100%;font-size:.94rem}th,td{border-bottom:1px solid #dfe8eb;text-align:left;padding:9px;vertical-align:top}
+th{background:#f1f7f9}.muted{color:#546977}.note{border-left:4px solid #147385;padding:11px 16px;background:#f2f8f9}
+a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
+@media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
+@media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
+</style></head><body><main>
+<p class="muted">Windows 11 · Ausgabe v0.1.5</p>
+<h1>Kleinanzeiger – Benutzerhandbuch</h1>
+<p>Kleinanzeiger verwaltet Ihre eigenen Anzeigen, zeigt Kennzahlen, unterstützt Entwürfe mit KI und sichert lokale Daten. Alle häufigen Aufgaben starten über das Fenster <strong>Kleinanzeiger</strong>.</p>
+<nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
+<h2 id="install">1. Installation und erster Start</h2>
+<ol>
+<li>Das offizielle <strong>Kleinanzeiger-v0.1.5-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
+<li><strong>Kleinanzeiger.cmd</strong> doppelklicken. Das Windows-Kontrollfenster erscheint.</li>
+<li><strong>Einrichten und starten</strong> klicken. Fehlendes Python 3.12/3.13 sowie Chrome werden bei Bedarf über geprüfte offizielle Dateien bereitgestellt. Eine Internetverbindung ist dafür nötig.</li>
+<li>Im eigens gestarteten Chrome-Fenster bei <strong>kleinanzeigen.de</strong> anmelden; gegebenenfalls die Konto-Bestätigung selbst durchführen. Kleinanzeiger speichert kein Kontopasswort.</li>
+<li>Falls das Dashboard nicht automatisch öffnet, nach erfolgter Anmeldung im Kontrollfenster nochmals <strong>Kleinanzeiger starten</strong> auswählen.</li>
+<li>Für weitere Starts die angelegte Desktop-Verknüpfung <strong>Kleinanzeiger</strong> benutzen. Der ursprüngliche ZIP-Ordner ist danach normalerweise nicht mehr nötig.</li>
+</ol>
+<p class="note">Der separate Chrome-Profilordner gehört zu Kleinanzeiger; das private Standard-Chrome-Profil wird nicht für Debugging verwendet. Die lokalen Dienste sind nur an <code>127.0.0.1</code> gebunden.</p>
+<h2 id="anzeigen">2. Meine Anzeigen ansehen, abgleichen und ändern</h2>
+<p>Im Dashboard stehen oben die Kennzahlen <em>Aktuelle Anzeigen</em>, <em>Aufrufe</em>, <em>Merker</em> und <em>Antworten</em>. Unter <strong>Meine Anzeigen</strong> sind eigene Anzeigen als Karten dargestellt. Eine Karte über <strong>Bearbeiten</strong> oder eine Anzeige in der Auswahlliste wählen. Die Anzeigen-ID wird automatisch übernommen; sie braucht nicht eingetippt zu werden.</p>
+<h3>Bestand aktualisieren</h3>
+<ul>
+<li><strong>Mit Kleinanzeigen abgleichen:</strong> liest den eigenen Bestand neu aus der angemeldeten Browser-Sitzung ein und aktualisiert danach die Übersicht.</li>
+<li><strong>Ansicht neu laden:</strong> lädt nur die bereits lokal gespeicherten Informationen. Dies ist kein neuer Plattformabgleich.</li>
+</ul>
+<p>Bei fehlender Anmeldung oder einem unklaren Abgleich bleibt die letzte bestätigte lokale Anzeige erhalten. Ein Fehlschlag wird nicht als erfolgreicher Abgleich angezeigt.</p>
+<h3>Bearbeiten, pausieren, aktivieren, löschen</h3>
+<ol>
+<li>Anzeige aus einer Karte oder der Auswahlliste wählen.</li>
+<li>Titel oder Beschreibung ändern und <strong>Änderungen speichern</strong> klicken; oder <strong>Pausieren</strong> bzw. <strong>Aktivieren</strong> wählen.</li>
+<li>Für <strong>Löschen</strong> wird vor dem Auftrag ausdrücklich nachgefragt. Löschen kann nicht einfach rückgängig gemacht werden.</li>
+</ol>
+<h3>Neue Anzeige mit Bildern erstellen</h3>
+<p>Den Bereich <strong>Neue Anzeige erstellen</strong> aufklappen, Kategoriepfad, Titel, Beschreibung und einen Festpreis eingeben. Optional Bilddateien (JPG, PNG, WebP) auswählen; bis zu zehn Bilder sind vorgesehen. <strong>Anzeige erstellen</strong> stößt die bestätigte Plattformaktion an. Vorher Inhalt und Preis prüfen. Ein KI-Entwurf allein veröffentlicht nichts.</p>
+<p class="note">Bei „Ergebnis unklar“, „Vorgang ausstehend“ oder einer unterbrochenen Verbindung nicht einen zweiten Erstell- oder Löschauftrag mit neuen Daten abschicken. Die vorhandene Recovery-/Statusanzeige verwenden und den ursprünglichen Ausgang klären.</p>
+<h2 id="email">3. Lokale Benachrichtigungs-E-Mails importieren</h2>
+<p>Der E-Mail-Import ergänzt Reaktionskennzahlen aus bereits auf Ihrem Rechner gespeicherten Kleinanzeigen-Nachrichten. Kleinanzeiger durchsucht weder Ihr Postfach noch verschickt es Nachrichten.</p>
+<ol>
+<li>Die relevanten Benachrichtigungen im E-Mail-Programm als <strong>.eml</strong>-Dateien speichern.</li>
+<li>Im Kontrollfenster <strong>Kleinanzeiger beenden</strong> anklicken und das kontrollierte Ende abwarten. Ein laufendes Dashboard blockiert den Import, damit keine konkurrierenden Datenbankschreiber entstehen.</li>
+<li><strong>E-Mails importieren</strong> wählen, bis zu 100 Dateien auswählen und die Auswahl bestätigen.</li>
+<li>Kleinanzeiger prüft die Dateien (maximal 5 MB pro Datei und 25 MB insgesamt), erstellt vor dem Import ein SQLite-Backup und importiert nur als Kleinanzeigen-Benachrichtigung belegte Nachrichten. Bereits bekannte Ereignisse werden nicht nochmals gezählt.</li>
+<li>Nach der Erfolgsanzeige <strong>Kleinanzeiger starten</strong>, dann die Auswertungen öffnen.</li>
+</ol>
+<p>Ungeeignete, anders formatierte oder manipulierte EML-Dateien werden abgewiesen. Die E-Mail-Reaktionswerte werden getrennt von den direkt aus dem Kundenkonto gelesenen Kennzahlen dargestellt.</p>
+<h2 id="labels">4. Anzeigen nach Bildtyp, Stadt, Texttyp und Titeltyp vergleichen</h2>
+<p>Die Gruppenvergleiche benötigen selbst gewählte Merkmale. Das sind lokale Beschriftungen, keine Änderungen an der Anzeige auf Kleinanzeigen.</p>
+<ol>
+<li>Kleinanzeiger im Kontrollfenster kontrolliert beenden.</li>
+<li><strong>Anzeigen vergleichen</strong> öffnen. Eine gespeicherte Anzeige aus der Liste auswählen; auch Anzeigen, die nur über importierte E-Mails bekannt sind, können aufgeführt werden.</li>
+<li>Die Felder <strong>Bildtyp</strong>, <strong>Stadt</strong>, <strong>Texttyp</strong> und <strong>Titeltyp</strong> ausfüllen. Beispiele: „Detailaufnahme“, „Hamburg“, „kurz“, „Sachlich“. Einheitliche Bezeichnungen verwenden, damit Gruppen vergleichbar bleiben.</li>
+<li><strong>Vergleichslabels speichern</strong> klicken. Ein bereits gefülltes Feld kann durch Leeren gezielt entfernt werden; unveränderte Felder werden beibehalten.</li>
+<li>Kleinanzeiger neu starten, im Dashboard <strong>Auswertungen und Rankings</strong> öffnen, <strong>Metrik</strong> und <strong>Dimension</strong> wählen. Balken, Tabellen sowie CSV-Dateien zeigen die verfügbaren Werte.</li>
+</ol>
+<p class="note">Rankings sind deskriptiv. Ohne bewusst gewählte Vergleichsgröße wird keine allgemeine „beste Anzeige“ behauptet. Fehlende Werte sind nicht gleich Null. Gruppen mit sehr kleiner Stichprobe sind keine belastbare Erfolgsempfehlung.</p>
+<h2 id="ki">5. KI-Texte und KI-Bilder (optional)</h2>
+<ol>
+<li>Im Kontrollfenster <strong>KI einrichten</strong> öffnen und den eigenen OpenAI-API-Schlüssel hinterlegen. Der Schlüssel wird benutzergebunden über Windows-DPAPI gespeichert.</li>
+<li>Kleinanzeiger starten; im Dashboard <strong>KI-Assistent für Anzeigen</strong> aufklappen.</li>
+<li>Artikelbeschreibung oder Bildidee eingeben. Modell- und Preisinformation prüfen und die Bestätigung für <strong>jede einzelne</strong> kostenpflichtige Anfrage erteilen.</li>
+<li>Textentwurf oder Bildentwurf erzeugen. Ergebnisse im Formular prüfen, bei Bedarf ändern und erst mit gesondertem Klick eine Anzeige erstellen.</li>
+</ol>
+<p>Die tatsächlichen Kosten hängen vom Provider und der Nutzung ab. Keine sensiblen Kontodaten in Prompts eingeben. Generierte Bilder sind nicht automatisch authentische Fotos des angebotenen Gegenstands.</p>
+<h2 id="daten">6. Datensicherung, Wiederherstellung und Updates</h2>
+<p>Im Kontrollfenster stehen <strong>Sicherung erstellen</strong> und <strong>Installieren / aktualisieren</strong> zur Verfügung. Vor einer Aktualisierung wird bei vorhandener Datenbank automatisch eine geprüfte Sicherung erzeugt. Die Datenbank liegt unter <code>%LOCALAPPDATA%\Kleinanzeiger\anzeigen.sqlite</code>, Sicherungen unter <code>%LOCALAPPDATA%\Kleinanzeiger\Backups</code>. Programmdateien liegen unter <code>%LOCALAPPDATA%\Kleinanzeiger\App</code>.</p>
+<p>Für <strong>Sicherung wiederherstellen</strong> zunächst über <strong>Weitere Optionen</strong> die Restore-Funktion öffnen. Diese stellt nur in eine <strong>noch nicht vorhandene</strong> Datenbank ohne WAL-/SHM-/Journal-Dateien wieder her. Eine vorhandene Datenbank wird niemals überschrieben. Die Sicherungsdatei benötigt ihr passendes Manifest.</p>
+<p class="note">Für einen sauberen Neuinstallationstest Datenbestand und Chrome-Profil zuerst separat sichern; ein Programmupdate löscht sie nicht. Nicht einfach die laufende SQLite-Datei kopieren oder ihren WAL-/SHM-Bestand löschen.</p>
+<h2 id="hilfe">7. Wenn etwas nicht funktioniert</h2>
+<table><tr><th>Beobachtung</th><th>Vorgehen</th></tr>
+<tr><td>Keine Anzeigen sichtbar</td><td>Im separaten Chrome anmelden, <strong>Mit Kleinanzeigen abgleichen</strong> auswählen und die Statusmeldung prüfen.</td></tr>
+<tr><td>Chrome, Python oder Installation fehlt</td><td>Im Kontrollfenster <strong>Installieren / aktualisieren</strong> wählen; Netzverbindung und technische Details prüfen.</td></tr>
+<tr><td>Programm läuft bereits</td><td>Das bestehende Kleinanzeiger-Fenster verwenden. Vor E-Mail-Import und Labelpflege die Anwendung beenden.</td></tr>
+<tr><td>E-Mail wird abgewiesen</td><td>Eine echte, unveränderte Kleinanzeigen-Nachricht als <code>.eml</code> speichern und Dateigröße prüfen.</td></tr>
+<tr><td>Keine Gruppenwerte</td><td>Labels zuordnen, Daten abgleichen oder E-Mails importieren, dann eine vorhandene Metrik und Dimension wählen.</td></tr>
+<tr><td>Änderung hat unklaren Ausgang</td><td>Keine identische Plattformaktion blind erneut starten; vorhandenen Recovery-Hinweis beachten.</td></tr>
+<tr><td>Wiederherstellung nicht möglich</td><td>Es darf noch keine Datenbank bzw. WAL/SHM/Journal-Datei am Ziel existieren; Manifest und Sicherung prüfen.</td></tr>
+</table>
+<p>Weitere technische Informationen sind über <strong>Details</strong> zugänglich. Nicht öffentlich teilen: persönliche Zugangsdaten, Dashboard-Sitzungslinks oder API-Schlüssel.</p>
+<h2>8. Lieferumfang und Testgrenzen</h2>
+<p>Der Release umfasst vollständige Anzeigenverwaltung, Synchronisation, Analytics, E-Mail-Import, Klassifikation, KI-Entwürfe und Datensicherung. Der installierte Windows-Pfad wird mit synthetischen Browser-/Anbieter-Gegenstellen getestet. Reale Kundenaktionen und kostenpflichtige KI-Anfragen werden dabei nicht automatisch durchgeführt. Die persönliche Nutzung des eigenen Kontos benötigt eine gültige eigene Anmeldung.</p>
+
+<footer>Kleinanzeiger v0.1.5 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+</main></body></html>
