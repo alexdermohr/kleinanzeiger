@@ -52,7 +52,7 @@ jobs:
         run: |
           import subprocess
           import sys
-          for pattern in ("test_dashboard_managed_ad_picker.py", "test_dashboard_workspace_ux.py", "test_dashboard_manual_sync.py", "test_portfolio_catalog_ui.py", "test_portfolio_catalog.py", "test_portfolio_drafts.py", "test_portfolio_drafts_http.py", "test_portfolio_jobs.py", "test_portfolio_jobs_http.py", "test_portfolio_jobs_ui.py", "test_portfolio_provider.py", "test_windows_customer_hub.py", "test_windows_installer_scripts.py", "test_windows_hub.py"):
+          for pattern in ("test_dashboard_managed_ad_picker.py", "test_dashboard_workspace_ux.py", "test_dashboard_manual_sync.py", "test_portfolio_catalog_ui.py", "test_portfolio_bulk_ui.py", "test_portfolio_catalog.py", "test_portfolio_drafts.py", "test_portfolio_drafts_http.py", "test_portfolio_jobs.py", "test_portfolio_jobs_http.py", "test_portfolio_jobs_ui.py", "test_portfolio_provider.py", "test_windows_customer_hub.py", "test_windows_installer_scripts.py", "test_windows_hub.py"):
               result = subprocess.run(
                   [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern, "-v"],
                   capture_output=True, text=True, check=False
