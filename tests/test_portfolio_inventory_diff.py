@@ -6,6 +6,7 @@ import sqlite3
 import unittest
 
 from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.adapters.management import DEFAULT_SOURCE as OBSERVATION_SOURCE
 from mark_api.portfolio_inventory_diff import InventoryDiffError, owner_inventory_diff_page
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
@@ -21,7 +22,7 @@ class OwnerDiffTests(unittest.TestCase):
         self.store = SnapshotStore(Path(t.name) / "store.sqlite", create_if_missing=True)
 
     def item(self, ad_id="A", *, title="Lampe", state=LifecycleState.ACTIVE,
-             views=1, observed_at=T, source=SOURCE):
+             views=1, observed_at=T, source=OBSERVATION_SOURCE):
         return AdSnapshot(ad_id=ad_id, observed_at=observed_at, source=source,
                           lifecycle_state=state, title=title, description="Gebraucht",
                           views=views)
@@ -31,7 +32,8 @@ class OwnerDiffTests(unittest.TestCase):
         attempt = self.store.begin_sync_attempt(source=SOURCE, started_at=start)
         records = tuple(self.item(
             value.ad_id, title=value.title, state=value.lifecycle_state,
-            views=value.views, observed_at=start + timedelta(seconds=2))
+            views=value.views, observed_at=start + timedelta(seconds=2),
+            source=value.source)
             for value in snapshots)
         result = (
             ReadResult.failure(ReadStatus.TRANSPORT_ERROR)
@@ -123,6 +125,97 @@ class OwnerDiffTests(unittest.TestCase):
         with self.assertRaises(InventoryDiffError):
             owner_inventory_diff_page(
                 self.store, after="A", limit=1, expected_epoch=page["epoch"])
+
+    def test_real_management_provenance_observation_survives_owner_journal(self):
+        # The real CDP reader supplies ManagementReadAdapter.DEFAULT_SOURCE,
+        # while its separate independent owner journal uses SOURCE.
+        self.assertNotEqual(SOURCE, OBSERVATION_SOURCE)
+        self.sync(0, [self.item("REAL-1", title="Alt")])
+        self.sync(15, [self.item("REAL-1", title="Neu"),
+                       self.item("REAL-2", title="Erstmals")])
+        result = owner_inventory_diff_page(self.store)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["total"], 2)
+        items = {row["ad_id"]: row for row in result["items"]}
+        self.assertEqual(items["REAL-1"]["state"], "changed")
+        self.assertEqual(items["REAL-1"]["changed_fields"], ["title"])
+        self.assertEqual(items["REAL-1"]["current"]["source"], OBSERVATION_SOURCE)
+        self.assertEqual(items["REAL-2"]["state"], "newly_observed")
+        self.assertEqual(result["source"], SOURCE)
+
+    def test_other_source_unresolved_sync_invalidates_pagination_epoch(self):
+        self.sync(0, [self.item("A"), self.item("B")])
+        self.sync(20, [self.item("A"), self.item("B")])
+        page = owner_inventory_diff_page(self.store, limit=1)
+        self.assertEqual(page["state"], "ready")
+        self.assertTrue(page["has_more"])
+        other = self.store.begin_sync_attempt(
+            source="private-web-periodic-readonly",
+            started_at=T + timedelta(minutes=50))
+        with self.assertRaisesRegex(InventoryDiffError, "neu laden"):
+            owner_inventory_diff_page(
+                self.store, after="A", limit=1, expected_epoch=page["epoch"])
+        blocked = owner_inventory_diff_page(self.store)
+        self.assertEqual(blocked["state"], "unverified")
+        self.assertEqual(blocked["unresolved_sync_attempts"], 1)
+        self.store.fail_sync_attempt(
+            other, source="private-web-periodic-readonly",
+            completed_at=T + timedelta(minutes=51),
+            error_kind="transport_error")
+        with self.assertRaisesRegex(InventoryDiffError, "neu laden"):
+            owner_inventory_diff_page(
+                self.store, after="A", limit=1, expected_epoch=page["epoch"])
+        restored = owner_inventory_diff_page(self.store)
+        self.assertNotEqual(restored["epoch"], page["epoch"])
+        self.assertEqual(restored["state"], "ready")
+
+    def test_completed_periodic_sync_overlapping_owner_round_is_not_owner_evidence(self):
+        # Both readers emit the same management snapshot source, but distinct
+        # journal sources. Matching only timestamps would falsely attribute the
+        # periodic observation to the owner's successful round.
+        self.sync(0, [self.item("A", title="Vorher")])
+        start = T + timedelta(minutes=20)
+        owner = self.store.begin_sync_attempt(source=SOURCE, started_at=start)
+        periodic_source = "private-web-periodic-readonly"
+        periodic = self.store.begin_sync_attempt(
+            source=periodic_source, started_at=start+timedelta(seconds=1))
+        self.store.append_inventory_result(
+            ReadResult.success_nonempty((self.item(
+                "A", title="Periodik", observed_at=start+timedelta(seconds=5)),)),
+            source=periodic_source, attempt_id=periodic,
+            observed_at=start+timedelta(seconds=5),
+            completed_at=start+timedelta(seconds=7))
+        self.store.append_inventory_result(
+            ReadResult.success_nonempty((self.item(
+                "A", title="Owner", observed_at=start+timedelta(seconds=2)),)),
+            source=SOURCE, attempt_id=owner,
+            observed_at=start+timedelta(seconds=2),
+            completed_at=start+timedelta(seconds=8))
+        result = owner_inventory_diff_page(self.store)
+        self.assertEqual(result["state"], "unverified")
+        self.assertEqual(result["items"][0]["state"], "unverified")
+        self.assertIsNone(result["items"][0]["current"])
+        self.assertIsNone(result["confirmed_at"])
+
+    def test_nonoverlapping_periodic_sync_does_not_mask_owner_comparison(self):
+        self.sync(0, [self.item("A", title="Owner alt")])
+        periodic_source = "private-web-periodic-readonly"
+        started = T + timedelta(minutes=10)
+        attempt = self.store.begin_sync_attempt(
+            source=periodic_source, started_at=started)
+        self.store.append_inventory_result(
+            ReadResult.success_nonempty((self.item(
+                "A", title="Periodik", observed_at=started+timedelta(seconds=2)),)),
+            source=periodic_source, attempt_id=attempt,
+            observed_at=started+timedelta(seconds=2),
+            completed_at=started+timedelta(seconds=5))
+        self.sync(20, [self.item("A", title="Owner neu")])
+        result = owner_inventory_diff_page(self.store)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["state"], "changed")
+        self.assertEqual(result["items"][0]["current"]["title"], "Owner neu")
+        self.assertEqual(result["items"][0]["previous"]["title"], "Owner alt")
 
     def test_bad_cursors_and_bool_limits_are_rejected(self):
         for kwargs in ({"limit": 0}, {"limit": 101}, {"limit": True},
