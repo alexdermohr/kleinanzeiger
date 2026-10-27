@@ -480,6 +480,19 @@ _DASHBOARD_HTML = """<!doctype html>
           </label>
           <button id="draft-find" type="button">Suchen</button>
         </div>
+        <details id="draft-photo-disclosure" class="compact-details">
+          <summary>Fotos aus einem Ordner zuordnen (optional)</summary>
+          <p class="muted">Bildnamen aus CSV/Excel werden mit einem lokal gewählten Ordner abgeglichen. Fehlende, mehrdeutige oder fehlerhafte Bilder werden nicht übernommen. Die Zuordnung ist rein lokal: Kein Hochladen oder Veröffentlichen.</p>
+          <label>Fotoordner auswählen (auch Unterordner)
+            <input id="draft-photo-folder" type="file" accept="image/jpeg,image/png,image/webp" webkitdirectory directory multiple>
+          </label>
+          <button id="draft-photo-clear" type="button">Fotoordner-Auswahl löschen</button>
+          <p id="draft-photo-folder-status" role="status" aria-live="polite">Noch kein Ordner gewählt.</p>
+          <div id="draft-photo-preview" hidden>
+            <p id="draft-photo-preview-status" role="status" aria-live="polite"></p>
+            <div id="draft-photo-thumbnails" class="controls"></div>
+          </div>
+        </details>
         <p id="draft-feedback" role="status" aria-live="polite">Entwürfe anzeigen …</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Wählen</th><th>Artikelnummer</th><th>Bezeichnung</th><th>Preis</th><th>Kategorie</th><th>Aktion</th></tr></thead>
@@ -1042,6 +1055,13 @@ let draftPageIndex = 0;
 let draftNextAfter = null;
 let draftSearch = "";
 let draftBusy = false;
+let draftPhotoIndex = new Map();
+let draftPhotoFolderChosen = false;
+let draftPhotoSelectionGeneration = 0;
+let draftPhotoPreparing = false;
+let draftPhotoApplied = false;
+let draftPhotoPreviewUrls = [];
+
 let draftLoaded = false;
 const draftSelectedSkus = new Set();
 let jobsAvailable = false;
@@ -3494,22 +3514,196 @@ function renderDraftNavigation() {
   byId("draft-page-label").textContent = "Seite " + (draftPageIndex + 1);
 }
 
-function useLocalDraft(item) {
-  if (!writeUiReady()) {
-    byId("draft-feedback").textContent = "Zum Übernehmen Kleinanzeiger normal starten.";
+// G3: only browser-selected local File objects; this code never posts to a server.
+function clearDraftPhotoPreview() {
+  for (const url of draftPhotoPreviewUrls) {
+    if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(url);
+  }
+  draftPhotoPreviewUrls = [];
+  byId("draft-photo-thumbnails").replaceChildren();
+  byId("draft-photo-preview-status").textContent = "";
+  byId("draft-photo-preview").hidden = true;
+}
+
+function draftPhotoKey(name) {
+  if (typeof name !== "string" ||
+      !/^[A-Za-z0-9ÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß ._()-]{0,180}[.](jpg|jpeg|png|webp)$/i.test(name)) return null;
+  return name.toLocaleLowerCase("de-DE");
+}
+
+function indexDraftPhotoFiles(files) {
+  if (files.length > 12000) throw new Error("Maximal 12.000 lokale Bilddateien auswählen.");
+  const found = new Map();
+  let ignored = 0;
+  for (const file of files) {
+    const relative = file && file.webkitRelativePath;
+    const parts = typeof relative === "string" ? relative.split("/") : [];
+    if (parts.length < 2 || parts.some(x => !x || x === "." || x === ".." || x.includes(String.fromCharCode(92)) || x.includes(String.fromCharCode(0)))
+        || parts[parts.length - 1] !== file.name) { ignored++; continue; }
+    const key = draftPhotoKey(file.name);
+    if (!key || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > 25 * 1024 * 1024
+        || typeof file.slice !== "function") { ignored++; continue; }
+    const extension = file.name.split(".").pop().toLocaleLowerCase("de-DE");
+    const expectedType = extension === "png" ? "image/png" :
+      extension === "webp" ? "image/webp" : "image/jpeg";
+    if (file.type !== expectedType) { ignored++; continue; }
+    const group = found.get(key) || [];
+    group.push(file);
+    found.set(key, group);
+  }
+  let conflicts = 0;
+  let usable = 0;
+  for (const group of found.values()) {
+    usable += group.length;
+    if (group.length > 1) conflicts++;
+  }
+  return {found, usable, ignored, conflicts};
+}
+
+function loadDraftPhotoFolder() {
+  draftPhotoSelectionGeneration++;
+  if (draftPhotoApplied) byId("create-media").value = "";
+  draftPhotoApplied = false;
+  clearDraftPhotoPreview();
+  draftPhotoIndex = new Map();
+  draftPhotoFolderChosen = false;
+  const files = Array.from(byId("draft-photo-folder").files || []);
+  if (!files.length) {
+    byId("draft-photo-folder-status").textContent = "Noch kein Ordner gewählt.";
     return;
   }
-  if (!window.confirm("Die bisherigen Eingaben im Formular 'Neue Anzeige' durch den lokalen Entwurf ersetzen? Es wird nichts veröffentlicht.")) {
-    return;
+  try {
+    const result = indexDraftPhotoFiles(files);
+    draftPhotoFolderChosen = true;
+    draftPhotoIndex = result.found;
+    byId("draft-photo-folder-status").textContent =
+      result.usable + " Bilder · " + result.conflicts + " doppelte Dateinamen · " +
+      result.ignored + " unbrauchbare Dateien. Nur genaue Dateinamen werden zugeordnet.";
+  } catch (error) {
+    byId("draft-photo-folder").value = "";
+    byId("draft-photo-folder-status").textContent = error.message;
   }
-  byId("create-category").value = item.category;
-  byId("create-title").value = item.title;
-  byId("create-description").value = item.description;
-  byId("create-price").value = String(item.price_eur);
-  byId("create-media").value = "";
-  revealCreateForm();
-  byId("draft-feedback").textContent = "Artikel " + item.sku +
-    " lokal ins Formular übernommen. Bilder bitte selbst auswählen; Veröffentlichung separat bestätigen.";
+}
+
+function clearDraftPhotoFolder() {
+  byId("draft-photo-folder").value = "";
+  loadDraftPhotoFolder();
+}
+
+function chosenDraftImages(item) {
+  if (!Array.isArray(item.images) || item.images.length > 10) throw new Error("Ungültige Bildhinweise.");
+  const selected = [];
+  const missing = [];
+  const ambiguous = [];
+  const known = new Set();
+  let bytes = 0;
+  for (const name of item.images) {
+    const key = draftPhotoKey(name);
+    if (!key || known.has(key)) throw new Error("Doppelte oder ungültige Bildhinweise.");
+    known.add(key);
+    const matches = draftPhotoIndex.get(key) || [];
+    if (!matches.length) missing.push(name);
+    else if (matches.length !== 1) ambiguous.push(name);
+    else { selected.push(matches[0]); bytes += matches[0].size; }
+  }
+  if (missing.length || ambiguous.length) {
+    throw new Error((missing.length ? "Fehlend: " + missing.join(", ") + ". " : "") +
+      (ambiguous.length ? "Mehrdeutig: " + ambiguous.join(", ") + ". " : "") +
+      "Ordnerinhalt prüfen oder Ordner-Auswahl löschen.");
+  }
+  if (bytes > 100 * 1024 * 1024) throw new Error("Maximal 100 MB Bilder je Anzeige.");
+  return selected;
+}
+
+async function verifyDraftImageSignature(file) {
+  const bytes = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const jpeg = bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  const png = bytes.length >= 8 && [137,80,78,71,13,10,26,10].every((v,i) => bytes[i] === v);
+  const webp = bytes.length >= 12 && [82,73,70,70].every((v,i) => bytes[i] === v)
+    && [87,69,66,80].every((v,i) => bytes[i+8] === v);
+  const extension = file.name.split(".").pop().toLocaleLowerCase("de-DE");
+  if (!((["jpg","jpeg"].includes(extension) && file.type === "image/jpeg" && jpeg)
+        || (extension === "png" && file.type === "image/png" && png)
+        || (extension === "webp" && file.type === "image/webp" && webp))) {
+    throw new Error(file.name + ": Inhalt passt nicht zum Bildformat.");
+  }
+}
+
+function showDraftPhotoPreview(files, sku) {
+  clearDraftPhotoPreview();
+  if (!files.length) return;
+  byId("draft-photo-preview").hidden = false;
+  byId("draft-photo-preview-status").textContent =
+    files.length + " Bilder lokal für " + sku + " in CSV-/Excel-Reihenfolge vorbereitet.";
+  for (const file of files) {
+    const figure = document.createElement("figure");
+    const picture = document.createElement("img");
+    picture.alt = "Foto: " + file.name;
+    picture.loading = "lazy";
+    picture.style.maxWidth = "110px";
+    picture.style.maxHeight = "90px";
+    if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+      try {
+        const url = URL.createObjectURL(file);
+        draftPhotoPreviewUrls.push(url);
+        picture.src = url;
+      } catch (_error) {
+        // Thumbnail failure must not invalidate already verified local Files.
+      }
+    }
+    const caption = document.createElement("figcaption");
+    caption.textContent = file.name;
+    figure.append(picture, caption);
+    byId("draft-photo-thumbnails").append(figure);
+  }
+}
+
+async function useLocalDraft(item) {
+  if (!writeUiReady() || draftPhotoPreparing || createInFlight) {
+    byId("draft-feedback").textContent = "Kleinanzeiger regulär starten und laufende Vorgänge beenden.";
+    return false;
+  }
+  if (!window.confirm("Lokale Entwurfsdaten im Formular 'Neue Anzeige' ersetzen? Es wird nichts veröffentlicht.")) return false;
+  draftPhotoPreparing = true;
+  const version = draftPhotoSelectionGeneration;
+  try {
+    let photos = [];
+    if (draftPhotoFolderChosen && Array.isArray(item.images) && item.images.length) {
+      photos = chosenDraftImages(item);
+      for (const file of photos) await verifyDraftImageSignature(file);
+    }
+    if (version !== draftPhotoSelectionGeneration || !writeUiReady()) {
+      throw new Error("Ordner oder Sitzung geändert; bitte erneut wählen.");
+    }
+    let selection = null;
+    if (photos.length) {
+      if (typeof DataTransfer !== "function") throw new Error("Dateiübernahme von Chrome nicht unterstützt.");
+      selection = new DataTransfer();
+      for (const file of photos) selection.items.add(file);
+      if (selection.files.length !== photos.length) throw new Error("Lokale Dateiübernahme unvollständig.");
+    }
+    // Commit file selection before text fields so a denied FileList setter
+    // cannot falsely report that all local form values were accepted.
+    if (selection) byId("create-media").files = selection.files;
+    else byId("create-media").value = "";
+    byId("create-category").value = item.category;
+    byId("create-title").value = item.title;
+    byId("create-description").value = item.description;
+    byId("create-price").value = String(item.price_eur);
+    draftPhotoApplied = !!selection;
+    showDraftPhotoPreview(photos, item.sku);
+    revealCreateForm();
+    byId("draft-feedback").textContent = "Artikel " + item.sku
+      + " lokal übernommen. " + (photos.length ? photos.length + " Fotos vorbereitet. " :
+      "Bilder selbst auswählen oder Ordner wählen. ") +
+      "Erstellen erfordert eine separate Bestätigung.";
+    return true;
+  } catch (error) {
+    byId("draft-feedback").textContent = "Keine Übernahme: " + error.message;
+    return false;
+  } finally {
+    draftPhotoPreparing = false;
+  }
 }
 
 function renderDraftRows(items) {
@@ -4420,6 +4614,13 @@ byId("draft-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") { event.preventDefault(); searchDrafts(); }
 });
 byId("draft-prev").addEventListener("click", previousDraftsPage);
+byId("draft-photo-folder").addEventListener("change", loadDraftPhotoFolder);
+byId("draft-photo-clear").addEventListener("click", clearDraftPhotoFolder);
+byId("create-media").addEventListener("change", () => { draftPhotoApplied = false; });
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("pagehide", clearDraftPhotoPreview);
+}
+
 byId("sale-ad-select").addEventListener("change",loadSelectedSale);
 byId("sale-save").addEventListener("click",saveSaleState);
 byId("sale-next").addEventListener("click",() => {
