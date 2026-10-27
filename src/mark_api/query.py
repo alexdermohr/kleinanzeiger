@@ -255,6 +255,24 @@ class MarkQueryService:
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
         return self._store.reaction_history(ad_id)
 
+    def imported_inquiries_page(
+        self, *, after: str = "", limit: int = 25,
+        watermark: int | None = None,
+    ) -> dict[str, object]:
+        """Read EML counters only; do not infer ownership from an email ID."""
+        if type(self._store) is not SnapshotStore:
+            raise ValueError("native EML overview unavailable")
+        page = self._store.inbound_inquiries_page(
+            after=after, limit=limit, watermark=watermark,
+        )
+        items = []
+        for record in page["inquiries"]:
+            ad = self.catalog_ad(record["ad_id"])
+            owned = ad is not None and ad["present"] is True
+            items.append({**record, "own_ad": owned,
+                          "title": ad["title"] if owned else None})
+        return {**page, "inquiries": items}
+
     def email_reaction(self, ad_id: str) -> EmailReactionView | None:
         history = self._store.inbound_message_history(ad_id)
         if not history:

@@ -221,6 +221,103 @@ class DashboardWriteProxyHttpTests(unittest.TestCase):
             headers["Idempotency-Key"] = idempotency_key
         return headers
 
+    def test_imported_inquiries_are_private_owner_bound_and_page_pinned(self) -> None:
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="42", observed_at=T1, source="management",
+            lifecycle_state=LifecycleState.ACTIVE, title="Eigene Vase",
+        ))
+        self.store.append_inbound_message_events((
+            InboundMessageEvent(
+                ad_id="42", conversation_id="private-contact",
+                provider_message_id="mail-one", observed_at=T0,
+                source="kleinanzeigen-email"),
+            InboundMessageEvent(
+                ad_id="42", conversation_id="private-contact",
+                provider_message_id="mail-two", observed_at=T1,
+                source="kleinanzeigen-email"),
+            InboundMessageEvent(
+                ad_id="9", conversation_id="unknown-buyer",
+                provider_message_id="mail-three", observed_at=T0,
+                source="kleinanzeigen-email"),
+        ))
+        url=self.base+"/api/portfolio/inquiries?limit=1"
+        with self.assertRaises(HTTPError) as unauthorized:
+            urlopen(url, timeout=2)
+        self.assertEqual(unauthorized.exception.code,403)
+        def read(uri):
+            with urlopen(Request(uri,headers=self.write_headers()),timeout=2) as response:
+                self.assertEqual(response.status,200)
+                return json.loads(response.read())
+        first=read(url)
+        self.assertEqual([i["ad_id"] for i in first["inquiries"]],["42"])
+        self.assertTrue(first["inquiries"][0]["own_ad"])
+        self.assertEqual(first["inquiries"][0]["title"],"Eigene Vase")
+        self.assertEqual(first["inquiries"][0]["conversation_count"],1)
+        self.assertEqual(first["inquiries"][0]["inbound_message_count"],2)
+        self.assertEqual(first["next_after"],"42")
+        self.assertNotIn("private-contact",json.dumps(first))
+        self.store.append_inbound_message_events((
+            InboundMessageEvent(
+                ad_id="99", conversation_id="new", provider_message_id="mail-four",
+                observed_at=T1, source="kleinanzeigen-email"),
+        ))
+        second=read(url+"&after=42&watermark="+str(first["watermark"]))
+        self.assertEqual([i["ad_id"] for i in second["inquiries"]],["9"])
+        self.assertFalse(second["inquiries"][0]["own_ad"])
+        self.assertIsNone(second["inquiries"][0]["title"])
+        self.assertFalse(second["has_more"])
+        self.assertFalse(self.backend.requests)
+        for value in ("limit=0","limit=51","after=x","limit=2&limit=3",
+                      "watermark=-1","unknown=1"):
+            with self.subTest(query=value):
+                request=Request(self.base+"/api/portfolio/inquiries?"+value,
+                                headers=self.write_headers())
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(request,timeout=2)
+                self.assertEqual(error.exception.code,400)
+
+    def test_imported_inquiries_fail_closed_on_corrupt_time(self) -> None:
+        self.store.append_inbound_message_events((
+            InboundMessageEvent(
+                ad_id="9",conversation_id="c1",provider_message_id="mail-corrupt",
+                observed_at=T0,source="kleinanzeigen-email"),
+        ))
+        with closing(self.store._connect()) as db:
+            db.execute("UPDATE inbound_message_events SET observed_at=? "
+                       "WHERE provider_message_id=?",("bad-date","mail-corrupt"))
+            db.commit()
+        request=Request(self.base+"/api/portfolio/inquiries",
+                        headers=self.write_headers())
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request,timeout=2)
+        self.assertEqual(error.exception.code,503)
+        self.assertNotIn(b"bad-date",error.exception.read())
+
+    def test_imported_inquiries_10000_events_stay_on_small_pages(self) -> None:
+        events = (
+            InboundMessageEvent(
+                ad_id=str(100000 + index),
+                conversation_id="synthetic-conversation-" + str(index),
+                provider_message_id="synthetic-mail-" + str(index),
+                observed_at=T0, source="kleinanzeigen-email",
+            )
+            for index in range(10000)
+        )
+        self.assertEqual(self.store.append_inbound_message_events(events), 10000)
+        query = MarkQueryService(self.store)
+        first = query.imported_inquiries_page(limit=50)
+        self.assertEqual(len(first["inquiries"]), 50)
+        self.assertEqual(first["inquiries"][0]["ad_id"], "100000")
+        self.assertEqual(first["inquiries"][-1]["ad_id"], "100049")
+        self.assertTrue(first["has_more"])
+        self.assertFalse(any(item["own_ad"] for item in first["inquiries"]))
+        second = query.imported_inquiries_page(
+            limit=50, after=first["next_after"], watermark=first["watermark"],
+        )
+        self.assertEqual(len(second["inquiries"]), 50)
+        self.assertEqual(second["inquiries"][0]["ad_id"], "100050")
+        self.assertEqual(second["watermark"], first["watermark"])
+
     def test_proxy_rejects_dashboard_tokens_that_are_not_header_safe_ascii(self) -> None:
         for token in (
             "abcdefghijklmnop😀",

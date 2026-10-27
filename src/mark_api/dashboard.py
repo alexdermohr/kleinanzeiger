@@ -724,6 +724,20 @@ _DASHBOARD_HTML = """<!doctype html>
       <details id="buyer-disclosure" class="feature-disclosure">
         <summary><span>Interessenten &amp; Antworten</span><small>Nachrichtenentwürfe ohne Versand</small></summary>
         <p class="muted">Bei einer eigenen Anzeige auf <strong>Antwort vorbereiten</strong> klicken. Eine bereits erhaltene Anfrage hier selbst einfügen. Kleinanzeiger liest derzeit keine Plattformkonversationen und verschickt keine Nachrichten.</p>
+        <div id="buyer-imported" hidden>
+          <h3>Importierte EML-Anfragen</h3>
+          <p class="muted">Nur lokale Benachrichtigungs-Metadaten, kein Plattform-Postfach, keine Nachrichtentexte. Eine E-Mail allein beweist keine eigene Anzeige.</p>
+          <div class="controls">
+            <button id="buyer-inquiries-load" type="button">Anfragen aktualisieren</button>
+            <button id="buyer-inquiries-prev" type="button" disabled>Zurück</button>
+            <button id="buyer-inquiries-next" type="button" disabled>Weiter</button>
+          </div>
+          <p id="buyer-inquiries-status" class="note" role="status" aria-live="polite"></p>
+          <table aria-label="Importierte EML-Anfragen">
+            <thead><tr><th>Anzeige</th><th>E-Mail-Ereignisse</th><th>Antwort</th></tr></thead>
+            <tbody id="buyer-inquiries-body"></tbody>
+          </table>
+        </div>
         <div class="controls">
           <label>Anzeigen-ID <input id="buyer-ad-id" type="text" readonly value="" aria-label="Gewählte Anzeigen-ID"></label>
           <label>Anzeige <input id="buyer-ad-title" type="text" readonly value="" aria-label="Gewählter Anzeigentitel"></label>
@@ -2884,8 +2898,80 @@ async function loadAnalytics() {
 }
 
 
-// Anfragen bleiben nur im aktuellen Browserformular. Kein Postfachzugriff,
-// serverseitiger Message Store und keine ausgehende Plattform-Nachricht.
+// Local imported EML metadata do not contain message text or authorise writes.
+let inquiryCursors = [""];
+let inquiryIndex = 0;
+let inquiryWatermark = null;
+let inquiryBusy = false;
+
+function inquiryButtons() {
+  byId("buyer-inquiries-load").disabled = inquiryBusy;
+  byId("buyer-inquiries-prev").disabled = inquiryBusy || inquiryIndex === 0;
+  byId("buyer-inquiries-next").disabled = inquiryBusy ||
+    inquiryCursors.length <= inquiryIndex + 1;
+}
+async function loadInquiries(reset = false) {
+  if (!jobsAvailable || !writeUiReady() || inquiryBusy) return;
+  if (reset) { inquiryCursors=[""]; inquiryIndex=0; inquiryWatermark=null; }
+  inquiryBusy = true;
+  inquiryButtons();
+  const status = byId("buyer-inquiries-status");
+  status.textContent = "Lokale Anfragen werden geladen …";
+  try {
+    const params = new URLSearchParams({limit:"25",after:inquiryCursors[inquiryIndex]});
+    if (inquiryWatermark !== null) params.set("watermark", String(inquiryWatermark));
+    const data = await _jobGet("/api/portfolio/inquiries?" + params.toString());
+    if (!data || !Array.isArray(data.inquiries) ||
+        !Number.isSafeInteger(data.watermark)) throw new Error("Invalid EML page");
+    inquiryWatermark = data.watermark;
+    const body = byId("buyer-inquiries-body");
+    body.replaceChildren();
+    for (const item of data.inquiries) {
+      const tr=document.createElement("tr");
+      const ad=document.createElement("td");
+      ad.textContent=(item.own_ad ? (item.title || "Ohne Titel") :
+        "Eigentum nicht bestätigt") + " · ID " + item.ad_id;
+      const evidence=document.createElement("td");
+      evidence.textContent=item.conversation_count + " Gespräch(e), " +
+        item.inbound_message_count + " Nachricht(en) · zuletzt erfasst: " +
+        item.last_imported_event_at + " · EML-Import";
+      const action=document.createElement("td");
+      if (item.own_ad) {
+        const button=document.createElement("button");
+        button.type="button";
+        button.textContent="Antwort vorbereiten";
+        button.addEventListener("click",async () => {
+          button.disabled=true;
+          try {
+            const result=await getJson("/api/catalog/ad?id="+
+              encodeURIComponent(item.ad_id));
+            if (!result || !result.ad || result.ad.ad_id!==item.ad_id ||
+                result.ad.present!==true) throw new Error("Stale ad");
+            openBuyerReplyForAd(result.ad);
+          } catch (_error) {
+            status.textContent="Anzeige zuerst erneut abgleichen und auswählen.";
+          } finally { button.disabled=false; }
+        });
+        action.append(button);
+      } else {
+        action.textContent="Keine Freigabe ohne eigene Anzeige";
+      }
+      tr.append(ad,evidence,action);
+      body.append(tr);
+    }
+    if (data.has_more && typeof data.next_after==="string") {
+      inquiryCursors[inquiryIndex+1]=data.next_after;
+      inquiryCursors.length=inquiryIndex+2;
+    } else { inquiryCursors.length=inquiryIndex+1; }
+    status.textContent=data.inquiries.length+" EML-belegte Anzeigen · Seite "+
+      (inquiryIndex+1)+". Keine automatische Nachricht oder KI-Aktion.";
+  } catch (_error) {
+    status.textContent="EML-Übersicht nicht verfügbar; lokale Daten und Sitzung prüfen.";
+  } finally { inquiryBusy=false; inquiryButtons(); }
+}
+
+// Antworttexte bleiben nur im Browserformular. Kein Plattform-Postfach
+// und keine ausgehende Nachricht.
 function buyerReplyAvailability() {
   const allowed = buyerTarget !== null && !buyerBusy;
   byId("buyer-manual").disabled = !allowed;
@@ -3351,6 +3437,7 @@ async function load() {
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
     jobsAvailable = dashboardConfig.portfolio_jobs_available === true;
+    byId("buyer-imported").hidden = !jobsAvailable;
     byId("job-provider-control").hidden =
       !(jobsAvailable && generationUiAvailable);
     byId("sync-now").hidden = !manualSyncAvailable;
@@ -4394,6 +4481,17 @@ byId("manage-activate").addEventListener(
   () => runAdAction("activate", "POST", "/activate"),
 );
 byId("manage-delete").addEventListener("click", deleteManagedAd);
+byId("buyer-inquiries-load").addEventListener("click", () => loadInquiries(true));
+byId("buyer-inquiries-prev").addEventListener("click", () => {
+  if (inquiryBusy || inquiryIndex===0) return;
+  inquiryIndex--;
+  loadInquiries();
+});
+byId("buyer-inquiries-next").addEventListener("click", () => {
+  if (inquiryBusy || inquiryIndex+1>=inquiryCursors.length) return;
+  inquiryIndex++;
+  loadInquiries();
+});
 byId("buyer-inquiry").addEventListener("input", onBuyerInputChange);
 byId("buyer-facts").addEventListener("input", onBuyerInputChange);
 byId("buyer-reply").addEventListener("input", buyerReplyAvailability);
@@ -5495,6 +5593,42 @@ def _handler_factory(
                             else attention_counts(store))
                 except (sqlite3.Error,OSError):
                     self._send_json(503, {"error":"local_work_storage_unavailable"})
+                    return
+                self._send_json(200,result)
+                return
+            if path == "/api/portfolio/inquiries":
+                # Imported EML metadata require the authenticated local session.
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                try:
+                    if len(target.query) > 256:
+                        raise ValueError("oversized EML query")
+                    options = parse_qs(
+                        target.query, keep_blank_values=True, max_num_fields=4,
+                        encoding="utf-8", errors="strict",
+                    )
+                    if (set(options)-{"after","limit","watermark"} or
+                            any(len(value)!=1 for value in options.values())):
+                        raise ValueError("unrecognized EML query")
+                    count=options.get("limit",["25"])[0]
+                    watermark=options.get("watermark",[None])[0]
+                    if (not count.isascii() or not count.isdecimal()
+                            or len(count)>2 or
+                            (watermark is not None and
+                             (not watermark.isascii() or
+                              not watermark.isdecimal() or len(watermark)>19))):
+                        raise ValueError("invalid EML query integer")
+                    result=query.imported_inquiries_page(
+                        after=options.get("after",[""])[0],
+                        limit=int(count),
+                        watermark=int(watermark) if watermark is not None else None,
+                    )
+                except (ValueError,UnicodeError,OverflowError):
+                    self._send_json(400,{"error":"invalid_inquiries_query"})
                     return
                 self._send_json(200,result)
                 return
