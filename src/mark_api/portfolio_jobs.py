@@ -448,11 +448,16 @@ def review_items(store: SnapshotStore, job_id: str, skus: list[str],
         if row["state"] in ("cancelled","needs_attention"):
             raise PortfolioJobError("job not ready for approvals")
         for sku in skus:
-            phase=conn.execute("SELECT phase FROM portfolio_job_items "
+            phase=conn.execute("SELECT phase,proposal_json FROM portfolio_job_items "
                                "WHERE job_id=? AND sku=? COLLATE BINARY",
                                (job_id,sku)).fetchone()
             if phase is None or phase["phase"] not in ("proposed","approved","rejected"):
                 raise PortfolioJobError("selection contains an unreviewable item")
+            # Reconciled UNKNOWN requests become rejected without ever
+            # receiving a proposal. Approving them would make local draft
+            # application fail on json.loads(None) and block valid proposals.
+            if approve and not phase["proposal_json"]:
+                raise PortfolioJobError("selection contains no stored proposal")
         desired="approved" if approve else "rejected"
         conn.executemany(
             "UPDATE portfolio_job_items SET phase=?,updated_at=? "
@@ -481,6 +486,11 @@ def apply_approved_local(store: SnapshotStore, job_id: str,
             (job_id,limit+1)).fetchall()
         if len(rows)>limit:
             raise PortfolioJobError("more approved items than apply limit")
+        # Older client versions could approve an UNKNOWN-settled row without
+        # any generated text. Abort before modifying even one local draft;
+        # the operator can explicitly reject the invalid approved row.
+        if any(not item["proposal_json"] for item in rows):
+            raise PortfolioJobError("approved suggestion missing; no partial edits")
         for item in rows:
             current=conn.execute(
                 "SELECT sku,title,description,category_json,price_eur,images_json,status "
