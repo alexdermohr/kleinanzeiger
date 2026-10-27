@@ -44,6 +44,7 @@ const confirmation=[];
 const window={addEventListener(){},confirm(text){confirmation.push(text);return true;},
   crypto:{getRandomValues(array){for(let i=0;i<array.length;i++)array[i]=i;return array;}}};
 const requests=[];
+let locallyApplied=false;
 let rejectFirstCreate=true;
 let jobs=[];
 let batchCalls=0;
@@ -59,7 +60,7 @@ async function fetch(path,options={}){
     const cursor=new URL(path,"http://127.0.0.1:8765").searchParams.get("after");
     const isSecond=!!cursor;
     return {ok:true,json:async()=>({drafts:[{sku:isSecond?skus[1]:skus[0],
-      title:"Original",description:"Fakten",category:"Haus > Licht",price_eur:29}],
+      title:locallyApplied?"Lokal verbessert":"Original",description:"Fakten",category:"Haus > Licht",price_eur:29}],
       has_more:!isSecond,next_after:isSecond?null:skus[0],total:2})};
   }
   if(path==="/api/portfolio/jobs/create"){
@@ -109,6 +110,7 @@ async function fetch(path,options={}){
       assert.deepEqual(body.skus,[skus[0]]);
       assert.equal(body.approve,true);
     }
+    if(path.endsWith("/apply-local")) locallyApplied=true;
     return {ok:true,json:async()=>({job_id:body.job_id,applied:1,platform_writes:0})};
   }
   throw new Error("unexpected request "+path);
@@ -122,6 +124,10 @@ vm.runInContext(code.slice(0,end),context);
 vm.runInContext('writeUiAvailable=true; jobsAvailable=true; writeToken="x".repeat(32);',context);
 const at=id=>document.getElementById(id);
 (async()=>{
+  vm.runInContext('generationUiAvailable=true; jobsAvailable=false; renderGenerationAvailability()',context);
+  assert.equal(at('job-provider-control').hidden,true,'provider controls must hide before job probe succeeds');
+  vm.runInContext('jobsAvailable=true; renderGenerationAvailability()',context);
+  assert.equal(at('job-provider-control').hidden,false,'provider controls must be shown after successful job probe');
   assert.equal(await vm.runInContext("loadDraftsPage()",context),true);
   let cb=at("drafts-body").children[0].children[0].children[0];
   cb.checked=true;cb.listeners.change();
@@ -144,7 +150,13 @@ const at=id=>document.getElementById(id);
   const reviewCheckbox=at("job-items-body").children[0].children[0].children[0];
   reviewCheckbox.checked=true;reviewCheckbox.listeners.change();
   await vm.runInContext('jobAction("review",{skus:["SKU-00001"],approve:true})',context);
+  at("drafts-disclosure").open=true;
+  const draftFetchesBeforeApply=requests.filter(r=>r.path.startsWith("/api/portfolio/drafts?")).length;
   await vm.runInContext('jobAction("apply-local",{})',context);
+  assert.equal(requests.filter(r=>r.path.startsWith("/api/portfolio/drafts?")).length,
+               draftFetchesBeforeApply+1,"successful local apply must refresh displayed draft rows");
+  assert.equal(at("drafts-body").children[0].children[2].textContent,
+               "Lokal verbessert","create-form source must reflect applied changes");
   at("job-clear-selection").listeners.click();
   assert.equal(at("job-selected-count").textContent,"0 Entwürfe einzeln ausgewählt");
   assert.equal(at("drafts-body").children.length,1,"clear selection must not erase page");

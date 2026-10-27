@@ -2532,6 +2532,7 @@ function generationUiReady() {
 
 function renderGenerationAvailability() {
   byId("generation-panel").hidden = !generationUiAvailable;
+  byId("job-provider-control").hidden = !(jobsAvailable && generationUiAvailable);
   byId("generation-session-note").hidden = generationUiReady();
   const canGenerate = generationUiReady() && !generationBusy;
   byId("generation-text").disabled = !canGenerate;
@@ -3182,7 +3183,15 @@ async function createJob() {
 async function jobAction(name, payload) {
   if (jobBusy || !jobActiveId) return;
   try {
-    await _jobPost(name,{job_id:jobActiveId,...payload});
+    const result = await _jobPost(name,{job_id:jobActiveId,...payload});
+    if (name === "apply-local" && result.applied > 0) {
+      // Never reuse stale draft objects for "In neue Anzeige" after an
+      // approved local AI edit. Hide old rows before refreshing, so a
+      // failed read cannot leave actionable stale article details.
+      draftLoaded = false;
+      byId("drafts-body").replaceChildren();
+      if (byId("drafts-disclosure").open) await loadDraftsPage();
+    }
     byId("jobs-feedback").textContent="Lokaler Vorgang bestätigt. Keine Plattformänderung.";
     await loadJobs();
   } catch (error) {
