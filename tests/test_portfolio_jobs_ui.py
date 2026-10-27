@@ -124,9 +124,9 @@ vm.runInContext(code.slice(0,end),context);
 vm.runInContext('writeUiAvailable=true; jobsAvailable=true; writeToken="x".repeat(32);',context);
 const at=id=>document.getElementById(id);
 (async()=>{
-  vm.runInContext('generationUiAvailable=true; jobsAvailable=false; renderGenerationAvailability()',context);
+  vm.runInContext('generationUiAvailable=true; jobsAvailable=false; renderJobsAvailability()',context);
   assert.equal(at('job-provider-control').hidden,true,'provider controls must hide before job probe succeeds');
-  vm.runInContext('jobsAvailable=true; renderGenerationAvailability()',context);
+  vm.runInContext('jobsAvailable=true; renderJobsAvailability()',context);
   assert.equal(at('job-provider-control').hidden,false,'provider controls must be shown after successful job probe');
   assert.equal(await vm.runInContext("loadDraftsPage()",context),true);
   let cb=at("drafts-body").children[0].children[0].children[0];

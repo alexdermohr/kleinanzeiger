@@ -2532,7 +2532,6 @@ function generationUiReady() {
 
 function renderGenerationAvailability() {
   byId("generation-panel").hidden = !generationUiAvailable;
-  byId("job-provider-control").hidden = !(jobsAvailable && generationUiAvailable);
   byId("generation-session-note").hidden = generationUiReady();
   const canGenerate = generationUiReady() && !generationBusy;
   byId("generation-text").disabled = !canGenerate;
@@ -2778,6 +2777,13 @@ async function syncNow() {
   }
 }
 
+function renderJobsAvailability() {
+  byId("jobs-panel").hidden = !jobsAvailable;
+  byId("nav-jobs").hidden = !jobsAvailable;
+  byId("job-provider-control").hidden =
+    !(jobsAvailable && generationUiAvailable);
+}
+
 async function load() {
   const status = byId("status");
   status.textContent = "Lade lokale Daten …";
@@ -2804,8 +2810,7 @@ async function load() {
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
     jobsAvailable = false;
-    byId("job-provider-control").hidden =
-      !(jobsAvailable && generationUiAvailable);
+    renderJobsAvailability();
     byId("sync-now").hidden = !manualSyncAvailable;
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     const genNavigation = optionalById("nav-generation");
@@ -2822,8 +2827,7 @@ async function load() {
         jobsAvailable = false;
       }
     }
-    byId("jobs-panel").hidden = !jobsAvailable;
-    byId("nav-jobs").hidden = !jobsAvailable;
+    renderJobsAvailability();
     renderWriteAvailability();
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     renderGenerationAvailability();
