@@ -36,6 +36,10 @@ from .portfolio_drafts import drafts_page
 from .portfolio_sales import SaleError, sale_detail, sales_page, sale_totals, update_manual_sale
 from .portfolio_reporting import PortfolioReportError, report as portfolio_report
 from .portfolio_templates import WorkTemplateError, attention_counts, list_templates, mutate_template
+from .portfolio_item_templates import (
+    ItemTemplateError, list_item_templates, save_item_template,
+    delete_item_template, draft_from_item_template, duplicate_local_draft,
+)
 from .portfolio_jobs import (
     PortfolioJobError, apply_approved_local, change_state, create_job, details as job_details,
     list_jobs, matching_draft_skus, process_one, recover_interrupted, review_items,
@@ -503,6 +507,32 @@ _DASHBOARD_HTML = """<!doctype html>
           <span id="draft-page-label">Seite 1</span>
           <button id="draft-next" type="button">Weiter</button>
         </div>
+        <details id="item-templates-disclosure" class="compact-details">
+          <summary>Artikelvorlagen &amp; Duplizieren (nur lokal)</summary>
+          <p class="muted">Importierte Artikel als Vorlage sichern oder als neuen Entwurf kopieren. Jede Kopie erhält eine eigene Artikelnummer. Es wird nichts veröffentlicht.</p>
+          <div class="controls">
+            <label>Quellartikel aus der Tabelle
+              <input id="item-template-source" type="text" readonly placeholder="Zuerst einen Entwurf wählen">
+            </label>
+            <label>Vorlagenname
+              <input id="item-template-name" type="text" maxlength="60" autocomplete="off">
+            </label>
+            <button id="item-template-save" type="button">Vorlage speichern</button>
+          </div>
+          <div class="controls">
+            <label>Gespeicherte Artikelvorlage
+              <select id="item-template-select"><option value="">Neue Vorlage</option></select>
+            </label>
+            <label>Neue Artikelnummer
+              <input id="item-template-new-sku" type="text" maxlength="80" autocomplete="off" placeholder="ART-2001">
+            </label>
+            <button id="item-template-from" type="button">Entwurf aus Vorlage</button>
+            <button id="item-template-copy" type="button">Entwurf duplizieren</button>
+            <button id="item-template-delete" type="button">Vorlage löschen</button>
+            <button id="item-template-refresh" type="button">Aktualisieren</button>
+          </div>
+          <p id="item-template-feedback" role="status" aria-live="polite">Vorlagen bei Bedarf laden.</p>
+        </details>
       </details>
     </section>
 
@@ -1090,6 +1120,9 @@ let reportLoadSeq = 0;
 let workTemplates = [];
 let workTemplatePending = null;
 let workTemplateBusy = false;
+let itemTemplates = [];
+let itemTemplateBusy = false;
+let itemTemplatePending = null;
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -3476,6 +3509,7 @@ async function load() {
     byId("report-panel").hidden = !reportingAvailable;
     byId("nav-report").hidden = !reportingAvailable;
     renderWriteAvailability();
+    renderItemTemplateControls();
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     renderGenerationAvailability();
     buyerReplyAvailability();
@@ -3725,6 +3759,146 @@ async function useLocalDraft(item) {
   }
 }
 
+// G2: local article templates; entirely separate from the P5 AI-instruction templates.
+function selectedItemTemplate() {
+  const id=byId("item-template-select").value;
+  return itemTemplates.find(item=>item.template_id===id)||null;
+}
+function renderItemTemplateControls() {
+  const enabled=writeUiReady()&&!itemTemplateBusy;
+  for (const id of ["item-template-save","item-template-from","item-template-copy",
+                    "item-template-delete","item-template-refresh"]) byId(id).disabled=!enabled;
+}
+function chooseItemTemplateSource(draft,mode) {
+  if (!draft || typeof draft.sku!=="string") return;
+  byId("item-templates-disclosure").open=true;
+  byId("item-template-source").value=draft.sku;
+  if (mode==="save") {
+    byId("item-template-select").value="";
+    byId("item-template-name").value=String(draft.title||"").slice(0,60);
+    byId("item-template-feedback").textContent="Quellartikel "+draft.sku+" gewählt. Vorlagenname prüfen.";
+    byId("item-template-name").focus();
+  } else {
+    byId("item-template-new-sku").value="";
+    byId("item-template-feedback").textContent="Entwurf "+draft.sku+" gewählt. Neue Artikelnummer eingeben.";
+    byId("item-template-new-sku").focus();
+  }
+  renderItemTemplateControls();
+}
+async function loadItemTemplates() {
+  if (!writeUiReady()) {
+    byId("item-template-feedback").textContent="Artikelvorlagen benötigen die reguläre lokale Sitzung.";
+    renderItemTemplateControls();
+    return false;
+  }
+  try {
+    const response=await fetch("/api/portfolio/item-templates",{
+      cache:"no-store",headers:_jobHeaders(),
+    });
+    if (!response.ok) throw new Error("Vorlagenliste nicht lesbar");
+    const data=await response.json();
+    if (!data || !Array.isArray(data.templates) || data.templates.length>100)
+      throw new Error("Ungültige lokale Vorlagenliste");
+    itemTemplates=data.templates;
+    const select=byId("item-template-select");
+    const previous=select.value;
+    select.replaceChildren();
+    const empty=document.createElement("option");
+    empty.value="";empty.textContent="Neue Vorlage";select.append(empty);
+    for (const template of itemTemplates) {
+      if (typeof template.template_id!=="string" || typeof template.name!=="string")
+        throw new Error("Ungültige Vorlagendaten");
+      const option=document.createElement("option");
+      option.value=template.template_id;option.textContent=template.name;
+      select.append(option);
+    }
+    select.value=itemTemplates.some(t=>t.template_id===previous)?previous:"";
+    byId("item-template-feedback").textContent=itemTemplates.length+" Artikelvorlagen lokal verfügbar.";
+    return true;
+  } catch (_error) {
+    byId("item-template-feedback").textContent="Vorlagenliste nicht verfügbar. Daten bleiben unverändert.";
+    return false;
+  } finally {
+    renderItemTemplateControls();
+  }
+}
+async function itemTemplateCommand(action) {
+  if (!writeUiReady() || itemTemplateBusy) return false;
+  const chosen=selectedItemTemplate();
+  const source=byId("item-template-source").value.trim();
+  const newSku=byId("item-template-new-sku").value.trim();
+  let data;
+  if (action==="save") {
+    if (!source) {
+      byId("item-template-feedback").textContent="Zuerst einen Entwurf in der Tabelle wählen.";
+      return false;
+    }
+    if (chosen && !window.confirm("Artikelvorlage "+chosen.name+" aktualisieren?")) return false;
+    data={action,source_sku:source,name:byId("item-template-name").value.trim(),
+      template_id:chosen?.template_id||null,expected_revision:chosen?.revision||0};
+  } else if (action==="delete") {
+    if (!chosen) {
+      byId("item-template-feedback").textContent="Zuerst eine Artikelvorlage auswählen.";
+      return false;
+    }
+    if (!window.confirm("Artikelvorlage "+chosen.name+" wirklich löschen?")) return false;
+    data={action,template_id:chosen.template_id,expected_revision:chosen.revision};
+  } else if (action==="from_template") {
+    if (!chosen || !newSku) {
+      byId("item-template-feedback").textContent="Vorlage und neue Artikelnummer wählen.";
+      return false;
+    }
+    data={action,template_id:chosen.template_id,new_sku:newSku};
+  } else if (action==="duplicate") {
+    if (!source || !newSku) {
+      byId("item-template-feedback").textContent="Quellartikel und neue Artikelnummer wählen.";
+      return false;
+    }
+    data={action,source_sku:source,new_sku:newSku};
+  } else return false;
+  const fingerprint=JSON.stringify(data);
+  if (itemTemplatePending?.fingerprint!==fingerprint)
+    itemTemplatePending={fingerprint,key:_newJobRequestKey()};
+  itemTemplateBusy=true;renderItemTemplateControls();
+  try {
+    const response=await fetch("/api/portfolio/item-templates/mutate",{
+      method:"POST",cache:"no-store",
+      headers:{..._jobHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({...data,request_key:itemTemplatePending.key}),
+    });
+    if (!response.ok) {
+      if (response.status===409) throw new Error("Name oder Artikelnummer vergeben oder Vorlage geändert. Aktualisieren.");
+      if (response.status===400) throw new Error("Angaben prüfen; es wurde nichts geändert.");
+      if (response.status===403) throw new Error("Lokale Schreibsitzung nicht verfügbar.");
+      throw new Error("Ergebnis unklar. Vor erneutem Ausführen lokalen Bestand prüfen; derselbe Schlüssel bleibt vorgemerkt.");
+    }
+    const result=await response.json();
+    if (!result || result.platform_writes!==0 || result.published===true)
+      throw new Error("Lokale Erfolgsmeldung ungültig.");
+    itemTemplatePending=null;
+    const refreshed=await loadItemTemplates();
+    if (refreshed && action==="save") byId("item-template-select").value=result.template_id;
+    if (action==="delete") {
+      byId("item-template-select").value="";
+      byId("item-template-name").value="";
+    }
+    if (action==="from_template" || action==="duplicate") {
+      byId("draft-search").value=result.sku;
+      await searchDrafts();
+    }
+    byId("item-template-feedback").textContent=
+      action==="delete"?"Vorlage lokal gelöscht.":
+      action==="save"?"Vorlage lokal gespeichert.":
+      "Eigenständiger lokaler Entwurf "+result.sku+" angelegt. Nichts veröffentlicht.";
+    return true;
+  } catch (error) {
+    byId("item-template-feedback").textContent=error.message;
+    return false;
+  } finally {
+    itemTemplateBusy=false;renderItemTemplateControls();
+  }
+}
+
 function renderDraftRows(items) {
   const body = byId("drafts-body");
   body.replaceChildren();
@@ -3762,6 +3936,16 @@ function renderDraftRows(items) {
     button.disabled = !writeUiReady();
     button.addEventListener("click", () => useLocalDraft(draft));
     actions.append(button);
+    const templateButton=document.createElement("button");
+    templateButton.type="button";templateButton.textContent="Als Vorlage";
+    templateButton.disabled=!writeUiReady();
+    templateButton.addEventListener("click",()=>chooseItemTemplateSource(draft,"save"));
+    actions.append(templateButton);
+    const copyButton=document.createElement("button");
+    copyButton.type="button";copyButton.textContent="Duplizieren";
+    copyButton.disabled=!writeUiReady();
+    copyButton.addEventListener("click",()=>chooseItemTemplateSource(draft,"copy"));
+    actions.append(copyButton);
     row.append(actions);
     body.append(row);
   }
@@ -4633,6 +4817,18 @@ byId("draft-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") { event.preventDefault(); searchDrafts(); }
 });
 byId("draft-prev").addEventListener("click", previousDraftsPage);
+byId("item-template-refresh").addEventListener("click",loadItemTemplates);
+byId("item-template-select").addEventListener("change",()=>{
+  const item=selectedItemTemplate();
+  byId("item-template-name").value=item?.name||"";
+});
+byId("item-template-save").addEventListener("click",()=>itemTemplateCommand("save"));
+byId("item-template-delete").addEventListener("click",()=>itemTemplateCommand("delete"));
+byId("item-template-from").addEventListener("click",()=>itemTemplateCommand("from_template"));
+byId("item-template-copy").addEventListener("click",()=>itemTemplateCommand("duplicate"));
+byId("item-templates-disclosure").addEventListener("toggle",()=>{
+  if (byId("item-templates-disclosure").open)loadItemTemplates();
+});
 byId("draft-photo-folder").addEventListener("change", loadDraftPhotoFolder);
 byId("draft-photo-clear").addEventListener("click", clearDraftPhotoFolder);
 byId("create-media").addEventListener("change", onManualCreateImageSelection);
@@ -5798,6 +5994,23 @@ def _handler_factory(
                     return
                 self._send_json(200,answer)
                 return
+            if path == "/api/portfolio/item-templates":
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error":"not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error":"write_session_required"})
+                    return
+                if target.query or target.fragment or target.path!=self.path:
+                    self._send_json(400, {"error":"invalid_item_template_query"})
+                    return
+                try:
+                    response=list_item_templates(store)
+                except (sqlite3.Error,OSError,ValueError,TypeError):
+                    self._send_json(503, {"error":"local_item_storage_unavailable"})
+                    return
+                self._send_json(200,response)
+                return
             if path in ("/api/portfolio/templates", "/api/portfolio/attention"):
                 if type(store) is not SnapshotStore or write_proxy is None:
                     self._send_json(404, {"error": "not_found"})
@@ -6449,7 +6662,69 @@ def _handler_factory(
                 return
             self._send_json(200,answer)
 
+        def _portfolio_item_template_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/item-templates/mutate"
+                    or target.query or target.fragment or target.path!=self.path
+                    or type(store) is not SnapshotStore or write_proxy is None):
+                self._send_json(404, {"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error":"item_key_required_in_body"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                action=payload.get("action")
+                shapes={
+                    "save":{"action","source_sku","name","template_id",
+                            "expected_revision","request_key"},
+                    "delete":{"action","template_id","expected_revision","request_key"},
+                    "from_template":{"action","template_id","new_sku","request_key"},
+                    "duplicate":{"action","source_sku","new_sku","request_key"},
+                }
+                if type(action) is not str or set(payload)!=shapes.get(action):
+                    raise ValueError("invalid item template fields")
+                if action=="save":
+                    answer=save_item_template(store,
+                        source_sku=payload["source_sku"],name=payload["name"],
+                        template_id=payload["template_id"],expected_revision=payload["expected_revision"],
+                        request_key=payload["request_key"])
+                elif action=="delete":
+                    answer=delete_item_template(store,
+                        template_id=payload["template_id"],expected_revision=payload["expected_revision"],
+                        request_key=payload["request_key"])
+                elif action=="from_template":
+                    answer=draft_from_item_template(store,
+                        template_id=payload["template_id"],new_sku=payload["new_sku"],
+                        request_key=payload["request_key"])
+                else:
+                    answer=duplicate_local_draft(store,
+                        source_sku=payload["source_sku"],new_sku=payload["new_sku"],
+                        request_key=payload["request_key"])
+            except ItemTemplateError as error:
+                detail=str(error).casefold()
+                conflict=any(word in detail for word in (
+                    "existiert","bereits vergeben","geändert","geaendert",
+                    "anfrage-schluessel","anfrage-schlüssel"))
+                self._send_json(409 if conflict else 400,
+                    {"error":"item_template_conflict" if conflict else "invalid_item_template"})
+                return
+            except (ValueError,UnicodeError,TypeError,KeyError,RecursionError):
+                self._send_json(400, {"error":"invalid_item_template"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503, {"error":"local_item_storage_unavailable"})
+                return
+            self._send_json(200,answer)
+
         def do_POST(self) -> None:
+            if urlsplit(self.path).path=="/api/portfolio/item-templates/mutate":
+                self._portfolio_item_template_command()
+                return
             if urlsplit(self.path).path=="/api/portfolio/templates/mutate":
                 self._portfolio_template_command()
                 return
