@@ -886,6 +886,8 @@ let jobPageIndex = 0;
 let jobCursors = [""];
 let jobNextAfter = null;
 let jobBusy = false;
+let jobDetailGeneration = 0;
+let jobDisplayedId = "";
 let jobReviewSelected = new Set();
 let jobPendingRequest = null;
 let jobBatchBusy = false;
@@ -3070,6 +3072,9 @@ async function loadJobs() {
       " letzte lokale KI-Aufträge · keine automatische KI-Ausführung";
     if (choice) await loadJobDetails(true);
     else {
+      jobDetailGeneration++;
+      jobDisplayedId = "";
+      jobReviewSelected.clear();
       byId("job-items-body").replaceChildren();
       byId("job-progress").textContent = "Noch keine KI-Aufträge gespeichert.";
     }
@@ -3081,7 +3086,9 @@ async function loadJobs() {
   }
 }
 async function loadJobDetails(reset = false) {
-  if (!jobActiveId || !writeUiReady() || jobBusy) return false;
+  if (!jobActiveId || !writeUiReady()) return false;
+  const requestedId = jobActiveId;
+  const generation = ++jobDetailGeneration;
   if (reset) {
     jobPageIndex = 0;
     jobCursors = [""];
@@ -3089,12 +3096,16 @@ async function loadJobDetails(reset = false) {
     jobReviewSelected.clear();
   }
   jobBusy = true;
+  jobDisplayedId = "";
+  byId("job-items-body").replaceChildren();
+  byId("job-progress").textContent = "Prüfe ausgewählten KI-Auftrag …";
   try {
     const params = new URLSearchParams({
-      job_id: jobActiveId, limit: "50", after: jobCursors[jobPageIndex],
+      job_id: requestedId, limit: "50", after: jobCursors[jobPageIndex],
     });
     const job = await _jobGet("/api/portfolio/jobs/detail?" + params.toString());
-    if (!job || job.job_id !== jobActiveId || !Array.isArray(job.items)) {
+    if (generation !== jobDetailGeneration || requestedId !== jobActiveId) return false;
+    if (!job || job.job_id !== requestedId || !Array.isArray(job.items)) {
       throw new Error("Auftrag nicht gefunden");
     }
     jobNextAfter = job.has_more ? job.next_after : null;
@@ -3143,12 +3154,15 @@ async function loadJobDetails(reset = false) {
     byId("job-page-label").textContent="Seite " + (jobPageIndex+1);
     byId("job-prev").disabled=jobPageIndex===0;
     byId("job-next").disabled=!jobNextAfter;
+    jobDisplayedId = requestedId;
     return true;
   } catch (_error) {
-    byId("jobs-feedback").textContent="Auftrag konnte nicht geladen werden.";
+    if (generation === jobDetailGeneration) {
+      byId("jobs-feedback").textContent="Auftrag konnte nicht geladen werden.";
+    }
     return false;
   } finally {
-    jobBusy=false;
+    if (generation === jobDetailGeneration) jobBusy=false;
   }
 }
 async function createJob() {
@@ -3185,9 +3199,11 @@ async function createJob() {
   }
 }
 async function jobAction(name, payload) {
-  if (jobBusy || !jobActiveId) return;
+  if (jobBusy || !jobActiveId || jobDisplayedId !== jobActiveId) return;
+  const requestedId = jobActiveId;
   try {
-    const result = await _jobPost(name,{job_id:jobActiveId,...payload});
+    const result = await _jobPost(name,{job_id:requestedId,...payload});
+    if (jobActiveId !== requestedId) return;
     if (name === "apply-local" && result.applied > 0) {
       // Never reuse stale draft objects for "In neue Anzeige" after an
       // approved local AI edit. Hide old rows before refreshing, so a
@@ -3203,6 +3219,10 @@ async function jobAction(name, payload) {
   }
 }
 function jobReview(approve) {
+  if (jobBusy || !jobActiveId || jobDisplayedId !== jobActiveId) {
+    byId("jobs-feedback").textContent="Den ausgewählten Auftrag zuerst erfolgreich laden und prüfen.";
+    return;
+  }
   if (!jobReviewSelected.size) {
     byId("jobs-feedback").textContent="Zuerst Vorschläge in der Tabelle auswählen.";
     return;
@@ -3218,7 +3238,7 @@ async function generateJobNext() {
   const consent=byId("job-provider-consent");
   const status=byId("job-provider-status");
   if (!writeUiReady() || !jobsAvailable || !generationUiAvailable ||
-      !generationToken || !jobActiveId) {
+      !generationToken || !jobActiveId || jobBusy || jobDisplayedId !== jobActiveId) {
     status.textContent="Die KI-Sitzung muss im Kleinanzeiger-Startfenster eingerichtet sein.";
     return;
   }
@@ -3266,7 +3286,7 @@ async function generateJobBatch() {
   const consent=byId("job-provider-consent");
   if (jobBatchBusy) return;
   if (!writeUiReady() || !jobsAvailable || !generationUiAvailable ||
-      !generationToken || !jobActiveId) {
+      !generationToken || !jobActiveId || jobBusy || jobDisplayedId !== jobActiveId) {
     status.textContent="Bitte Kleinanzeiger mit aktivierter KI-Sitzung starten.";
     return;
   }

@@ -45,6 +45,8 @@ const window={addEventListener(){},confirm(text){confirmation.push(text);return 
   crypto:{getRandomValues(array){for(let i=0;i<array.length;i++)array[i]=i;return array;}}};
 const requests=[];
 let locallyApplied=false;
+let jobSwitchRace=false;
+let pendingOldJobReply=null;
 let rejectFirstCreate=true;
 let jobs=[];
 let batchCalls=0;
@@ -82,6 +84,13 @@ async function fetch(path,options={}){
     return {ok:true,json:async()=>({jobs})};
   }
   if(path.startsWith("/api/portfolio/jobs/detail?")){
+    if(jobSwitchRace){
+      const id=new URL(path,"http://127.0.0.1:8765").searchParams.get("job_id");
+      if(id==="a".repeat(32)){
+        return new Promise(resolve=>{pendingOldJobReply=resolve;});
+      }
+      if(id==="b".repeat(32)) throw new Error("synthetic B detail timeout");
+    }
     return {ok:true,json:async()=>({
       ...jobs[0], counts:{proposed:1,queued:1,approved:0,unknown:0},
       actual_cents:1,reserved_cents:0,budget_cents:200,items:[
@@ -183,6 +192,33 @@ const at=id=>document.getElementById(id);
   assert.equal(batchCalls,6,"stop must prevent all subsequent calls");
   assert.ok(at("job-provider-status").textContent.includes("gestoppt"));
   assert.ok(requests.every(r=>r.path.startsWith("/api/portfolio/")));
+
+  // A is still being loaded when the user changes to B. Both have the
+  // same SKU; a stale A checkbox must never authorize B's unseen proposal.
+  jobSwitchRace=true;
+  const oldId="a".repeat(32),newId="b".repeat(32);
+  vm.runInContext('jobActiveId="a".repeat(32)',context);
+  const pendingA=vm.runInContext("loadJobDetails(true)",context);
+  assert.ok(pendingOldJobReply,"first detail request must be pending");
+  at("job-choice").value=newId;
+  at("job-choice").listeners.change();
+  await new Promise(resolve=>setImmediate(resolve));
+  pendingOldJobReply({ok:true,json:async()=>({
+    job_id:oldId,items:[{sku:skus[0],phase:"proposed",
+      proposal:{title:"Old job A",description:"Do not approve"},original:{title:"Old"}}],
+    total:1,has_more:false,counts:{proposed:1},
+    actual_cents:0,reserved_cents:0,budget_cents:20,state:"review"
+  })});
+  await pendingA;
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(vm.runInContext("jobActiveId",context),newId);
+  assert.equal(at("job-items-body").children.length,0,
+               "old job A proposals cannot remain actionable for B");
+  const priorApprovals=requests.filter(r=>r.path.endsWith("/review")).length;
+  vm.runInContext('jobReviewSelected.add("SKU-00001");jobReview(true)',context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(requests.filter(r=>r.path.endsWith("/review")).length,priorApprovals,
+               "same SKU must not approve unverified job B");
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
         result = subprocess.run(
