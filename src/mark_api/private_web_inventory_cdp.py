@@ -21,7 +21,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from .adapters.management import (
-    DEFAULT_SOURCE, MAX_PAGES, ManagementReadAdapter,
+    DEFAULT_SOURCE, MAX_PAGES, MAX_INVENTORY_ITEMS, ManagementReadAdapter,
     _normalize_state, _optional_counter, _optional_text,
 )
 from .domain import AdSnapshot
@@ -324,6 +324,8 @@ class CdpManagementInventoryReader:
                 except ValueError:
                     return ReadResult.failure(ReadStatus.PARSE_ERROR, error="invalid_page_shape")
                 entries = list(ads)
+                if len(entries) > MAX_INVENTORY_ITEMS:
+                    return ReadResult.failure(ReadStatus.PARSE_ERROR, error="inventory_too_large")
                 for index in range(2, last_page + 1):
                     result = self._page(client, index)
                     if not result.is_success:
@@ -336,6 +338,8 @@ class CdpManagementInventoryReader:
                         return ReadResult.failure(ReadStatus.PARSE_ERROR, error="invalid_page_shape")
                     if final_page != last_page:
                         return ReadResult.failure(ReadStatus.PARSE_ERROR, error="pagination_drift")
+                    if len(entries) + len(items) > MAX_INVENTORY_ITEMS:
+                        return ReadResult.failure(ReadStatus.PARSE_ERROR, error="inventory_too_large")
                     entries.extend(items)
                 observed_at = self._clock()
                 snapshots = []

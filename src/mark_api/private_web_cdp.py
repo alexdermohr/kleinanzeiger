@@ -33,7 +33,8 @@ _CREATE_FORM_PATH = "/p-anzeige-aufgeben-schritt2.html"
 _MANAGEMENT_PATH = "/m-meine-anzeigen.html"
 # Keep this fail-closed traversal bound aligned with the Management reader
 # without importing adapter modules into the browser/CDP boundary.
-_MANAGEMENT_MAX_PAGES = 100
+# Bound exact-owner editor search to the same inventory-page ceiling.
+_MANAGEMENT_MAX_PAGES = 256
 _POST_SUBMIT_PATH = _MANAGEMENT_PATH
 _MAX_TARGET_BYTES = 64 * 1024
 _CDP_CANCEL_RECV_POLL_SECONDS = 0.25

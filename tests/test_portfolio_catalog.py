@@ -21,6 +21,10 @@ from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.query import MarkQueryService
 from mark_api.storage import SnapshotStore
 
+# This module is explicitly run by native Windows installed CI (3.12 and 3.13).
+# Import the synthetic CDP 10k suite for that existing native test entrypoint.
+from test_inventory_scale_10000 import InventoryScaleTests
+
 
 T0 = datetime(2026, 10, 26, 9, tzinfo=timezone.utc)
 
