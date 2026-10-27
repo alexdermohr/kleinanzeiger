@@ -1056,6 +1056,7 @@ let draftNextAfter = null;
 let draftSearch = "";
 let draftBusy = false;
 let draftPhotoIndex = new Map();
+let draftPhotoConflictedNames = new Set();
 let draftPhotoFolderChosen = false;
 let draftPhotoSelectionGeneration = 0;
 let draftPhotoPreparing = false;
@@ -3377,6 +3378,7 @@ function applyGenerationImageToCreate() {
       new File([generationImageBlob], "mark-ki-entwurf.png", {type: "image/png"}),
     );
     files.files = selected.files;
+    onManualCreateImageSelection();
     if (typeof document !== "undefined" && typeof document.getElementById === "function") {
     const create = document.getElementById("create-disclosure");
     if (create) create.open = true;
@@ -3534,13 +3536,18 @@ function draftPhotoKey(name) {
 function indexDraftPhotoFiles(files) {
   if (files.length > 12000) throw new Error("Maximal 12.000 lokale Bilddateien auswählen.");
   const found = new Map();
+  const occurrences = new Map();
   let ignored = 0;
   for (const file of files) {
+    // Count ALL matching names, even when one copy has invalid size/MIME/path.
+    // Otherwise discarding an invalid duplicate could silently select the
+    // same-named image from an unrelated SKU folder.
+    const key = draftPhotoKey(file && file.name);
+    if (key) occurrences.set(key, (occurrences.get(key) || 0) + 1);
     const relative = file && file.webkitRelativePath;
     const parts = typeof relative === "string" ? relative.split("/") : [];
     if (parts.length < 2 || parts.some(x => !x || x === "." || x === ".." || x.includes(String.fromCharCode(92)) || x.includes(String.fromCharCode(0)))
         || parts[parts.length - 1] !== file.name) { ignored++; continue; }
-    const key = draftPhotoKey(file.name);
     if (!key || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > 25 * 1024 * 1024
         || typeof file.slice !== "function") { ignored++; continue; }
     const extension = file.name.split(".").pop().toLocaleLowerCase("de-DE");
@@ -3551,13 +3558,13 @@ function indexDraftPhotoFiles(files) {
     group.push(file);
     found.set(key, group);
   }
-  let conflicts = 0;
-  let usable = 0;
-  for (const group of found.values()) {
-    usable += group.length;
-    if (group.length > 1) conflicts++;
+  const conflictedNames = new Set();
+  for (const [name, count] of occurrences) {
+    if (count > 1) conflictedNames.add(name);
   }
-  return {found, usable, ignored, conflicts};
+  let usable = 0;
+  for (const group of found.values()) usable += group.length;
+  return {found, usable, ignored, conflicts: conflictedNames.size, conflictedNames};
 }
 
 function loadDraftPhotoFolder() {
@@ -3566,6 +3573,7 @@ function loadDraftPhotoFolder() {
   draftPhotoApplied = false;
   clearDraftPhotoPreview();
   draftPhotoIndex = new Map();
+  draftPhotoConflictedNames = new Set();
   draftPhotoFolderChosen = false;
   const files = Array.from(byId("draft-photo-folder").files || []);
   if (!files.length) {
@@ -3576,6 +3584,7 @@ function loadDraftPhotoFolder() {
     const result = indexDraftPhotoFiles(files);
     draftPhotoFolderChosen = true;
     draftPhotoIndex = result.found;
+    draftPhotoConflictedNames = result.conflictedNames;
     byId("draft-photo-folder-status").textContent =
       result.usable + " Bilder · " + result.conflicts + " doppelte Dateinamen · " +
       result.ignored + " unbrauchbare Dateien. Nur genaue Dateinamen werden zugeordnet.";
@@ -3590,6 +3599,16 @@ function clearDraftPhotoFolder() {
   loadDraftPhotoFolder();
 }
 
+function onManualCreateImageSelection() {
+  const previewShown = !byId("draft-photo-preview").hidden;
+  draftPhotoApplied = false;
+  if (previewShown) {
+    clearDraftPhotoPreview();
+    byId("draft-feedback").textContent =
+      "Bildauswahl geändert: Die vorherige Fotozuordnungs-Vorschau wurde verworfen. Aktuelle Bilder im Anzeigenformular prüfen.";
+  }
+}
+
 function chosenDraftImages(item) {
   if (!Array.isArray(item.images) || item.images.length > 10) throw new Error("Ungültige Bildhinweise.");
   const selected = [];
@@ -3602,8 +3621,8 @@ function chosenDraftImages(item) {
     if (!key || known.has(key)) throw new Error("Doppelte oder ungültige Bildhinweise.");
     known.add(key);
     const matches = draftPhotoIndex.get(key) || [];
-    if (!matches.length) missing.push(name);
-    else if (matches.length !== 1) ambiguous.push(name);
+    if (draftPhotoConflictedNames.has(key) || matches.length > 1) ambiguous.push(name);
+    else if (!matches.length) missing.push(name);
     else { selected.push(matches[0]); bytes += matches[0].size; }
   }
   if (missing.length || ambiguous.length) {
@@ -4616,7 +4635,7 @@ byId("draft-search").addEventListener("keydown", (event) => {
 byId("draft-prev").addEventListener("click", previousDraftsPage);
 byId("draft-photo-folder").addEventListener("change", loadDraftPhotoFolder);
 byId("draft-photo-clear").addEventListener("click", clearDraftPhotoFolder);
-byId("create-media").addEventListener("change", () => { draftPhotoApplied = false; });
+byId("create-media").addEventListener("change", onManualCreateImageSelection);
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   window.addEventListener("pagehide", clearDraftPhotoPreview);
 }

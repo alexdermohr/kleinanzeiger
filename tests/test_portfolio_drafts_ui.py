@@ -15,6 +15,8 @@ class PortfolioDraftPhotoUiTests(unittest.TestCase):
         self.assertIn("verifyDraftImageSignature", _DASHBOARD_JS)
         self.assertIn("chosenDraftImages", _DASHBOARD_JS)
         self.assertIn("Dateiübernahme", _DASHBOARD_JS)
+        self.assertIn("onManualCreateImageSelection();", _DASHBOARD_JS)
+        self.assertIn("draftPhotoConflictedNames.has(key)", _DASHBOARD_JS)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js needed for actual dashboard JS")
     def test_one_thousand_skus_match_content_validation_conflicts_and_no_writes(self) -> None:
@@ -108,6 +110,27 @@ ctx.testItem=item;
  assert.equal(await call("useLocalDraft(testItem)"),false);
  assert.equal(elements.get("create-title").value,keep);
  assert.match(elements.get("draft-feedback").textContent,/Mehrdeutig/);
+ // A size-invalid duplicate must STILL count as ambiguous (Codex P2).
+ folder.files=[file("front-0999.jpg","Selected/Valid"),
+               {...file("front-0999.jpg","Selected/TooBig"),size:25*1024*1024+1},
+               file("detail-0999.png","Selected/Valid")];
+ call("loadDraftPhotoFolder()");
+ assert.equal(await call("useLocalDraft(testItem)"),false);
+ assert.match(elements.get("draft-feedback").textContent,/Mehrdeutig: front-0999.jpg/);
+ // An unsupported-MIME duplicate must not silently expose the other SKU photo.
+ folder.files=[file("front-0999.jpg","Selected/Valid"),
+               {...file("front-0999.jpg","Selected/InvalidMime"),type:"image/png"},
+               file("detail-0999.png","Selected/Valid")];
+ call("loadDraftPhotoFolder()");
+ assert.equal(await call("useLocalDraft(testItem)"),false);
+ assert.match(elements.get("draft-feedback").textContent,/Mehrdeutig: front-0999.jpg/);
+ // A suspicious path duplicate is also a collision even if excluded as eligible.
+ folder.files=[file("front-0999.jpg","Selected/Valid"),
+               file("front-0999.jpg","Selected/../Outside"),
+               file("detail-0999.png","Selected/Valid")];
+ call("loadDraftPhotoFolder()");
+ assert.equal(await call("useLocalDraft(testItem)"),false);
+ assert.match(elements.get("draft-feedback").textContent,/Mehrdeutig: front-0999.jpg/);
  // Missing image also blocks.
  folder.files=[file("front-0999.jpg","Selected/Only")];call("loadDraftPhotoFolder()");
  assert.equal(await call("useLocalDraft(testItem)"),false);
@@ -131,6 +154,19 @@ ctx.testItem=item;
  assert.equal(await call("useLocalDraft(testItem)"),true);
  assert.equal(media.files.length,0);
  assert.match(elements.get("draft-feedback").textContent,/Bilder selbst auswählen/);
+ // A later manual file choice must invalidate misleading earlier thumbnails.
+ folder.files=[file("front-0999.jpg","Selected/Front"),
+               file("detail-0999.png","Selected/Detail")];
+ call("loadDraftPhotoFolder()");
+ assert.equal(await call("useLocalDraft(testItem)"),true);
+ assert.equal(elements.get("draft-photo-preview").hidden,false);
+ const earlierRevoked=revoked;
+ media.files=[file("manual.png","Selected/Manual")];
+ media.listeners.change();
+ assert.equal(elements.get("draft-photo-preview").hidden,true);
+ assert.ok(revoked>earlierRevoked);
+ assert.match(elements.get("draft-feedback").textContent,/vorherige Fotozuordnungs-Vorschau/);
+ assert.equal(media.files[0].name,"manual.png");
  // No publish, provider or platform requests in the entire flow.
  assert.equal(writes,0);
  assert.ok(revoked>=2,"preview URLs must be released on selection change");
