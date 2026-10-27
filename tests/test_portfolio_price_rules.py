@@ -148,6 +148,79 @@ class PriceRuleTests(unittest.TestCase):
         self.assertNotIn("sold", str(item))
         self.assertEqual(item["platform_writes"], 0)
 
+    def test_delete_recreate_keeps_revision_monotone_and_rejects_stale_editor(self):
+        self.seed()
+        original = self.set(wait=0)
+        self.assertEqual(original["revision"], 1)
+        removed = delete_price_rule(
+            self.store, sku="SKU-1", expected_revision=1, request_key="b" * 64)
+        self.assertTrue(removed["deleted"])
+        self.assertEqual(price_suggestions_page(self.store)["total"], 0)
+        with closing(sqlite3.connect(self.db)) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT revision,deleted FROM portfolio_price_rules WHERE sku='SKU-1'"
+            ).fetchone(), (2, 1))
+        replacement = self.set(
+            minimum=35, step=10, wait=0,
+            key="c" * 64, revision=0, now=_START + timedelta(days=1))
+        self.assertEqual(replacement["revision"], 3)
+        with self.assertRaises(PriceRuleError):
+            self.set(minimum=25, step=10, wait=0,
+                     key="d" * 64, revision=1)
+        with self.assertRaises(PriceRuleError):
+            delete_price_rule(
+                self.store, sku="SKU-1",
+                expected_revision=1, request_key="e" * 64)
+        proposed = price_suggestions_page(
+            self.store, now=_START + timedelta(days=2))["rules"]
+        self.assertEqual(len(proposed), 1)
+        self.assertEqual(proposed[0]["minimum_price_eur"], 35)
+        self.assertEqual(proposed[0]["suggested_price_eur"], 40)
+        self.assertEqual(proposed[0]["revision"], 3)
+        current = self.set(
+            minimum=34, step=10, wait=0, revision=3, key="f" * 64)
+        self.assertEqual(current["revision"], 4)
+        delete_price_rule(self.store, sku="SKU-1",
+                          expected_revision=4, request_key="0" * 64)
+        newest = self.set(
+            minimum=30, wait=0, revision=0, key="1" * 64)
+        self.assertEqual(newest["revision"], 6)
+        with self.assertRaises(PriceRuleError):
+            self.set(minimum=25, wait=0, revision=3, key="2" * 64)
+        self.assertEqual(self.store.tracked_ad_ids(), ())
+
+    def test_deleted_tombstone_reactivation_respects_active_ten_thousand_limit(self):
+        self.seed()
+        with closing(self.store._connect()) as conn,conn:
+            for statement in RULE_DDL.split(";"):
+                if statement.strip():
+                    conn.execute(statement)
+            conn.execute(
+                "INSERT INTO portfolio_price_rules "
+                "(sku,minimum_price_eur,reduction_step_eur,wait_days,revision,deleted,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("SKU-1", 40, 5, 0, 4, 1, _START.isoformat()),
+            )
+            conn.executemany(
+                "INSERT INTO portfolio_price_rules "
+                "(sku,minimum_price_eur,reduction_step_eur,wait_days,revision,updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                ((f"FULL-{i:05d}", 15, 5, 0, 1, _START.isoformat())
+                 for i in range(10_000)),
+            )
+        with self.assertRaisesRegex(PriceRuleError, "Maximal 10000"):
+            self.set(minimum=35, wait=0, key="3"*64)
+        with closing(self.store._connect()) as conn,conn:
+            self.assertEqual(tuple(conn.execute(
+                "SELECT revision,deleted FROM portfolio_price_rules WHERE sku='SKU-1'"
+            ).fetchone()), (4, 1))
+            conn.execute(
+                "UPDATE portfolio_price_rules SET deleted=1, revision=2 "
+                "WHERE sku='FULL-00000'")
+        revived = self.set(minimum=35, wait=0, key="4"*64)
+        self.assertEqual(revived["revision"], 5)
+        self.assertEqual(price_suggestions_page(self.store)["total"], 10_000)
+
     def test_bad_values_and_unobserved_sku_are_rejected_atomically(self):
         self.seed()
         for minimum,step,wait,revision,key in [

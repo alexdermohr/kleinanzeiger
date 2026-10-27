@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS portfolio_price_rules (
  reduction_step_eur INTEGER NOT NULL CHECK(reduction_step_eur >= 1),
  wait_days INTEGER NOT NULL CHECK(wait_days >= 0),
  revision INTEGER NOT NULL CHECK(revision >= 1),
+ deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)),
  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS portfolio_price_rule_requests (
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS portfolio_price_rule_requests (
 _COLUMNS = {
     "portfolio_price_rules": {
         "sku", "minimum_price_eur", "reduction_step_eur",
-        "wait_days", "revision", "updated_at",
+        "wait_days", "revision", "deleted", "updated_at",
     },
     "portfolio_price_rule_requests": {
         "request_key", "intent_sha256", "response_json",
@@ -177,30 +178,46 @@ def set_price_rule(
         if minimum > current_price:
             raise PriceRuleError("Mindestpreis liegt ueber dem lokalen Artikelpreis.")
         old = conn.execute(
-            "SELECT revision FROM portfolio_price_rules WHERE sku=? COLLATE BINARY",
+            "SELECT revision,deleted FROM portfolio_price_rules WHERE sku=? COLLATE BINARY",
             (item,),
         ).fetchone()
         if old is None:
             if revision != 0:
                 raise PriceRuleError("Preisregel wurde geaendert; bitte neu laden.")
-            if conn.execute("SELECT COUNT(*) FROM portfolio_price_rules").fetchone()[0] >= _MAX_RULES:
+            if conn.execute("SELECT COUNT(*) FROM portfolio_price_rules WHERE deleted=0").fetchone()[0] >= _MAX_RULES:
                 raise PriceRuleError("Maximal 10000 lokale Preisregeln.")
             new_revision = 1
             conn.execute(
                 "INSERT INTO portfolio_price_rules "
-                "(sku,minimum_price_eur,reduction_step_eur,wait_days,revision,updated_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (item, minimum, step, days, new_revision, timestamp.isoformat()),
+                "(sku,minimum_price_eur,reduction_step_eur,wait_days,revision,deleted,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (item, minimum, step, days, new_revision, 0, timestamp.isoformat()),
+            )
+        elif old["deleted"] == 1:
+            # Preserve a per-SKU monotone generation after deletion: stale
+            # editor revisions must never match a recreated rule.
+            if revision != 0 or old["revision"] >= 1_000_000:
+                raise PriceRuleError("Preisregel wurde geaendert; bitte neu laden.")
+            if conn.execute("SELECT COUNT(*) FROM portfolio_price_rules WHERE deleted=0").fetchone()[0] >= _MAX_RULES:
+                raise PriceRuleError("Maximal 10000 lokale Preisregeln.")
+            new_revision = old["revision"] + 1
+            conn.execute(
+                "UPDATE portfolio_price_rules SET minimum_price_eur=?,"
+                "reduction_step_eur=?,wait_days=?,revision=?,deleted=0,updated_at=? "
+                "WHERE sku=? COLLATE BINARY AND deleted=1 AND revision=?",
+                (minimum, step, days, new_revision, timestamp.isoformat(),
+                 item, old["revision"]),
             )
         else:
-            if old["revision"] != revision:
+            if old["deleted"] != 0 or old["revision"] != revision or revision >= 1_000_000:
                 raise PriceRuleError("Preisregel wurde geaendert; bitte neu laden.")
             new_revision = revision + 1
             conn.execute(
                 "UPDATE portfolio_price_rules SET minimum_price_eur=?,"
                 "reduction_step_eur=?,wait_days=?,revision=?,updated_at=? "
-                "WHERE sku=? COLLATE BINARY",
-                (minimum, step, days, new_revision, timestamp.isoformat(), item),
+                "WHERE sku=? COLLATE BINARY AND deleted=0 AND revision=?",
+                (minimum, step, days, new_revision, timestamp.isoformat(),
+                 item, revision),
             )
         result = {
             "sku": item, "minimum_price_eur": minimum,
@@ -228,8 +245,9 @@ def delete_price_rule(
         if old_result is not None:
             return old_result
         removed = conn.execute(
-            "DELETE FROM portfolio_price_rules WHERE sku=? COLLATE BINARY "
-            "AND revision=?", (item, revision),
+            "UPDATE portfolio_price_rules SET deleted=1, revision=revision+1 "
+            "WHERE sku=? COLLATE BINARY AND revision=? AND deleted=0",
+            (item, revision),
         )
         if removed.rowcount != 1:
             raise PriceRuleError("Preisregel wurde geaendert; bitte neu laden.")
@@ -240,6 +258,8 @@ def delete_price_rule(
 
 def _suggestion(row: sqlite3.Row, *, now: datetime) -> dict[str, Any]:
     sku = _sku(row["sku"])
+    if row["deleted"] != 0:
+        raise sqlite3.DatabaseError("deleted rule leaked into suggestion")
     floor = _integer(row["minimum_price_eur"], "Mindestpreis", 1, _MAX_PRICE)
     step = _integer(row["reduction_step_eur"], "Preisschritt", 1, _MAX_PRICE)
     wait = _integer(row["wait_days"], "Wartezeit", 0, _MAX_DAYS)
@@ -304,11 +324,11 @@ def price_suggestions_page(
             if has_drafts else "portfolio_price_rules r"
         )
         price_projection = "d.price_eur AS local_price_eur" if has_drafts else "NULL AS local_price_eur"
-        count = conn.execute("SELECT COUNT(*) FROM portfolio_price_rules").fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM portfolio_price_rules WHERE deleted=0").fetchone()[0]
         rows = conn.execute(
             "SELECT r.sku,r.minimum_price_eur,r.reduction_step_eur,r.wait_days,"
-            "r.revision,r.updated_at," + price_projection + " FROM " + joined
-            + " WHERE r.sku > ? COLLATE BINARY "
+            "r.revision,r.deleted,r.updated_at," + price_projection + " FROM " + joined
+            + " WHERE r.sku > ? COLLATE BINARY AND r.deleted=0 "
             "ORDER BY r.sku COLLATE BINARY LIMIT ?",
             (after, limit + 1),
         ).fetchall()
