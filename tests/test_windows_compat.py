@@ -119,6 +119,67 @@ class WindowsInstalledProductTests(unittest.TestCase):
         with self.assertRaises(PrivateWebCdpWriteNotAttemptedError):
             _reserve_exclusive_cdp_target(24722)
 
+    def test_multiple_chrome_tabs_attach_only_canonical_management_tab(self):
+        """Actual Windows target mutex + selection; no real network or profile."""
+        import json
+        from mark_api.private_web_cdp import _LoopbackCdpClient
+
+        manager_url = "https://www.kleinanzeigen.de/m-meine-anzeigen.html"
+        base = "ws://127.0.0.1:24723/devtools/page/"
+        targets = [
+            {"type": "page", "url": "https://example.invalid/news",
+             "webSocketDebuggerUrl": base + "other"},
+            {"type": "page", "url": manager_url,
+             "webSocketDebuggerUrl": base + "manager-b"},
+            {"type": "page", "url": manager_url + "?ref=mine",
+             "webSocketDebuggerUrl": base + "manager-a"},
+        ]
+
+        class PageList:
+            def __init__(self, address, pages):
+                self.address, self.pages = address, pages
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return None
+            def geturl(self):
+                return self.address
+            def read(self, *_):
+                return json.dumps(self.pages).encode("utf-8")
+
+        class FakeTcp:
+            def close(self):
+                pass
+
+        class FakeWs:
+            def __init__(self):
+                self.sent = []
+                self.closed = False
+            def send(self, message):
+                self.sent.append(message)
+            def close(self):
+                self.closed = True
+
+        selected = []
+        for pages in (targets, list(reversed(targets))):
+            def ws_factory(url, **_options):
+                socket = FakeWs()
+                selected.append((url, socket))
+                return socket
+            client = _LoopbackCdpClient(
+                "http://127.0.0.1:24723",
+                timeout_seconds=1,
+                opener=lambda url, timeout, pages=pages: PageList(url, pages),
+                tcp_socket_factory=lambda *args, **kw: FakeTcp(),
+                websocket_factory=ws_factory,
+            )
+            self.assertEqual(client._target_websocket_url, base + "manager-a")
+            client.close()
+
+        self.assertEqual([url for url, _ in selected], [base + "manager-a"] * 2)
+        self.assertTrue(all(socket.closed and not socket.sent
+                            for _, socket in selected))
+
     def test_sqlite_exclusive_writer(self):
         with tempfile.TemporaryDirectory() as root:
             db = Path(root) / "anzeigen.sqlite"
