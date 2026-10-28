@@ -129,6 +129,38 @@ class PortfolioJobTests(unittest.TestCase):
         settle_unknown(self.store,jid,keys[0],actual_cents=2,explicitly_checked=True)
         self.assertEqual(details(self.store,jid)["actual_cents"],2)
 
+    def test_settled_unknown_without_proposal_cannot_be_approved_or_block_valid_draft(self) -> None:
+        keys = self.seed(2)
+        jid = self.create(keys)["job_id"]
+        change_state(self.store, jid, "start")
+        claimed = claim_next(self.store, jid)
+        self.assertEqual(claimed["sku"], keys[0])
+        mark_unknown(self.store, jid, keys[0], claimed["claim_token"])
+        settle_unknown(self.store, jid, keys[0],
+                       actual_cents=1, explicitly_checked=True)
+        change_state(self.store, jid, "resume")
+        produced = process_one(self.store, jid, self.mock_model)
+        self.assertEqual(produced["sku"], keys[1])
+
+        # The settled UNKNOWN has no proposal_json. Re-approving it together
+        # with a valid suggestion previously broke the entire draft apply.
+        with self.assertRaises(PortfolioJobError):
+            review_items(self.store, jid, keys, approve=True)
+        current = details(self.store, jid)
+        self.assertEqual(current["counts"]["rejected"], 1)
+        self.assertEqual(current["counts"]["proposed"], 1)
+        self.assertEqual(current["counts"].get("approved", 0), 0)
+
+        review_items(self.store, jid, [keys[1]], approve=True)
+        self.assertEqual(apply_approved_local(self.store, jid)["applied"], 1)
+        with closing(self.store._connect()) as conn:
+            titles = dict(conn.execute(
+                "SELECT sku, title FROM portfolio_drafts ORDER BY sku COLLATE BINARY"
+            ).fetchall())
+        self.assertEqual(titles[keys[0]], "Titel " + keys[0])
+        self.assertEqual(titles[keys[1]], "Verbessert Titel " + keys[1])
+        self.assertEqual(details(self.store, jid)["actual_cents"], 2)
+
     def test_atomic_review_and_local_application_with_stale_source(self) -> None:
         keys=self.seed(3)
         jid=self.create(keys)["job_id"]
@@ -156,6 +188,33 @@ class PortfolioJobTests(unittest.TestCase):
         self.assertEqual(applied,{"job_id":jid,"applied":2,"platform_writes":0})
         self.assertEqual(apply_approved_local(self.store,jid)["applied"],0)
         self.assertEqual(details(self.store,jid)["counts"]["applied_local"],2)
+
+    def test_legacy_approved_entry_without_proposal_fails_atomically(self) -> None:
+        keys = self.seed(2)
+        jid = self.create(keys)["job_id"]
+        change_state(self.store, jid, "start")
+        for _ in keys:
+            process_one(self.store, jid, self.mock_model)
+        review_items(self.store, jid, keys, approve=True)
+        with closing(self.store._connect()) as conn, conn:
+            conn.execute(
+                "UPDATE portfolio_job_items SET proposal_json=NULL "
+                "WHERE job_id=? AND sku=? COLLATE BINARY",
+                (jid, keys[0]),
+            )
+        # A pre-existing legacy approved row must never leave a partial draft
+        # change or crash with an unrelated JSON TypeError.
+        with self.assertRaises(PortfolioJobError):
+            apply_approved_local(self.store, jid)
+        with closing(self.store._connect()) as conn:
+            titles = dict(conn.execute(
+                "SELECT sku, title FROM portfolio_drafts ORDER BY sku COLLATE BINARY"
+            ).fetchall())
+        self.assertEqual(titles[keys[0]], "Titel " + keys[0])
+        self.assertEqual(titles[keys[1]], "Titel " + keys[1])
+        review_items(self.store, jid, [keys[0]], approve=False)
+        self.assertEqual(apply_approved_local(self.store, jid)["applied"], 1)
+        self.assertEqual(details(self.store, jid)["counts"]["rejected"], 1)
 
     def test_validation_and_cancel_prevents_mutation(self) -> None:
         keys=self.seed(100)

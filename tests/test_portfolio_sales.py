@@ -1,13 +1,15 @@
 """P3 sales ledger: idempotent local entries, bounded pages and known unknowns."""
 from __future__ import annotations
 from contextlib import closing
-from datetime import datetime,timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 
+from mark_api.adapters.management import DEFAULT_SOURCE as MANAGEMENT_SOURCE
 from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.results import ReadResult
 from mark_api.portfolio_sales import SaleError, sale_detail, sales_page, sale_totals, update_manual_sale
 from mark_api.storage import SnapshotStore, LOCAL_CATALOG_SOURCE
 
@@ -71,6 +73,33 @@ class SalesLedgerTests(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT COUNT(*) FROM portfolio_sale_events").fetchone()[0],3)
         self.assertEqual(self.store.tracked_ad_ids(),("12345",))
+
+    def test_real_management_reader_owner_sync_allows_manual_reservation(self):
+        # The production ManagementReadAdapter preserves its own snapshot
+        # source; the owner-inventory journal uses a separate source label.
+        start=datetime(2026,10,27,10,tzinfo=timezone.utc)
+        owner_journal="private-web-owner-inventory"
+        self.assertNotEqual(MANAGEMENT_SOURCE,owner_journal)
+        attempt=self.store.begin_sync_attempt(source=owner_journal,started_at=start)
+        observed=AdSnapshot(
+            ad_id="34567",title="Tatsächlicher Artikel",
+            lifecycle_state=LifecycleState.ACTIVE,
+            observed_at=start+timedelta(seconds=2),source=MANAGEMENT_SOURCE)
+        self.store.append_inventory_result(
+            ReadResult.success_nonempty((observed,)),
+            source=owner_journal,attempt_id=attempt,
+            observed_at=start+timedelta(seconds=2),
+            completed_at=start+timedelta(seconds=5))
+        with closing(self.store._connect()) as conn:
+            actual=conn.execute(
+                "SELECT source FROM ad_snapshots WHERE ad_id='34567'"
+            ).fetchone()
+        self.assertEqual(actual["source"],MANAGEMENT_SOURCE)
+        reserved=update_manual_sale(self.store,self.payload("34567"))
+        self.assertEqual(reserved["state"],"reserved")
+        self.assertEqual(reserved["revision"],1)
+        self.assertEqual(reserved["platform_writes"],0)
+        self.assertEqual(sale_totals(self.store)["reserved"],1)
 
     def test_email_only_or_untrusted_catalog_cannot_become_own_sale(self):
         self.observe("12345",source="user-supplied-local-catalog")
