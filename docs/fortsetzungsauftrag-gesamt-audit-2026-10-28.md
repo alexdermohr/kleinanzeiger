@@ -1,11 +1,11 @@
 # Verbindlicher Fortsetzungsauftrag: Kleinanzeiger nach Gesamt-Audit v0.1.11 vollständig fertigstellen
 
-**Übergabe:** 28. Oktober 2026, ca. 16:20 Uhr (Europe/Berlin)  
-**Produkt:** Kleinanzeiger, früher Mark · Windows-Kundenprodukt für Mark  
-**Repository:** https://github.com/alexdermohr/kleinanzeiger  
-**Operator:** Grabowski · https://github.com/heimgewebe/grabowski  
-**Verbindliches, nachverfolgbares Master-TODO:** https://github.com/alexdermohr/kleinanzeiger/issues/240  
-**Offizielles Ausgangsrelease:** https://github.com/alexdermohr/kleinanzeiger/releases/tag/v0.1.11  
+**Übergabe:** 28. Oktober 2026, ca. 16:20 Uhr (Europe/Berlin)
+**Produkt:** Kleinanzeiger, früher Mark · Windows-Kundenprodukt für Mark
+**Repository:** https://github.com/alexdermohr/kleinanzeiger
+**Operator:** Grabowski · https://github.com/heimgewebe/grabowski
+**Verbindliches, nachverfolgbares Master-TODO:** https://github.com/alexdermohr/kleinanzeiger/issues/240
+**Offizielles Ausgangsrelease:** https://github.com/alexdermohr/kleinanzeiger/releases/tag/v0.1.11
 **Am Übergabetag bestätigter main- und Release-Commit:** 3b0fe73806a0d8e96f8f6b98fae979347afe7585 (vor jeder Änderung frisch prüfen).
 
 ## 1. Verbindlicher Arbeitsauftrag
