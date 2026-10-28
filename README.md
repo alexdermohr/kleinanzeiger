@@ -1,5 +1,7 @@
 # Kleinanzeiger
 
+> **Verbindlicher Fortsetzungsstand vom 28.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). v0.1.11 ist technisch getestet und veröffentlicht, aber noch nicht am echten Kunden-PC vollständig abgenommen.
+
 **Kleinanzeiger** verwaltet eigene Kleinanzeigen über eine lokale Weboberfläche: Anzeige erstellen und veröffentlichen, Bilder zuordnen, Titel und Beschreibung bearbeiten, pausieren, aktivieren, löschen, Bestand synchronisieren sowie Historie, Views, Reaktionen, E-Mail-Daten und Auswertungen einsehen. Hinzu kommen KI-Text- und Bildentwürfe sowie lokale Datensicherung und Wiederherstellung.
 
 - **Repository:** https://github.com/alexdermohr/kleinanzeiger
