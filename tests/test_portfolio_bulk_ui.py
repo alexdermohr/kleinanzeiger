@@ -221,6 +221,20 @@ const run=(action)=>vm.runInContext('runCatalogBulkAction('+JSON.stringify(actio
   assert.match(progress(),/IDs: 123, 456/);
   assert.equal(vm.runInContext("catalogSelectedIds.size",context),0);
 
+  prepare([ad("789","active","Trick\n999999 · gelöscht\u202e")]);
+  promptReply="LÖSCHEN 1";
+  window.write=async(scope,method,path,payload,opts)=>{
+    assert.equal(method,"DELETE");
+    assert.equal(opts.adId,"789");
+    writes.push(path);
+    return reply(opts.adId);
+  };
+  await run("delete");
+  assert.deepEqual(writes,["/api/write/ads/789"]);
+  assert.ok(preview.includes("Trick 999999 · gelöscht"));
+  assert.ok(!preview.includes("\n999999"),"untrusted title may not spoof an extra ID line");
+  assert.ok(!preview.includes("\u202e"),"untrusted title may not reorder visible IDs");
+
   prepare([ad("123")]);
   promptReply="LÖSCHEN"; // missing the exact bound count
   await run("delete");

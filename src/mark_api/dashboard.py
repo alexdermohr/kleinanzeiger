@@ -1835,11 +1835,15 @@ async function runCatalogBulkAction(action) {
     : (action === "pause" ? "pausieren" : "aktivieren");
   const from = destructive ? "aktiv/pausiert" : (action === "pause" ? "aktiv" : "pausiert");
   const to = destructive ? "gelöscht" : (action === "pause" ? "pausiert" : "aktiv");
-  const lines = ads.map((ad) =>
-    ad.ad_id + " · " + ad.title.slice(0, 70) + " ("
+  const lines = ads.map((ad) => {
+    // Platform titles are untrusted display data. Control/bidi characters must
+    // never create deceptive extra ID rows in an irreversible action preview.
+    const safeTitle = ad.title.replace(/[\\u0000-\\u001f\\u007f-\\u009f\\u2028-\\u202e\\u2066-\\u2069]/g, " ")
+      .trim().slice(0, 70) || "Ohne Titel";
+    return ad.ad_id + " · " + safeTitle + " ("
       + (destructive ? (ad.lifecycle_state === "active" ? "aktiv" : "pausiert") : from)
-      + " -> " + to + ")"
-  );
+      + " -> " + to + ")";
+  });
   if (!window.confirm(
     "Diese " + ads.length + " eigenen Anzeigen wirklich " + verb + "?\\n\\n"
       + lines.join("\\n") + "\\n\\n"
