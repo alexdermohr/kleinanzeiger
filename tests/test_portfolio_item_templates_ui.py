@@ -140,7 +140,7 @@ context.item=item;
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
         result=subprocess.run(
-            ["node","-e",harness],input=_DASHBOARD_JS,text=True,
+            ["node","-e",harness],input=_DASHBOARD_JS,text=True, encoding="utf-8",
             capture_output=True,timeout=50,check=False,
         )
         self.assertEqual(result.returncode,0,

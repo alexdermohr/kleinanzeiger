@@ -159,7 +159,7 @@ const run=(expr)=>vm.runInContext(expr,context);
 """
         process = subprocess.run(
             ["node","--jitless","-e",harness],
-            input=_DASHBOARD_JS, text=True,
+            input=_DASHBOARD_JS, text=True, encoding="utf-8",
             stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=12,
             check=False,
         )
@@ -169,7 +169,7 @@ const run=(expr)=>vm.runInContext(expr,context);
     @unittest.skipUnless(shutil.which("node"), "Node.js required for JS syntax")
     def test_complete_dashboard_js_compiles(self):
         result=subprocess.run(["node","--jitless","--check"],input=_DASHBOARD_JS,
-            text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8)
+            text=True, encoding="utf-8",stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8)
         self.assertEqual(result.returncode,0,result.stderr)
 
 
