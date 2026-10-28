@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.7 – Windows 11
+# Kleinanzeiger v0.1.8 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -53,13 +53,38 @@ Für größere Bestände zeigt **Meine Anzeigen** nur 50 Anzeigen pro Seite.
 lokale Bestand gefiltert werden. **Weiter / Zurück** blättert seitenweise.
 Die Auswahlkästchen lassen sich über Seiten hinweg sammeln; **Auswahl
 als CSV** speichert ausschließlich die ausgewählten Anzeigen-IDs.
-**Auswahl leeren** setzt sie zurück. Diese Mehrfachauswahl verändert keine
-Plattformanzeige und führt noch keine KI-Massenaktion aus. Einzelne
-Anzeigen werden weiterhin ausdrücklich über **Bearbeiten** verwaltet.
+**Auswahl leeren** setzt sie zurück. CSV-Export und Markieren allein ändern **keine** Plattformanzeige.
+Mit gültiger Schreibsitzung lassen sich **1 bis 10 eigene Anzeigen** nach
+vollständiger Bestätigung **nacheinander pausieren oder aktivieren**.
+Vor jedem Einzelauftrag wird der lokale Stand erneut geprüft. Bei
+unbekanntem Ergebnis, geändertem Status, Recovery oder auf Wunsch wird
+der Stapel gestoppt, ohne automatischen Plattform-Retry. **Massenlöschen,
+Preisänderungen und Sammelveröffentlichung** sind nicht enthalten.
+Einzelne Anzeigen werden weiterhin über **Bearbeiten** verwaltet.
 
 Über **Mit Kleinanzeigen abgleichen** werden eigene Anzeigen direkt aus der
 angemeldeten Browser-Sitzung neu gelesen. **Ansicht neu laden** aktualisiert
 hingegen ausschließlich die lokal gespeicherte Darstellung.
+
+## Interessenten und Antwortentwürfe
+
+Unter **Meine Anzeigen** eine eigene Anzeige suchen und **Antwort vorbereiten**
+anklicken. Im Bereich **Interessenten & Antworten** einen bereits erhaltenen
+Nachrichtenausschnitt ohne personenbezogene Daten eingeben und nur tatsächlich
+bekannte Fakten hinzufügen. **Neutrale Antwort beginnen** ist kostenlos und
+arbeitet rein lokal. **KI-Antwortentwurf erzeugen** braucht den eigenen
+KI-Schlüssel, die aktive KI-Sitzung und für jeden Aufruf eine neue ausdrückliche
+Zustimmung zur Promptübertragung und zu möglichen Kosten. Den Text prüfen,
+bearbeiten und bei Bedarf **Antworttext kopieren**.
+
+**Kleinanzeiger liest keine vollständigen Plattform-Chats aus und versendet
+keine Nachrichten.** Die Nachricht und der Antwortentwurf werden in dieser
+Ansicht nicht dauerhaft gespeichert. Der Nutzer versendet den kopierten Text
+selbst im originalen Kleinanzeigen-Dialog.
+
+## Lokale KI-Stapelaufträge
+
+Im Dashboard **KI-Stapelaufträge** öffnen. Bis zu 5.000 lokale CSV-/XLSX-Entwürfe zu einem Auftrag sammeln, Originale und Vorschläge prüfen, einzeln freigeben und nur lokal übernehmen. Optional können nach eigener Modell-, Datenübertragungs- und Budgetbestätigung bis zu zehn KI-Aufrufe nacheinander ausgeführt werden; weitere Aufrufe lassen sich stoppen. Es werden keine Anzeigen automatisch massenhaft veröffentlicht oder gelöscht. Providerkosten sind nur konservativ geschätzt und nicht garantiert.
 
 ## Bestehende Daten und Updates
 

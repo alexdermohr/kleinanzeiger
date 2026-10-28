@@ -3561,6 +3561,64 @@ class SnapshotStore:
             for row in rows[:limit]
         ), len(rows) > limit
 
+    def inbound_inquiries_page(
+        self, *, after: str = "", limit: int = 25,
+        watermark: int | None = None,
+    ) -> dict[str, object]:
+        """Read bounded imported event counts at a pinned insertion watermark.
+
+        Contains no buyer data or message body. The reported event time is
+        the last inserted event's observation, not the platform's latest chat.
+        """
+        if (
+            type(after) is not str or len(after) > 32
+            or (after and (not after.isascii() or not after.isdigit()))
+            or type(limit) is not int or not 1 <= limit <= 50
+            or (watermark is not None and (
+                type(watermark) is not int
+                or not 0 <= watermark <= 2**63 - 1
+            ))
+        ):
+            raise ValueError("invalid EML cursor")
+        with closing(self._connect()) as connection:
+            self._assert_native_history_ad_ids(connection, "inbound_message_events")
+            if watermark is None:
+                bound = connection.execute(
+                    "SELECT COALESCE(MAX(id),0) AS bound FROM inbound_message_events"
+                ).fetchone()
+                assert bound is not None
+                watermark = int(bound["bound"])
+            groups = connection.execute(
+                """SELECT ad_id, COUNT(DISTINCT conversation_id) AS conversations,
+                          COUNT(*) AS messages, MAX(id) AS last_id
+                   FROM inbound_message_events
+                   WHERE ad_id > ? AND id <= ?
+                   GROUP BY ad_id ORDER BY ad_id LIMIT ?""",
+                (after, watermark, limit + 1),
+            ).fetchall()
+            items: list[dict[str, object]] = []
+            for group in groups[:limit]:
+                last_id = self._history_row_id(group["last_id"])
+                last = connection.execute(
+                    "SELECT observed_at FROM inbound_message_events WHERE id=?",
+                    (last_id,),
+                ).fetchone()
+                if last is None:
+                    raise sqlite3.DatabaseError("missing EML event")
+                items.append({
+                    "ad_id": self._required_observation_ad_id(group["ad_id"]),
+                    "conversation_count": self._history_nonnegative_count(
+                        group["conversations"]),
+                    "inbound_message_count": self._history_nonnegative_count(
+                        group["messages"]),
+                    "last_imported_event_at": self._observed_history_time(
+                        last["observed_at"]).isoformat(),
+                })
+        more = len(groups) > limit
+        return {"inquiries": items, "watermark": watermark,
+                "has_more": more,
+                "next_after": items[-1]["ad_id"] if more else None}
+
     def inbound_message_history(
         self,
         ad_id: str,

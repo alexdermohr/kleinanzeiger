@@ -33,6 +33,15 @@ from .analytics import (
     group_metric_ranking_to_dict,
 )
 from .portfolio_drafts import drafts_page
+from .portfolio_sales import SaleError, sale_detail, sales_page, sale_totals, update_manual_sale
+from .portfolio_followups import FollowupError, followup_detail, followups_page, mutate_followup
+from .portfolio_conversations import ConversationError, conversations_page, update_conversation_review
+from .portfolio_reporting import PortfolioReportError, report as portfolio_report
+from .portfolio_templates import WorkTemplateError, attention_counts, list_templates, mutate_template
+from .portfolio_item_templates import (
+    ItemTemplateError, list_item_templates, save_item_template,
+    delete_item_template, draft_from_item_template, duplicate_local_draft,
+)
 from .portfolio_jobs import (
     PortfolioJobError, apply_approved_local, change_state, create_job, details as job_details,
     list_jobs, matching_draft_skus, process_one, recover_interrupted, review_items,
@@ -55,7 +64,7 @@ from .strict_json import strict_json_object
 from .write_api import _normalize_create_payload, _request_fingerprint
 
 from .generation import (
-    AdvertisementDraft, AdvertisementGenerator, GenerationError,
+    AdvertisementDraft, BuyerReplyDraft, AdvertisementGenerator, GenerationError,
     _validate_png_payload,
 )
 
@@ -231,6 +240,8 @@ class DashboardGenerationAccess:
             generator = self._factory()
             if mode == "text":
                 return generator.generate_text(prompt)
+            if mode == "reply":
+                return generator.generate_reply(prompt)
             if mode == "image":
                 return generator.generate_image(prompt)
             raise GenerationError("invalid generation kind")
@@ -294,8 +305,11 @@ _DASHBOARD_HTML = """<!doctype html>
       <a id="nav-create" href="#create-disclosure">Neue Anzeige</a>
       <a id="nav-drafts" href="#drafts-panel">Artikelentwürfe</a>
       <a id="nav-jobs" href="#jobs-panel" hidden>KI-Stapelaufträge</a>
+      <a id="nav-sales" href="#sales-panel" hidden>Verkäufe & Lager</a>
+      <a id="nav-report" href="#report-panel" hidden>Controlling</a>
       <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
       <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
+      <a id="nav-buyer" href="#buyer-panel">Interessenten &amp; Antworten</a>
     </nav>
     <section id="status" class="status" role="status" aria-live="polite"></section>
 
@@ -340,6 +354,11 @@ _DASHBOARD_HTML = """<!doctype html>
         <div class="catalog-selection-actions">
           <button type="button" id="catalog-clear">Auswahl leeren</button>
           <button type="button" id="catalog-export">Auswahl als CSV</button>
+          <button type="button" id="catalog-bulk-pause" data-write-control hidden>Auswahl pausieren (max. 10)</button>
+          <button type="button" id="catalog-bulk-activate" data-write-control hidden>Auswahl aktivieren (max. 10)</button>
+          <button type="button" id="catalog-bulk-delete" data-write-control hidden>Auswahl endgültig löschen (max. 10)</button>
+          <button type="button" id="catalog-bulk-stop" hidden>Nach aktueller Anzeige stoppen</button>
+          <span id="catalog-bulk-progress" role="status" aria-live="polite"></span>
         </div>
         <div id="ad-cards" class="ad-cards" role="list"></div>
         <div class="catalog-pages">
@@ -347,6 +366,37 @@ _DASHBOARD_HTML = """<!doctype html>
           <span id="catalog-page-label">Seite 1</span>
           <button id="catalog-next" type="button">Weiter</button>
         </div>
+        <details id="followup-pane" class="compact-details" hidden>
+          <summary>Wiedervorlagen · nächste Prüfung planen</summary>
+          <p class="note">Manueller Prüftermin für eigene Anzeigen. <strong>Ein Plattform-Ablaufdatum ist nicht bekannt.</strong> Kein automatisches Verlängern, keine KI-Kosten und keine Plattformänderung.</p>
+          <div class="catalog-toolbar">
+            <label>Eigene Anzeige aus aktueller Katalogseite
+              <select id="followup-ad-select"><option value="">Anzeige wählen …</option></select>
+            </label>
+            <label>Eigener Prüftermin (kein Plattformablauf)
+              <input id="followup-date" type="date" min="2020-01-01" max="2100-12-31">
+            </label>
+            <label>Notiz (optional)
+              <input id="followup-note" type="text" maxlength="120" placeholder="Zum Beispiel: Fotos prüfen">
+            </label>
+            <button id="followup-save" type="button" disabled>Wiedervorlage speichern</button>
+            <button id="followup-delete" type="button" disabled>Wiedervorlage entfernen</button>
+          </div>
+          <p id="followup-summary" class="note" aria-live="polite"></p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Anzeige</th><th>Eigener Termin</th><th>Status</th><th>Notiz</th><th>Aktion</th></tr></thead>
+              <tbody id="followup-body"></tbody>
+            </table>
+          </div>
+          <div class="catalog-pages">
+            <button id="followup-prev" type="button" disabled>Zurück</button>
+            <span id="followup-page-label">Seite 1</span>
+            <button id="followup-next" type="button" disabled>Weiter</button>
+            <button id="followup-refresh" type="button">Aktualisieren</button>
+          </div>
+          <p id="followup-feedback" role="status" aria-live="polite"></p>
+        </details>
         <p id="ad-cards-empty" class="empty" hidden>Hier erscheinen deine Anzeigen nach der Synchronisierung.</p>
         <details class="compact-details inventory-details">
           <summary>Alle Kennzahlen und Details anzeigen</summary>
@@ -468,6 +518,19 @@ _DASHBOARD_HTML = """<!doctype html>
           </label>
           <button id="draft-find" type="button">Suchen</button>
         </div>
+        <details id="draft-photo-disclosure" class="compact-details">
+          <summary>Fotos aus einem Ordner zuordnen (optional)</summary>
+          <p class="muted">Bildnamen aus CSV/Excel werden mit einem lokal gewählten Ordner abgeglichen. Fehlende, mehrdeutige oder fehlerhafte Bilder werden nicht übernommen. Die Zuordnung ist rein lokal: Kein Hochladen oder Veröffentlichen.</p>
+          <label>Fotoordner auswählen (auch Unterordner)
+            <input id="draft-photo-folder" type="file" accept="image/jpeg,image/png,image/webp" webkitdirectory directory multiple>
+          </label>
+          <button id="draft-photo-clear" type="button">Fotoordner-Auswahl löschen</button>
+          <p id="draft-photo-folder-status" role="status" aria-live="polite">Noch kein Ordner gewählt.</p>
+          <div id="draft-photo-preview" hidden>
+            <p id="draft-photo-preview-status" role="status" aria-live="polite"></p>
+            <div id="draft-photo-thumbnails" class="controls"></div>
+          </div>
+        </details>
         <p id="draft-feedback" role="status" aria-live="polite">Entwürfe anzeigen …</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Wählen</th><th>Artikelnummer</th><th>Bezeichnung</th><th>Preis</th><th>Kategorie</th><th>Aktion</th></tr></thead>
@@ -478,6 +541,32 @@ _DASHBOARD_HTML = """<!doctype html>
           <span id="draft-page-label">Seite 1</span>
           <button id="draft-next" type="button">Weiter</button>
         </div>
+        <details id="item-templates-disclosure" class="compact-details">
+          <summary>Artikelvorlagen &amp; Duplizieren (nur lokal)</summary>
+          <p class="muted">Importierte Artikel als Vorlage sichern oder als neuen Entwurf kopieren. Jede Kopie erhält eine eigene Artikelnummer. Es wird nichts veröffentlicht.</p>
+          <div class="controls">
+            <label>Quellartikel aus der Tabelle
+              <input id="item-template-source" type="text" readonly placeholder="Zuerst einen Entwurf wählen">
+            </label>
+            <label>Vorlagenname
+              <input id="item-template-name" type="text" maxlength="60" autocomplete="off">
+            </label>
+            <button id="item-template-save" type="button">Vorlage speichern</button>
+          </div>
+          <div class="controls">
+            <label>Gespeicherte Artikelvorlage
+              <select id="item-template-select"><option value="">Neue Vorlage</option></select>
+            </label>
+            <label>Neue Artikelnummer
+              <input id="item-template-new-sku" type="text" maxlength="80" autocomplete="off" placeholder="ART-2001">
+            </label>
+            <button id="item-template-from" type="button">Entwurf aus Vorlage</button>
+            <button id="item-template-copy" type="button">Entwurf duplizieren</button>
+            <button id="item-template-delete" type="button">Vorlage löschen</button>
+            <button id="item-template-refresh" type="button">Aktualisieren</button>
+          </div>
+          <p id="item-template-feedback" role="status" aria-live="polite">Vorlagen bei Bedarf laden.</p>
+        </details>
       </details>
     </section>
 
@@ -497,6 +586,27 @@ _DASHBOARD_HTML = """<!doctype html>
         <label>Gemeinsamer Verbesserungsauftrag
           <textarea id="job-instruction" maxlength="1500" rows="3" placeholder="Nur nachgewiesene Artikelmerkmale verwenden, Titel präzisieren, nichts hinzuerfinden."></textarea>
         </label>
+        <details id="work-templates-disclosure" class="feature-disclosure">
+          <summary><span>Arbeitsvorlagen & Prüfhinweise</span><small>Häufig genutzte KI-Anweisungen lokal speichern und offene Arbeiten anzeigen</small></summary>
+          <p class="muted">Gespeicherte Vorlagen erstellen weder Aufträge noch KI-Anfragen.
+          Vorschläge und unklare Ergebnisse müssen weiterhin einzeln geprüft werden.</p>
+          <div class="controls">
+            <label>Gespeicherte Vorlage
+              <select id="work-template-select"><option value="">Neue Vorlage</option></select>
+            </label>
+            <button id="work-template-use" type="button">Als Auftragstext übernehmen</button>
+            <button id="work-template-refresh" type="button">Aktualisieren</button>
+          </div>
+          <div class="controls">
+            <label>Vorlagenname (maximal 60 Zeichen)
+              <input id="work-template-name" type="text" maxlength="60" autocomplete="off" placeholder="Sachlich und kurz">
+            </label>
+            <button id="work-template-save" type="button">Aktuelle Anweisung speichern</button>
+            <button id="work-template-delete" type="button">Vorlage löschen</button>
+          </div>
+          <p id="work-template-feedback" role="status" aria-live="polite"></p>
+          <p id="work-attention" class="muted" role="status" aria-live="polite" hidden></p>
+        </details>
         <div class="controls">
           <label>Reserviertes Gesamtbudget (USD)
             <input id="job-budget-eur" type="number" min="0" max="1000000" step="0.01" value="2.00">
@@ -567,6 +677,86 @@ _DASHBOARD_HTML = """<!doctype html>
       </details>
     </section>
 
+    <section id="sales-panel" class="panel secondary-panel" hidden>
+      <details id="sales-disclosure" class="feature-disclosure">
+        <summary><span>Verkäufe & Lager</span><small>Eigene Anzeigen reservieren, Verkaufserlöse und Lagerorte notieren</small></summary>
+        <p class="muted">Diese Angaben sind ausdrücklich manuelle lokale Notizen,
+          keine bestätigten Verkaufsbelege von Kleinanzeigen. Änderungen
+          hier verändern niemals eine Plattformanzeige oder senden Nachrichten.</p>
+        <div class="controls">
+          <label>Anzeige aus der gerade angezeigten Katalogseite wählen
+            <select id="sale-ad-select"><option value="">Zuerst Meine Anzeigen laden</option></select>
+          </label>
+          <label>Lokaler Verkaufsstatus
+            <select id="sale-state">
+              <option value="available">Noch verfügbar</option>
+              <option value="reserved">Reserviert</option>
+              <option value="sold">Verkauft (manuelle Angabe)</option>
+            </select>
+          </label>
+        </div>
+        <div class="controls">
+          <label>Verkaufserlös in Euro (nur bei Verkauft)
+            <input id="sale-revenue" type="number" min="0" step="1" placeholder="Erlös">
+          </label>
+          <label>Bekannte Kosten in Euro (optional)
+            <input id="sale-cost" type="number" min="0" step="1" placeholder="Unbekannt">
+          </label>
+        </div>
+        <div class="controls">
+          <label>Lagerort (optional)
+            <input id="sale-location" type="text" maxlength="120" autocomplete="off" placeholder="Regal, Fach">
+          </label>
+          <label>Eigene Notiz (ohne private Käuferdaten)
+            <input id="sale-note" type="text" maxlength="240" autocomplete="off">
+          </label>
+        </div>
+        <button id="sale-save" type="button">Lokalen Verkaufsstand speichern</button>
+        <p id="sale-feedback" role="status" aria-live="polite"></p>
+        <p id="sale-totals" class="note">Noch keine lokalen Verkaufszahlen.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Anzeige</th><th>Lokaler Status</th><th>Erlös €</th><th>Bekannte Kosten €</th><th>Nachrichten (importiert)</th><th>Lagerort</th></tr></thead>
+          <tbody id="sales-body"></tbody>
+        </table></div>
+        <div class="catalog-pages">
+          <button id="sale-prev" type="button">Zurück</button>
+          <span id="sale-page-label">Seite 1</span>
+          <button id="sale-next" type="button">Weiter</button>
+        </div>
+      </details>
+    </section>
+
+    <section id="report-panel" class="panel secondary-panel" hidden>
+      <details id="report-disclosure" class="feature-disclosure">
+        <summary><span>Portfolio-Controlling</span><small>Nachrichtenverlauf, manuelle Verkäufe und KI-Kosten getrennt sehen</small></summary>
+        <div class="controls">
+          <label>Berichtszeitraum (Kalendertage in UTC)
+            <select id="report-days">
+              <option value="7">Letzte 7 Tage</option>
+              <option value="30">Letzte 30 Tage</option>
+              <option value="90">Letzte 90 Tage</option>
+            </select>
+          </label>
+          <button id="report-refresh" type="button">Bericht berechnen</button>
+          <button id="report-download" type="button" disabled>Tageszahlen als CSV</button>
+        </div>
+        <p id="report-feedback" role="status" aria-live="polite"></p>
+        <p id="report-summary" class="note">Noch kein Bericht geladen.</p>
+        <p id="report-sales-summary" class="muted"></p>
+        <p id="report-ai-summary" class="muted"></p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Kalendertag (UTC)</th><th>Importierte Eingangsnachrichten</th></tr></thead>
+          <tbody id="report-daily-body"></tbody>
+        </table></div>
+        <p class="muted">Angezeigt werden höchstens die letzten 14 Tageszeilen;
+        der CSV-Export enthält den vollständigen gewählten Zeitraum.
+        Die E-Mail-Importzahl ist keine vollständige Kleinanzeigen-Nachrichtenstatistik.
+        Erlöse sind der aktuelle manuelle Gesamtbestand, nicht einem Zeitraum
+        zugerechnete Verkäufe. KI-Ausgaben sind unbestätigte USD-Schätzungen,
+        keine Anbieterrechnung. Keine Kausal- oder Konversionsbehauptung.</p>
+      </details>
+    </section>
+
     <section id="generation-panel" class="panel secondary-panel" hidden>
       <details id="generation-disclosure" class="feature-disclosure">
         <summary><span>KI-Assistent für Anzeigen</span><small>Texte und Bilder als Entwurf</small></summary>
@@ -604,6 +794,73 @@ _DASHBOARD_HTML = """<!doctype html>
         <p><button id="generation-apply-image" type="button" disabled>Als neues Anzeigenbild übernehmen (ohne Veröffentlichung)</button></p>
       </div>
 
+      </details>
+    </section>
+
+    <section id="buyer-panel" class="panel secondary-panel">
+      <details id="buyer-disclosure" class="feature-disclosure">
+        <summary><span>Interessenten &amp; Antworten</span><small>Nachrichtenentwürfe ohne Versand</small></summary>
+        <p class="muted">Bei einer eigenen Anzeige auf <strong>Antwort vorbereiten</strong> klicken. Eine bereits erhaltene Anfrage hier selbst einfügen. Kleinanzeiger liest derzeit keine Plattformkonversationen und verschickt keine Nachrichten.</p>
+        <div id="buyer-imported" hidden>
+          <h3>Importierte EML-Anfragen</h3>
+          <p class="muted">Nur lokale Benachrichtigungs-Metadaten, kein Plattform-Postfach, keine Nachrichtentexte. Eine E-Mail allein beweist keine eigene Anzeige.</p>
+          <div class="controls">
+            <button id="buyer-inquiries-load" type="button">Anfragen aktualisieren</button>
+            <button id="buyer-inquiries-prev" type="button" disabled>Zurück</button>
+            <button id="buyer-inquiries-next" type="button" disabled>Weiter</button>
+          </div>
+          <p id="buyer-inquiries-status" class="note" role="status" aria-live="polite"></p>
+          <table aria-label="Importierte EML-Anfragen">
+            <thead><tr><th>Anzeige</th><th>E-Mail-Ereignisse</th><th>Antwort</th></tr></thead>
+            <tbody id="buyer-inquiries-body"></tbody>
+          </table>
+          <h3>EML-Gespräche bearbeiten</h3>
+          <p class="muted">Neue E-Mail-Benachrichtigungen seit der letzten lokalen Prüfung erkennen und abhaken. Keine Plattform-Lesebestätigung und kein Nachrichtenversand.</p>
+          <div class="controls">
+            <label>Bearbeitungsstand
+              <select id="buyer-conversations-filter">
+                <option value="new">Neu seit Prüfung</option>
+                <option value="all">Alle importierten Gespräche</option>
+                <option value="reviewed">Lokal geprüft</option>
+              </select>
+            </label>
+            <button id="buyer-conversations-load" type="button">Gespräche anzeigen</button>
+            <button id="buyer-conversations-prev" type="button" disabled>Zurück</button>
+            <button id="buyer-conversations-next" type="button" disabled>Weiter</button>
+          </div>
+          <p id="buyer-conversations-status" class="note" role="status" aria-live="polite"></p>
+          <div class="table-wrap">
+            <table aria-label="Lokal importierte EML-Gespräche">
+              <thead><tr><th>Anzeige</th><th>Gespräch</th><th>Lokaler Stand</th><th>Aktion</th></tr></thead>
+              <tbody id="buyer-conversations-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="controls">
+          <label>Anzeigen-ID <input id="buyer-ad-id" type="text" readonly value="" aria-label="Gewählte Anzeigen-ID"></label>
+          <label>Anzeige <input id="buyer-ad-title" type="text" readonly value="" aria-label="Gewählter Anzeigentitel"></label>
+        </div>
+        <label>Nachricht oder Frage (nur benötigter Ausschnitt)
+          <textarea id="buyer-inquiry" maxlength="2200" placeholder="Anfrage hier einfügen; Namen, Telefonnummern, Adressen und Zahlungsdaten zuvor entfernen."></textarea>
+        </label>
+        <label>Bekannte, selbst geprüfte Fakten für die Antwort (optional)
+          <textarea id="buyer-facts" maxlength="1200" placeholder="Nur belegte Angaben wie Artikelzustand, Preis und Versandmöglichkeit. Keine Vermutungen."></textarea>
+        </label>
+        <div class="write-actions">
+          <button id="buyer-manual" type="button">Neutrale Antwort beginnen</button>
+          <button id="buyer-generate" type="button">KI-Antwortentwurf erzeugen</button>
+        </div>
+        <p class="note">KI benötigt die ausdrücklich freigeschaltete KI-Sitzung und verursacht möglicherweise externe Kosten. Für Texte gilt dasselbe Modell und dieselbe Preisinformation wie im KI-Assistenten. Keine Kundendaten ohne vorherige Prüfung übertragen.</p>
+        <label>
+          <input type="checkbox" id="buyer-consent">
+          Ich habe die Eingabe auf personenbezogene Daten geprüft, die Modell-/Kosteninformation kontrolliert und bestätige die externe Textübertragung und mögliche Kosten für genau diesen einen KI-Aufruf.
+        </label>
+        <p id="buyer-status" class="note" role="status" aria-live="polite">Bitte zuerst eine eigene Anzeige auswählen.</p>
+        <label>Antwortentwurf (editierbar, noch nicht gesendet)
+          <textarea id="buyer-reply" maxlength="1500" placeholder="Hier erscheint ein lokaler oder KI-Entwurf. Vor Verwendung sorgfältig prüfen."></textarea>
+        </label>
+        <button id="buyer-copy" type="button" disabled>Antworttext kopieren</button>
+        <p class="muted">Der Text bleibt nur in dieser Browseransicht. Es gibt keine automatische Freigabe oder Versendung, auch nicht nach dem Kopieren.</p>
       </details>
     </section>
 
@@ -855,6 +1112,9 @@ let writeToken = null;
 let generationToken = null;
 let generationUiAvailable = false;
 let generationBusy = false;
+let buyerBusy = false;
+let buyerRevision = 0;
+let buyerTarget = null;
 let generationImageBlob = null;
 let generationImageSourcePrompt = null;
 let generationImagePreviewUrl = null;
@@ -863,8 +1123,11 @@ let pendingRecoveryBlocked = false;
 let createInFlight = false;
 let latestAdsById = new Map();
 const adCardElements = new Map();
-// Local selection only stages IDs for export; never grants or performs Writes.
+// Local selection stages observed IDs; only an explicit confirmed bulk action may request protected Writes.
 const catalogSelectedIds = new Set();
+const catalogSelectedAds = new Map();
+let catalogBulkBusy = false;
+let catalogBulkStop = false;
 let catalogRows = [];
 let catalogCursors = [""];
 let catalogPageIndex = 0;
@@ -872,11 +1135,33 @@ let catalogNextAfter = null;
 let catalogLoading = false;
 let catalogGeneration = 0;
 let catalogFilters = {search: "", status: "all"};
+let followupBusy = false;
+let followupActiveId = "";
+let followupRevision = 0;
+let followupHasLive = false;
+let followupDetailLoading = false;
+let followupDetailLoaded = false;
+let followupDetailsGeneration = 0;
+let followupPageGeneration = 0;
+let followupPageIndex = 0;
+let followupPageCursors = [""];
+let followupNextAfter = null;
+let followupPending = null;
+let followupLoaded = false;
+let followupLoading = false;
 let draftCursors = [""];
 let draftPageIndex = 0;
 let draftNextAfter = null;
 let draftSearch = "";
 let draftBusy = false;
+let draftPhotoIndex = new Map();
+let draftPhotoConflictedNames = new Set();
+let draftPhotoFolderChosen = false;
+let draftPhotoSelectionGeneration = 0;
+let draftPhotoPreparing = false;
+let draftPhotoApplied = false;
+let draftPhotoPreviewUrls = [];
+
 let draftLoaded = false;
 const draftSelectedSkus = new Set();
 let jobsAvailable = false;
@@ -892,6 +1177,31 @@ let jobReviewSelected = new Set();
 let jobPendingRequest = null;
 let jobBatchBusy = false;
 let jobBatchStop = false;
+let salesAvailable = false;
+let salesPage = 0;
+let salesCursors = [""];
+let salesNextAfter = null;
+let saleEntries = new Map();
+let salePending = null;
+let saleLoadSeq = 0;
+let saleVerifiedId = "";
+let saleSaveBusy = false;
+let reportingAvailable = false;
+let reportData = null;
+let reportLoadSeq = 0;
+let workTemplates = [];
+let workTemplatePending = null;
+let workTemplateBusy = false;
+// Item templates and AI work-instruction editors are distinct local tools.
+let itemTemplates = [];
+let itemTemplateBusy = false;
+let itemTemplatePending = null;
+// Preserve the revision explicitly loaded into the work-template editor;
+// a list refresh must never authorize stale editor fields at a newer revision.
+let workTemplateEditorBaseline = null;
+let workTemplateSelectionGeneration = 0;
+let workTemplateLoadGeneration = 0;
+let workTemplateSelectionRequiresRecheck = false;
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -1114,7 +1424,7 @@ function renderWriteAvailability() {
   const ready = writeUiReady();
   byId("write-session-note").hidden = ready;
   for (const element of document.querySelectorAll("[data-write-control]")) {
-    element.disabled = !ready;
+    element.disabled = !ready || catalogBulkBusy;
   }
   if (ready && pendingWrites.size > 0) {
     setWriteStatus(
@@ -1353,6 +1663,327 @@ function managedContentChanges(adId) {
 }
 
 
+
+function renderFollowupControls() {
+  const select = optionalById("followup-ad-select");
+  if (!select) return;
+  const selected = select.value;
+  const usable = !followupBusy && !followupDetailLoading && followupDetailLoaded
+    && writeUiReady() && /^[0-9]{1,32}$/.test(selected);
+  const dateValue = byId("followup-date").value;
+  byId("followup-save").disabled = !usable || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(dateValue);
+  byId("followup-delete").disabled = !usable || !followupHasLive;
+  select.disabled = followupBusy;
+  byId("followup-date").disabled = followupBusy || followupDetailLoading;
+  byId("followup-note").disabled = followupBusy || followupDetailLoading;
+  byId("followup-refresh").disabled = followupBusy || followupLoading;
+  byId("followup-prev").disabled = followupBusy || followupLoading || followupPageIndex === 0;
+  byId("followup-next").disabled = followupBusy || followupLoading || followupNextAfter === null;
+  byId("followup-page-label").textContent = "Seite " + (followupPageIndex + 1);
+}
+
+function renderFollowupChoices() {
+  const select = optionalById("followup-ad-select");
+  if (!select) return;
+  const selected = select.value || followupActiveId;
+  const options = new Map();
+  for (const ad of catalogRows) {
+    if (ad && ad.present === true && typeof ad.ad_id === "string"
+        && /^[0-9]{1,32}$/.test(ad.ad_id)) {
+      options.set(ad.ad_id, typeof ad.title === "string" ? ad.title : "Ohne Titel");
+    }
+  }
+  if (followupActiveId && !options.has(followupActiveId)) {
+    options.set(followupActiveId, "Zuvor gewählte Anzeige");
+  }
+  const nodes = [];
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "Eigene Anzeige wählen …";
+  nodes.push(blank);
+  for (const [id, title] of options) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = id + " · " + title.slice(0, 75);
+    nodes.push(option);
+  }
+  select.replaceChildren(...nodes);
+  select.value = options.has(selected) ? selected : "";
+  renderFollowupControls();
+}
+
+function selectFollowupAd(id, title) {
+  if (followupBusy || typeof id !== "string" || !/^[0-9]{1,32}$/.test(id)) return;
+  const select = byId("followup-ad-select");
+  // Saved reminders can be edited even when their listing is on another page.
+  const option = document.createElement("option");
+  option.value = id;
+  option.textContent = id + " · " + (typeof title === "string" ? title.slice(0, 75) : "");
+  select.append(option);
+  select.value = id;
+  void loadSelectedFollowup();
+}
+
+async function followupGet(path) {
+  const response = await fetch(path, {cache: "no-store", headers: _jobHeaders()});
+  if (!response.ok) throw new Error("Wiedervorlagen konnten nicht gelesen werden.");
+  return response.json();
+}
+
+async function loadSelectedFollowup() {
+  const id = byId("followup-ad-select").value;
+  const seq = ++followupDetailsGeneration;
+  followupActiveId = id;
+  followupRevision = 0;
+  followupHasLive = false;
+  followupDetailLoaded = false;
+  followupDetailLoading = Boolean(id);
+  byId("followup-date").value = "";
+  byId("followup-note").value = "";
+  renderFollowupControls();
+  if (!id) return;
+  try {
+    const result = await followupGet(
+      "/api/portfolio/followups/detail?ad_id=" + encodeURIComponent(id));
+    if (seq !== followupDetailsGeneration || byId("followup-ad-select").value !== id) return;
+    if (!result || result.platform_expiry_status !== "unknown_no_verified_observation"
+        || !Number.isSafeInteger(result.tombstone_revision)
+        || result.tombstone_revision < 0) {
+      throw new Error("Unvollständige lokale Wiedervorlage.");
+    }
+    const reminder = result.followup;
+    if (reminder !== null) {
+      if (!reminder || reminder.ad_id !== id || reminder.source !== "manual_user_followup"
+          || !Number.isSafeInteger(reminder.revision) || reminder.revision < 1
+          || typeof reminder.manual_followup_date !== "string") {
+        throw new Error("Ungültiger Wiedervorlagenstand.");
+      }
+      if (result.tombstone_revision !== 0) {
+        throw new Error("Widersprüchliche Wiedervorlage.");
+      }
+      followupRevision = reminder.revision;
+      followupHasLive = true;
+      byId("followup-date").value = reminder.manual_followup_date;
+      byId("followup-note").value = reminder.manual_note || "";
+    } else {
+      // A deleted reminder keeps its generation for deliberate re-creation.
+      followupRevision = result.tombstone_revision;
+    }
+    followupDetailLoaded = true;
+    // An ambiguous prior local response must be reconciled, not submitted
+    // with a fresh key merely because the user changed the selected ad.
+    if (followupPending && followupPending.payload.ad_id === id) {
+      const expected = followupPending.payload;
+      if (reminder && reminder.revision > expected.expected_revision
+          && reminder.manual_followup_date === expected.due_date
+          && reminder.manual_note === expected.note) {
+        followupPending = null;
+      } else if (!reminder && expected.action === "delete"
+          && result.tombstone_revision > expected.expected_revision) {
+        followupPending = null;
+      }
+    }
+    byId("followup-feedback").textContent = reminder
+      ? "Manuell geplante Wiedervorlage geladen. Das Plattform-Ablaufdatum bleibt unbekannt."
+      : "Für diese Anzeige ist noch kein eigener Prüftermin hinterlegt.";
+  } catch (error) {
+    if (seq === followupDetailsGeneration && byId("followup-ad-select").value === id) {
+      byId("followup-feedback").textContent = error.message;
+    }
+  } finally {
+    if (seq === followupDetailsGeneration) {
+      followupDetailLoading = false;
+      renderFollowupControls();
+    }
+  }
+}
+
+function renderFollowupRows(payload) {
+  if (!payload || !Array.isArray(payload.followups) || payload.followups.length > 50
+      || payload.platform_expiry_status !== "unknown_no_verified_observation"
+      || payload.platform_writes !== 0
+      || typeof payload.has_more !== "boolean"
+      || !Number.isSafeInteger(payload.total) || payload.total < 0
+      || !Number.isSafeInteger(payload.overdue) || payload.overdue < 0
+      || !Number.isSafeInteger(payload.due_soon) || payload.due_soon < 0
+      || (payload.has_more
+        && (typeof payload.next_after !== "string"
+          || !/^[0-9]{1,32}$/.test(payload.next_after)))) {
+    throw new Error("Ungültige Wiedervorlagenliste.");
+  }
+  const items = [];
+  for (const reminder of payload.followups) {
+    if (!reminder || typeof reminder.ad_id !== "string"
+        || !/^[0-9]{1,32}$/.test(reminder.ad_id)
+        || typeof reminder.manual_followup_date !== "string"
+        || reminder.platform_expiry_at !== null
+        || !["overdue", "due_soon", "scheduled"].includes(reminder.state)) {
+      throw new Error("Ungültige Terminangaben.");
+    }
+    const row = document.createElement("tr");
+    const labels = [
+      reminder.ad_id, reminder.title || "Ohne Titel",
+      reminder.manual_followup_date,
+      reminder.state === "overdue" ? "Überfällig"
+        : reminder.state === "due_soon" ? "In den nächsten 7 Tagen" : "Geplant",
+      reminder.manual_note || "",
+    ];
+    for (const label of labels) {
+      const cell = document.createElement("td");
+      cell.textContent = String(label);
+      row.append(cell);
+    }
+    const actionCell = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Bearbeiten";
+    button.addEventListener("click", () => selectFollowupAd(reminder.ad_id, reminder.title));
+    actionCell.append(button);
+    row.append(actionCell);
+    items.push(row);
+  }
+  byId("followup-body").replaceChildren(...items);
+  followupNextAfter = payload.has_more ? payload.next_after : null;
+  const total = payload.total;
+  byId("followup-summary").textContent =
+    String(total) + " eigene Wiedervorlagen · "
+    + String(payload.overdue) + " überfällig · "
+    + String(payload.due_soon) + " in den nächsten 7 Tagen"
+    + " · Plattform-Ablaufdatum unbekannt";
+  renderFollowupControls();
+}
+
+async function loadFollowups(reset = false) {
+  if (!writeUiReady()) return false;
+  if (reset) {
+    followupPageCursors = [""];
+    followupPageIndex = 0;
+    followupNextAfter = null;
+  }
+  const seq = ++followupPageGeneration;
+  followupLoading = true;
+  renderFollowupControls();
+  byId("followup-feedback").textContent = "Lade eigene Wiedervorlagen …";
+  try {
+    const options = new URLSearchParams({
+      limit: "50", after: followupPageCursors[followupPageIndex],
+    });
+    const payload = await followupGet("/api/portfolio/followups?" + options.toString());
+    if (seq !== followupPageGeneration) return false;
+    renderFollowupRows(payload);
+    followupLoaded = true;
+    byId("followup-feedback").textContent = payload.followups.length
+      ? "Einträge aus der lokalen Kundendatenbank."
+      : "Noch keine Wiedervorlagen hinterlegt.";
+    return true;
+  } catch (error) {
+    if (seq === followupPageGeneration) {
+      byId("followup-feedback").textContent =
+        "Wiedervorlagen konnten nicht geladen werden. Alte Daten bleiben sichtbar.";
+    }
+    return false;
+  } finally {
+    if (seq === followupPageGeneration) {
+      followupLoading = false;
+      renderFollowupControls();
+    }
+  }
+}
+
+async function changeFollowupPage(delta) {
+  if (followupBusy || followupLoading || !followupLoaded) return;
+  if (delta > 0 && followupNextAfter === null) return;
+  if (delta < 0 && followupPageIndex === 0) return;
+  const oldIndex = followupPageIndex;
+  const oldCursors = followupPageCursors.slice();
+  const oldNext = followupNextAfter;
+  if (delta > 0) {
+    followupPageCursors = [...followupPageCursors.slice(0, oldIndex + 1), followupNextAfter];
+    followupPageIndex++;
+  } else {
+    followupPageIndex--;
+  }
+  const request = loadFollowups();
+  const generation = followupPageGeneration;
+  if (!await request && generation === followupPageGeneration) {
+    followupPageIndex = oldIndex;
+    followupPageCursors = oldCursors;
+    followupNextAfter = oldNext;
+    renderFollowupControls();
+  }
+}
+
+async function mutateSelectedFollowup(action) {
+  if (followupBusy || followupDetailLoading || !followupDetailLoaded
+      || !writeUiReady()) return;
+  const adId = byId("followup-ad-select").value;
+  if (!/^[0-9]{1,32}$/.test(adId)) return;
+  if (action !== "save" && action !== "delete") return;
+  if (action === "delete" && (
+      !followupHasLive ||
+      !window.confirm("Nur die eigene Wiedervorlage zu Anzeige " + adId
+        + " entfernen? Die Plattformanzeige bleibt unverändert.")
+  )) return;
+  const payload = {
+    action: action,
+    ad_id: adId,
+    due_date: action === "save" ? byId("followup-date").value : null,
+    note: action === "save" ? byId("followup-note").value.trim() : "",
+    expected_revision: followupRevision,
+  };
+  if (action === "save" && !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(payload.due_date)) {
+    byId("followup-feedback").textContent = "Einen gültigen manuellen Prüftermin wählen.";
+    return;
+  }
+  const intent = JSON.stringify(payload);
+  if (followupPending && followupPending.intent !== intent) {
+    byId("followup-feedback").textContent =
+      "Voriger lokaler Vorgang ist unklar. Zuerst denselben Eintrag erneut prüfen.";
+    return;
+  }
+  if (!followupPending) {
+    followupPending = {intent, payload, key: _newJobRequestKey()};
+  }
+  followupBusy = true;
+  renderFollowupControls();
+  try {
+    const response = await fetch("/api/portfolio/followups/mutate", {
+      method: "POST", cache: "no-store",
+      headers: {..._jobHeaders(), "Content-Type": "application/json"},
+      body: JSON.stringify({...payload, request_key: followupPending.key}),
+    });
+    if (response.status === 409) {
+      followupPending = null;
+      throw new Error("Wiedervorlage inzwischen geändert. Bitte Stand neu laden.");
+    }
+    if (response.status === 400) {
+      // A validation rejection is definitive, unlike a lost response or 5xx.
+      // Do not poison later corrected form submissions with an old intent.
+      followupPending = null;
+      throw new Error("Wiedervorlage ungültig. Termin oder Notiz korrigieren.");
+    }
+    if (!response.ok) {
+      throw new Error("Speichern nicht bestätigt. Dieselbe lokale Anfrage prüfen.");
+    }
+    const result = await response.json();
+    if (!result || result.ad_id !== adId || result.platform_writes !== 0
+        || !Number.isSafeInteger(result.revision)
+        || (action === "delete") !== (result.deleted === true)) {
+      throw new Error("Lokales Ergebnis nicht eindeutig bestätigt.");
+    }
+    followupPending = null;
+    byId("followup-feedback").textContent = "Wiedervorlage lokal bestätigt. Keine Plattformaktion.";
+    await loadSelectedFollowup();
+    await loadFollowups(true);
+  } catch (error) {
+    byId("followup-feedback").textContent = error.message
+      + " Kein automatischer Retry und keine Plattformaktion.";
+  } finally {
+    followupBusy = false;
+    renderFollowupControls();
+  }
+}
+
 function renderCatalogSelection() {
   // Existing standalone/legacy Dashboard render harnesses have no portfolio
   // toolbar. Selection remains inert rather than changing their Write flows.
@@ -1362,7 +1993,23 @@ function renderCatalogSelection() {
   const exportControl = optionalById("catalog-export");
   if (label) label.textContent = count + " ausgewählt";
   if (clear) clear.disabled = count === 0;
-  if (exportControl) exportControl.disabled = count === 0;
+  if (exportControl) exportControl.disabled = count === 0 || catalogBulkBusy;
+  if (clear) clear.disabled = count === 0 || catalogBulkBusy;
+  const canWrite = writeUiReady() && !catalogBulkBusy
+    && !pendingRecoveryBlocked && pendingWrites.size === 0
+    && count >= 1 && count <= 10;
+  for (const id of ["catalog-bulk-pause", "catalog-bulk-activate", "catalog-bulk-delete"]) {
+    const control = optionalById(id);
+    if (control) {
+      control.hidden = !writeUiAvailable;
+      control.disabled = !canWrite;
+    }
+  }
+  const stop = optionalById("catalog-bulk-stop");
+  if (stop) {
+    stop.hidden = !catalogBulkBusy;
+    stop.disabled = !catalogBulkBusy || catalogBulkStop;
+  }
 }
 
 function catalogCheckbox(ad) {
@@ -1371,10 +2018,27 @@ function catalogCheckbox(ad) {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.checked = catalogSelectedIds.has(ad.ad_id);
+  checkbox.disabled = catalogBulkBusy;
   checkbox.title = "Anzeige " + ad.ad_id + " in Arbeitsauswahl übernehmen";
   checkbox.addEventListener("change", () => {
-    if (checkbox.checked) catalogSelectedIds.add(ad.ad_id);
-    else catalogSelectedIds.delete(ad.ad_id);
+    if (catalogBulkBusy) {
+      checkbox.checked = catalogSelectedIds.has(ad.ad_id);
+      return;
+    }
+    if (checkbox.checked) {
+      catalogSelectedIds.add(ad.ad_id);
+      catalogSelectedAds.set(ad.ad_id, Object.freeze({
+        ad_id: ad.ad_id,
+        // Preserve null as a distinct observation; display fallback only in the preview.
+        title: typeof ad.title === "string" ? ad.title : null,
+        present: ad.present === true,
+        lifecycle_state: ad.lifecycle_state,
+        observed_at: ad.observed_at,
+      }));
+    } else {
+      catalogSelectedIds.delete(ad.ad_id);
+      catalogSelectedAds.delete(ad.ad_id);
+    }
     for (const peer of Array.from(document.querySelectorAll(".catalog-select input"))) {
       if (peer.title === checkbox.title) peer.checked = checkbox.checked;
     }
@@ -1385,9 +2049,9 @@ function catalogCheckbox(ad) {
 }
 
 function renderCatalogNavigation() {
-  byId("catalog-prev").disabled = catalogLoading || catalogPageIndex === 0;
-  byId("catalog-next").disabled = catalogLoading || catalogNextAfter === null;
-  byId("catalog-find").disabled = catalogLoading;
+  byId("catalog-prev").disabled = catalogLoading || catalogBulkBusy || catalogPageIndex === 0;
+  byId("catalog-next").disabled = catalogLoading || catalogBulkBusy || catalogNextAfter === null;
+  byId("catalog-find").disabled = catalogLoading || catalogBulkBusy;
   byId("catalog-page-label").textContent = "Seite " + (catalogPageIndex + 1);
   renderCatalogSelection();
 }
@@ -1419,6 +2083,8 @@ async function loadCatalogPage({reset = false} = {}) {
     catalogNextAfter = payload.has_more ? payload.next_after : null;
     catalogRows = payload.ads;
     renderAds(payload.ads);
+    renderFollowupChoices();
+    renderSaleChoices();
     byId("catalog-feedback").textContent = payload.ads.length +
       " Anzeigen auf dieser Seite" +
       (catalogFilters.search || catalogFilters.status !== "all" ? " · gefiltert" : "");
@@ -1463,6 +2129,7 @@ async function changeCatalogPage({index, cursors, filters, reset = false}) {
 }
 
 function searchCatalog() {
+  if (catalogBulkBusy) return false;
   return changeCatalogPage({
     index: 0, cursors: [""], reset: true,
     filters: {
@@ -1473,7 +2140,7 @@ function searchCatalog() {
 }
 
 function nextCatalogPage() {
-  if (catalogLoading || catalogNextAfter === null) return;
+  if (catalogBulkBusy || catalogLoading || catalogNextAfter === null) return;
   const cursors = catalogCursors.slice(0, catalogPageIndex + 1);
   cursors.push(catalogNextAfter);
   return changeCatalogPage({
@@ -1482,7 +2149,7 @@ function nextCatalogPage() {
 }
 
 function previousCatalogPage() {
-  if (catalogLoading || catalogPageIndex <= 0) return;
+  if (catalogBulkBusy || catalogLoading || catalogPageIndex <= 0) return;
   return changeCatalogPage({
     index: catalogPageIndex - 1,
     cursors: catalogCursors.slice(), filters: catalogFilters,
@@ -1490,8 +2157,182 @@ function previousCatalogPage() {
 }
 
 function clearCatalogSelection() {
+  if (catalogBulkBusy) return;
   catalogSelectedIds.clear();
+  catalogSelectedAds.clear();
   renderAds(catalogRows);
+}
+
+function prepareCatalogBulkAction(action) {
+  if (!["pause", "activate", "delete"].includes(action)) {
+    throw new Error("Unbekannte Sammelaktion.");
+  }
+  const ids = Array.from(catalogSelectedIds);
+  if (ids.length === 0 || ids.length > 10) {
+    throw new Error("Bitte 1 bis 10 Anzeigen auswählen. Größere Bestände in kontrollierten Stapeln bearbeiten.");
+  }
+  const sourceState = action === "pause" ? "active"
+    : (action === "activate" ? "paused" : null);
+  const ads = [];
+  for (const id of ids) {
+    const ad = catalogSelectedAds.get(id);
+    if (!ad || !/^[0-9]{1,32}$/.test(id)
+        || ad.ad_id !== id || ad.present !== true
+        || typeof ad.observed_at !== "string" || !ad.observed_at
+        || (sourceState === null
+          ? !["active", "paused"].includes(ad.lifecycle_state)
+          : ad.lifecycle_state !== sourceState)) {
+      throw new Error("Auswahl enthält eine unpassende Anzeige. Bestand abgleichen und "
+        + (action === "pause" ? "aktive"
+          : action === "activate" ? "pausierte" : "aktive oder pausierte")
+        + " Anzeigen wählen.");
+    }
+    ads.push(ad);
+  }
+  return ads;
+}
+
+function showCatalogBulkProgress(message) {
+  const progress = optionalById("catalog-bulk-progress");
+  if (progress) progress.textContent = message;
+}
+
+// This read-only lookup rechecks the local observation for each own ad before
+// a new Write. It is not a remote freshness guarantee; backend owner and
+// replay/ambiguity fences remain authoritative. Missing data fails closed.
+async function verifyCatalogBulkAd(ad) {
+  // Indexed, exact-ID local owner history; a partial fuzzy search might
+  // miss a valid ID among hundreds of matching titles in a large portfolio.
+  const payload = await getJson(
+    "/api/catalog/ad?id=" + encodeURIComponent(ad.ad_id)
+  );
+  const current = payload?.ad;
+  if (!current || current.present !== true
+      || current.lifecycle_state !== ad.lifecycle_state
+      || current.title !== ad.title
+      || current.observed_at !== ad.observed_at) {
+    throw new Error("Katalogstand seit Auswahl verändert oder nicht mehr auffindbar.");
+  }
+}
+
+async function runCatalogBulkAction(action) {
+  if (catalogBulkBusy) return;
+  if (!writeUiReady() || pendingRecoveryBlocked || pendingWrites.size > 0) {
+    showCatalogBulkProgress("Vor Sammelaktionen zuerst die Sitzung und offene Writes klären.");
+    return;
+  }
+  let ads;
+  try {
+    ads = prepareCatalogBulkAction(action);
+  } catch (error) {
+    showCatalogBulkProgress(error.message);
+    return;
+  }
+  const destructive = action === "delete";
+  const verb = destructive ? "endgültig löschen"
+    : (action === "pause" ? "pausieren" : "aktivieren");
+  const from = destructive ? "aktiv/pausiert" : (action === "pause" ? "aktiv" : "pausiert");
+  const to = destructive ? "gelöscht" : (action === "pause" ? "pausiert" : "aktiv");
+  const lines = ads.map((ad) => {
+    // Platform titles are untrusted display data. Control/bidi characters must
+    // never create deceptive extra ID rows in an irreversible action preview.
+    const safeTitle = (ad.title ?? "Ohne Titel").replace(/[\\u0000-\\u001f\\u007f-\\u009f\\u2028-\\u202e\\u2066-\\u2069]/g, " ")
+      .trim().slice(0, 70) || "Ohne Titel";
+    return ad.ad_id + " · " + safeTitle + " ("
+      + (destructive ? (ad.lifecycle_state === "active" ? "aktiv" : "pausiert") : from)
+      + " -> " + to + ")";
+  });
+  if (!window.confirm(
+    "Diese " + ads.length + " eigenen Anzeigen wirklich " + verb + "?\\n\\n"
+      + lines.join("\\n") + "\\n\\n"
+      + "Jede Änderung wird einzeln geprüft. Bei unklarem Ergebnis stoppt der Stapel. "
+      + "Keine automatische Wiederholung."
+  )) return;
+  if (destructive) {
+    // A second deliberate approval is required before a destructive write.
+    const challenge = "LÖSCHEN " + ads.length;
+    if (window.prompt(
+      "Zum endgültigen Löschen dieser " + ads.length
+        + " Anzeigen bitte exakt " + challenge + " eingeben:", ""
+    ) !== challenge) {
+      showCatalogBulkProgress("Löschung abgebrochen. Keine Plattformaktion.");
+      return;
+    }
+  }
+  catalogBulkBusy = true;
+  catalogBulkStop = false;
+  renderWriteAvailability();
+  renderCatalogSelection();
+  renderCatalogNavigation();
+  let confirmed = 0;
+  const confirmedIds = [];
+  let stopped = "";
+  try {
+    for (const ad of ads) {
+      if (catalogBulkStop) {
+        stopped = "Auf Wunsch nach der aktuellen Anzeige gestoppt.";
+        break;
+      }
+      if (!writeUiReady() || pendingRecoveryBlocked || pendingWrites.size > 0) {
+        stopped = "Ein Schreibvorgang ist noch offen. Keine weitere Plattformaktion.";
+        break;
+      }
+      try {
+        await verifyCatalogBulkAd(ad);
+      } catch (error) {
+        stopped = "Anzeige " + ad.ad_id + ": " + error.message + " Keine weitere Aktion.";
+        break;
+      }
+      if (catalogBulkStop) {
+        stopped = "Auf Wunsch vor der nächsten Anzeige gestoppt.";
+        break;
+      }
+      showCatalogBulkProgress(
+        "Sammelaktion " + verb + ": " + confirmed + "/" + ads.length
+          + " bestätigt · prüfe Anzeige " + ad.ad_id + " …"
+      );
+      const result = await runPlatformWrite(
+        "ad:" + ad.ad_id + ":" + action,
+        destructive ? "DELETE" : "POST",
+        "/api/write/ads/" + ad.ad_id + (destructive ? "" : "/" + action),
+        null, {adId: ad.ad_id},
+      );
+      if (!confirmedWriteResult(result)) {
+        stopped = "Anzeige " + ad.ad_id + ": Ausgang unklar oder abgelehnt. "
+          + "Keine weitere Aktion; Recovery prüfen, nicht erneut senden.";
+        break;
+      }
+      confirmed += 1;
+      confirmedIds.push(ad.ad_id);
+      catalogSelectedIds.delete(ad.ad_id);
+      catalogSelectedAds.delete(ad.ad_id);
+      renderCatalogSelection();
+      if (pendingWrites.size > 0 || pendingRecoveryBlocked) {
+        stopped = "Ein lokaler Recovery-ACK ist noch offen. Keine weitere Aktion.";
+        break;
+      }
+    }
+  } catch (error) {
+    stopped = "Abbruch wegen unerwartetem Fehler: " + error.message;
+  } finally {
+    catalogBulkBusy = false;
+    catalogBulkStop = false;
+    renderWriteAvailability();
+    renderCatalogSelection();
+    renderCatalogNavigation();
+  }
+  showCatalogBulkProgress(
+    confirmed + " von " + ads.length + " Anzeigen bestätigt"
+    + (confirmedIds.length ? " · IDs: " + confirmedIds.join(", ") : "")
+    + (stopped ? " · " + stopped : " · Stapel abgeschlossen.")
+  );
+}
+
+function stopCatalogBulkAction() {
+  if (!catalogBulkBusy) return;
+  catalogBulkStop = true;
+  showCatalogBulkProgress("Stoppt nach dem aktuell laufenden Einzelvorgang.");
+  renderCatalogSelection();
 }
 
 function exportCatalogSelection() {
@@ -1583,6 +2424,14 @@ function renderAds(ads) {
         action.addEventListener("click", () => populateManageForm(ad));
         footer.append(action);
       }
+      if (writeUiReady() && ad.present === true) {
+        const reply = document.createElement("button");
+        reply.type = "button";
+        reply.className = "ad-card-action";
+        reply.textContent = "Antwort vorbereiten";
+        reply.addEventListener("click", () => openBuyerReplyForAd(ad));
+        footer.append(reply);
+      }
       card.append(heading, footer);
       cards.append(card);
       adCardElements.set(ad.ad_id, card);
@@ -1622,6 +2471,14 @@ function renderAds(ads) {
       button.textContent = ad.present ? "Verwalten" : "Recovery";
       button.addEventListener("click", () => populateManageForm(ad));
       actionCell.append(button);
+    }
+    if (writeUiReady() && ad.present === true) {
+      const reply = document.createElement("button");
+      reply.type = "button";
+      reply.className = "row-action";
+      reply.textContent = "Antwort";
+      reply.addEventListener("click", () => openBuyerReplyForAd(ad));
+      actionCell.append(reply);
     }
     row.append(actionCell);
     body.append(row);
@@ -2524,6 +3381,428 @@ async function loadAnalytics() {
 }
 
 
+// Local imported EML metadata do not contain message text or authorise writes.
+let inquiryCursors = [""];
+let inquiryIndex = 0;
+let inquiryWatermark = null;
+let inquiryBusy = false;
+
+function inquiryButtons() {
+  byId("buyer-inquiries-load").disabled = inquiryBusy;
+  byId("buyer-inquiries-prev").disabled = inquiryBusy || inquiryIndex === 0;
+  byId("buyer-inquiries-next").disabled = inquiryBusy ||
+    inquiryCursors.length <= inquiryIndex + 1;
+}
+async function loadInquiries(reset = false) {
+  if (!jobsAvailable || !writeUiReady() || inquiryBusy) return;
+  if (reset) { inquiryCursors=[""]; inquiryIndex=0; inquiryWatermark=null; }
+  inquiryBusy = true;
+  inquiryButtons();
+  const status = byId("buyer-inquiries-status");
+  status.textContent = "Lokale Anfragen werden geladen …";
+  try {
+    const params = new URLSearchParams({limit:"25",after:inquiryCursors[inquiryIndex]});
+    if (inquiryWatermark !== null) params.set("watermark", String(inquiryWatermark));
+    const data = await _jobGet("/api/portfolio/inquiries?" + params.toString());
+    if (!data || !Array.isArray(data.inquiries) ||
+        !Number.isSafeInteger(data.watermark)) throw new Error("Invalid EML page");
+    inquiryWatermark = data.watermark;
+    const body = byId("buyer-inquiries-body");
+    body.replaceChildren();
+    for (const item of data.inquiries) {
+      const tr=document.createElement("tr");
+      const ad=document.createElement("td");
+      ad.textContent=(item.own_ad ? (item.title || "Ohne Titel") :
+        "Eigentum nicht bestätigt") + " · ID " + item.ad_id;
+      const evidence=document.createElement("td");
+      evidence.textContent=item.conversation_count + " Gespräch(e), " +
+        item.inbound_message_count + " Nachricht(en) · zuletzt erfasst: " +
+        item.last_imported_event_at + " · EML-Import";
+      const action=document.createElement("td");
+      if (item.own_ad) {
+        const button=document.createElement("button");
+        button.type="button";
+        button.textContent="Antwort vorbereiten";
+        button.addEventListener("click",async () => {
+          button.disabled=true;
+          try {
+            const result=await getJson("/api/catalog/ad?id="+
+              encodeURIComponent(item.ad_id));
+            if (!result || !result.ad || result.ad.ad_id!==item.ad_id ||
+                result.ad.present!==true) throw new Error("Stale ad");
+            openBuyerReplyForAd(result.ad);
+          } catch (_error) {
+            status.textContent="Anzeige zuerst erneut abgleichen und auswählen.";
+          } finally { button.disabled=false; }
+        });
+        action.append(button);
+      } else {
+        action.textContent="Keine Freigabe ohne eigene Anzeige";
+      }
+      tr.append(ad,evidence,action);
+      body.append(tr);
+    }
+    if (data.has_more && typeof data.next_after==="string") {
+      inquiryCursors[inquiryIndex+1]=data.next_after;
+      inquiryCursors.length=inquiryIndex+2;
+    } else { inquiryCursors.length=inquiryIndex+1; }
+    status.textContent=data.inquiries.length+" EML-belegte Anzeigen · Seite "+
+      (inquiryIndex+1)+". Keine automatische Nachricht oder KI-Aktion.";
+  } catch (_error) {
+    status.textContent="EML-Übersicht nicht verfügbar; lokale Daten und Sitzung prüfen.";
+  } finally { inquiryBusy=false; inquiryButtons(); }
+}
+
+
+// EML-only, human-controlled triage. Never claim live marketplace unread status.
+let conversationPageCursors=[""];
+let conversationPageIndex=0;
+let conversationWatermark=null;
+let conversationBusy=false;
+let conversationPending=null;
+let conversationLoadSeq=0;
+function conversationButtons() {
+  byId("buyer-conversations-load").disabled=conversationBusy;
+  byId("buyer-conversations-prev").disabled=conversationBusy || conversationPageIndex===0;
+  byId("buyer-conversations-next").disabled=conversationBusy ||
+    conversationPageIndex+1>=conversationPageCursors.length;
+  byId("buyer-conversations-filter").disabled=conversationBusy;
+}
+async function loadConversations(reset=false) {
+  if (!jobsAvailable || !writeUiReady() || conversationBusy) return false;
+  if (reset) {
+    conversationPageCursors=[""]; conversationPageIndex=0; conversationWatermark=null;
+  }
+  const generation=++conversationLoadSeq;
+  const filter=byId("buyer-conversations-filter").value;
+  conversationBusy=true;
+  conversationButtons();
+  const status=byId("buyer-conversations-status");
+  status.textContent="Importierte EML-Gespräche werden geladen …";
+  try {
+    const params=new URLSearchParams({
+      limit:"25",after:conversationPageCursors[conversationPageIndex],status:filter,
+    });
+    if (conversationWatermark!==null) params.set("watermark",String(conversationWatermark));
+    const response=await fetch("/api/portfolio/conversations?"+params.toString(), {
+      cache:"no-store", headers:_jobHeaders(),
+    });
+    if (!response.ok) throw new Error("HTTP "+response.status);
+    const data=await response.json();
+    if (generation!==conversationLoadSeq) return false;
+    if (!data || !Array.isArray(data.conversations) ||
+        data.conversations.length>25 || data.filter!==filter ||
+        data.platform_messages_read!==false || data.platform_writes!==0 ||
+        !Number.isSafeInteger(data.watermark) || data.watermark<0 ||
+        typeof data.has_more!=="boolean" ||
+        (data.has_more && (typeof data.next_after!=="string" || !data.next_after))) {
+      throw new Error("Ungültige lokale Gesprächsliste");
+    }
+    // Resolve an ambiguous local POST through a fresh read, never a new key.
+    if (conversationPending) {
+      const prior=JSON.parse(conversationPending.intent);
+      const observed=data.conversations.find(x=>
+        x.ad_id===prior.ad_id && x.conversation_id===prior.conversation_id);
+      if (observed &&
+          observed.revision===prior.expected_revision+1 &&
+          observed.review_state===(prior.action==="review" ?
+            "locally_reviewed" : "new_since_review")) {
+        conversationPending=null;
+      }
+    }
+    conversationWatermark=data.watermark;
+    const body=byId("buyer-conversations-body");
+    body.replaceChildren();
+    for (const item of data.conversations) {
+      if (!item || !/^[0-9]{1,32}$/.test(item.ad_id) ||
+          typeof item.conversation_id!=="string" ||
+          !["new_since_review","locally_reviewed"].includes(item.review_state) ||
+          !Number.isSafeInteger(item.revision) || item.revision<0 ||
+          !Number.isSafeInteger(item.message_count) || item.message_count<1) {
+        throw new Error("Ungültiges EML-Gespräch");
+      }
+      const row=document.createElement("tr");
+      const ad=document.createElement("td");
+      ad.textContent=item.own_ad ? ((item.title||"Ohne Titel")+" · ID "+item.ad_id)
+        : "Eigentum nicht bestätigt · ID "+item.ad_id;
+      const identity=document.createElement("td");
+      identity.textContent=item.conversation_id+" · "+item.message_count+
+        " importiert · zuletzt: "+item.last_imported_event_at;
+      const state=document.createElement("td");
+      state.textContent=item.review_state==="locally_reviewed" ? "Lokal geprüft" :
+        "Neue EML seit lokaler Prüfung";
+      const actionCell=document.createElement("td");
+      if (item.own_ad===true) {
+        const button=document.createElement("button");
+        button.type="button";
+        button.textContent=item.review_state==="locally_reviewed" ?
+          "Erneut vorlegen" : "Als geprüft markieren";
+        const sameIntent=JSON.stringify({
+          ad_id:item.ad_id, conversation_id:item.conversation_id,
+          action:item.review_state==="locally_reviewed" ? "reopen" : "review",
+          expected_revision:item.revision,
+        });
+        button.disabled=conversationPending!==null &&
+          conversationPending.intent!==sameIntent;
+        button.addEventListener("click",()=>void markConversation(item));
+        actionCell.append(button);
+      } else { actionCell.textContent="Nur eigene Anzeigen"; }
+      row.append(ad,identity,state,actionCell);
+      body.append(row);
+    }
+    if (data.has_more) {
+      conversationPageCursors[conversationPageIndex+1]=data.next_after;
+      conversationPageCursors.length=conversationPageIndex+2;
+    } else { conversationPageCursors.length=conversationPageIndex+1; }
+    status.textContent=data.conversations.length+" EML-Gespräche · Seite "+
+      (conversationPageIndex+1)+" · lokaler Prüfstand, kein Plattformstatus";
+    return true;
+  } catch (error) {
+    status.textContent="Lokal importierte Gespräche derzeit nicht verfügbar. "+error.message;
+    return false;
+  } finally {
+    conversationBusy=false;
+    conversationButtons();
+  }
+}
+async function markConversation(item) {
+  if (conversationBusy || !writeUiReady() || !item || item.own_ad!==true) return;
+  const action=item.review_state==="locally_reviewed" ? "reopen" : "review";
+  const payload={
+    ad_id:item.ad_id, conversation_id:item.conversation_id,
+    action, expected_revision:item.revision,
+  };
+  const intent=JSON.stringify(payload);
+  if (conversationPending && conversationPending.intent!==intent) {
+    byId("buyer-conversations-status").textContent=
+      "Ein anderer lokaler Vorgang ist noch nicht geklärt. Erst diesen prüfen.";
+    return;
+  }
+  if (!conversationPending) {
+    conversationPending={intent, key:_newJobRequestKey()};
+  }
+  conversationBusy=true; conversationButtons();
+  try {
+    const response=await fetch("/api/portfolio/conversations/review", {
+      method:"POST", cache:"no-store",
+      headers:{..._jobHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({...payload,request_key:conversationPending.key}),
+    });
+    if (response.status===409) {
+      conversationPending=null;
+      throw new Error("Gespräch inzwischen geändert. Bitte neu laden.");
+    }
+    if (!response.ok) throw new Error("Lokale Prüfung nicht bestätigt.");
+    const result=await response.json();
+    if (!result || result.ad_id!==item.ad_id ||
+        result.conversation_id!==item.conversation_id ||
+        result.platform_writes!==0 ||
+        !Number.isSafeInteger(result.revision) ||
+        result.revision!==item.revision+1) {
+      throw new Error("Mehrdeutiges lokales Prüfergebnis.");
+    }
+    conversationPending=null;
+    byId("buyer-conversations-status").textContent="Nur lokaler Bearbeitungsstand geändert.";
+    conversationBusy=false;
+    await loadConversations(true);
+  } catch (error) {
+    byId("buyer-conversations-status").textContent=error.message+
+      " Kein automatischer erneuter Aufruf, keine Plattformaktion.";
+  } finally {
+    conversationBusy=false;
+    conversationButtons();
+  }
+}
+
+// Antworttexte bleiben nur im Browserformular. Kein Plattform-Postfach
+// und keine ausgehende Nachricht.
+function buyerReplyAvailability() {
+  const allowed = buyerTarget !== null && !buyerBusy;
+  byId("buyer-manual").disabled = !allowed;
+  byId("buyer-generate").disabled = !allowed || !generationUiReady() || generationBusy;
+  byId("buyer-inquiry").disabled = buyerBusy;
+  byId("buyer-facts").disabled = buyerBusy;
+  byId("buyer-consent").disabled = buyerBusy;
+  byId("buyer-reply").disabled = buyerBusy;
+  byId("buyer-copy").disabled = buyerBusy || !byId("buyer-reply").value.trim();
+}
+
+function clearBuyerReply(status = "") {
+  byId("buyer-reply").value = "";
+  byId("buyer-consent").checked = false;
+  byId("buyer-status").textContent = status;
+  buyerReplyAvailability();
+}
+
+function openBuyerReplyForAd(ad) {
+  if (buyerBusy || !ad || ad.present !== true ||
+      typeof ad.ad_id !== "string" || !/^[0-9]{1,32}$/.test(ad.ad_id)) return;
+  // Display placeholder must never replace the observed identity value.
+  const sourceTitle = typeof ad.title === "string" ? ad.title : null;
+  const title = sourceTitle ?? "Ohne Titel";
+  const changed = buyerTarget === null
+    || buyerTarget.ad_id !== ad.ad_id
+    || buyerTarget.source_title !== sourceTitle
+    || buyerTarget.observed_at !== ad.observed_at;
+  buyerTarget = Object.freeze({
+    ad_id: ad.ad_id, title, source_title: sourceTitle,
+    observed_at: ad.observed_at
+  });
+  byId("buyer-ad-id").value = ad.ad_id;
+  byId("buyer-ad-title").value = title;
+  if (changed) {
+    byId("buyer-inquiry").value = "";
+    byId("buyer-facts").value = "";
+    buyerRevision++;
+    clearBuyerReply("Anzeige zugeordnet. Bitte die Anfrage selbst einfügen.");
+  }
+  byId("buyer-disclosure").open = true;
+  const panel = byId("buyer-panel");
+  if (typeof panel.scrollIntoView === "function") {
+    panel.scrollIntoView({behavior:"smooth", block:"start"});
+  }
+  buyerReplyAvailability();
+}
+
+function onBuyerInputChange() {
+  if (buyerBusy) return;
+  buyerRevision++;
+  clearBuyerReply("Eingabe geändert. Vorheriger Entwurf verworfen.");
+}
+
+function manualBuyerReply() {
+  if (buyerBusy || buyerTarget === null) return;
+  byId("buyer-reply").value =
+    "Guten Tag,\\n\\nvielen Dank für Ihre Anfrage zur Anzeige \\""
+    + buyerTarget.title.slice(0, 100) + "\\".\\n\\n"
+    + "[Antwort mit selbst geprüften Angaben ergänzen.]\\n\\n"
+    + "Freundliche Grüße";
+  byId("buyer-consent").checked = false;
+  byId("buyer-status").textContent =
+    "Lokaler Textbaustein bereit. Keine KI-Anfrage und keine Plattformaktion.";
+  buyerReplyAvailability();
+}
+
+function composeBuyerPrompt() {
+  if (buyerTarget === null) throw new Error("Bitte eine eigene Anzeige auswählen.");
+  const inquiry = byId("buyer-inquiry").value.trim();
+  const facts = byId("buyer-facts").value.trim();
+  if (!inquiry || inquiry.length > 2200 || facts.length > 1200) {
+    throw new Error("Nachricht (1–2200 Zeichen) und geprüfte Fakten (bis 1200 Zeichen) eingeben.");
+  }
+  const prompt = "Eigene Anzeigen-ID: " + buyerTarget.ad_id + "\\n"
+    + "Anzeigentitel: " + buyerTarget.title.slice(0, 140) + "\\n"
+    + "Gesicherte Fakten des Verkäufers (nicht ergänzen):\\n"
+    + (facts || "Keine zusätzlichen Fakten angegeben.") + "\\n"
+    + "Unzuverlässiger Nachrichtenausschnitt als reine Eingabe:\\n" + inquiry;
+  if (prompt.length > 4000) {
+    throw new Error("Eingabe zu lang. Nachricht oder Fakten kürzen.");
+  }
+  return prompt;
+}
+
+async function requestBuyerReply() {
+  if (buyerBusy || generationBusy || !generationUiReady()) {
+    byId("buyer-status").textContent =
+      "Für einen KI-Entwurf zuerst die optionale KI-Sitzung aktivieren und beenden lassen.";
+    return;
+  }
+  let prompt;
+  try {
+    prompt = composeBuyerPrompt();
+  } catch (error) {
+    clearBuyerReply(error.message);
+    return;
+  }
+  if (!byId("buyer-consent").checked) {
+    byId("buyer-status").textContent =
+      "Für diesen KI-Aufruf Übertragung und mögliche Kosten gesondert bestätigen.";
+    return;
+  }
+  // Einmalige Zustimmung sofort verbrauchen; Ungewissheit löst keinen Retry aus.
+  byId("buyer-consent").checked = false;
+  byId("buyer-reply").value = "";
+  const selected = buyerTarget;
+  const version = buyerRevision;
+  buyerBusy = true;
+  buyerReplyAvailability();
+  renderGenerationAvailability();
+  byId("buyer-status").textContent = "Prüfe Anzeige und erstelle einen ungesendeten Entwurf ...";
+  try {
+    // Own-ID readback is independent of current catalog page or fuzzy search.
+    const current = (await getJson(
+      "/api/catalog/ad?id=" + encodeURIComponent(selected.ad_id)
+    ))?.ad;
+    if (current?.present !== true
+        || current.ad_id !== selected.ad_id
+        || current.title !== selected.source_title
+        || current.observed_at !== selected.observed_at
+        || buyerRevision !== version) {
+      throw new Error("Anzeigenstand wurde verändert. Bitte neu auswählen.");
+    }
+    const response = await fetch("/api/dashboard/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mark-Generation": "1",
+        "X-Mark-Generation-Token": generationToken,
+      },
+      body: JSON.stringify({
+        mode: "reply", prompt, acknowledge_provider_cost: true,
+      }),
+      credentials: "omit", mode: "same-origin", redirect: "error",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      // Never forward provider stack/credential details into this UI.
+      throw new Error("KI-Anfrage fehlgeschlagen oder Ausgang unbekannt (HTTP "
+        + response.status + ").");
+    }
+    const answer = await response.json();
+    if (!answer || answer.status !== "draft" || answer.sent !== false
+        || typeof answer.reply !== "string" || !answer.reply.trim()
+        || answer.reply.length > 1500) {
+      throw new Error("Ungültige Antwort des KI-Entwurfsdienstes.");
+    }
+    if (buyerRevision !== version || buyerTarget !== selected
+        || composeBuyerPrompt() !== prompt) {
+      throw new Error("Eingabe während der Anfrage geändert; Entwurf verworfen.");
+    }
+    byId("buyer-reply").value = answer.reply;
+    byId("buyer-status").textContent =
+      "KI-Entwurf bereit. Fakten prüfen, gegebenenfalls bearbeiten und selbst versenden.";
+  } catch (error) {
+    byId("buyer-reply").value = "";
+    byId("buyer-status").textContent =
+      "Kein bestätigter KI-Entwurf: " + error.message + " Kein automatischer Neuversuch.";
+  } finally {
+    buyerBusy = false;
+    buyerReplyAvailability();
+    renderGenerationAvailability();
+  }
+}
+
+async function copyBuyerReply() {
+  const field = byId("buyer-reply");
+  if (buyerBusy || !field.value.trim()) return;
+  if (typeof navigator === "undefined" || !navigator.clipboard
+      || typeof navigator.clipboard.writeText !== "function") {
+    if (typeof field.select === "function") field.select();
+    byId("buyer-status").textContent =
+      "Bitte markierten Text mit Strg+C kopieren. Es wurde nichts versendet.";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(field.value);
+    byId("buyer-status").textContent =
+      "Antworttext kopiert. Kein Versand durch Kleinanzeiger.";
+  } catch (_error) {
+    if (typeof field.select === "function") field.select();
+    byId("buyer-status").textContent =
+      "Zwischenablage nicht verfügbar. Text markieren und Strg+C verwenden.";
+  }
+}
+
 function generationUiReady() {
   return (
     generationUiAvailable
@@ -2535,7 +3814,7 @@ function generationUiReady() {
 function renderGenerationAvailability() {
   byId("generation-panel").hidden = !generationUiAvailable;
   byId("generation-session-note").hidden = generationUiReady();
-  const canGenerate = generationUiReady() && !generationBusy;
+  const canGenerate = generationUiReady() && !generationBusy && !buyerBusy;
   byId("generation-text").disabled = !canGenerate;
   byId("generation-image").disabled = !canGenerate;
   byId("generation-consent").disabled = generationBusy;
@@ -2580,7 +3859,7 @@ function onGenerationPromptChange() {
 }
 
 async function requestGeneration(mode) {
-  if (!generationUiReady() || generationBusy) return;
+  if (!generationUiReady() || generationBusy || buyerBusy) return;
   if (mode !== "text" && mode !== "image") return;
   const prompt = byId("generation-prompt").value.trim();
   if (generationTextDraft && generationTextDraft.sourcePrompt !== prompt) clearSelectedGenerationDraft("text");
@@ -2725,6 +4004,7 @@ function applyGenerationImageToCreate() {
       new File([generationImageBlob], "mark-ki-entwurf.png", {type: "image/png"}),
     );
     files.files = selected.files;
+    onManualCreateImageSelection();
     if (typeof document !== "undefined" && typeof document.getElementById === "function") {
     const create = document.getElementById("create-disclosure");
     if (create) create.open = true;
@@ -2818,9 +4098,7 @@ async function load() {
     const genNavigation = optionalById("nav-generation");
     if (genNavigation) genNavigation.hidden = !generationUiAvailable;
     await refreshPendingWrites();
-    // Probe the authenticated local-only job read route, without changing
-    // the established /api/dashboard/config wire contract or guessing that
-    // independently protected owner frontends expose the local SQLite job API.
+    // Probe the authenticated local job route before showing job or sale controls.
     if (writeUiReady()) {
       try {
         const available = await _jobGet("/api/portfolio/jobs?limit=1");
@@ -2830,9 +4108,20 @@ async function load() {
       }
     }
     renderJobsAvailability();
+    byId("buyer-imported").hidden = !jobsAvailable;
+    const followupPane = optionalById("followup-pane");
+    if (followupPane) followupPane.hidden = !jobsAvailable;
+    salesAvailable = jobsAvailable;
+    byId("sales-panel").hidden = !salesAvailable;
+    byId("nav-sales").hidden = !salesAvailable;
+    reportingAvailable = salesAvailable;
+    byId("report-panel").hidden = !reportingAvailable;
+    byId("nav-report").hidden = !reportingAvailable;
     renderWriteAvailability();
+    renderItemTemplateControls();
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     renderGenerationAvailability();
+    buyerReplyAvailability();
     await loadCatalogPage();
     renderSyncStatus(summary.sync_status, summary.sync_recovery);
     renderAnalyticsContract(contract);
@@ -2870,22 +4159,353 @@ function renderDraftNavigation() {
   byId("draft-page-label").textContent = "Seite " + (draftPageIndex + 1);
 }
 
-function useLocalDraft(item) {
+// G3: only browser-selected local File objects; this code never posts to a server.
+function clearDraftPhotoPreview() {
+  for (const url of draftPhotoPreviewUrls) {
+    if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(url);
+  }
+  draftPhotoPreviewUrls = [];
+  byId("draft-photo-thumbnails").replaceChildren();
+  byId("draft-photo-preview-status").textContent = "";
+  byId("draft-photo-preview").hidden = true;
+}
+
+function draftPhotoKey(name) {
+  if (typeof name !== "string" ||
+      !/^[A-Za-z0-9ÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß ._()-]{0,180}[.](jpg|jpeg|png|webp)$/i.test(name)) return null;
+  return name.toLocaleLowerCase("de-DE");
+}
+
+function indexDraftPhotoFiles(files) {
+  if (files.length > 12000) throw new Error("Maximal 12.000 lokale Bilddateien auswählen.");
+  const found = new Map();
+  const occurrences = new Map();
+  let ignored = 0;
+  for (const file of files) {
+    // Count ALL matching names, even when one copy has invalid size/MIME/path.
+    // Otherwise discarding an invalid duplicate could silently select the
+    // same-named image from an unrelated SKU folder.
+    const key = draftPhotoKey(file && file.name);
+    if (key) occurrences.set(key, (occurrences.get(key) || 0) + 1);
+    const relative = file && file.webkitRelativePath;
+    const parts = typeof relative === "string" ? relative.split("/") : [];
+    if (parts.length < 2 || parts.some(x => !x || x === "." || x === ".." || x.includes(String.fromCharCode(92)) || x.includes(String.fromCharCode(0)))
+        || parts[parts.length - 1] !== file.name) { ignored++; continue; }
+    if (!key || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > 25 * 1024 * 1024
+        || typeof file.slice !== "function") { ignored++; continue; }
+    const extension = file.name.split(".").pop().toLocaleLowerCase("de-DE");
+    const expectedType = extension === "png" ? "image/png" :
+      extension === "webp" ? "image/webp" : "image/jpeg";
+    if (file.type !== expectedType) { ignored++; continue; }
+    const group = found.get(key) || [];
+    group.push(file);
+    found.set(key, group);
+  }
+  const conflictedNames = new Set();
+  for (const [name, count] of occurrences) {
+    if (count > 1) conflictedNames.add(name);
+  }
+  let usable = 0;
+  for (const group of found.values()) usable += group.length;
+  return {found, usable, ignored, conflicts: conflictedNames.size, conflictedNames};
+}
+
+function loadDraftPhotoFolder() {
+  draftPhotoSelectionGeneration++;
+  if (draftPhotoApplied) byId("create-media").value = "";
+  draftPhotoApplied = false;
+  clearDraftPhotoPreview();
+  draftPhotoIndex = new Map();
+  draftPhotoConflictedNames = new Set();
+  draftPhotoFolderChosen = false;
+  const files = Array.from(byId("draft-photo-folder").files || []);
+  if (!files.length) {
+    byId("draft-photo-folder-status").textContent = "Noch kein Ordner gewählt.";
+    return;
+  }
+  try {
+    const result = indexDraftPhotoFiles(files);
+    draftPhotoFolderChosen = true;
+    draftPhotoIndex = result.found;
+    draftPhotoConflictedNames = result.conflictedNames;
+    byId("draft-photo-folder-status").textContent =
+      result.usable + " Bilder · " + result.conflicts + " doppelte Dateinamen · " +
+      result.ignored + " unbrauchbare Dateien. Nur genaue Dateinamen werden zugeordnet.";
+  } catch (error) {
+    byId("draft-photo-folder").value = "";
+    byId("draft-photo-folder-status").textContent = error.message;
+  }
+}
+
+function clearDraftPhotoFolder() {
+  byId("draft-photo-folder").value = "";
+  loadDraftPhotoFolder();
+}
+
+function onManualCreateImageSelection() {
+  const previewShown = !byId("draft-photo-preview").hidden;
+  draftPhotoApplied = false;
+  if (previewShown) {
+    clearDraftPhotoPreview();
+    byId("draft-feedback").textContent =
+      "Bildauswahl geändert: Die vorherige Fotozuordnungs-Vorschau wurde verworfen. Aktuelle Bilder im Anzeigenformular prüfen.";
+  }
+}
+
+function chosenDraftImages(item) {
+  if (!Array.isArray(item.images) || item.images.length > 10) throw new Error("Ungültige Bildhinweise.");
+  const selected = [];
+  const missing = [];
+  const ambiguous = [];
+  const known = new Set();
+  let bytes = 0;
+  for (const name of item.images) {
+    const key = draftPhotoKey(name);
+    if (!key || known.has(key)) throw new Error("Doppelte oder ungültige Bildhinweise.");
+    known.add(key);
+    const matches = draftPhotoIndex.get(key) || [];
+    if (draftPhotoConflictedNames.has(key) || matches.length > 1) ambiguous.push(name);
+    else if (!matches.length) missing.push(name);
+    else { selected.push(matches[0]); bytes += matches[0].size; }
+  }
+  if (missing.length || ambiguous.length) {
+    throw new Error((missing.length ? "Fehlend: " + missing.join(", ") + ". " : "") +
+      (ambiguous.length ? "Mehrdeutig: " + ambiguous.join(", ") + ". " : "") +
+      "Ordnerinhalt prüfen oder Ordner-Auswahl löschen.");
+  }
+  if (bytes > 100 * 1024 * 1024) throw new Error("Maximal 100 MB Bilder je Anzeige.");
+  return selected;
+}
+
+async function verifyDraftImageSignature(file) {
+  const bytes = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const jpeg = bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  const png = bytes.length >= 8 && [137,80,78,71,13,10,26,10].every((v,i) => bytes[i] === v);
+  const webp = bytes.length >= 12 && [82,73,70,70].every((v,i) => bytes[i] === v)
+    && [87,69,66,80].every((v,i) => bytes[i+8] === v);
+  const extension = file.name.split(".").pop().toLocaleLowerCase("de-DE");
+  if (!((["jpg","jpeg"].includes(extension) && file.type === "image/jpeg" && jpeg)
+        || (extension === "png" && file.type === "image/png" && png)
+        || (extension === "webp" && file.type === "image/webp" && webp))) {
+    throw new Error(file.name + ": Inhalt passt nicht zum Bildformat.");
+  }
+}
+
+function showDraftPhotoPreview(files, sku) {
+  clearDraftPhotoPreview();
+  if (!files.length) return;
+  byId("draft-photo-preview").hidden = false;
+  byId("draft-photo-preview-status").textContent =
+    files.length + " Bilder lokal für " + sku + " in CSV-/Excel-Reihenfolge vorbereitet.";
+  for (const file of files) {
+    const figure = document.createElement("figure");
+    const picture = document.createElement("img");
+    picture.alt = "Foto: " + file.name;
+    picture.loading = "lazy";
+    picture.style.maxWidth = "110px";
+    picture.style.maxHeight = "90px";
+    if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+      try {
+        const url = URL.createObjectURL(file);
+        draftPhotoPreviewUrls.push(url);
+        picture.src = url;
+      } catch (_error) {
+        // Thumbnail failure must not invalidate already verified local Files.
+      }
+    }
+    const caption = document.createElement("figcaption");
+    caption.textContent = file.name;
+    figure.append(picture, caption);
+    byId("draft-photo-thumbnails").append(figure);
+  }
+}
+
+async function useLocalDraft(item) {
+  if (!writeUiReady() || draftPhotoPreparing || createInFlight) {
+    byId("draft-feedback").textContent = "Kleinanzeiger regulär starten und laufende Vorgänge beenden.";
+    return false;
+  }
+  if (!window.confirm("Lokale Entwurfsdaten im Formular 'Neue Anzeige' ersetzen? Es wird nichts veröffentlicht.")) return false;
+  draftPhotoPreparing = true;
+  const version = draftPhotoSelectionGeneration;
+  try {
+    let photos = [];
+    if (draftPhotoFolderChosen && Array.isArray(item.images) && item.images.length) {
+      photos = chosenDraftImages(item);
+      for (const file of photos) await verifyDraftImageSignature(file);
+    }
+    if (version !== draftPhotoSelectionGeneration || !writeUiReady()) {
+      throw new Error("Ordner oder Sitzung geändert; bitte erneut wählen.");
+    }
+    let selection = null;
+    if (photos.length) {
+      if (typeof DataTransfer !== "function") throw new Error("Dateiübernahme von Chrome nicht unterstützt.");
+      selection = new DataTransfer();
+      for (const file of photos) selection.items.add(file);
+      if (selection.files.length !== photos.length) throw new Error("Lokale Dateiübernahme unvollständig.");
+    }
+    // Commit file selection before text fields so a denied FileList setter
+    // cannot falsely report that all local form values were accepted.
+    if (selection) byId("create-media").files = selection.files;
+    else byId("create-media").value = "";
+    byId("create-category").value = item.category;
+    byId("create-title").value = item.title;
+    byId("create-description").value = item.description;
+    byId("create-price").value = String(item.price_eur);
+    draftPhotoApplied = !!selection;
+    showDraftPhotoPreview(photos, item.sku);
+    revealCreateForm();
+    byId("draft-feedback").textContent = "Artikel " + item.sku
+      + " lokal übernommen. " + (photos.length ? photos.length + " Fotos vorbereitet. " :
+      "Bilder selbst auswählen oder Ordner wählen. ") +
+      "Erstellen erfordert eine separate Bestätigung.";
+    return true;
+  } catch (error) {
+    byId("draft-feedback").textContent = "Keine Übernahme: " + error.message;
+    return false;
+  } finally {
+    draftPhotoPreparing = false;
+  }
+}
+
+// G2: local article templates; entirely separate from the P5 AI-instruction templates.
+function selectedItemTemplate() {
+  const id=byId("item-template-select").value;
+  return itemTemplates.find(item=>item.template_id===id)||null;
+}
+function renderItemTemplateControls() {
+  const enabled=writeUiReady()&&!itemTemplateBusy;
+  for (const id of ["item-template-save","item-template-from","item-template-copy",
+                    "item-template-delete","item-template-refresh"]) byId(id).disabled=!enabled;
+}
+function chooseItemTemplateSource(draft,mode) {
+  if (!draft || typeof draft.sku!=="string") return;
+  byId("item-templates-disclosure").open=true;
+  byId("item-template-source").value=draft.sku;
+  if (mode==="save") {
+    byId("item-template-select").value="";
+    byId("item-template-name").value=String(draft.title||"").slice(0,60);
+    byId("item-template-feedback").textContent="Quellartikel "+draft.sku+" gewählt. Vorlagenname prüfen.";
+    byId("item-template-name").focus();
+  } else {
+    byId("item-template-new-sku").value="";
+    byId("item-template-feedback").textContent="Entwurf "+draft.sku+" gewählt. Neue Artikelnummer eingeben.";
+    byId("item-template-new-sku").focus();
+  }
+  renderItemTemplateControls();
+}
+async function loadItemTemplates() {
   if (!writeUiReady()) {
-    byId("draft-feedback").textContent = "Zum Übernehmen Kleinanzeiger normal starten.";
-    return;
+    byId("item-template-feedback").textContent="Artikelvorlagen benötigen die reguläre lokale Sitzung.";
+    renderItemTemplateControls();
+    return false;
   }
-  if (!window.confirm("Die bisherigen Eingaben im Formular 'Neue Anzeige' durch den lokalen Entwurf ersetzen? Es wird nichts veröffentlicht.")) {
-    return;
+  try {
+    const response=await fetch("/api/portfolio/item-templates",{
+      cache:"no-store",headers:_jobHeaders(),
+    });
+    if (!response.ok) throw new Error("Vorlagenliste nicht lesbar");
+    const data=await response.json();
+    if (!data || !Array.isArray(data.templates) || data.templates.length>100)
+      throw new Error("Ungültige lokale Vorlagenliste");
+    itemTemplates=data.templates;
+    const select=byId("item-template-select");
+    const previous=select.value;
+    select.replaceChildren();
+    const empty=document.createElement("option");
+    empty.value="";empty.textContent="Neue Vorlage";select.append(empty);
+    for (const template of itemTemplates) {
+      if (typeof template.template_id!=="string" || typeof template.name!=="string")
+        throw new Error("Ungültige Vorlagendaten");
+      const option=document.createElement("option");
+      option.value=template.template_id;option.textContent=template.name;
+      select.append(option);
+    }
+    select.value=itemTemplates.some(t=>t.template_id===previous)?previous:"";
+    byId("item-template-feedback").textContent=itemTemplates.length+" Artikelvorlagen lokal verfügbar.";
+    return true;
+  } catch (_error) {
+    byId("item-template-feedback").textContent="Vorlagenliste nicht verfügbar. Daten bleiben unverändert.";
+    return false;
+  } finally {
+    renderItemTemplateControls();
   }
-  byId("create-category").value = item.category;
-  byId("create-title").value = item.title;
-  byId("create-description").value = item.description;
-  byId("create-price").value = String(item.price_eur);
-  byId("create-media").value = "";
-  revealCreateForm();
-  byId("draft-feedback").textContent = "Artikel " + item.sku +
-    " lokal ins Formular übernommen. Bilder bitte selbst auswählen; Veröffentlichung separat bestätigen.";
+}
+async function itemTemplateCommand(action) {
+  if (!writeUiReady() || itemTemplateBusy) return false;
+  const chosen=selectedItemTemplate();
+  const source=byId("item-template-source").value.trim();
+  const newSku=byId("item-template-new-sku").value.trim();
+  let data;
+  if (action==="save") {
+    if (!source) {
+      byId("item-template-feedback").textContent="Zuerst einen Entwurf in der Tabelle wählen.";
+      return false;
+    }
+    if (chosen && !window.confirm("Artikelvorlage "+chosen.name+" aktualisieren?")) return false;
+    data={action,source_sku:source,name:byId("item-template-name").value.trim(),
+      template_id:chosen?.template_id||null,expected_revision:chosen?.revision||0};
+  } else if (action==="delete") {
+    if (!chosen) {
+      byId("item-template-feedback").textContent="Zuerst eine Artikelvorlage auswählen.";
+      return false;
+    }
+    if (!window.confirm("Artikelvorlage "+chosen.name+" wirklich löschen?")) return false;
+    data={action,template_id:chosen.template_id,expected_revision:chosen.revision};
+  } else if (action==="from_template") {
+    if (!chosen || !newSku) {
+      byId("item-template-feedback").textContent="Vorlage und neue Artikelnummer wählen.";
+      return false;
+    }
+    data={action,template_id:chosen.template_id,new_sku:newSku};
+  } else if (action==="duplicate") {
+    if (!source || !newSku) {
+      byId("item-template-feedback").textContent="Quellartikel und neue Artikelnummer wählen.";
+      return false;
+    }
+    data={action,source_sku:source,new_sku:newSku};
+  } else return false;
+  const fingerprint=JSON.stringify(data);
+  if (itemTemplatePending?.fingerprint!==fingerprint)
+    itemTemplatePending={fingerprint,key:_newJobRequestKey()};
+  itemTemplateBusy=true;renderItemTemplateControls();
+  try {
+    const response=await fetch("/api/portfolio/item-templates/mutate",{
+      method:"POST",cache:"no-store",
+      headers:{..._jobHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({...data,request_key:itemTemplatePending.key}),
+    });
+    if (!response.ok) {
+      if (response.status===409) throw new Error("Name oder Artikelnummer vergeben oder Vorlage geändert. Aktualisieren.");
+      if (response.status===400) throw new Error("Angaben prüfen; es wurde nichts geändert.");
+      if (response.status===403) throw new Error("Lokale Schreibsitzung nicht verfügbar.");
+      throw new Error("Ergebnis unklar. Vor erneutem Ausführen lokalen Bestand prüfen; derselbe Schlüssel bleibt vorgemerkt.");
+    }
+    const result=await response.json();
+    if (!result || result.platform_writes!==0 || result.published===true)
+      throw new Error("Lokale Erfolgsmeldung ungültig.");
+    itemTemplatePending=null;
+    const refreshed=await loadItemTemplates();
+    if (refreshed && action==="save") byId("item-template-select").value=result.template_id;
+    if (action==="delete") {
+      byId("item-template-select").value="";
+      byId("item-template-name").value="";
+    }
+    if (action==="from_template" || action==="duplicate") {
+      byId("draft-search").value=result.sku;
+      await searchDrafts();
+    }
+    byId("item-template-feedback").textContent=
+      action==="delete"?"Vorlage lokal gelöscht.":
+      action==="save"?"Vorlage lokal gespeichert.":
+      "Eigenständiger lokaler Entwurf "+result.sku+" angelegt. Nichts veröffentlicht.";
+    return true;
+  } catch (error) {
+    byId("item-template-feedback").textContent=error.message;
+    return false;
+  } finally {
+    itemTemplateBusy=false;renderItemTemplateControls();
+  }
 }
 
 function renderDraftRows(items) {
@@ -2925,6 +4545,16 @@ function renderDraftRows(items) {
     button.disabled = !writeUiReady();
     button.addEventListener("click", () => useLocalDraft(draft));
     actions.append(button);
+    const templateButton=document.createElement("button");
+    templateButton.type="button";templateButton.textContent="Als Vorlage";
+    templateButton.disabled=!writeUiReady();
+    templateButton.addEventListener("click",()=>chooseItemTemplateSource(draft,"save"));
+    actions.append(templateButton);
+    const copyButton=document.createElement("button");
+    copyButton.type="button";copyButton.textContent="Duplizieren";
+    copyButton.disabled=!writeUiReady();
+    copyButton.addEventListener("click",()=>chooseItemTemplateSource(draft,"copy"));
+    actions.append(copyButton);
     row.append(actions);
     body.append(row);
   }
@@ -3414,6 +5044,451 @@ if (jobsNavigation) jobsNavigation.addEventListener("click",() => {
 byId("jobs-disclosure").addEventListener("toggle",() => {
   if (byId("jobs-disclosure").open && !jobsLoaded) loadJobs();
 });
+async function loadWorkTemplates() {
+  if (!jobsAvailable || !writeUiReady()) return false;
+  const generation=++workTemplateLoadGeneration;
+  try {
+    const [items,attention]=await Promise.all([
+      _jobGet("/api/portfolio/templates"),
+      _jobGet("/api/portfolio/attention"),
+    ]);
+    if (generation!==workTemplateLoadGeneration) return false;
+    if (!items || !Array.isArray(items.templates) || items.templates.length>100) {
+      throw new Error("Ungültige Vorlagenliste");
+    }
+    workTemplates=items.templates;
+    const select=byId("work-template-select");
+    const before=select.value;
+    select.replaceChildren();
+    const empty=document.createElement("option");
+    empty.value="";
+    empty.textContent="Neue Vorlage";
+    select.append(empty);
+    for (const tpl of workTemplates) {
+      const entry=document.createElement("option");
+      entry.value=tpl.template_id;
+      entry.textContent=tpl.name;
+      select.append(entry);
+    }
+    select.value=workTemplates.some(t=>t.template_id===before)?before:"";
+    if (before && select.value!==before) {
+      // A deleted/vanished template may not silently turn stale fields into
+      // a new template or adopt a newer revision without explicit selection.
+      workTemplateEditorBaseline=null;
+      workTemplateSelectionRequiresRecheck=true;
+    }
+    const counts=[
+      ["Unklare KI-Vorgänge",attention.unknown_ki_outcomes],
+      ["Vorschläge zur Prüfung",attention.proposals_to_review],
+      ["Verkäufe ohne bekannte Kosten",attention.manual_sales_missing_cost],
+      ["Über 14 Tage reservierte lokale Anzeigen",attention.old_local_reservations],
+    ];
+    const warnings=counts.filter(([,n])=>Number.isSafeInteger(n)&&n>0);
+    const notice=byId("work-attention");
+    notice.hidden=warnings.length===0;
+    notice.textContent=warnings.map(([label,n])=>label+": "+n).join(" · ");
+    byId("work-template-feedback").textContent=workTemplateSelectionRequiresRecheck
+      ? "Ausgewählte Vorlage nicht mehr vorhanden. Bitte die Auswahl erneut bewusst festlegen."
+      : workTemplates.length+" lokale Arbeitsvorlagen verfügbar.";
+    return true;
+  } catch (_error) {
+    if (generation!==workTemplateLoadGeneration) return false;
+    byId("work-template-feedback").textContent=
+      "Lokale Vorlagen/Prüfhinweise nicht verfügbar; Daten bleiben unverändert.";
+    return false;
+  }
+}
+function selectedWorkTemplate() {
+  const id=byId("work-template-select").value;
+  return workTemplates.find(t=>t.template_id===id)||null;
+}
+function useWorkTemplate() {
+  const tpl=selectedWorkTemplate();
+  if (!tpl) {
+    byId("work-template-feedback").textContent="Zuerst eine Vorlage auswählen.";
+    return;
+  }
+  if (byId("job-instruction").value.trim() && !window.confirm(
+      "Vorhandenen Auftragstext durch die gespeicherte Vorlage ersetzen?")) return;
+  byId("job-instruction").value=tpl.instruction;
+  byId("work-template-name").value=tpl.name;
+  workTemplateEditorBaseline=Object.freeze({id:tpl.template_id,revision:tpl.revision});
+  workTemplateSelectionRequiresRecheck=false;
+  byId("work-template-feedback").textContent=
+    "Vorlage lokal eingefügt; Auftrag und KI-Kosten werden nicht automatisch gestartet.";
+}
+async function mutateWorkTemplate(remove=false) {
+  if (workTemplateBusy || !jobsAvailable || !writeUiReady()) return;
+  const selected=selectedWorkTemplate();
+  const selectedId=byId("work-template-select").value;
+  if (workTemplateSelectionRequiresRecheck ||
+      (selectedId && (!selected || workTemplateEditorBaseline?.id!==selectedId))) {
+    byId("work-template-feedback").textContent=
+      "Vorlagenstand geändert. Bitte die Vorlage neu auswählen, bevor Sie speichern.";
+    return;
+  }
+  const payload={
+    template_id:selected?.template_id||null,
+    name:remove?null:byId("work-template-name").value.trim(),
+    instruction:remove?null:byId("job-instruction").value.trim(),
+    expected_revision:selected ? workTemplateEditorBaseline.revision : 0,
+    delete:remove,
+  };
+  if (remove && !selected) {
+    byId("work-template-feedback").textContent="Bitte zuerst eine Vorlage auswählen.";
+    return;
+  }
+  if (remove && !window.confirm("Diese lokale Arbeitsvorlage löschen?")) return;
+  if (!remove && selected && !window.confirm(
+      "Die gespeicherte Vorlage '"+selected.name+"' aktualisieren?")) return;
+  const fingerprint=JSON.stringify(payload);
+  if (workTemplatePending && workTemplatePending.fingerprint!==fingerprint) {
+    byId("work-template-feedback").textContent=
+      "Voriger Vorlagenauftrag ist noch ungeklärt. Zuerst dessen Ausgang prüfen.";
+    return;
+  }
+  if (!workTemplatePending) {
+    workTemplatePending={fingerprint,key:_newJobRequestKey()};
+  }
+  const submittedSelection=selectedId;
+  const submittedGeneration=workTemplateSelectionGeneration;
+  workTemplateBusy=true;
+  for (const id of ["work-template-save","work-template-delete",
+                    "work-template-select","work-template-refresh","work-template-use",
+                    "work-template-name","job-instruction"]) byId(id).disabled=true;
+  try {
+    const response=await fetch("/api/portfolio/templates/mutate",{
+      method:"POST",cache:"no-store",
+      headers:{..._jobHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({...payload,request_key:workTemplatePending.key}),
+    });
+    if (!response.ok) {
+      throw new Error("Vorlagenstand nicht bestätigt. Zuerst prüfen, keine neue Anfrage erzeugen.");
+    }
+    const result=await response.json();
+    if (result.platform_writes!==0) throw new Error("Unerwartete Antwort");
+    workTemplatePending=null;
+    const newId=remove?"":result.template_id;
+    const loaded=await loadWorkTemplates();
+    const selectedAfterReload=byId("work-template-select").value;
+    const originalEditorUnchanged=
+      submittedGeneration===workTemplateSelectionGeneration;
+    // Deleting the submitted template legitimately removes it from the list.
+    // User-driven selection changes always have a newer generation.
+    if (loaded && originalEditorUnchanged &&
+        (selectedAfterReload===submittedSelection ||
+         (remove && selectedAfterReload===""))) {
+      byId("work-template-select").value=newId;
+      const current=selectedWorkTemplate();
+      workTemplateEditorBaseline=current
+        ? Object.freeze({id:current.template_id,revision:current.revision}) : null;
+      workTemplateSelectionRequiresRecheck=false;
+      if (remove) byId("work-template-name").value="";
+    }
+    byId("work-template-feedback").textContent=
+      remove?"Vorlage lokal gelöscht.":"Arbeitsanweisung als lokale Vorlage gespeichert.";
+  } catch (error) {
+    byId("work-template-feedback").textContent=error.message;
+  } finally {
+    workTemplateBusy=false;
+    for (const id of ["work-template-save","work-template-delete",
+                      "work-template-select","work-template-refresh","work-template-use",
+                      "work-template-name","job-instruction"]) byId(id).disabled=false;
+  }
+}
+byId("work-template-refresh").addEventListener("click",loadWorkTemplates);
+byId("work-template-select").addEventListener("change",() => {
+  workTemplateSelectionGeneration++;
+  const item=selectedWorkTemplate();
+  workTemplateEditorBaseline=item
+    ? Object.freeze({id:item.template_id,revision:item.revision}) : null;
+  workTemplateSelectionRequiresRecheck=false;
+  byId("work-template-name").value=item?.name||"";
+});
+byId("work-template-use").addEventListener("click",useWorkTemplate);
+byId("work-template-save").addEventListener("click",()=>mutateWorkTemplate(false));
+byId("work-template-delete").addEventListener("click",()=>mutateWorkTemplate(true));
+byId("work-templates-disclosure").addEventListener("toggle",() => {
+  if (byId("work-templates-disclosure").open)loadWorkTemplates();
+});
+function renderSaleChoices() {
+  const select=byId("sale-ad-select");
+  const previous=select.value;
+  select.replaceChildren();
+  const placeholder=document.createElement("option");
+  placeholder.value="";
+  placeholder.textContent="Anzeige wählen …";
+  select.append(placeholder);
+  for (const ad of catalogRows) {
+    if (typeof ad.ad_id!=="string" || !/^[0-9]{1,32}$/.test(ad.ad_id)) continue;
+    const option=document.createElement("option");
+    option.value=ad.ad_id;
+    option.textContent=ad.ad_id+" · "+String(ad.title||"");
+    select.append(option);
+  }
+  if (catalogRows.some(ad=>ad.ad_id===previous)) {
+    select.value=previous;
+  } else {
+    select.value="";
+  }
+  loadSelectedSale();
+}
+async function loadSelectedSale() {
+  // The selected ad may be on any result page, while the sales ledger
+  // itself may have thousands of rows. Always fetch its exact revision.
+  const id=byId("sale-ad-select").value;
+  const seq=++saleLoadSeq;
+  saleVerifiedId="";
+  byId("sale-save").disabled=true;
+  if (!id || !salesAvailable || !writeUiReady()) {
+    fillSaleForm();
+    return;
+  }
+  let verified=false;
+  try {
+    const response=await _jobGet("/api/portfolio/sales/detail?"+
+      new URLSearchParams({ad_id:id}).toString());
+    if (seq!==saleLoadSeq || byId("sale-ad-select").value!==id) return;
+    if (response.sale && response.sale.ad_id!==id) {
+      throw new Error("Verkaufsstand passt nicht zur Anzeigen-ID.");
+    }
+    if (response.sale) saleEntries.set(id,response.sale);
+    else saleEntries.delete(id);
+    fillSaleForm();
+    verified=true;
+    saleVerifiedId=id;
+  } catch (_error) {
+    if (seq===saleLoadSeq) {
+      byId("sale-feedback").textContent=
+        "Einzelanzeige nicht geprüft. Speichern bis zur Neuladung gesperrt.";
+      return;
+    }
+  } finally {
+    if (seq===saleLoadSeq) byId("sale-save").disabled=
+      !verified || saleVerifiedId!==id || saleSaveBusy;
+  }
+}
+function fillSaleForm() {
+  const id=byId("sale-ad-select").value;
+  const entry=saleEntries.get(id);
+  byId("sale-state").value=entry?.state||"available";
+  byId("sale-revenue").value=entry?.revenue_eur===null ||
+    entry?.revenue_eur===undefined ? "" : String(entry.revenue_eur);
+  byId("sale-cost").value=entry?.cost_eur===null ||
+    entry?.cost_eur===undefined ? "" : String(entry.cost_eur);
+  byId("sale-location").value=entry?.location||"";
+  byId("sale-note").value=entry?.note||"";
+  salePending=null;
+}
+async function loadSales() {
+  if (!salesAvailable || !writeUiReady()) return false;
+  try {
+    const [list,totals]=await Promise.all([
+      _jobGet("/api/portfolio/sales?"+new URLSearchParams({
+        limit:"50",after:salesCursors[salesPage],
+      }).toString()),
+      _jobGet("/api/portfolio/sales/totals"),
+    ]);
+    if (!list || !Array.isArray(list.sales) || list.sales.length>50) {
+      throw new Error("Ungültige lokale Verkaufsdaten.");
+    }
+    saleEntries=new Map(list.sales.map(item=>[item.ad_id,item]));
+    salesNextAfter=list.has_more ? list.next_after : null;
+    byId("sale-prev").disabled=salesPage===0;
+    byId("sale-next").disabled=!salesNextAfter;
+    byId("sale-page-label").textContent="Seite "+(salesPage+1);
+    byId("sale-totals").textContent="Manuell als verkauft markiert: "+
+      totals.sold+" · Reserviert: "+totals.reserved+
+      " · Erlös "+totals.revenue_eur+" € · Bekannte Kosten "+
+      totals.known_cost_eur+" € · Bekannter Überschuss "+
+      totals.known_profit_eur+" € aus "+totals.known_profit_count+
+      " Verkäufen mit vollständigen Angaben · Fehlende Kosten bei "+
+      totals.unknown_cost_count+" Verkäufen";
+    const body=byId("sales-body");
+    body.replaceChildren();
+    for (const item of list.sales) {
+      const tr=document.createElement("tr");
+      for (const val of [
+        item.ad_id+" · "+item.title,item.state,
+        item.revenue_eur===null?"—":item.revenue_eur,
+        item.cost_eur===null?"unbekannt":item.cost_eur,
+        item.imported_inbound_messages,item.location
+      ]) {
+        const cell=document.createElement("td");
+        cell.textContent=String(val);
+        tr.append(cell);
+      }
+      body.append(tr);
+    }
+    await loadSelectedSale();
+    byId("sale-feedback").textContent=list.total+" lokal dokumentierte Anzeigen.";
+    return true;
+  } catch (_error) {
+    byId("sale-feedback").textContent="Lokale Verkaufsübersicht nicht verfügbar. Daten bleiben bestehen.";
+    return false;
+  }
+}
+function _saleWholeEur(id,required) {
+  const raw=byId(id).value.trim();
+  if (!raw && !required) return null;
+  if (!/^[0-9]{1,8}$/.test(raw) || Number(raw)>99999999) {
+    throw new Error("Nur ganze Eurobeträge zwischen 0 und 99999999 verwenden.");
+  }
+  return Number(raw);
+}
+async function saveSaleState() {
+  if (!salesAvailable || !writeUiReady() || saleSaveBusy ||
+      byId("sale-save").disabled ||
+      saleVerifiedId!==byId("sale-ad-select").value) return;
+  saleSaveBusy=true;
+  byId("sale-save").disabled=true;
+  try {
+    const id=byId("sale-ad-select").value;
+    if (!/^[0-9]{1,32}$/.test(id)) throw new Error("Anzeige aus der Liste wählen.");
+    const state=byId("sale-state").value;
+    if (!["available","reserved","sold"].includes(state)) throw new Error("Ungültiger Status.");
+    const sold=state==="sold";
+    const payload={
+      ad_id:id,state,
+      revenue_eur:sold?_saleWholeEur("sale-revenue",true):null,
+      cost_eur:sold?_saleWholeEur("sale-cost",false):null,
+      location:byId("sale-location").value.trim(),
+      note:byId("sale-note").value.trim(),
+      expected_revision:saleEntries.get(id)?.revision||0,
+    };
+    const fingerprint=JSON.stringify(payload);
+    if (salePending?.fingerprint!==fingerprint) {
+      salePending={fingerprint,key:_newJobRequestKey()};
+    }
+    if (state==="sold" && !window.confirm(
+        "Verkauf ausschließlich lokal als eigene Angabe dokumentieren? "+
+        "Die Anzeige wird NICHT bei Kleinanzeigen als verkauft markiert.")) return;
+    const response=await fetch("/api/portfolio/sales/update",{
+      method:"POST",cache:"no-store",
+      headers:{..._jobHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({...payload,request_key:salePending.key}),
+    });
+    if (!response.ok) throw new Error("Speichern nicht bestätigt. Eintrag prüfen; nicht blind neu anlegen.");
+    const result=await response.json();
+    if (result.ad_id!==id || result.platform_writes!==0) {
+      throw new Error("Verkaufsstand nicht eindeutig bestätigt.");
+    }
+    salePending=null;
+    byId("sale-feedback").textContent="Lokaler Eintrag gespeichert. Keine Plattformaktion.";
+    await loadSales();
+  } catch (error) {
+    byId("sale-feedback").textContent=error.message;
+  } finally {
+    saleSaveBusy=false;
+    // A manual reload can reconcile a lost HTTP answer before any new
+    // idempotency key is generated; a retry keeps the identical key/payload.
+    byId("sale-save").disabled=!(
+      saleVerifiedId && saleVerifiedId===byId("sale-ad-select").value &&
+      salesAvailable && writeUiReady()
+    );
+  }
+}
+async function loadPortfolioReport() {
+  if (!reportingAvailable || !writeUiReady()) return false;
+  const selected=byId("report-days").value;
+  if (!["7","30","90"].includes(selected)) return false;
+  const seq=++reportLoadSeq;
+  byId("report-refresh").disabled=true;
+  byId("report-download").disabled=true;
+  byId("report-feedback").textContent="Berechne lokalen Bericht …";
+  try {
+    const data=await _jobGet("/api/portfolio/report?days="+selected);
+    if (seq!==reportLoadSeq || byId("report-days").value!==selected) return false;
+    if (!data || data.window_days!==Number(selected) ||
+        !Array.isArray(data.imported_messages_per_day) ||
+        data.imported_messages_per_day.length!==Number(selected) ||
+        data.platform_writes!==0 || data.revenue_period_attributed!==false) {
+      throw new Error("Ungültige Daten");
+    }
+    reportData=data;
+    byId("report-summary").textContent="Zeitraum "+data.start_day_utc+
+      " bis "+data.end_day_utc+" (UTC) · Eigene Anzeigen mit belegter Bestandshistorie: "+
+      data.own_ads_with_inventory_history+" · Lokal importierte Eingangsnachrichten: "+
+      data.imported_inbound_messages_window+" · Unterschiedliche importierte Gespräche: "+
+      data.imported_conversations_window;
+    const sale=data.manual_sales_current_all_time;
+    byId("report-sales-summary").textContent="Manueller Verkaufsstand (alle Zeiten): "+
+      sale.manually_sold+" als verkauft, "+sale.manually_reserved+
+      " reserviert · Erlöse "+sale.revenue_eur+" € · Bekannte Kosten "+
+      sale.known_cost_eur+" € · Bekannter Überschuss "+
+      sale.known_surplus_eur+" € für "+sale.known_surplus_sale_count+
+      " Verkäufe mit bekannten Kosten; bei "+sale.unknown_cost_count+
+      " weiteren Verkäufen fehlen Kosten.";
+    const cost=data.ai_usage_estimate_all_time;
+    byId("report-ai-summary").textContent=cost?
+      "KI-Schätzung (alle Zeiten, nicht abgerechnet): "+
+      (cost.usd_cent_estimate/100).toFixed(2)+" USD nach bestätigten Tokens; "+
+      (cost.usd_cent_reserved/100).toFixed(2)+" USD reserviert; "+
+      cost.unknown_outcomes+" unklare Ergebnisse." :
+      "Noch keine lokalen KI-Auftragskosten erfasst; kein Rechnungsabgleich.";
+    const body=byId("report-daily-body");
+    body.replaceChildren();
+    for (const item of data.imported_messages_per_day.slice(-14)) {
+      const row=document.createElement("tr");
+      for (const value of [item.day_utc,item.imported_messages]) {
+        const cell=document.createElement("td");
+        cell.textContent=String(value);
+        row.append(cell);
+      }
+      body.append(row);
+    }
+    byId("report-download").disabled=false;
+    byId("report-feedback").textContent=
+      "Lokal berechnet. Keine Veröffentlichung und keine Anbieteranfrage.";
+    return true;
+  } catch (_error) {
+    if (seq===reportLoadSeq) {
+      reportData=null;
+      byId("report-feedback").textContent=
+        "Bericht nicht verfügbar. Datengrundlage prüfen; keine Werte erfunden.";
+    }
+    return false;
+  } finally {
+    if (seq===reportLoadSeq) byId("report-refresh").disabled=false;
+  }
+}
+function downloadPortfolioReportCsv() {
+  if (!reportData || byId("report-days").value!==String(reportData.window_days)) return;
+  const rows=["tag_utc,importierte_eingangsnachrichten"];
+  for (const item of reportData.imported_messages_per_day) {
+    // Fixed ISO date and integer counts cannot start spreadsheet formulas.
+    if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(item.day_utc) ||
+        !Number.isSafeInteger(item.imported_messages) ||
+        item.imported_messages<0) return;
+    rows.push(item.day_utc+","+String(item.imported_messages));
+  }
+  const file=new Blob(["\\uFEFF"+rows.join("\\r\\n")+"\\r\\n"],
+                      {type:"text/csv;charset=utf-8"});
+  const url=URL.createObjectURL(file);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download="kleinanzeiger-nachrichten-"+
+    reportData.window_days+"-tage.csv";
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+byId("report-refresh").addEventListener("click",loadPortfolioReport);
+byId("report-days").addEventListener("change",() => {
+  reportData=null;
+  byId("report-download").disabled=true;
+  if (byId("report-disclosure").open) loadPortfolioReport();
+});
+byId("report-download").addEventListener("click",downloadPortfolioReportCsv);
+const reportNav=optionalById("nav-report");
+if (reportNav) reportNav.addEventListener("click",() => {
+  byId("report-disclosure").open=true;
+  loadPortfolioReport();
+});
+byId("report-disclosure").addEventListener("toggle",() => {
+  if (byId("report-disclosure").open)loadPortfolioReport();
+});
 const draftNavigation = optionalById("nav-drafts");
 if (draftNavigation) draftNavigation.addEventListener("click", () => {
   byId("drafts-disclosure").open = true;
@@ -3427,7 +5502,73 @@ byId("draft-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") { event.preventDefault(); searchDrafts(); }
 });
 byId("draft-prev").addEventListener("click", previousDraftsPage);
+byId("item-template-refresh").addEventListener("click",loadItemTemplates);
+byId("item-template-select").addEventListener("change",()=>{
+  const item=selectedItemTemplate();
+  byId("item-template-name").value=item?.name||"";
+});
+byId("item-template-save").addEventListener("click",()=>itemTemplateCommand("save"));
+byId("item-template-delete").addEventListener("click",()=>itemTemplateCommand("delete"));
+byId("item-template-from").addEventListener("click",()=>itemTemplateCommand("from_template"));
+byId("item-template-copy").addEventListener("click",()=>itemTemplateCommand("duplicate"));
+byId("item-templates-disclosure").addEventListener("toggle",()=>{
+  if (byId("item-templates-disclosure").open)loadItemTemplates();
+});
+byId("draft-photo-folder").addEventListener("change", loadDraftPhotoFolder);
+byId("draft-photo-clear").addEventListener("click", clearDraftPhotoFolder);
+byId("create-media").addEventListener("change", onManualCreateImageSelection);
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("pagehide", clearDraftPhotoPreview);
+}
+
+byId("sale-ad-select").addEventListener("change",loadSelectedSale);
+byId("sale-save").addEventListener("click",saveSaleState);
+byId("sale-next").addEventListener("click",() => {
+  if (!salesNextAfter) return;
+  salesCursors=[...salesCursors.slice(0,salesPage+1),salesNextAfter];
+  salesPage++;
+  loadSales();
+});
+byId("sale-prev").addEventListener("click",() => {
+  if (salesPage===0)return;
+  salesPage--;
+  salesCursors=salesCursors.slice(0,salesPage+1);
+  loadSales();
+});
+const saleNav=optionalById("nav-sales");
+if (saleNav) saleNav.addEventListener("click",() => {
+  byId("sales-disclosure").open=true;
+  loadSales();
+});
+byId("sales-disclosure").addEventListener("toggle",() => {
+  if (byId("sales-disclosure").open)loadSales();
+});
 byId("draft-next").addEventListener("click", nextDraftsPage);
+const followupPaneControl = optionalById("followup-pane");
+if (followupPaneControl) followupPaneControl.addEventListener("toggle", () => {
+  if (followupPaneControl.open) {
+    renderFollowupChoices();
+    void loadFollowups(!followupLoaded);
+    if (byId("followup-ad-select").value) void loadSelectedFollowup();
+  }
+});
+const followupAdControl = optionalById("followup-ad-select");
+if (followupAdControl) followupAdControl.addEventListener("change", loadSelectedFollowup);
+const followupDateControl = optionalById("followup-date");
+if (followupDateControl) followupDateControl.addEventListener("change", renderFollowupControls);
+const followupSaveControl = optionalById("followup-save");
+if (followupSaveControl) followupSaveControl.addEventListener("click", () => mutateSelectedFollowup("save"));
+const followupDeleteControl = optionalById("followup-delete");
+if (followupDeleteControl) followupDeleteControl.addEventListener("click", () => mutateSelectedFollowup("delete"));
+const followupRefreshControl = optionalById("followup-refresh");
+if (followupRefreshControl) followupRefreshControl.addEventListener("click", () => {
+  void loadFollowups(true);
+  if (byId("followup-ad-select").value) void loadSelectedFollowup();
+});
+const followupPrevControl = optionalById("followup-prev");
+if (followupPrevControl) followupPrevControl.addEventListener("click", () => changeFollowupPage(-1));
+const followupNextControl = optionalById("followup-next");
+if (followupNextControl) followupNextControl.addEventListener("click", () => changeFollowupPage(1));
 byId("catalog-find").addEventListener("click", searchCatalog);
 byId("catalog-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -3440,6 +5581,10 @@ byId("catalog-prev").addEventListener("click", previousCatalogPage);
 byId("catalog-next").addEventListener("click", nextCatalogPage);
 byId("catalog-clear").addEventListener("click", clearCatalogSelection);
 byId("catalog-export").addEventListener("click", exportCatalogSelection);
+byId("catalog-bulk-pause").addEventListener("click", () => runCatalogBulkAction("pause"));
+byId("catalog-bulk-activate").addEventListener("click", () => runCatalogBulkAction("activate"));
+byId("catalog-bulk-delete").addEventListener("click", () => runCatalogBulkAction("delete"));
+byId("catalog-bulk-stop").addEventListener("click", stopCatalogBulkAction);
 byId("sync-now").addEventListener("click", syncNow);
 byId("metric-select").addEventListener("change", loadAnalytics);
 byId("dimension-select").addEventListener("change", loadAnalytics);
@@ -3463,6 +5608,36 @@ byId("manage-activate").addEventListener(
   () => runAdAction("activate", "POST", "/activate"),
 );
 byId("manage-delete").addEventListener("click", deleteManagedAd);
+byId("buyer-inquiries-load").addEventListener("click", () => loadInquiries(true));
+byId("buyer-conversations-load").addEventListener("click", () => loadConversations(true));
+byId("buyer-conversations-filter").addEventListener("change", () => loadConversations(true));
+byId("buyer-conversations-prev").addEventListener("click", () => {
+  if (conversationBusy || conversationPageIndex===0) return;
+  conversationPageIndex--; void loadConversations();
+});
+byId("buyer-conversations-next").addEventListener("click", () => {
+  if (conversationBusy || conversationPageIndex+1>=conversationPageCursors.length) return;
+  conversationPageIndex++; void loadConversations();
+});
+byId("buyer-inquiries-prev").addEventListener("click", () => {
+  if (inquiryBusy || inquiryIndex===0) return;
+  inquiryIndex--;
+  loadInquiries();
+});
+byId("buyer-inquiries-next").addEventListener("click", () => {
+  if (inquiryBusy || inquiryIndex+1>=inquiryCursors.length) return;
+  inquiryIndex++;
+  loadInquiries();
+});
+byId("buyer-inquiry").addEventListener("input", onBuyerInputChange);
+byId("buyer-facts").addEventListener("input", onBuyerInputChange);
+byId("buyer-reply").addEventListener("input", buyerReplyAvailability);
+byId("buyer-manual").addEventListener("click", manualBuyerReply);
+byId("buyer-generate").addEventListener("click", requestBuyerReply);
+byId("buyer-copy").addEventListener("click", copyBuyerReply);
+byId("nav-buyer").addEventListener("click", () => {
+  byId("buyer-disclosure").open = true;
+});
 byId("generation-prompt").addEventListener("input", onGenerationPromptChange);
 byId("generation-text").addEventListener("click", () => requestGeneration("text"));
 byId("generation-image").addEventListener("click", () => requestGeneration("image"));
@@ -4352,6 +6527,11 @@ def _handler_factory(
                     {
                         "write_ui_available": write_proxy is not None,
                         **(
+                            {"portfolio_jobs_available": True}
+                            if type(store) is SnapshotStore and write_proxy is not None
+                            else {}
+                        ),
+                        **(
                             {"generation_ui_available": True}
                             if generation_access is not None else {}
                         ),
@@ -4415,6 +6595,28 @@ def _handler_factory(
                 payload["sync_status"] = store.sync_status()
                 payload["sync_recovery"] = store.sync_recovery_status()
                 self._send_json(200, payload)
+                return
+            if path == "/api/catalog/ad":
+                # Indexed lookup of one owned local observation, never a
+                # platform fetch, bulk scan, writer or ownership capability.
+                if len(target.query) > 128:
+                    self._send_json(400, {"error": "invalid_catalog_ad"})
+                    return
+                try:
+                    filters = parse_qs(
+                        target.query, keep_blank_values=True, max_num_fields=2,
+                        encoding="utf-8", errors="strict",
+                    )
+                    if set(filters) != {"id"} or len(filters["id"]) != 1:
+                        raise ValueError("invalid fields")
+                    ad = query.catalog_ad(filters["id"][0])
+                except (UnicodeError, ValueError):
+                    self._send_json(400, {"error": "invalid_catalog_ad"})
+                    return
+                if ad is None:
+                    self._send_json(404, {"error": "unknown_catalog_ad"})
+                else:
+                    self._send_json(200, {"ad": ad})
                 return
             if path == "/api/catalog/ads":
                 # Observation-only, strict URL schema; never authorize a Write.
@@ -4510,6 +6712,212 @@ def _handler_factory(
                     return
                 except (sqlite3.Error,OSError,TypeError):
                     self._send_json(503, {"error": "database_unavailable"})
+                    return
+                self._send_json(200,answer)
+                return
+            if path == "/api/portfolio/item-templates":
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error":"not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error":"write_session_required"})
+                    return
+                if target.query or target.fragment or target.path!=self.path:
+                    self._send_json(400, {"error":"invalid_item_template_query"})
+                    return
+                try:
+                    response=list_item_templates(store)
+                except (sqlite3.Error,OSError,ValueError,TypeError):
+                    self._send_json(503, {"error":"local_item_storage_unavailable"})
+                    return
+                self._send_json(200,response)
+                return
+            if path in ("/api/portfolio/templates", "/api/portfolio/attention"):
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                if target.query or target.fragment or target.path!=self.path:
+                    self._send_json(400, {"error": "invalid_local_work_query"})
+                    return
+                try:
+                    result=(list_templates(store) if path.endswith("/templates")
+                            else attention_counts(store))
+                except (sqlite3.Error,OSError):
+                    self._send_json(503, {"error":"local_work_storage_unavailable"})
+                    return
+                self._send_json(200,result)
+                return
+            if path == "/api/portfolio/conversations":
+                # EML-Metadaten, kein Plattformpostfach und kein Versandstatus.
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error":"not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error":"write_session_required"})
+                    return
+                try:
+                    if len(target.query)>700 or target.fragment:
+                        raise ValueError("oversized conversation query")
+                    options=parse_qs(target.query,keep_blank_values=True,
+                        max_num_fields=4,encoding="utf-8",errors="strict")
+                    if (set(options)-{"after","limit","watermark","status"}
+                            or any(len(value)!=1 for value in options.values())):
+                        raise ValueError("invalid conversation query")
+                    count=options.get("limit",["25"])[0]
+                    bound=options.get("watermark",[None])[0]
+                    if (not count.isascii() or not count.isdecimal() or len(count)>2
+                        or (bound is not None and (not bound.isascii()
+                            or not bound.isdecimal() or len(bound)>19))):
+                        raise ValueError("invalid conversation numbers")
+                    answer=conversations_page(store,
+                        after=options.get("after",[""])[0],limit=int(count),
+                        watermark=int(bound) if bound is not None else None,
+                        status=options.get("status",["all"])[0])
+                except (ValueError,UnicodeError,ConversationError,OverflowError):
+                    self._send_json(400,{"error":"invalid_conversations_query"})
+                    return
+                except (sqlite3.Error,OSError):
+                    self._send_json(503,{"error":"conversations_storage_unavailable"})
+                    return
+                self._send_json(200,answer)
+                return
+            if path == "/api/portfolio/inquiries":
+                # Imported EML metadata require the authenticated local session.
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                try:
+                    if len(target.query) > 256:
+                        raise ValueError("oversized EML query")
+                    options = parse_qs(
+                        target.query, keep_blank_values=True, max_num_fields=4,
+                        encoding="utf-8", errors="strict",
+                    )
+                    if (set(options)-{"after","limit","watermark"} or
+                            any(len(value)!=1 for value in options.values())):
+                        raise ValueError("unrecognized EML query")
+                    count=options.get("limit",["25"])[0]
+                    watermark=options.get("watermark",[None])[0]
+                    if (not count.isascii() or not count.isdecimal()
+                            or len(count)>2 or
+                            (watermark is not None and
+                             (not watermark.isascii() or
+                              not watermark.isdecimal() or len(watermark)>19))):
+                        raise ValueError("invalid EML query integer")
+                    result=query.imported_inquiries_page(
+                        after=options.get("after",[""])[0],
+                        limit=int(count),
+                        watermark=int(watermark) if watermark is not None else None,
+                    )
+                except (ValueError,UnicodeError,OverflowError):
+                    self._send_json(400,{"error":"invalid_inquiries_query"})
+                    return
+                self._send_json(200,result)
+                return
+            if path in ("/api/portfolio/followups", "/api/portfolio/followups/detail"):
+                # Human-entered follow-up dates are NOT platform expiry observations.
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error":"not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error":"write_session_required"})
+                    return
+                try:
+                    if len(target.query)>256:
+                        raise ValueError("oversized followup query")
+                    options=parse_qs(target.query,keep_blank_values=True,
+                        max_num_fields=3,encoding="utf-8",errors="strict")
+                    if (any(len(value)!=1 for value in options.values())
+                            or target.fragment):
+                        raise ValueError("invalid followup query")
+                    if path.endswith("/detail"):
+                        if set(options)!={"ad_id"}:
+                            raise ValueError("ad_id required")
+                        result=followup_detail(store,options["ad_id"][0])
+                    else:
+                        if set(options)-{"after","limit"}:
+                            raise ValueError("invalid followup fields")
+                        count=options.get("limit",["50"])[0]
+                        if not (count.isascii() and count.isdecimal() and len(count)<=2):
+                            raise ValueError("invalid followup limit")
+                        result=followups_page(store,
+                            after=options.get("after",[""])[0],limit=int(count))
+                except (ValueError,UnicodeError,FollowupError,OverflowError):
+                    self._send_json(400,{"error":"invalid_followup_query"})
+                    return
+                except (sqlite3.Error,OSError,TypeError):
+                    self._send_json(503,{"error":"followup_storage_unavailable"})
+                    return
+                self._send_json(200,result)
+                return
+            if path == "/api/portfolio/report":
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                try:
+                    if len(target.query)>24:
+                        raise ValueError("report query too large")
+                    options=parse_qs(target.query,keep_blank_values=True,
+                                    max_num_fields=2,encoding="utf-8",errors="strict")
+                    if set(options)!={"days"} or len(options["days"])!=1 or (
+                        options["days"][0] not in {"7","30","90"}
+                    ):
+                        raise ValueError("invalid report window")
+                    result=portfolio_report(store,days=int(options["days"][0]))
+                except (ValueError,UnicodeError,PortfolioReportError):
+                    self._send_json(400, {"error": "invalid_portfolio_report_query"})
+                    return
+                except (sqlite3.Error,OSError):
+                    self._send_json(503, {"error": "portfolio_report_unavailable"})
+                    return
+                self._send_json(200,result)
+                return
+            if path in ("/api/portfolio/sales", "/api/portfolio/sales/totals",
+                        "/api/portfolio/sales/detail"):
+                # Account-evidenced manual ledger, inaccessible to unauthenticated
+                # read-only frontends or cross-origin pages.
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "write_session_required"})
+                    return
+                if len(target.query)>256:
+                    self._send_json(400, {"error":"invalid_sales_query"})
+                    return
+                try:
+                    options=parse_qs(target.query,keep_blank_values=True,
+                                    max_num_fields=3,encoding="utf-8",errors="strict")
+                    if path.endswith("/totals"):
+                        if options:raise ValueError("unknown fields")
+                        answer=sale_totals(store)
+                    elif path.endswith("/detail"):
+                        if set(options)!={"ad_id"} or len(options["ad_id"])!=1:
+                            raise ValueError("invalid detail params")
+                        answer={"sale":sale_detail(store,options["ad_id"][0])}
+                    else:
+                        if (set(options)-{"after","limit"} or
+                                any(len(v)!=1 for v in options.values())):
+                            raise ValueError("invalid fields")
+                        count=options.get("limit",["50"])[0]
+                        if len(count)>2 or not count.isdecimal():
+                            raise ValueError("invalid page length")
+                        answer=sales_page(store,limit=int(count),
+                            after=options.get("after",[""])[0])
+                except (ValueError,UnicodeError,SaleError):
+                    self._send_json(400, {"error":"invalid_sales_query"})
+                    return
+                except (sqlite3.Error,OSError):
+                    self._send_json(503, {"error":"sales_storage_unavailable"})
                     return
                 self._send_json(200,answer)
                 return
@@ -4796,7 +7204,7 @@ def _handler_factory(
                 if (
                     not isinstance(request, dict)
                     or set(request) != {"mode", "prompt", "acknowledge_provider_cost"}
-                    or request["mode"] not in ("text", "image")
+                    or request["mode"] not in ("text", "image", "reply")
                     or request["acknowledge_provider_cost"] is not True
                 ):
                     raise ValueError("invalid_request")
@@ -4825,6 +7233,11 @@ def _handler_factory(
                 return
             if request["mode"] == "text":
                 if not isinstance(result, AdvertisementDraft):
+                    self._send_json(502, {"error": "generation_invalid_output"})
+                    return
+                self._send_json(200, result.as_dict())
+            elif request["mode"] == "reply":
+                if not isinstance(result, BuyerReplyDraft):
                     self._send_json(502, {"error": "generation_invalid_output"})
                     return
                 self._send_json(200, result.as_dict())
@@ -4976,7 +7389,211 @@ def _handler_factory(
                 return
             self._send_json(200,result)
 
+        def _portfolio_conversation_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/conversations/review"
+                    or target.query or target.fragment or target.path!=self.path
+                    or type(store) is not SnapshotStore or write_proxy is None):
+                self._send_json(404,{"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403,{"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400,{"error":"local_review_key_required_in_body"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                answer=update_conversation_review(store,payload)
+            except ConversationError as exc:
+                conflict=str(exc) in (
+                    "review state changed; reload",
+                    "request key reused for different action")
+                self._send_json(409 if conflict else 400,
+                    {"error":"conversation_review_conflict" if conflict
+                        else "invalid_conversation_review"})
+                return
+            except (ValueError,UnicodeError,TypeError,RecursionError):
+                self._send_json(400,{"error":"invalid_conversation_review"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503,{"error":"conversation_storage_unavailable"})
+                return
+            self._send_json(200,answer)
+
+        def _portfolio_followup_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/followups/mutate"
+                    or target.query or target.fragment
+                    or target.path!=self.path or type(store) is not SnapshotStore
+                    or write_proxy is None):
+                self._send_json(404,{"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403,{"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400,{"error":"followup_key_required_in_body"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                result=mutate_followup(store,payload)
+            except FollowupError as exc:
+                conflict=str(exc) in ("followup revision changed; reload",
+                                     "request key conflict")
+                self._send_json(409 if conflict else 400,{"error":
+                    "followup_revision_conflict" if conflict
+                    else "invalid_followup"})
+                return
+            except (ValueError,UnicodeError,TypeError,RecursionError):
+                self._send_json(400,{"error":"invalid_followup"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503,{"error":"followup_storage_unavailable"})
+                return
+            self._send_json(200,result)
+
+        def _portfolio_sale_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/sales/update"
+                    or target.query or target.fragment
+                    or target.path!=self.path or type(store) is not SnapshotStore
+                    or write_proxy is None):
+                self._send_json(404, {"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error":"ledger_key_required_in_body"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                reply=update_manual_sale(store,payload)
+            except SaleError as exc:
+                conflict=str(exc) in ("sale entry changed; reload","request key conflict")
+                self._send_json(409 if conflict else 400,{"error":
+                    "sales_revision_conflict" if conflict else "invalid_sale_entry"})
+                return
+            except (ValueError,UnicodeError,TypeError):
+                self._send_json(400, {"error":"invalid_sale_entry"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503, {"error":"sales_storage_unavailable"})
+                return
+            self._send_json(200,reply)
+
+        def _portfolio_template_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/templates/mutate"
+                    or target.query or target.fragment or target.path!=self.path
+                    or type(store) is not SnapshotStore or write_proxy is None):
+                self._send_json(404, {"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error":"template_key_required_in_json"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                answer=mutate_template(store,payload)
+            except WorkTemplateError as err:
+                conflict=str(err) in (
+                    "request key conflict","duplicate template name",
+                    "template revision changed; reload",
+                )
+                self._send_json(409 if conflict else 400,{"error":
+                    "template_conflict" if conflict else "invalid_template"})
+                return
+            except (ValueError,UnicodeError,TypeError):
+                self._send_json(400, {"error":"invalid_template"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503, {"error":"local_work_storage_unavailable"})
+                return
+            self._send_json(200,answer)
+
+        def _portfolio_item_template_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/item-templates/mutate"
+                    or target.query or target.fragment or target.path!=self.path
+                    or type(store) is not SnapshotStore or write_proxy is None):
+                self._send_json(404, {"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error":"item_key_required_in_body"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                action=payload.get("action")
+                shapes={
+                    "save":{"action","source_sku","name","template_id",
+                            "expected_revision","request_key"},
+                    "delete":{"action","template_id","expected_revision","request_key"},
+                    "from_template":{"action","template_id","new_sku","request_key"},
+                    "duplicate":{"action","source_sku","new_sku","request_key"},
+                }
+                if type(action) is not str or set(payload)!=shapes.get(action):
+                    raise ValueError("invalid item template fields")
+                if action=="save":
+                    answer=save_item_template(store,
+                        source_sku=payload["source_sku"],name=payload["name"],
+                        template_id=payload["template_id"],expected_revision=payload["expected_revision"],
+                        request_key=payload["request_key"])
+                elif action=="delete":
+                    answer=delete_item_template(store,
+                        template_id=payload["template_id"],expected_revision=payload["expected_revision"],
+                        request_key=payload["request_key"])
+                elif action=="from_template":
+                    answer=draft_from_item_template(store,
+                        template_id=payload["template_id"],new_sku=payload["new_sku"],
+                        request_key=payload["request_key"])
+                else:
+                    answer=duplicate_local_draft(store,
+                        source_sku=payload["source_sku"],new_sku=payload["new_sku"],
+                        request_key=payload["request_key"])
+            except ItemTemplateError as error:
+                detail=str(error).casefold()
+                conflict=any(word in detail for word in (
+                    "existiert","bereits vergeben","geändert","geaendert",
+                    "anfrage-schluessel","anfrage-schlüssel"))
+                self._send_json(409 if conflict else 400,
+                    {"error":"item_template_conflict" if conflict else "invalid_item_template"})
+                return
+            except (ValueError,UnicodeError,TypeError,KeyError,RecursionError):
+                self._send_json(400, {"error":"invalid_item_template"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503, {"error":"local_item_storage_unavailable"})
+                return
+            self._send_json(200,answer)
+
         def do_POST(self) -> None:
+            if urlsplit(self.path).path=="/api/portfolio/conversations/review":
+                self._portfolio_conversation_command()
+                return
+            if urlsplit(self.path).path=="/api/portfolio/followups/mutate":
+                self._portfolio_followup_command()
+                return
+            if urlsplit(self.path).path=="/api/portfolio/item-templates/mutate":
+                self._portfolio_item_template_command()
+                return
+            if urlsplit(self.path).path=="/api/portfolio/templates/mutate":
+                self._portfolio_template_command()
+                return
+            if urlsplit(self.path).path=="/api/portfolio/sales/update":
+                self._portfolio_sale_command()
+                return
             if urlsplit(self.path).path.startswith("/api/portfolio/jobs/"):
                 self._portfolio_job_command()
                 return

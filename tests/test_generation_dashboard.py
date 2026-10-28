@@ -19,7 +19,7 @@ from unittest.mock import patch
 from mark_api.dashboard import (
     DashboardGenerationAccess, create_server, main as dashboard_main,
 )
-from mark_api.generation import AdvertisementDraft, GenerationError
+from mark_api.generation import AdvertisementDraft, BuyerReplyDraft, GenerationError
 from mark_api.storage import SnapshotStore
 
 
@@ -39,6 +39,7 @@ def valid_png():
 class FakeGenerator:
     def __init__(self):
         self.text_calls = []
+        self.reply_calls = []
         self.image_calls = []
         self.error = None
 
@@ -47,6 +48,12 @@ class FakeGenerator:
         if self.error:
             raise self.error
         return AdvertisementDraft(title="Fahrrad 28 Zoll", description="Ein eigener Artikel")
+
+    def generate_reply(self, prompt):
+        self.reply_calls.append(prompt)
+        if self.error:
+            raise self.error
+        return BuyerReplyDraft(reply="Guten Tag! Ich prüfe die Details gern.")
 
     def generate_image(self, prompt):
         self.image_calls.append(prompt)
@@ -292,6 +299,41 @@ class GenerationHttpTests(unittest.TestCase):
         self.assertEqual(self.generator.text_calls, ["Ein Fahrrad"])
         self.assertEqual(self.generator.image_calls, ["Bild"])
 
+    def test_reply_generation_consent_shared_quota_and_no_send(self):
+        access = DashboardGenerationAccess(
+            ui_token="s" * 32,
+            generator_factory=lambda: self.generator,
+            max_requests=1,
+        )
+        with server_context(access) as (port, _db):
+            self.assertEqual(
+                http_call(port, "POST", "/api/dashboard/generate",
+                          body(mode="reply", consent=False), headers(port))[0],
+                400,
+            )
+            self.assertEqual(self.generator.reply_calls, [])
+            status, response_headers, data = http_call(
+                port, "POST", "/api/dashboard/generate",
+                body(mode="reply", prompt="Fahrrad: ist es noch da?"),
+                headers(port),
+            )
+            self.assertEqual(status, 200)
+            payload = json.loads(data)
+            self.assertEqual(payload["reply"], "Guten Tag! Ich prüfe die Details gern.")
+            self.assertEqual(payload["status"], "draft")
+            self.assertIs(payload["sent"], False)
+            self.assertEqual(response_headers["Cache-Control"], "no-store")
+            self.assertEqual(http_call(
+                port, "POST", "/api/write/ads/123/pause", b"", headers(port),
+            )[0], 405)
+            self.assertEqual(http_call(
+                port, "POST", "/api/dashboard/generate",
+                body(mode="reply"), headers(port),
+            )[0], 429)
+        self.assertEqual(self.generator.reply_calls, ["Fahrrad: ist es noch da?"])
+        self.assertEqual(self.generator.text_calls, [])
+        self.assertEqual(self.generator.image_calls, [])
+
     def test_upstream_failure_never_retries_or_discloses_secrets(self):
         self.generator.error = RuntimeError("provider key and sensitive prompt")
         access = DashboardGenerationAccess(
@@ -475,6 +517,7 @@ globalThis.byId = (id) => {
 globalThis.generationUiAvailable = true;
 globalThis.generationToken = "s".repeat(32);
 globalThis.generationBusy = false;
+globalThis.buyerBusy = false;
 globalThis.generationTextDraft = null;
 globalThis.generationImageBlob = null;
 globalThis.generationImageSourcePrompt = null;

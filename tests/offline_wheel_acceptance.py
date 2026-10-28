@@ -911,7 +911,7 @@ class InstalledOfflineWheelAcceptance(unittest.TestCase):
                         with res:
                             return res.status, json.loads(res.read()), dict(res.headers)
                     assert call("/api/dashboard/config")[:2] == (
-                        200, {"write_ui_available": True},
+                        200, {"write_ui_available": True, "portfolio_jobs_available": True},
                     )
                     status, _, _ = call(
                         "/api/write/ads/314/pause", method="POST",

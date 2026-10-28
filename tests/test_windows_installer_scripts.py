@@ -13,8 +13,8 @@ SCRIPTS = ROOT / "scripts"
 class WindowsInstallerContractTests(unittest.TestCase):
     def test_installer_verifies_pinned_wheel_before_network_or_setup(self):
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
-        self.assertIn("kleinanzeiger-0.1.7-py3-none-any.whl", script)
-        self.assertIn(r"kleinanzeiger-0\.1\.7-py3-none-any\.whl", script)
+        self.assertIn("kleinanzeiger-0.1.8-py3-none-any.whl", script)
+        self.assertIn(r"kleinanzeiger-0\.1\.8-py3-none-any\.whl", script)
         self.assertNotIn(r"kleinanzeiger-0\.1\.3-py3-none-any\.whl", script)
         self.assertIn("SHA256SUMS.txt", script)
         self.assertLess(script.index("Get-FileHash"), script.index("Invoke-WebRequest"))
@@ -56,8 +56,8 @@ class WindowsInstallerContractTests(unittest.TestCase):
     def test_release_copy_manifest_and_version_are_consistent(self):
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.1.7"', metadata)
-        self.assertIn("Kleinanzeiger-v0.1.7-Windows.zip", workflow)
+        self.assertIn('version = "0.1.8"', metadata)
+        self.assertIn("Kleinanzeiger-v0.1.8-Windows.zip", workflow)
         for filename in (
             "Kleinanzeiger.cmd",
             "windows-install.ps1", "windows-center.ps1", "windows-worker.ps1", "windows-start.ps1", "windows-chrome.ps1",

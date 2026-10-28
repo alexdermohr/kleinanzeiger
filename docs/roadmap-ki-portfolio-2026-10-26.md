@@ -166,7 +166,7 @@ sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
   geschützter Merge noch blockiert. v0.1.7 nicht als veröffentlicht
   kennzeichnen.
 - **P2:** Auf dem isolierten Entwicklungsbranch
-  feat/portfolio-ai-batch-source-20261026: lokale durable 5000er-Jobs,
+  feat/portfolio-ai-batch-20261026: lokale durable 5000er-Jobs,
   idempotente Auswahl, Budgetreserven, UNKNOWN-Quarantäne,
   50er-Vorschauen, Freigaben und atomare lokale Anwendung.
   Die zentrale Windows-Browseroberfläche bietet zusätzlich einzeln
@@ -179,3 +179,23 @@ sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
   echte autorisierte Plattform-Massenwrites, P3, P4, P5 sowie
   Kunden-PC-Endabnahme. Siehe docs/portfolio-ki-auftraege.md.
   Der Vaterrechner fotolabor bleibt unangetastet.
+
+- **P3 in Entwicklung:** Lokale manuelle Verkauf-/Reserviert-Vermerke,
+  Lagerort, Erlös, bekannte Kosten und Teilgewinn sowie authentifizierte
+  50er-Seiten und exact-ID-Revisionsabfragen implementiert. Diese lokalen
+  Angaben sind keine bestätigten Plattformverkäufe. Nachrichtenintegration
+  und native Windows-Abnahme bleiben offen. Siehe docs/portfolio-verkaeufe.md.
+
+- **P4 Teilimplementation:** Read-only 7/30/90-Tage-Controlling
+  mit EML-Belegzählung, aktuellem manuellem Verkaufsstand und
+  separat ausgewiesenen USD-KI-Schätzungen sowie CSV-Export.
+  10.000 synthetische Anzeigen ohne Vollbestands-JSON getestet.
+  Keine behauptete Kausalität, kein automatischer Preis-/Titeltest;
+  diese folgen erst nach zusätzlichen unabhängigen Datenquellen.
+  Siehe docs/portfolio-controlling.md; noch kein Release.
+
+- **P5 Teilimplementation:** Bis zu 100 lokale KI-Arbeitsvorlagen,
+  Name/Anweisung mit CAS-Version und Idempotenz, sowie nur bei Bedarf
+  sichtbare lokale Hinweise zu Prüfaufträgen, UNKNOWN und fehlenden
+  Verkaufskosten. Kein Hintergrundjob, kein automatischer Provideraufruf
+  oder Plattformwrite. Siehe docs/portfolio-vorlagen.md; noch kein Release.

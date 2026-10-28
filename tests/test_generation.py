@@ -101,6 +101,46 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(fmt["schema"]["required"], ["title", "description"])
         self.assertFalse(fmt["schema"]["additionalProperties"])
 
+    def test_buyer_reply_is_strict_unpublished_draft(self):
+        self.responses.output_text = json.dumps({
+            "reply": "Guten Tag, vielen Dank für Ihre Anfrage. Welche Details interessieren Sie?",
+        })
+        answer = self.generator.generate_reply("Anzeige 123: Fahrrad. Käufer fragt nach Versand.")
+        self.assertIn("vielen Dank", answer.reply)
+        self.assertEqual(answer.as_dict()["status"], "draft")
+        self.assertIs(answer.as_dict()["sent"], False)
+        self.assertEqual(len(self.responses.calls), 1)
+        request = self.responses.calls[0]
+        self.assertEqual(request["model"], "gpt-5.6-terra")
+        self.assertIn("Erfinde", request["instructions"])
+        self.assertIn("unzuverlässige Daten", request["instructions"])
+        self.assertEqual(request["text"]["format"]["schema"]["required"], ["reply"])
+        self.assertFalse(request["text"]["format"]["schema"]["additionalProperties"])
+        self.assertEqual(len(self.images.calls), 0)
+
+    def test_buyer_reply_rejects_bad_input_and_provider_claims(self):
+        for bad in ("", " ", "a" * 4001, "foo\x00", "\ud800"):
+            with self.subTest(input=repr(bad)[:40]), self.assertRaises(GenerationError):
+                self.generator.generate_reply(bad)
+        self.assertEqual(len(self.responses.calls), 0)
+        for output in (
+            "not JSON", "[]", "{}", '{"reply": 12}',
+            '{"reply": ""}', '{"reply": "good", "sent": true}',
+            '{"reply": "a"} trailing', json.dumps({"reply": "x" * 1501}),
+            json.dumps({"reply": "bad\ud800"}),
+            '{"reply": "bad\\u0000"}',
+        ):
+            with self.subTest(output=output[:40]):
+                self.responses.output_text = output
+                with self.assertRaises(GenerationError):
+                    self.generator.generate_reply("Ein Fahrrad")
+        self.assertEqual(len(self.responses.calls), 10)
+        self.responses.error = RuntimeError("secret provider key")
+        with self.assertRaisesRegex(GenerationError, "reply generation request failed") as error:
+            self.generator.generate_reply("Ein Fahrrad")
+        self.assertNotIn("secret", str(error.exception))
+        self.assertEqual(len(self.responses.calls), 11)
+
     def test_invalid_text_prompt_does_not_contact_provider(self):
         for prompt in ("", "   ", "x" * 4001, "ok\x00bad", "lone\ud800"):
             with self.subTest(prompt=prompt[:12]):

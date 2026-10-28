@@ -21,6 +21,10 @@ from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.query import MarkQueryService
 from mark_api.storage import SnapshotStore
 
+# This module is explicitly run by native Windows installed CI (3.12 and 3.13).
+# Import the synthetic CDP 10k suite for that existing native test entrypoint.
+from test_inventory_scale_10000 import InventoryScaleTests
+
 
 T0 = datetime(2026, 10, 26, 9, tzinfo=timezone.utc)
 
@@ -158,6 +162,38 @@ class PortfolioCatalogTests(unittest.TestCase):
             self.get("/api/catalog/ads?q=" + quote("😀" * 120))[0], 200,
         )
 
+    def test_exact_ad_read_is_indexed_strict_and_observation_only(self) -> None:
+        self.add("88888", "Erster Titel", views=6)
+        self.add("88889", "Andere Anzeige", state=LifecycleState.PAUSED)
+        self.add("88888", "Aktueller Titel", views=None,
+                 observed_at=T0 + timedelta(minutes=2))
+        result = self.query.catalog_ad("88888")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["title"], "Aktueller Titel")
+        self.assertEqual(result["views"], 6)
+        self.assertEqual(result["lifecycle_state"], "active")
+        self.assertEqual(result["ad_id"], "88888")
+        self.assertIsNone(self.query.catalog_ad("99999"))
+        for bad in ("", " 88888", "88888x", "a" * 33, "\n", "８８８８８"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.query.catalog_ad(bad)
+
+        self.start_server()
+        status, payload = self.get("/api/catalog/ad?id=88888")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["ad"], result)
+        self.assertEqual(self.get("/api/catalog/ad?id=99999"),
+                         (404, {"error": "unknown_catalog_ad"}))
+        for bad in ("", "?id=", "?id=a", "?id=88888&id=88889",
+                    "?id=88888&evil=1", "?id=" + "1" * 33,
+                    "?id=%FF", "?id=%0A", "?q=88888"):
+            with self.subTest(bad=bad):
+                self.assertEqual(
+                    self.get("/api/catalog/ad" + bad),
+                    (400, {"error": "invalid_catalog_ad"}),
+                )
+
     def test_corrupt_native_key_fails_closed(self) -> None:
         self.add("10001", "Vase")
         with closing(sqlite3.connect(self.db)) as conn, conn:
@@ -208,6 +244,13 @@ class PortfolioCatalogTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(summary["tracked_ads"], 10_000)
         self.assertEqual(summary["current_ads"], 10_000)
+        # Exact-ID preflight must locate an arbitrary tail record without
+        # loading the first 100 search matches or 10,000 JSON objects.
+        status, one = self.get("/api/catalog/ad?id=1000009999")
+        self.assertEqual(status, 200)
+        self.assertEqual(one["ad"]["ad_id"], "1000009999")
+        self.assertEqual(one["ad"]["title"], "Artikel 9999")
+        self.assertLess(len(json.dumps(one)), 2_000)
 
 
 if __name__ == "__main__":
