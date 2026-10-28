@@ -1633,7 +1633,8 @@ function catalogCheckbox(ad) {
       catalogSelectedIds.add(ad.ad_id);
       catalogSelectedAds.set(ad.ad_id, Object.freeze({
         ad_id: ad.ad_id,
-        title: typeof ad.title === "string" ? ad.title : "Ohne Titel",
+        // Preserve null as a distinct observation; display fallback only in the preview.
+        title: typeof ad.title === "string" ? ad.title : null,
         present: ad.present === true,
         lifecycle_state: ad.lifecycle_state,
         observed_at: ad.observed_at,
@@ -1838,7 +1839,7 @@ async function runCatalogBulkAction(action) {
   const lines = ads.map((ad) => {
     // Platform titles are untrusted display data. Control/bidi characters must
     // never create deceptive extra ID rows in an irreversible action preview.
-    const safeTitle = ad.title.replace(/[\\u0000-\\u001f\\u007f-\\u009f\\u2028-\\u202e\\u2066-\\u2069]/g, " ")
+    const safeTitle = (ad.title ?? "Ohne Titel").replace(/[\\u0000-\\u001f\\u007f-\\u009f\\u2028-\\u202e\\u2066-\\u2069]/g, " ")
       .trim().slice(0, 70) || "Ohne Titel";
     return ad.ad_id + " · " + safeTitle + " ("
       + (destructive ? (ad.lifecycle_state === "active" ? "aktiv" : "pausiert") : from)
