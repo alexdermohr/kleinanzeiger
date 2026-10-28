@@ -317,7 +317,7 @@ class PortfolioJobsHttpTests(unittest.TestCase):
             result=subprocess.run(
                 [shutil.which("node"), "-e",
                  "new(require('node:vm').Script)(require('node:fs').readFileSync(0,'utf8'))"],
-                input=_DASHBOARD_JS, text=True, capture_output=True, timeout=15,
+                input=_DASHBOARD_JS, text=True, encoding="utf-8", capture_output=True, timeout=15,
             )
             self.assertEqual(result.returncode,0,result.stderr)
 

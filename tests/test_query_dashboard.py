@@ -2686,7 +2686,7 @@ renderSyncStatus(recentSuccess, {
 assert.match(status.textContent, /konnten nicht geprüft werden/);
 """
         completed = subprocess.run(
-            ["node"], input=harness, text=True,
+            ["node"], input=harness, text=True, encoding="utf-8",
             capture_output=True, check=False,
         )
         self.assertEqual(
@@ -2804,7 +2804,7 @@ assert.equal(groupChart.children[0].children[2].textContent, "12.00 (n=1)");
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -2863,7 +2863,7 @@ assert.equal(unknown.children.length, 0);
 Date.now = originalNow;
 """
         completed = subprocess.run(
-            ["node"], input=harness, text=True, capture_output=True,
+            ["node"], input=harness, text=True, encoding="utf-8", capture_output=True,
             check=False,
         )
         self.assertEqual(
@@ -3037,7 +3037,7 @@ const visibleRanking = () => el("ranking-body").children[0]?.children[2]?.textCo
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         completed = subprocess.run(
-            ["node"], input=harness, text=True, capture_output=True, check=False,
+            ["node"], input=harness, text=True, encoding="utf-8", capture_output=True, check=False,
         )
         self.assertEqual(
             completed.returncode,
@@ -3143,7 +3143,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -3212,7 +3212,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -3274,7 +3274,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -3358,7 +3358,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -3451,7 +3451,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -3547,7 +3547,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -3662,7 +3662,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -3796,7 +3796,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -3900,7 +3900,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -4015,7 +4015,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -4111,7 +4111,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -4235,7 +4235,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -4328,7 +4328,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -4412,7 +4412,7 @@ globalThis.fetch = async (path, options) => {
 });
 """
         completed = subprocess.run(
-            ["node"], input=harness, text=True, capture_output=True, check=False,
+            ["node"], input=harness, text=True, encoding="utf-8", capture_output=True, check=False,
         )
         self.assertEqual(
             completed.returncode, 0,
@@ -4519,7 +4519,7 @@ globalThis.fetch = async (path, options) => {
 });
 """
         completed = subprocess.run(
-            ["node"], input=harness, text=True, capture_output=True, check=False,
+            ["node"], input=harness, text=True, encoding="utf-8", capture_output=True, check=False,
         )
         self.assertEqual(
             completed.returncode, 0,
@@ -4638,7 +4638,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -4701,7 +4701,7 @@ const files = [
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -4778,7 +4778,7 @@ const files = [
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -4897,7 +4897,7 @@ setCreate({
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -5031,7 +5031,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -5166,7 +5166,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -5305,7 +5305,7 @@ const unknownDescription = {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -5439,7 +5439,7 @@ const original = {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -5565,7 +5565,7 @@ const original = {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -5745,7 +5745,7 @@ globalThis.fetch = async (path, options) => {
         completed = subprocess.run(
             ["node"],
             input=harness,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )
