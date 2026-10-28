@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Install','OnlineUpdate','Backup','Restore','ImportMail','Classify')][string]$Action = 'Install',
+  [ValidateSet('Install','OnlineUpdate','Backup','Restore','ImportMail','Classify','ImportProducts','ExportProducts')][string]$Action = 'Install',
   [string]$PackageDirectory = $PSScriptRoot,
   [string]$BackupName = '',
   [switch]$SelfTest,
@@ -251,12 +251,45 @@ function Update-CustomerLabels {
   }
 }
 
+function Invoke-PortfolioWorker([string]$mode) {
+  Assert-KleinanzeigerStopped
+  if (!(Test-Path -LiteralPath $db -PathType Leaf) -or
+      !(Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+    throw 'Kleinanzeiger muss vor dem Artikelimport eingerichtet sein.'
+  }
+  $payload = Read-UiPayload
+  $file = [string]$payload.path
+  if (!$file -or $file.Length -gt 1024 -or ![IO.Path]::IsPathRooted($file)) {
+    throw 'Bitte eine lokale Datei auswaehlen.'
+  }
+  if ($mode -eq 'import') {
+    if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw 'Importdatei nicht gefunden.' }
+    if ([string]$payload.sha256 -notmatch '^[0-9a-f]{64}$') {
+      throw 'Vorschaupruefwert fehlt.'
+    }
+    Save-Backup
+  } else {
+    if (Test-Path -LiteralPath $file) { throw 'Exportdatei darf noch nicht existieren.' }
+  }
+  $json = ConvertTo-Json -InputObject $payload -Compress -Depth 4
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+  if ($encoded.Length -gt 16384) { throw 'Importpfad ist zu lang.' }
+  $env:KLEINANZEIGER_IMPORT_REQUEST = $encoded
+  try {
+    & $venvPython -m mark_api.portfolio_import_cli --db $db --mode $mode
+    if ($LASTEXITCODE -ne 0) { throw 'Artikelaktion fehlgeschlagen; Details pruefen.' }
+    Write-Output $(if($mode -eq 'import'){'PRODUCT_IMPORT_OK'}else{'PRODUCT_EXPORT_OK'})
+  } finally {
+    Remove-Item Env:KLEINANZEIGER_IMPORT_REQUEST -ErrorAction SilentlyContinue
+  }
+}
+
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
-  $names = @(Get-ReleaseAssetNames '0.1.6')
-  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.6-Windows.zip' -or
-      $names[1] -ne 'Kleinanzeiger-v0.1.6-Windows.sha256' -or
-      $names[2] -ne 'Kleinanzeiger-v0.1.6-Release-Manifest.json') {
+  $names = @(Get-ReleaseAssetNames '0.1.8')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.8-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.8-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.8-Release-Manifest.json') {
     throw 'Release-Dateinamen sind nicht eindeutig.'
   }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
@@ -269,6 +302,8 @@ switch ($Action) {
   'Backup' { Save-Backup }
   'ImportMail' { Import-CustomerMail }
   'Classify' { Update-CustomerLabels }
+  'ImportProducts' { Invoke-PortfolioWorker 'import' }
+  'ExportProducts' { Invoke-PortfolioWorker 'export' }
   'Restore' {
     Assert-KleinanzeigerStopped
     foreach ($suffix in @('','-wal','-shm','-journal')) {

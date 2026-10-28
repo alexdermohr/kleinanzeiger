@@ -75,6 +75,7 @@ class DashboardManualSyncHttpTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body), {
             "write_ui_available": True, "manual_sync_available": True,
+            "portfolio_jobs_available": True,
         })
 
     def test_only_explicit_local_token_bound_post_triggers_one_sync(self):

@@ -137,3 +137,71 @@ willkürlichen Standard.
 Datei oder den dazu verknüpften Issues/PRs fortgeschrieben; Entwurf,
 implementiert, synthetisch getestet, gemergt und offiziell veröffentlicht
 sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
+## 7. Implementierungsprotokoll – 26.10.2026
+
+- **P0 offiziell veröffentlicht:** `v0.1.6`, PR #213 und Windows-Release auf Commit
+  `8c6c163b320dc3a3f3f66dd83224ec8bd094c809`.
+  Serverseitige Katalogseiten, Suche, Filter, Mehrfachauswahl und
+  10.000 synthetische Bestandsdatensätze sind getestet.
+- **P1 umgesetzt (Veröffentlichung erst nach PR-/CI-Gates):** gesonderte,
+  `ad_snapshots`-unabhängige Tabelle `portfolio_drafts` innerhalb derselben
+  sicherbaren SQLite-Datei, CSV/XLSX-Spaltenmapping, UTF-8-CSV,
+  bis 5000 Entwürfe je Datei, SHA-256-gebundener Dry-run und atomarer
+  Import mit konfliktfestem SKU, seitenweise Leseschnittstelle,
+  Windows-Importvorschau, Entwurfs-CSV-Export und Übernahme ins
+  bereits geschützte Neuanzeigenformular. Sämtliche Artikel bleiben
+  **lokale, unveröffentlichte Entwürfe**.
+- **P1 Mediengrenze:** Die optionale Spalte `images` speichert für den
+  menschlichen Abgleich nur Dateinamen; kein automatisches Laden,
+  Kopieren oder Hochladen von Bilddateien. Eine separate spätere
+  Medienzuordnung muss Quellenbindung, Typ, Hash und Vorschau
+  nachweisen. Dies ist kein Hindernis für den restlichen CSV/XLSX-Import.
+- **P2 nächster Entwicklungsschritt:** aus lokalen SKUs stabile,
+  persistierte und wiederaufnehmbare Aufträge mit *entwurf-bis-freigabe*
+  bauen; KI-Kosten und Plattformänderungen bleiben getrennt
+  und vor jedem tatsächlich kostenpflichtigen oder schreibenden Schritt
+  ausdrücklich budget- und benutzergebunden.
+
+
+## Umsetzungslage nach dem P1-/P2-Fortsetzungsauftrag (26.10.2026)
+
+- **P0:** v0.1.6 offiziell veröffentlicht.
+- **P1:** PR #219, geprüfter Branch-HEAD
+  eca4d716bb010bd0c44f781b15a633ea98a58eb1.
+  Windows-, Wheel- und Quell-CI grün, Review-Funde geklärt;
+  geschützter Merge noch blockiert. v0.1.7 nicht als veröffentlicht
+  kennzeichnen.
+- **P2:** Auf dem isolierten Entwicklungsbranch
+  feat/portfolio-ai-batch-20261026: lokale durable 5000er-Jobs,
+  idempotente Auswahl, Budgetreserven, UNKNOWN-Quarantäne,
+  50er-Vorschauen, Freigaben und atomare lokale Anwendung.
+  Die zentrale Windows-Browseroberfläche bietet zusätzlich einzeln
+  oder je bestätigter Serie bis zu 10 sequenzielle kostenpflichtige
+  KI-Entwürfe an (maximal 100 Provider-Versuche je Produktsitzung).
+  Tokenverbrauch wird konservativ in USD geschätzt, ist keine
+  unabhängige Rechnung. **Nicht ausgeliefert**, bis Native CI,
+  Release und P1-Abhängigkeit geklärt sind.
+- **Weiter offen:** Provider-Rechnungsnachweise/hartes Budget,
+  echte autorisierte Plattform-Massenwrites, P3, P4, P5 sowie
+  Kunden-PC-Endabnahme. Siehe docs/portfolio-ki-auftraege.md.
+  Der Vaterrechner fotolabor bleibt unangetastet.
+
+- **P3 in Entwicklung:** Lokale manuelle Verkauf-/Reserviert-Vermerke,
+  Lagerort, Erlös, bekannte Kosten und Teilgewinn sowie authentifizierte
+  50er-Seiten und exact-ID-Revisionsabfragen implementiert. Diese lokalen
+  Angaben sind keine bestätigten Plattformverkäufe. Nachrichtenintegration
+  und native Windows-Abnahme bleiben offen. Siehe docs/portfolio-verkaeufe.md.
+
+- **P4 Teilimplementation:** Read-only 7/30/90-Tage-Controlling
+  mit EML-Belegzählung, aktuellem manuellem Verkaufsstand und
+  separat ausgewiesenen USD-KI-Schätzungen sowie CSV-Export.
+  10.000 synthetische Anzeigen ohne Vollbestands-JSON getestet.
+  Keine behauptete Kausalität, kein automatischer Preis-/Titeltest;
+  diese folgen erst nach zusätzlichen unabhängigen Datenquellen.
+  Siehe docs/portfolio-controlling.md; noch kein Release.
+
+- **P5 Teilimplementation:** Bis zu 100 lokale KI-Arbeitsvorlagen,
+  Name/Anweisung mit CAS-Version und Idempotenz, sowie nur bei Bedarf
+  sichtbare lokale Hinweise zu Prüfaufträgen, UNKNOWN und fehlenden
+  Verkaufskosten. Kein Hintergrundjob, kein automatischer Provideraufruf
+  oder Plattformwrite. Siehe docs/portfolio-vorlagen.md; noch kein Release.

@@ -17,7 +17,10 @@ from ..results import ReadResult, ReadStatus
 
 MANAGEMENT_URL = "https://www.kleinanzeigen.de/m-meine-anzeigen-verwalten.json"
 DEFAULT_SOURCE = "kleinanzeigen-management"
-MAX_PAGES = 100
+# Hard upper bounds are independent of any platform-reported page count.
+# 200 pages of 50 ads covers 10,000 listings without partial inventory.
+MAX_PAGES = 256
+MAX_INVENTORY_ITEMS = 12_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +282,8 @@ class ManagementReadAdapter:
             )
 
         raw_ads = list(first_ads)
+        if len(raw_ads) > MAX_INVENTORY_ITEMS:
+            return ReadResult.failure(ReadStatus.PARSE_ERROR, error="inventory_too_large")
         for page in range(2, last_page + 1):
             result = self._read_page(cookies=cookies, page=page)
             if not result.is_success:
@@ -299,6 +304,8 @@ class ManagementReadAdapter:
                     ReadStatus.PARSE_ERROR,
                     error="pagination_drift",
                 )
+            if len(raw_ads) + len(page_ads) > MAX_INVENTORY_ITEMS:
+                return ReadResult.failure(ReadStatus.PARSE_ERROR, error="inventory_too_large")
             raw_ads.extend(page_ads)
 
         observed_at = self._clock()
@@ -313,6 +320,8 @@ class ManagementReadAdapter:
                 error="invalid_ad_shape",
             )
 
+        if len({snapshot.ad_id for snapshot in snapshots}) != len(snapshots):
+            return ReadResult.failure(ReadStatus.PARSE_ERROR, error="duplicate_owner_ids")
         if not snapshots:
             return ReadResult.success_empty(())
         return ReadResult.success_nonempty(snapshots)

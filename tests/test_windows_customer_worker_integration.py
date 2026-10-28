@@ -7,6 +7,8 @@ PC, and never against a real email or platform account.
 from __future__ import annotations
 
 import base64
+import csv
+import hashlib
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email import policy
@@ -18,6 +20,7 @@ import unittest
 
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.query import MarkQueryService
+from mark_api.portfolio_drafts import drafts_page
 from mark_api.storage import SnapshotStore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +121,42 @@ class NativeWindowsCustomerWorkerTests(unittest.TestCase):
         self.assertTrue(list(backups.glob("*.sqlite.manifest.json")))
         self.assertEqual(store.latest_classification_bounded("1234567890").city, 'Łódź "Nord"')
 
+        # End-to-end: 1,000 customer-supplied articles remain local drafts.
+        csv_file = state / "synthetische-artikel.csv"
+        with csv_file.open("w", encoding="utf-8-sig", newline="") as output:
+            sheet = csv.writer(output)
+            sheet.writerow(("sku","title","description","category","price_eur","images"))
+            for i in range(1000):
+                sheet.writerow((
+                    f"SKU-{i:05d}", f'Łódź "Vase" {i}', "Gebrauchter Artikel",
+                    "Haus > Dekoration", 29, "ansicht.jpg;detail.png",
+                ))
+        request = base64.b64encode(json.dumps({"path": str(csv_file)}).encode("utf-8")).decode("ascii")
+        preview = subprocess.run(
+            [str(venv), "-m", "mark_api.portfolio_import_cli",
+             "--db", str(db), "--mode", "preview"],
+            env={**os.environ, "KLEINANZEIGER_IMPORT_REQUEST": request},
+            capture_output=True, text=True, timeout=50, check=False,
+        )
+        self.assertEqual(preview.returncode, 0, preview.stderr + preview.stdout)
+        dryrun = json.loads(preview.stdout)
+        self.assertEqual((dryrun["new"], dryrun["total"]), (1000, 1000))
+        imported_products = worker("ImportProducts", {
+            "path": str(csv_file), "sha256": dryrun["sha256"],
+        })
+        self.assertEqual(imported_products.returncode, 0,
+                         imported_products.stderr + imported_products.stdout)
+        self.assertIn("PRODUCT_IMPORT_OK", imported_products.stdout)
+        self.assertEqual(drafts_page(store)["total"], 1000)
+        self.assertEqual(drafts_page(store)["drafts"][0]["published"], False)
+        exported_csv = state / "synthetische-artikel-export.csv"
+        exported_products = worker("ExportProducts", {"path": str(exported_csv)})
+        self.assertEqual(exported_products.returncode, 0,
+                         exported_products.stderr + exported_products.stdout)
+        self.assertIn("PRODUCT_EXPORT_OK", exported_products.stdout)
+        self.assertTrue(exported_csv.is_file())
+        self.assertEqual(drafts_page(store)["total"], 1000)
+        self.assertEqual(store.tracked_ad_ids(), ("1234567890", "9876543210"))
 
 if __name__ == "__main__":
     unittest.main()

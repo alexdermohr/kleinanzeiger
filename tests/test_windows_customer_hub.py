@@ -111,12 +111,21 @@ class CustomerHubTests(unittest.TestCase):
         self.assertIn("mark_api.windows_customer_choices", hub)
         self.assertIn("Show-CustomerMailPicker", hub)
         self.assertIn("Show-CustomerLabels", hub)
+        self.assertIn("Show-ProductImport", hub)
+        self.assertIn("Show-ProductExport", hub)
+        self.assertIn("Invoke-PortfolioPreview", hub)
+        self.assertIn("mark_api.portfolio_import_cli", worker)
+        self.assertIn("PRODUCT_IMPORT_OK", worker)
+        self.assertIn("PRODUCT_EXPORT_OK", worker)
+        self.assertIn("KLEINANZEIGER_IMPORT_REQUEST", worker)
+        self.assertIn("ImportProducts", worker)
+        self.assertIn("ExportProducts", worker)
         self.assertIn("DropDownList", hub)
         self.assertIn("test_windows_customer_hub.py", workflow)
         self.assertIn("Kleinanzeiger-Handbuch.html", workflow)
         self.assertIn("Kleinanzeiger-Funktionen.html", workflow)
-        self.assertIn("'0.1.6'", workflow)
-        self.assertIn("0.1.6", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertIn("'0.1.8'", workflow)
+        self.assertIn("0.1.8", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(
             email_parser().parse_args(["--db", "ads.sqlite", "x.eml"]).emails,
             [Path("x.eml")],

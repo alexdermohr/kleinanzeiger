@@ -896,7 +896,7 @@ def main(argv: list[str] | None = None) -> int:
         if not callable(_GenerationSdkClient):
             print("kleinanzeiger: generation SDK unavailable", file=sys.stderr)
             return 2
-        generation_access = DashboardGenerationAccess(ui_token=secrets.token_urlsafe(32))
+        generation_access = DashboardGenerationAccess(ui_token=secrets.token_urlsafe(32), max_requests=100)
     if (
         (args.witness_socket is None) != (args.witness_owner_uid is None)
         or (args.witness_owner_uid is not None

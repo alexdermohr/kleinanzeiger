@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
+import re
 from typing import Mapping
 from datetime import datetime
 
@@ -173,6 +174,17 @@ class MarkQueryService:
                     rows.append(item)
         return tuple(rows)
 
+    def catalog_ad(self, ad_id: str) -> dict[str, object] | None:
+        """Read exactly one locally observed ad by indexed ID; no write authority.
+
+        This avoids scanning pages or materializing the whole 10k+ portfolio
+        during per-ad status checks. Historical owner provenance stays intact.
+        """
+        if type(ad_id) is not str or re.fullmatch(r"[0-9]{1,32}", ad_id) is None:
+            raise ValueError("invalid catalog ad id")
+        item = self._project_history(ad_id, self._store.ad_history(ad_id))
+        return ad_view_to_dict(item) if item is not None else None
+
     def catalog_page(
         self, *, after: str = "", limit: int = 50,
         search: str = "", status: str = "all",
@@ -242,6 +254,24 @@ class MarkQueryService:
 
     def reaction_history(self, ad_id: str) -> tuple[ReactionSnapshot, ...]:
         return self._store.reaction_history(ad_id)
+
+    def imported_inquiries_page(
+        self, *, after: str = "", limit: int = 25,
+        watermark: int | None = None,
+    ) -> dict[str, object]:
+        """Read EML counters only; do not infer ownership from an email ID."""
+        if type(self._store) is not SnapshotStore:
+            raise ValueError("native EML overview unavailable")
+        page = self._store.inbound_inquiries_page(
+            after=after, limit=limit, watermark=watermark,
+        )
+        items = []
+        for record in page["inquiries"]:
+            ad = self.catalog_ad(record["ad_id"])
+            owned = ad is not None and ad["present"] is True
+            items.append({**record, "own_ad": owned,
+                          "title": ad["title"] if owned else None})
+        return {**page, "inquiries": items}
 
     def email_reaction(self, ad_id: str) -> EmailReactionView | None:
         history = self._store.inbound_message_history(ad_id)
