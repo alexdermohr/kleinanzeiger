@@ -131,3 +131,27 @@ willkürlichen Standard.
 Datei oder den dazu verknüpften Issues/PRs fortgeschrieben; Entwurf,
 implementiert, synthetisch getestet, gemergt und offiziell veröffentlicht
 sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
+## 7. Implementierungsprotokoll – 26.10.2026
+
+- **P0 offiziell veröffentlicht:** `v0.1.6`, PR #213 und Windows-Release auf Commit
+  `8c6c163b320dc3a3f3f66dd83224ec8bd094c809`.
+  Serverseitige Katalogseiten, Suche, Filter, Mehrfachauswahl und
+  10.000 synthetische Bestandsdatensätze sind getestet.
+- **P1 umgesetzt (Veröffentlichung erst nach PR-/CI-Gates):** gesonderte,
+  `ad_snapshots`-unabhängige Tabelle `portfolio_drafts` innerhalb derselben
+  sicherbaren SQLite-Datei, CSV/XLSX-Spaltenmapping, UTF-8-CSV,
+  bis 5000 Entwürfe je Datei, SHA-256-gebundener Dry-run und atomarer
+  Import mit konfliktfestem SKU, seitenweise Leseschnittstelle,
+  Windows-Importvorschau, Entwurfs-CSV-Export und Übernahme ins
+  bereits geschützte Neuanzeigenformular. Sämtliche Artikel bleiben
+  **lokale, unveröffentlichte Entwürfe**.
+- **P1 Mediengrenze:** Die optionale Spalte `images` speichert für den
+  menschlichen Abgleich nur Dateinamen; kein automatisches Laden,
+  Kopieren oder Hochladen von Bilddateien. Eine separate spätere
+  Medienzuordnung muss Quellenbindung, Typ, Hash und Vorschau
+  nachweisen. Dies ist kein Hindernis für den restlichen CSV/XLSX-Import.
+- **P2 nächster Entwicklungsschritt:** aus lokalen SKUs stabile,
+  persistierte und wiederaufnehmbare Aufträge mit *entwurf-bis-freigabe*
+  bauen; KI-Kosten und Plattformänderungen bleiben getrennt
+  und vor jedem tatsächlich kostenpflichtigen oder schreibenden Schritt
+  ausdrücklich budget- und benutzergebunden.

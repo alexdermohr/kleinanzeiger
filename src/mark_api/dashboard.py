@@ -32,6 +32,7 @@ from .analytics import (
     analytics_contract_to_dict,
     group_metric_ranking_to_dict,
 )
+from .portfolio_drafts import drafts_page
 from .query import (
     MarkQueryService,
     ad_snapshot_to_dict,
@@ -254,6 +255,7 @@ _DASHBOARD_HTML = """<!doctype html>
     <nav class="quick-nav" aria-label="Bereiche">
       <a href="#workspace">Meine Anzeigen</a>
       <a id="nav-create" href="#create-disclosure">Neue Anzeige</a>
+      <a id="nav-drafts" href="#drafts-panel">Artikelentwürfe</a>
       <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
       <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
     </nav>
@@ -417,6 +419,29 @@ _DASHBOARD_HTML = """<!doctype html>
         <p class="muted">Zum Bearbeiten und Erstellen Kleinanzeiger normal über Starten.cmd starten.</p>
       </section>
     </div>
+
+    <section id="drafts-panel" class="panel secondary-panel">
+      <details id="drafts-disclosure" class="feature-disclosure">
+        <summary><span>Artikelentwürfe</span><small>CSV-/Excel-Artikel prüfen, durchsuchen und ins Anzeigenformular übernehmen</small></summary>
+        <p class="muted">Diese Artikel sind nur lokal gespeichert und nicht auf Kleinanzeigen veröffentlicht. Import und Export erfolgen im Kleinanzeiger-Startfenster bei beendeter Anwendung.</p>
+        <div class="controls">
+          <label>Artikelnummer oder Titel suchen
+            <input id="draft-search" type="search" maxlength="120" autocomplete="off" placeholder="Artikelnummer oder Titel">
+          </label>
+          <button id="draft-find" type="button">Suchen</button>
+        </div>
+        <p id="draft-feedback" role="status" aria-live="polite">Entwürfe anzeigen …</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Artikelnummer</th><th>Bezeichnung</th><th>Preis</th><th>Kategorie</th><th>Aktion</th></tr></thead>
+          <tbody id="drafts-body"></tbody>
+        </table></div>
+        <div class="catalog-pages">
+          <button id="draft-prev" type="button">Zurück</button>
+          <span id="draft-page-label">Seite 1</span>
+          <button id="draft-next" type="button">Weiter</button>
+        </div>
+      </details>
+    </section>
 
     <section id="generation-panel" class="panel secondary-panel" hidden>
       <details id="generation-disclosure" class="feature-disclosure">
@@ -723,6 +748,12 @@ let catalogNextAfter = null;
 let catalogLoading = false;
 let catalogGeneration = 0;
 let catalogFilters = {search: "", status: "all"};
+let draftCursors = [""];
+let draftPageIndex = 0;
+let draftNextAfter = null;
+let draftSearch = "";
+let draftBusy = false;
+let draftLoaded = false;
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -2672,6 +2703,117 @@ async function load() {
   }
 }
 
+
+function renderDraftNavigation() {
+  byId("draft-prev").disabled = draftBusy || draftPageIndex === 0;
+  byId("draft-next").disabled = draftBusy || draftNextAfter === null;
+  byId("draft-find").disabled = draftBusy;
+  byId("draft-page-label").textContent = "Seite " + (draftPageIndex + 1);
+}
+
+function useLocalDraft(item) {
+  if (!writeUiReady()) {
+    byId("draft-feedback").textContent = "Zum Übernehmen Kleinanzeiger normal starten.";
+    return;
+  }
+  if (!window.confirm("Die bisherigen Eingaben im Formular 'Neue Anzeige' durch den lokalen Entwurf ersetzen? Es wird nichts veröffentlicht.")) {
+    return;
+  }
+  byId("create-category").value = item.category;
+  byId("create-title").value = item.title;
+  byId("create-description").value = item.description;
+  byId("create-price").value = String(item.price_eur);
+  byId("create-media").value = "";
+  revealCreateForm();
+  byId("draft-feedback").textContent = "Artikel " + item.sku +
+    " lokal ins Formular übernommen. Bilder bitte selbst auswählen; Veröffentlichung separat bestätigen.";
+}
+
+function renderDraftRows(items) {
+  const body = byId("drafts-body");
+  body.replaceChildren();
+  for (const draft of items) {
+    const row = document.createElement("tr");
+    for (const field of ["sku", "title", "price_eur", "category"]) {
+      const cell = document.createElement("td");
+      cell.textContent = String(draft[field] ?? "");
+      row.append(cell);
+    }
+    const actions = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "In neue Anzeige";
+    button.disabled = !writeUiReady();
+    button.addEventListener("click", () => useLocalDraft(draft));
+    actions.append(button);
+    row.append(actions);
+    body.append(row);
+  }
+}
+
+async function loadDraftsPage() {
+  if (draftBusy) return false;
+  draftBusy = true;
+  renderDraftNavigation();
+  byId("draft-feedback").textContent = "Lade lokale Entwürfe …";
+  const params = new URLSearchParams({
+    limit: "50", after: draftCursors[draftPageIndex], q: draftSearch,
+  });
+  try {
+    const payload = await getJson("/api/portfolio/drafts?" + params.toString());
+    if (!payload || !Array.isArray(payload.drafts) || payload.drafts.length > 50
+        || typeof payload.has_more !== "boolean"
+        || (payload.has_more && (typeof payload.next_after !== "string" || !payload.next_after))) {
+      throw new Error("ungültige lokale Entwurfsantwort");
+    }
+    draftNextAfter = payload.has_more ? payload.next_after : null;
+    draftLoaded = true;
+    renderDraftRows(payload.drafts);
+    byId("draft-feedback").textContent = payload.total +
+      " lokale Entwürfe · " + payload.drafts.length + " auf dieser Seite";
+    return true;
+  } catch (_error) {
+    byId("draft-feedback").textContent = "Entwürfe konnten nicht geladen werden. Daten bleiben unverändert.";
+    return false;
+  } finally {
+    draftBusy = false;
+    renderDraftNavigation();
+  }
+}
+
+async function changeDraftPage(index, cursors, search) {
+  if (draftBusy) return false;
+  const prev = {
+    index: draftPageIndex, cursors: draftCursors.slice(),
+    after: draftNextAfter, search: draftSearch,
+  };
+  draftPageIndex = index;
+  draftCursors = cursors;
+  draftSearch = search;
+  const success = await loadDraftsPage();
+  if (!success) {
+    draftPageIndex = prev.index;
+    draftCursors = prev.cursors;
+    draftNextAfter = prev.after;
+    draftSearch = prev.search;
+    renderDraftNavigation();
+  }
+  return success;
+}
+
+function searchDrafts() {
+  return changeDraftPage(0, [""], byId("draft-search").value.trim());
+}
+function nextDraftsPage() {
+  if (draftBusy || draftNextAfter === null) return false;
+  return changeDraftPage(draftPageIndex + 1,
+    [...draftCursors.slice(0, draftPageIndex + 1), draftNextAfter], draftSearch);
+}
+function previousDraftsPage() {
+  if (draftBusy || draftPageIndex === 0) return false;
+  return changeDraftPage(draftPageIndex - 1, draftCursors.slice(), draftSearch);
+}
+
 const newAdNavigation = optionalById("nav-create");
 if (newAdNavigation) newAdNavigation.addEventListener("click", revealCreateForm);
 const analyticsNavigation = optionalById("nav-analytics");
@@ -2685,6 +2827,20 @@ if (generationNavigation) generationNavigation.addEventListener("click", () => {
   if (disclosure) disclosure.open = true;
 });
 byId("reload").addEventListener("click", load);
+const draftNavigation = optionalById("nav-drafts");
+if (draftNavigation) draftNavigation.addEventListener("click", () => {
+  byId("drafts-disclosure").open = true;
+  if (!draftLoaded) loadDraftsPage();
+});
+byId("drafts-disclosure").addEventListener("toggle", () => {
+  if (byId("drafts-disclosure").open && !draftLoaded) loadDraftsPage();
+});
+byId("draft-find").addEventListener("click", searchDrafts);
+byId("draft-search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); searchDrafts(); }
+});
+byId("draft-prev").addEventListener("click", previousDraftsPage);
+byId("draft-next").addEventListener("click", nextDraftsPage);
 byId("catalog-find").addEventListener("click", searchCatalog);
 byId("catalog-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -3701,6 +3857,39 @@ def _handler_factory(
                     self._send_json(400, {"error": "invalid_catalog_query"})
                     return
                 self._send_json(200, result)
+                return
+            if path == "/api/portfolio/drafts":
+                # Imported SKUs are local draft identities, never owner ad IDs.
+                if len(target.query) > 4096:
+                    self._send_json(400, {"error": "invalid_draft_query"})
+                    return
+                try:
+                    options = parse_qs(
+                        target.query, keep_blank_values=True, max_num_fields=6,
+                        encoding="utf-8", errors="strict",
+                    )
+                    if (set(options) - {"limit", "after", "q"}
+                            or any(len(v) != 1 for v in options.values())):
+                        raise ValueError("invalid fields")
+                    count = options.get("limit", ["50"])[0]
+                    if len(count) > 2 or not count.isdecimal():
+                        raise ValueError("invalid limit")
+                    if isinstance(store, SnapshotStore):
+                        drafts = drafts_page(
+                            store, limit=int(count),
+                            after=options.get("after", [""])[0],
+                            search=options.get("q", [""])[0],
+                        )
+                    else:
+                        drafts = {"drafts": [], "has_more": False,
+                                  "next_after": None, "total": 0}
+                except (UnicodeError, ValueError):
+                    self._send_json(400, {"error": "invalid_draft_query"})
+                    return
+                except (sqlite3.Error, OSError, TypeError):
+                    self._send_json(503, {"error": "database_unavailable"})
+                    return
+                self._send_json(200, drafts)
                 return
             if path == "/api/ads":
                 self._send_json(
