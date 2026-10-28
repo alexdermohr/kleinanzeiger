@@ -112,6 +112,15 @@ class TemplatesTests(unittest.TestCase):
         self.assertEqual(state["old_local_reservations"],1)
         self.assertEqual(state["provider_calls"],0)
         self.assertEqual(state["platform_writes"],0)
+        # Cancellation does not rewrite prior item phases. Their proposals
+        # are no longer reviewable and must disappear from the attention badge.
+        change_state(self.store, job["job_id"], "cancel")
+        cancelled=attention_counts(self.store)
+        self.assertEqual(cancelled["proposals_to_review"],0)
+        self.assertEqual(cancelled["unknown_ki_outcomes"],0)
+        self.assertEqual(cancelled["manual_sales_missing_cost"],1)
+        self.assertEqual(cancelled["old_local_reservations"],1)
+        self.assertEqual(cancelled["platform_writes"],0)
 
 if __name__=="__main__":
     unittest.main()

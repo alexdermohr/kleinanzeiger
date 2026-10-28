@@ -1124,9 +1124,16 @@ let reportLoadSeq = 0;
 let workTemplates = [];
 let workTemplatePending = null;
 let workTemplateBusy = false;
+// Item templates and AI work-instruction editors are distinct local tools.
 let itemTemplates = [];
 let itemTemplateBusy = false;
 let itemTemplatePending = null;
+// Preserve the revision explicitly loaded into the work-template editor;
+// a list refresh must never authorize stale editor fields at a newer revision.
+let workTemplateEditorBaseline = null;
+let workTemplateSelectionGeneration = 0;
+let workTemplateLoadGeneration = 0;
+let workTemplateSelectionRequiresRecheck = false;
 let managedAdBaseline = null;
 
 function consumeWriteToken() {
@@ -3079,13 +3086,16 @@ function clearBuyerReply(status = "") {
 function openBuyerReplyForAd(ad) {
   if (buyerBusy || !ad || ad.present !== true ||
       typeof ad.ad_id !== "string" || !/^[0-9]{1,32}$/.test(ad.ad_id)) return;
-  const title = typeof ad.title === "string" ? ad.title : "Ohne Titel";
+  // Display placeholder must never replace the observed identity value.
+  const sourceTitle = typeof ad.title === "string" ? ad.title : null;
+  const title = sourceTitle ?? "Ohne Titel";
   const changed = buyerTarget === null
     || buyerTarget.ad_id !== ad.ad_id
-    || buyerTarget.title !== title
+    || buyerTarget.source_title !== sourceTitle
     || buyerTarget.observed_at !== ad.observed_at;
   buyerTarget = Object.freeze({
-    ad_id: ad.ad_id, title, observed_at: ad.observed_at
+    ad_id: ad.ad_id, title, source_title: sourceTitle,
+    observed_at: ad.observed_at
   });
   byId("buyer-ad-id").value = ad.ad_id;
   byId("buyer-ad-title").value = title;
@@ -3174,7 +3184,7 @@ async function requestBuyerReply() {
     ))?.ad;
     if (current?.present !== true
         || current.ad_id !== selected.ad_id
-        || current.title !== selected.title
+        || current.title !== selected.source_title
         || current.observed_at !== selected.observed_at
         || buyerRevision !== version) {
       throw new Error("Anzeigenstand wurde verändert. Bitte neu auswählen.");
@@ -4483,11 +4493,13 @@ byId("jobs-disclosure").addEventListener("toggle",() => {
 });
 async function loadWorkTemplates() {
   if (!jobsAvailable || !writeUiReady()) return false;
+  const generation=++workTemplateLoadGeneration;
   try {
     const [items,attention]=await Promise.all([
       _jobGet("/api/portfolio/templates"),
       _jobGet("/api/portfolio/attention"),
     ]);
+    if (generation!==workTemplateLoadGeneration) return false;
     if (!items || !Array.isArray(items.templates) || items.templates.length>100) {
       throw new Error("Ungültige Vorlagenliste");
     }
@@ -4506,6 +4518,12 @@ async function loadWorkTemplates() {
       select.append(entry);
     }
     select.value=workTemplates.some(t=>t.template_id===before)?before:"";
+    if (before && select.value!==before) {
+      // A deleted/vanished template may not silently turn stale fields into
+      // a new template or adopt a newer revision without explicit selection.
+      workTemplateEditorBaseline=null;
+      workTemplateSelectionRequiresRecheck=true;
+    }
     const counts=[
       ["Unklare KI-Vorgänge",attention.unknown_ki_outcomes],
       ["Vorschläge zur Prüfung",attention.proposals_to_review],
@@ -4516,10 +4534,12 @@ async function loadWorkTemplates() {
     const notice=byId("work-attention");
     notice.hidden=warnings.length===0;
     notice.textContent=warnings.map(([label,n])=>label+": "+n).join(" · ");
-    byId("work-template-feedback").textContent=
-      workTemplates.length+" lokale Arbeitsvorlagen verfügbar.";
+    byId("work-template-feedback").textContent=workTemplateSelectionRequiresRecheck
+      ? "Ausgewählte Vorlage nicht mehr vorhanden. Bitte die Auswahl erneut bewusst festlegen."
+      : workTemplates.length+" lokale Arbeitsvorlagen verfügbar.";
     return true;
   } catch (_error) {
+    if (generation!==workTemplateLoadGeneration) return false;
     byId("work-template-feedback").textContent=
       "Lokale Vorlagen/Prüfhinweise nicht verfügbar; Daten bleiben unverändert.";
     return false;
@@ -4539,17 +4559,26 @@ function useWorkTemplate() {
       "Vorhandenen Auftragstext durch die gespeicherte Vorlage ersetzen?")) return;
   byId("job-instruction").value=tpl.instruction;
   byId("work-template-name").value=tpl.name;
+  workTemplateEditorBaseline=Object.freeze({id:tpl.template_id,revision:tpl.revision});
+  workTemplateSelectionRequiresRecheck=false;
   byId("work-template-feedback").textContent=
     "Vorlage lokal eingefügt; Auftrag und KI-Kosten werden nicht automatisch gestartet.";
 }
 async function mutateWorkTemplate(remove=false) {
   if (workTemplateBusy || !jobsAvailable || !writeUiReady()) return;
   const selected=selectedWorkTemplate();
+  const selectedId=byId("work-template-select").value;
+  if (workTemplateSelectionRequiresRecheck ||
+      (selectedId && (!selected || workTemplateEditorBaseline?.id!==selectedId))) {
+    byId("work-template-feedback").textContent=
+      "Vorlagenstand geändert. Bitte die Vorlage neu auswählen, bevor Sie speichern.";
+    return;
+  }
   const payload={
     template_id:selected?.template_id||null,
     name:remove?null:byId("work-template-name").value.trim(),
     instruction:remove?null:byId("job-instruction").value.trim(),
-    expected_revision:selected?.revision||0,
+    expected_revision:selected ? workTemplateEditorBaseline.revision : 0,
     delete:remove,
   };
   if (remove && !selected) {
@@ -4560,12 +4589,20 @@ async function mutateWorkTemplate(remove=false) {
   if (!remove && selected && !window.confirm(
       "Die gespeicherte Vorlage '"+selected.name+"' aktualisieren?")) return;
   const fingerprint=JSON.stringify(payload);
-  if (workTemplatePending?.fingerprint!==fingerprint) {
+  if (workTemplatePending && workTemplatePending.fingerprint!==fingerprint) {
+    byId("work-template-feedback").textContent=
+      "Voriger Vorlagenauftrag ist noch ungeklärt. Zuerst dessen Ausgang prüfen.";
+    return;
+  }
+  if (!workTemplatePending) {
     workTemplatePending={fingerprint,key:_newJobRequestKey()};
   }
+  const submittedSelection=selectedId;
+  const submittedGeneration=workTemplateSelectionGeneration;
   workTemplateBusy=true;
-  byId("work-template-save").disabled=true;
-  byId("work-template-delete").disabled=true;
+  for (const id of ["work-template-save","work-template-delete",
+                    "work-template-select","work-template-refresh","work-template-use",
+                    "work-template-name","job-instruction"]) byId(id).disabled=true;
   try {
     const response=await fetch("/api/portfolio/templates/mutate",{
       method:"POST",cache:"no-store",
@@ -4579,22 +4616,40 @@ async function mutateWorkTemplate(remove=false) {
     if (result.platform_writes!==0) throw new Error("Unerwartete Antwort");
     workTemplatePending=null;
     const newId=remove?"":result.template_id;
-    await loadWorkTemplates();
-    byId("work-template-select").value=newId;
-    if (remove) byId("work-template-name").value="";
+    const loaded=await loadWorkTemplates();
+    const selectedAfterReload=byId("work-template-select").value;
+    const originalEditorUnchanged=
+      submittedGeneration===workTemplateSelectionGeneration;
+    // Deleting the submitted template legitimately removes it from the list.
+    // User-driven selection changes always have a newer generation.
+    if (loaded && originalEditorUnchanged &&
+        (selectedAfterReload===submittedSelection ||
+         (remove && selectedAfterReload===""))) {
+      byId("work-template-select").value=newId;
+      const current=selectedWorkTemplate();
+      workTemplateEditorBaseline=current
+        ? Object.freeze({id:current.template_id,revision:current.revision}) : null;
+      workTemplateSelectionRequiresRecheck=false;
+      if (remove) byId("work-template-name").value="";
+    }
     byId("work-template-feedback").textContent=
       remove?"Vorlage lokal gelöscht.":"Arbeitsanweisung als lokale Vorlage gespeichert.";
   } catch (error) {
     byId("work-template-feedback").textContent=error.message;
   } finally {
     workTemplateBusy=false;
-    byId("work-template-save").disabled=false;
-    byId("work-template-delete").disabled=false;
+    for (const id of ["work-template-save","work-template-delete",
+                      "work-template-select","work-template-refresh","work-template-use",
+                      "work-template-name","job-instruction"]) byId(id).disabled=false;
   }
 }
 byId("work-template-refresh").addEventListener("click",loadWorkTemplates);
 byId("work-template-select").addEventListener("change",() => {
+  workTemplateSelectionGeneration++;
   const item=selectedWorkTemplate();
+  workTemplateEditorBaseline=item
+    ? Object.freeze({id:item.template_id,revision:item.revision}) : null;
+  workTemplateSelectionRequiresRecheck=false;
   byId("work-template-name").value=item?.name||"";
 });
 byId("work-template-use").addEventListener("click",useWorkTemplate);

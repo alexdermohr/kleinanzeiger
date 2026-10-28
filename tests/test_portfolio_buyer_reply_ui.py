@@ -196,6 +196,25 @@ const assertOnlyReadsAndDrafts=()=>{
   vm.runInContext("openBuyerReplyForAd(window.invalid)",context);
   assert.equal(byId("buyer-ad-id").value,"321","absent ad is not a valid target");
   assertOnlyReadsAndDrafts();
+
+  // An owner snapshot may carry a real null title while the UI displays a
+  // localized placeholder. Exact revalidation must compare the raw value;
+  // it must neither block a valid null nor accept a different literal title.
+  vm.runInContext('generationUiAvailable=true; generationToken="s".repeat(32)',context);
+  selectAd(ad("654",null));
+  assert.equal(byId("buyer-ad-title").value,"Ohne Titel");
+  byId("buyer-inquiry").value="Ist das noch da?";
+  byId("buyer-inquiry").listeners.input();
+  byId("buyer-consent").checked=true;
+  await generate();
+  assert.equal(countPosts(),5,"unchanged nullable owner title permits one explicit AI draft");
+  assert.equal(byId("buyer-reply").value,"Guten Tag, vielen Dank für Ihre Anfrage.");
+  currentAd={...currentAd,title:"Ohne Titel"};
+  byId("buyer-consent").checked=true;
+  await generate();
+  assert.equal(countPosts(),5,"raw null must not match literal display-placeholder title");
+  assert.match(byId("buyer-status").textContent,/verändert/);
+  assertOnlyReadsAndDrafts();
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
         result = subprocess.run(
