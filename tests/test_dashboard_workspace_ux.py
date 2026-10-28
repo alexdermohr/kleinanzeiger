@@ -39,6 +39,27 @@ class DashboardWorkspaceUXTests(unittest.TestCase):
         ids = re.findall(r'\bid="([^"]+)"', html)
         self.assertEqual(len(ids), len(set(ids)), "HTML IDs must remain unique")
 
+    def test_focused_navigation_and_contextual_actions(self) -> None:
+        html = _DASHBOARD_HTML
+        navigation = html.split('<nav class="quick-nav"', 1)[1].split("</nav>", 1)[0]
+        primary = navigation.split('<details id="nav-more"', 1)[0]
+        self.assertEqual(primary.count("<a "), 5)
+        for label in ("Übersicht", "Meine Anzeigen", "Artikel &amp; KI",
+                      "Interessenten", "Auswertungen"):
+            self.assertIn(label, primary)
+        self.assertIn('id="nav-more"', navigation)
+        for link in ('id="nav-create"', 'id="nav-jobs"', 'id="nav-sales"',
+                     'id="nav-report"', 'id="nav-generation"'):
+            self.assertIn(link, navigation.split('<details id="nav-more"', 1)[1])
+        self.assertIn('id="catalog-selection-actions"', html)
+        self.assertIn('aria-label="Aktionen für ausgewählte Anzeigen" hidden', html)
+        self.assertIn('id="catalog-selection-hint"', html)
+        self.assertIn('actions.hidden = count === 0 && !catalogBulkBusy', _DASHBOARD_JS)
+        self.assertIn('hint.hidden = count <= 10 || !writeUiAvailable', _DASHBOARD_JS)
+        self.assertIn('.nav-more-links { position: absolute;', _DASHBOARD_CSS)
+        self.assertIn('.catalog-selection-actions:not([hidden]) { position: sticky;', _DASHBOARD_CSS)
+        self.assertNotIn('.quick-nav a:first-child', _DASHBOARD_CSS)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js needed for browser-JS behavior")
     def test_cards_bind_only_loaded_own_ads_and_keep_selection_safe(self) -> None:
         harness = r"""

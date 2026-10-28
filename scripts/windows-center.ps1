@@ -69,7 +69,7 @@ $font = [System.Drawing.Font]::new('Segoe UI',10)
 $fontBold = [System.Drawing.Font]::new('Segoe UI',10,[Drawing.FontStyle]::Bold)
 $form = [System.Windows.Forms.Form]::new()
 $form.Text = 'Kleinanzeiger'
-$form.ClientSize = [System.Drawing.Size]::new(640,590)
+$form.ClientSize = [System.Drawing.Size]::new(640,510)
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.StartPosition = 'CenterScreen'
@@ -106,30 +106,42 @@ $headingFont = [System.Drawing.Font]::new('Segoe UI',22,[Drawing.FontStyle]::Bol
 $title = Add-Label 'Kleinanzeiger' 26 20 420 43 $headingFont
 $intro = Add-Label 'Deine Anzeigen verwalten – alles an einem Ort.' 28 66 585 28 $font $muted
 $versionLabel = Add-Label 'Prüfe Installation …' 28 105 575 26 $font $muted
+# The primary workflow fits on one compact page; secondary maintenance
+# remains in this window but is hidden until deliberately requested.
 $primary = Add-Button 'Kleinanzeiger starten' 28 145 584 55 $true
 $update = Add-Button 'Installieren / aktualisieren' 28 216 282 43
-$backup = Add-Button 'Sicherung erstellen' 330 216 282 43
-$ai = Add-Button 'KI einrichten' 28 273 282 43
-$account = Add-Button 'Kleinanzeigen-Konto öffnen' 330 273 282 43
-$mail = Add-Button 'E-Mails importieren' 28 330 282 43
-$labels = Add-Button 'Anzeigen vergleichen' 330 330 282 43
-$products = Add-Button 'Artikel importieren' 28 389 282 43
-$productsExport = Add-Button 'Entwürfe exportieren' 330 389 282 43
-$statusLabel = Add-Label 'Bereit.' 28 450 584 34 $font $muted
+$account = Add-Button 'Kleinanzeigen-Konto öffnen' 330 216 282 43
+$products = Add-Button 'Artikel importieren' 28 273 282 43
+$backup = Add-Button 'Sicherung erstellen' 330 273 282 43
+$ai = Add-Button 'KI einrichten' 28 330 282 43
+$advanced = Add-Button 'Weitere Aktionen' 330 330 282 43
+$mail = Add-Button 'E-Mails importieren' 28 390 282 43
+$labels = Add-Button 'Anzeigen vergleichen' 330 390 282 43
+$productsExport = Add-Button 'Entwürfe exportieren' 28 449 282 43
+$restore = Add-Button 'Sicherung wiederherstellen …' 330 449 282 43
+$statusLabel = Add-Label 'Bereit.' 28 397 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
 $detailsLink.Text = 'Fehlerdetails anzeigen'
-$detailsLink.SetBounds(28,490,220,26)
+$detailsLink.SetBounds(28,453,240,26)
 $detailsLink.LinkColor = $accent
+$detailsLink.Visible = $false
 $form.Controls.Add($detailsLink)
 $detailsLink.Add_Click({
-  $shown = $(if ($script:details) { $script:details } else { 'Keine zusätzlichen Informationen.' })
+  $shown = $(if ($script:details) { $script:details } else { $statusLabel.Text })
   [Windows.Forms.MessageBox]::Show($shown,'Kleinanzeiger – technische Details') | Out-Null
 })
-$advanced = Add-Button 'Weitere Optionen' 28 529 200 32
-$advanced.Font = [System.Drawing.Font]::new('Segoe UI',8.5)
-$restore = Add-Button 'Sicherung wiederherstellen …' 248 529 280 32
-$restore.Font = [System.Drawing.Font]::new('Segoe UI',8.5)
-$restore.Visible = $false
+$script:advancedExpanded = $false
+function Set-AdvancedLayout([bool]$expanded) {
+  $script:advancedExpanded = $expanded
+  foreach ($control in @($mail,$labels,$productsExport,$restore)) {
+    $control.Visible = $expanded
+  }
+  $advanced.Text = $(if($expanded){'Weniger anzeigen'}else{'Weitere Aktionen'})
+  $statusLabel.SetBounds(28,$(if($expanded){516}else{397}),584,44)
+  $detailsLink.SetBounds(28,$(if($expanded){572}else{453}),240,26)
+  $form.ClientSize = [System.Drawing.Size]::new(640,$(if($expanded){630}else{510}))
+}
+Set-AdvancedLayout $false
 $help = [System.Windows.Forms.LinkLabel]::new()
 $help.Text = 'Handbuch'
 $help.SetBounds(451,37,87,24)
@@ -144,6 +156,9 @@ $form.Controls.Add($features)
 function Set-Status([string]$message,[bool]$failure=$false) {
   $statusLabel.Text = $message
   $statusLabel.ForeColor = $(if($failure){[Drawing.Color]::FromArgb(167,51,67)}else{$muted})
+  # A permanent technical link is distracting while everything is healthy.
+  # On failure it is always visible below the status, never obscured by controls.
+  $detailsLink.Visible = $failure
 }
 function Refresh-Controls {
   $busy = $script:process -and !$script:process.HasExited
@@ -161,6 +176,7 @@ function Refresh-Controls {
   $primary.Text = $(if($product){'Kleinanzeiger beenden'}elseif($needsInstall){'Einrichten und starten'}else{'Kleinanzeiger starten'})
   $primary.Enabled = !$busy -or $product
   $update.Enabled = !$busy
+  $advanced.Enabled = !$busy
   $backup.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $ai.Enabled = !$busy
   $mail.Enabled = !$busy -and (Test-Path -LiteralPath $db)
@@ -704,7 +720,7 @@ $account.Add_Click({
   catch { Set-Status $_.Exception.Message $true }
 })
 $ai.Add_Click({ if (!$script:process) { Show-KiDialog } })
-$advanced.Add_Click({ $restore.Visible = !$restore.Visible })
+$advanced.Add_Click({ Set-AdvancedLayout (!$script:advancedExpanded) })
 $restore.Add_Click({
   if (Test-Path -LiteralPath $db) {
     Set-Status 'Die Datenbank ist bereits vorhanden. Wiederherstellung gesperrt.' $true
@@ -800,6 +816,21 @@ if ($SelfTest) {
       throw "Hilfe-Datei fehlt: $file"
     }
   }
+  if ($script:advancedExpanded -or $form.ClientSize.Height -ne 510 -or
+      $advanced.Text -ne 'Weitere Aktionen' -or $detailsLink.Visible -or
+      $statusLabel.Top -ne 397 -or $detailsLink.Top -ne 453) {
+    throw 'Kompakte Bedienoberflaeche ist nicht korrekt gestartet.'
+  }
+  Set-AdvancedLayout $true
+  # Controls inherit Form.Visible; the headless SelfTest cannot assert
+  # effective child Visible without showing a customer window.
+  if (!$script:advancedExpanded -or $form.ClientSize.Height -ne 630 -or
+      $advanced.Text -ne 'Weniger anzeigen' -or $statusLabel.Top -ne 516 -or
+      $detailsLink.Top -ne 572 -or
+      $mail.Top -ne 390 -or $productsExport.Top -ne 449) {
+    throw 'Erweiterte Kundenaktionen sind nicht vollstaendig erreichbar.'
+  }
+  Set-AdvancedLayout $false
   if ($form.Controls.Count -lt 12 -or $primary.Text -ne 'Kleinanzeiger starten' -or
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $restore -or
       $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $help -or $null -eq $features) {

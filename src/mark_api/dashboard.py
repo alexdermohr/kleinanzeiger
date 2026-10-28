@@ -300,16 +300,22 @@ _DASHBOARD_HTML = """<!doctype html>
       </div>
     </header>
 
-    <nav class="quick-nav" aria-label="Bereiche">
+    <nav class="quick-nav" aria-label="Hauptbereiche">
+      <a href="#top">Übersicht</a>
       <a href="#workspace">Meine Anzeigen</a>
-      <a id="nav-create" href="#create-disclosure">Neue Anzeige</a>
-      <a id="nav-drafts" href="#drafts-panel">Artikelentwürfe</a>
-      <a id="nav-jobs" href="#jobs-panel" hidden>KI-Stapelaufträge</a>
-      <a id="nav-sales" href="#sales-panel" hidden>Verkäufe & Lager</a>
-      <a id="nav-report" href="#report-panel" hidden>Controlling</a>
+      <a id="nav-drafts" href="#drafts-panel">Artikel &amp; KI</a>
+      <a id="nav-buyer" href="#buyer-panel">Interessenten</a>
       <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
-      <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
-      <a id="nav-buyer" href="#buyer-panel">Interessenten &amp; Antworten</a>
+      <details id="nav-more" class="nav-more">
+        <summary>Weitere Bereiche</summary>
+        <div class="nav-more-links">
+          <a id="nav-create" href="#create-disclosure">Neue Anzeige</a>
+          <a id="nav-jobs" href="#jobs-panel" hidden>KI-Stapelaufträge</a>
+          <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
+          <a id="nav-sales" href="#sales-panel" hidden>Verkäufe &amp; Lager</a>
+          <a id="nav-report" href="#report-panel" hidden>Controlling</a>
+        </div>
+      </details>
     </nav>
     <section id="status" class="status" role="status" aria-live="polite"></section>
 
@@ -351,7 +357,7 @@ _DASHBOARD_HTML = """<!doctype html>
           <span id="catalog-feedback" role="status" aria-live="polite">Lade Anzeigen …</span>
           <span id="catalog-selected-count">0 ausgewählt</span>
         </div>
-        <div class="catalog-selection-actions">
+        <div id="catalog-selection-actions" class="catalog-selection-actions" aria-label="Aktionen für ausgewählte Anzeigen" hidden>
           <button type="button" id="catalog-clear">Auswahl leeren</button>
           <button type="button" id="catalog-export">Auswahl als CSV</button>
           <button type="button" id="catalog-bulk-pause" data-write-control hidden>Auswahl pausieren (max. 10)</button>
@@ -359,6 +365,7 @@ _DASHBOARD_HTML = """<!doctype html>
           <button type="button" id="catalog-bulk-delete" data-write-control hidden>Auswahl endgültig löschen (max. 10)</button>
           <button type="button" id="catalog-bulk-stop" hidden>Nach aktueller Anzeige stoppen</button>
           <span id="catalog-bulk-progress" role="status" aria-live="polite"></span>
+          <span id="catalog-selection-hint" class="catalog-selection-hint" role="status" aria-live="polite" hidden>Plattformaktionen sind auf 10 ausgewählte Anzeigen pro Schritt begrenzt. Für die gesamte Auswahl ist der CSV-Export verfügbar.</span>
         </div>
         <div id="ad-cards" class="ad-cards" role="list"></div>
         <div class="catalog-pages">
@@ -945,7 +952,9 @@ _DASHBOARD_CSS = """
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 body { margin: 0; background: var(--page); color: var(--ink); }
+section[id], details[id], #workspace { scroll-margin-top: 90px; }
 main { max-width: 1380px; margin: 0 auto; padding: 28px 24px 72px; }
 .app-header { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 20px; }
 h1, h2, h3, p { margin-top: 0; }
@@ -974,10 +983,15 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 .reload-button { white-space: nowrap; background: var(--surface); color: var(--accent-dark); padding: 10px 16px; }
 .header-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.quick-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 23px; }
-.quick-nav a { text-decoration: none; color: #486879; font-weight: 700; font-size: .84rem; padding: 9px 14px; border: 1px solid transparent; border-radius: 999px; }
-.quick-nav a:first-child { color: var(--accent-dark); background: #e0f0f3; }
-.quick-nav a:hover, .quick-nav a:focus-visible { color: var(--accent-dark); background: #e0f0f3; }
+.quick-nav { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 9px; margin-bottom: 18px; background: #f3f6fa; border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 4px 20px rgba(27,55,77,.06); }
+.quick-nav a, .nav-more summary { display: block; text-decoration: none; color: #486879; font-weight: 700; font-size: .84rem; padding: 9px 13px; border-radius: 9px; white-space: nowrap; }
+.quick-nav a:hover, .quick-nav a:focus-visible, .nav-more summary:hover, .nav-more summary:focus-visible { color: var(--accent-dark); background: #e0f0f3; }
+.nav-more { position: relative; margin-left: auto; }
+.nav-more summary { cursor: pointer; list-style: none; }
+.nav-more summary::-webkit-details-marker { display: none; }
+.nav-more summary::after { content: " ▾"; }
+.nav-more[open] summary { color: var(--accent-dark); background: #e0f0f3; }
+.nav-more-links { position: absolute; top: calc(100% + 6px); right: 0; z-index: 22; display: grid; min-width: 230px; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 30px rgba(27,55,77,.15); }
 .status { color: #95551e; font-size: .87rem; margin: 12px 0; }
 .status:empty { display: none; }
 .cards { display: grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 12px; margin-bottom: 22px; }
@@ -997,6 +1011,8 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .catalog-toolbar input, .catalog-toolbar select { width: 100%; min-width: 0; }
 .catalog-toolbar button { white-space: nowrap; }
 .catalog-summary, .catalog-selection-actions, .catalog-pages { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.catalog-selection-actions:not([hidden]) { position: sticky; bottom: 8px; z-index: 9; padding: 11px; background: var(--surface); border: 1px solid #a9cbd3; border-radius: 12px; box-shadow: 0 8px 24px rgba(27,55,77,.12); }
+.catalog-selection-hint { flex-basis: 100%; color: var(--subtle); font-size: .8rem; }
 .catalog-summary { justify-content: space-between; font-size: .78rem; color: var(--subtle); }
 .catalog-pages { justify-content: space-between; margin-top: 12px; }
 .catalog-pages button, .catalog-selection-actions button { font-size: .8rem; }
@@ -1076,6 +1092,11 @@ td.title { min-width: 180px; white-space: normal; }
 @media (max-width: 920px) { .workspace { grid-template-columns: minmax(0,1fr); } }
 @media (max-width: 640px) {
   main { padding: 18px 12px 42px; }
+  .quick-nav { position: static; padding: 7px; }
+  .quick-nav a, .nav-more summary { font-size: .79rem; padding: 8px 10px; }
+  .nav-more { margin-left: 0; }
+  .nav-more-links { right: auto; left: 0; }
+  .catalog-selection-actions:not([hidden]) { bottom: 0; }
   .app-header { align-items: flex-start; flex-direction: column; gap: 14px; }
   .cards { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
   .cards article { padding: 12px; }
@@ -1988,6 +2009,10 @@ function renderCatalogSelection() {
   // Existing standalone/legacy Dashboard render harnesses have no portfolio
   // toolbar. Selection remains inert rather than changing their Write flows.
   const count = catalogSelectedIds.size;
+  const actions = optionalById("catalog-selection-actions");
+  if (actions) actions.hidden = count === 0 && !catalogBulkBusy;
+  const hint = optionalById("catalog-selection-hint");
+  if (hint) hint.hidden = count <= 10 || !writeUiAvailable;
   const label = optionalById("catalog-selected-count");
   const clear = optionalById("catalog-clear");
   const exportControl = optionalById("catalog-export");
@@ -4624,6 +4649,16 @@ function previousDraftsPage() {
   return changeDraftPage(draftPageIndex - 1, draftCursors.slice(), draftSearch);
 }
 
+const moreNavigation = optionalById("nav-more");
+if (moreNavigation) moreNavigation.addEventListener("click", (event) => {
+  // Browser enhancement only. Existing link and Disclosure handlers remain
+  // independent; do not query or mutate hidden panels or session state.
+  const target = event && event.target;
+  if (target && typeof target.closest === "function"
+      && target.closest(".nav-more-links a")) {
+    moreNavigation.open = false;
+  }
+});
 const newAdNavigation = optionalById("nav-create");
 if (newAdNavigation) newAdNavigation.addEventListener("click", revealCreateForm);
 const analyticsNavigation = optionalById("nav-analytics");

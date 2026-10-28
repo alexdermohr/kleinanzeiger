@@ -14,13 +14,13 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.10</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.11</p>
 <h1>Kleinanzeiger – Benutzerhandbuch</h1>
 <p>Kleinanzeiger verwaltet Ihre eigenen Anzeigen, zeigt Kennzahlen, unterstützt Entwürfe mit KI und sichert lokale Daten. Alle häufigen Aufgaben starten über das Fenster <strong>Kleinanzeiger</strong>.</p>
 <nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#stapel">Stapelaufträge</a><a href="#verkauf">Verkäufe & Lager</a><a href="#controlling">Controlling</a><a href="#vorlagen">Vorlagen</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
 <h2 id="install">1. Installation und erster Start</h2>
 <ol>
-<li>Das offizielle <strong>Kleinanzeiger-v0.1.10-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
+<li>Das offizielle <strong>Kleinanzeiger-v0.1.11-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
 <li><strong>Kleinanzeiger.cmd</strong> doppelklicken. Das Windows-Kontrollfenster erscheint.</li>
 <li><strong>Einrichten und starten</strong> klicken. Fehlendes Python 3.12/3.13 sowie Chrome werden bei Bedarf über geprüfte offizielle Dateien bereitgestellt. Eine Internetverbindung ist dafür nötig.</li>
 <li>Im eigens gestarteten Chrome-Fenster bei <strong>kleinanzeigen.de</strong> anmelden; gegebenenfalls die Konto-Bestätigung selbst durchführen. Kleinanzeiger speichert kein Kontopasswort.</li>
@@ -28,11 +28,19 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <li>Für weitere Starts die angelegte Desktop-Verknüpfung <strong>Kleinanzeiger</strong> benutzen. Der ursprüngliche ZIP-Ordner ist danach normalerweise nicht mehr nötig.</li>
 </ol>
 <p class="note">Der separate Chrome-Profilordner gehört zu Kleinanzeiger; das private Standard-Chrome-Profil wird nicht für Debugging verwendet. Die lokalen Dienste sind nur an <code>127.0.0.1</code> gebunden.</p>
+<p class="note"><strong>Neue kompakte Bedienung:</strong> Das Windows-Kontrollfenster zeigt
+Start, Aktualisieren, Konto, Import, Sicherung und KI direkt. E-Mail-Import,
+Vergleiche, Entwurfsexport und Restore stehen unter <strong>Weitere Aktionen</strong>.
+Der Fehlerdetails-Link erscheint nur nach einem Fehlschlag. Das Dashboard hat
+fünf Hauptbereiche (Übersicht, Meine Anzeigen, Artikel &amp; KI,
+Interessenten, Auswertungen); seltene Werkzeuge liegen unter
+<strong>Weitere Bereiche</strong>. Keiner dieser Wege veröffentlicht
+oder verändert allein eine Anzeige.</p>
 <h2 id="anzeigen">2. Meine Anzeigen ansehen, abgleichen und ändern</h2>
 <p>Im Dashboard stehen oben die Kennzahlen <em>Aktuelle Anzeigen</em>, <em>Aufrufe</em>, <em>Merker</em> und <em>Antworten</em>. Unter <strong>Meine Anzeigen</strong> sind eigene Anzeigen als Karten dargestellt. Eine Karte über <strong>Bearbeiten</strong> oder eine Anzeige in der Auswahlliste wählen. Die Anzeigen-ID wird automatisch übernommen; sie braucht nicht eingetippt zu werden.</p>
 <h3>Hunderte oder Tausende Anzeigen übersichtlich verwalten</h3>
 <p>Der Anzeigenkatalog zeigt bis zu <strong>50 Anzeigen pro Seite</strong> statt alle Karten auf einmal. Im Suchfeld einen <strong>Titel oder eine Anzeigen-ID</strong> eingeben und auf <strong>Suchen</strong> klicken. Mit <strong>Status</strong> zwischen allen, aktiven, pausierten und weiteren Anzeigen filtern. Unten mit <strong>Weiter</strong> und <strong>Zurück</strong> durch die Ergebnisse blättern.</p>
-<p>Zum Zusammenstellen einer Arbeitsliste die Auswahlkästchen bei den Anzeigen markieren. Die Auswahl bleibt beim Seitenwechsel erhalten; oben wird die Anzahl angezeigt. <strong>Auswahl als CSV</strong> exportiert die gewählten Anzeigen-IDs. <strong>Auswahl leeren</strong> entfernt sie.</p>
+<p>Zum Zusammenstellen einer Arbeitsliste die Auswahlkästchen bei den Anzeigen markieren. Die Auswahl bleibt beim Seitenwechsel erhalten; oben wird die Anzahl angezeigt. Erst nach dem Markieren erscheint die während der Auswahl erreichbare Aktionsleiste. <strong>Auswahl als CSV</strong> exportiert die gewählten Anzeigen-IDs. <strong>Auswahl leeren</strong> entfernt sie. Bei mehr als zehn ausgewählten Anzeigen erklärt die Leiste, warum eine geschützte Plattform-Sammelaktion gesperrt bleibt; der reine CSV-Export ist weiterhin möglich.</p>
 <h3>Eigene Wiedervorlagen statt vermuteter Ablaufdaten</h3>
 <p>Unter <strong>Meine Anzeigen → Wiedervorlagen</strong> eine eigene Anzeige aus der aktuellen Katalogseite auswählen, einen selbst bestimmten Prüftermin und bei Bedarf eine kurze Notiz eingeben und <strong>Wiedervorlage speichern</strong> wählen. Gespeicherte Einträge lassen sich seitenweise durchsehen, über <strong>Bearbeiten</strong> erneut auswählen, mit Revisionsprüfung ändern oder nach Bestätigung entfernen. Der Status zeigt überfällige und in den nächsten sieben UTC-Tagen fällige manuelle Prüftermine. Die Termine überstehen Neustart und Datenbanksicherung. <strong>Ein echtes Plattform-Ablaufdatum wird derzeit nicht ausgelesen und bleibt unbekannt.</strong> Dieser Bereich verlängert, löscht oder veröffentlicht keine Anzeige und startet keine KI-Kosten. Für Tausende Einträge sind höchstens 50 pro Seite sichtbar.</p>
 <p><strong>Mehrere Anzeigen pausieren oder aktivieren:</strong> In einer angemeldeten Schreibsitzung 1 bis 10 eigene Anzeigen mit passendem Status auswählen und <strong>Auswahl pausieren</strong> oder <strong>Auswahl aktivieren</strong> anklicken. Die Bestätigung zeigt vorab alle IDs, Titel und Statuswechsel. Erst nach Zustimmung wird jede Anzeige <strong>einzeln</strong> über die geschützte Plattformschreibkette bearbeitet. Der Katalogstand wird vor jedem Schritt erneut gelesen; bei einer Änderung, unbekanntem Ergebnis, offenem Recovery-Vorgang oder manuellen Stopp wird der Rest nicht ausgeführt. Eine nicht eindeutig bestätigte Änderung niemals blind erneut auslösen. Für mehr als zehn Anzeigen weitere kontrollierte Durchgänge nutzen. Eine Sammelveröffentlichung oder Sammelpreisänderung gibt es weiterhin nicht. Für einzelne inhaltliche Änderungen <strong>Bearbeiten</strong> wählen.</p>
@@ -92,16 +100,16 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <p>Die tatsächlichen Kosten hängen vom Provider und der Nutzung ab. Keine sensiblen Kontodaten in Prompts eingeben. Generierte Bilder sind nicht automatisch authentische Fotos des angebotenen Gegenstands.</p>
 <h2 id="daten">6. Datensicherung, Wiederherstellung und Updates</h2>
 <p>Im Kontrollfenster stehen <strong>Sicherung erstellen</strong> und <strong>Installieren / aktualisieren</strong> zur Verfügung. Vor einer Aktualisierung wird bei vorhandener Datenbank automatisch eine geprüfte Sicherung erzeugt. Die Datenbank liegt unter <code>%LOCALAPPDATA%\Kleinanzeiger\anzeigen.sqlite</code>, Sicherungen unter <code>%LOCALAPPDATA%\Kleinanzeiger\Backups</code>. Programmdateien liegen unter <code>%LOCALAPPDATA%\Kleinanzeiger\App</code>.</p>
-<p>Für <strong>Sicherung wiederherstellen</strong> zunächst über <strong>Weitere Optionen</strong> die Restore-Funktion öffnen. Diese stellt nur in eine <strong>noch nicht vorhandene</strong> Datenbank ohne WAL-/SHM-/Journal-Dateien wieder her. Eine vorhandene Datenbank wird niemals überschrieben. Die Sicherungsdatei benötigt ihr passendes Manifest.</p>
+<p>Für <strong>Sicherung wiederherstellen</strong> zunächst über <strong>Weitere Aktionen</strong> die Restore-Funktion öffnen. Diese stellt nur in eine <strong>noch nicht vorhandene</strong> Datenbank ohne WAL-/SHM-/Journal-Dateien wieder her. Eine vorhandene Datenbank wird niemals überschrieben. Die Sicherungsdatei benötigt ihr passendes Manifest.</p>
 <p class="note">Für einen sauberen Neuinstallationstest Datenbestand und Chrome-Profil zuerst separat sichern; ein Programmupdate löscht sie nicht. Nicht einfach die laufende SQLite-Datei kopieren oder ihren WAL-/SHM-Bestand löschen.</p>
 <h2 id="hilfe">
 <p><strong>Chrome ist angemeldet, Dashboard bleibt aber geschlossen?</strong>
-Ab Version 0.1.10 werden mehrere Chrome-Tabs im eigenen Profil
+Ab Version 0.1.11 werden mehrere Chrome-Tabs im eigenen Profil
 unterstützt: Kleinanzeiger wählt nur den kanonischen Tab „Meine Anzeigen“.
 Andere Tabs und offene Anzeigen-Editoren bleiben unangetastet.
 Der Link <strong>Fehlerdetails anzeigen</strong> steht unter der Statuszeile.
 Die Anmeldung im normalen Chrome ist nicht dieselbe wie im eigenen
-Kleinanzeiger-Chrome-Profil. In Version 0.1.10 wird die lokale Chrome-Browsersteuerung
+Kleinanzeiger-Chrome-Profil. In Version 0.1.11 wird die lokale Chrome-Browsersteuerung
 vor dem Produktstart geprüft. Bei der Meldung „Browsersteuerung nicht bereit“
 nur die durch Kleinanzeiger geöffneten Chrome-Fenster schließen und erneut öffnen.
 Wenn „Meine Anzeigen“ sichtbar ist und der Dienst dennoch nicht startet,
@@ -164,5 +172,5 @@ nicht löschen.</p>
 <p>Die Vorlage startet keinen Auftrag. Prüfhinweise führen keine Plattformaktionen und keine kostenpflichtige KI-Verarbeitung aus. Wiederkehrende autonome Arbeitsregeln sind noch nicht enthalten.</p>
 <h2>14. Grenzen der aktuellen Ausgabe</h2>
 <p><strong>Noch nicht enthalten:</strong> Kontogebundene vollständige Nachrichtenkonversationen und ein kontrollierter Nachrichtenversand, automatische Plattform-Stapeländerungen/-veröffentlichungen, wiederkehrende KI-Autopilot-Regeln, eine unabhängig geprüfte Provider-Abrechnung sowie eine Freigabe auf Ihrem tatsächlichen Windows-Kunden-PC. Diese Funktionen dürfen nicht mit vorhandenen lokalen Notizen, KI-Vorschlägen oder simulierten Tests verwechselt werden.</p>
-<footer>Kleinanzeiger v0.1.10 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.11 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>
