@@ -18,7 +18,10 @@ const vm=require("node:vm");
 
 const source=fs.readFileSync(0,"utf8");
 const start=source.indexOf("async function loadSelectedSale() {");
-const end=source.indexOf("\nconst draftNavigation =",start);
+// P3 runs independently; downstream P4 adds reporting handlers before nav-drafts.
+const draftEnd=source.indexOf("\nconst draftNavigation =",start);
+const reportEnd=source.indexOf("\nasync function loadPortfolioReport() {",start);
+const end=reportEnd>start && reportEnd<draftEnd ? reportEnd : draftEnd;
 assert.ok(start>=0 && end>start,"the shipped sales functions must exist");
 const elements=new Map();
 class Element {
