@@ -35,6 +35,7 @@ from .analytics import (
 from .portfolio_drafts import drafts_page
 from .portfolio_sales import SaleError, sale_detail, sales_page, sale_totals, update_manual_sale
 from .portfolio_followups import FollowupError, followup_detail, followups_page, mutate_followup
+from .portfolio_conversations import ConversationError, conversations_page, update_conversation_review
 from .portfolio_reporting import PortfolioReportError, report as portfolio_report
 from .portfolio_templates import WorkTemplateError, attention_counts, list_templates, mutate_template
 from .portfolio_item_templates import (
@@ -813,6 +814,27 @@ _DASHBOARD_HTML = """<!doctype html>
             <thead><tr><th>Anzeige</th><th>E-Mail-Ereignisse</th><th>Antwort</th></tr></thead>
             <tbody id="buyer-inquiries-body"></tbody>
           </table>
+          <h3>EML-Gespräche bearbeiten</h3>
+          <p class="muted">Neue E-Mail-Benachrichtigungen seit der letzten lokalen Prüfung erkennen und abhaken. Keine Plattform-Lesebestätigung und kein Nachrichtenversand.</p>
+          <div class="controls">
+            <label>Bearbeitungsstand
+              <select id="buyer-conversations-filter">
+                <option value="new">Neu seit Prüfung</option>
+                <option value="all">Alle importierten Gespräche</option>
+                <option value="reviewed">Lokal geprüft</option>
+              </select>
+            </label>
+            <button id="buyer-conversations-load" type="button">Gespräche anzeigen</button>
+            <button id="buyer-conversations-prev" type="button" disabled>Zurück</button>
+            <button id="buyer-conversations-next" type="button" disabled>Weiter</button>
+          </div>
+          <p id="buyer-conversations-status" class="note" role="status" aria-live="polite"></p>
+          <div class="table-wrap">
+            <table aria-label="Lokal importierte EML-Gespräche">
+              <thead><tr><th>Anzeige</th><th>Gespräch</th><th>Lokaler Stand</th><th>Aktion</th></tr></thead>
+              <tbody id="buyer-conversations-body"></tbody>
+            </table>
+          </div>
         </div>
         <div class="controls">
           <label>Anzeigen-ID <input id="buyer-ad-id" type="text" readonly value="" aria-label="Gewählte Anzeigen-ID"></label>
@@ -3403,6 +3425,167 @@ async function loadInquiries(reset = false) {
   } finally { inquiryBusy=false; inquiryButtons(); }
 }
 
+
+// EML-only, human-controlled triage. Never claim live marketplace unread status.
+let conversationPageCursors=[""];
+let conversationPageIndex=0;
+let conversationWatermark=null;
+let conversationBusy=false;
+let conversationPending=null;
+let conversationLoadSeq=0;
+function conversationButtons() {
+  byId("buyer-conversations-load").disabled=conversationBusy;
+  byId("buyer-conversations-prev").disabled=conversationBusy || conversationPageIndex===0;
+  byId("buyer-conversations-next").disabled=conversationBusy ||
+    conversationPageIndex+1>=conversationPageCursors.length;
+  byId("buyer-conversations-filter").disabled=conversationBusy;
+}
+async function loadConversations(reset=false) {
+  if (!jobsAvailable || !writeUiReady() || conversationBusy) return false;
+  if (reset) {
+    conversationPageCursors=[""]; conversationPageIndex=0; conversationWatermark=null;
+  }
+  const generation=++conversationLoadSeq;
+  const filter=byId("buyer-conversations-filter").value;
+  conversationBusy=true;
+  conversationButtons();
+  const status=byId("buyer-conversations-status");
+  status.textContent="Importierte EML-Gespräche werden geladen …";
+  try {
+    const params=new URLSearchParams({
+      limit:"25",after:conversationPageCursors[conversationPageIndex],status:filter,
+    });
+    if (conversationWatermark!==null) params.set("watermark",String(conversationWatermark));
+    const response=await fetch("/api/portfolio/conversations?"+params.toString(), {
+      cache:"no-store", headers:_jobHeaders(),
+    });
+    if (!response.ok) throw new Error("HTTP "+response.status);
+    const data=await response.json();
+    if (generation!==conversationLoadSeq) return false;
+    if (!data || !Array.isArray(data.conversations) ||
+        data.conversations.length>25 || data.filter!==filter ||
+        data.platform_messages_read!==false || data.platform_writes!==0 ||
+        !Number.isSafeInteger(data.watermark) || data.watermark<0 ||
+        typeof data.has_more!=="boolean" ||
+        (data.has_more && (typeof data.next_after!=="string" || !data.next_after))) {
+      throw new Error("Ungültige lokale Gesprächsliste");
+    }
+    // Resolve an ambiguous local POST through a fresh read, never a new key.
+    if (conversationPending) {
+      const prior=JSON.parse(conversationPending.intent);
+      const observed=data.conversations.find(x=>
+        x.ad_id===prior.ad_id && x.conversation_id===prior.conversation_id);
+      if (observed &&
+          observed.revision===prior.expected_revision+1 &&
+          observed.review_state===(prior.action==="review" ?
+            "locally_reviewed" : "new_since_review")) {
+        conversationPending=null;
+      }
+    }
+    conversationWatermark=data.watermark;
+    const body=byId("buyer-conversations-body");
+    body.replaceChildren();
+    for (const item of data.conversations) {
+      if (!item || !/^[0-9]{1,32}$/.test(item.ad_id) ||
+          typeof item.conversation_id!=="string" ||
+          !["new_since_review","locally_reviewed"].includes(item.review_state) ||
+          !Number.isSafeInteger(item.revision) || item.revision<0 ||
+          !Number.isSafeInteger(item.message_count) || item.message_count<1) {
+        throw new Error("Ungültiges EML-Gespräch");
+      }
+      const row=document.createElement("tr");
+      const ad=document.createElement("td");
+      ad.textContent=item.own_ad ? ((item.title||"Ohne Titel")+" · ID "+item.ad_id)
+        : "Eigentum nicht bestätigt · ID "+item.ad_id;
+      const identity=document.createElement("td");
+      identity.textContent=item.conversation_id+" · "+item.message_count+
+        " importiert · zuletzt: "+item.last_imported_event_at;
+      const state=document.createElement("td");
+      state.textContent=item.review_state==="locally_reviewed" ? "Lokal geprüft" :
+        "Neue EML seit lokaler Prüfung";
+      const actionCell=document.createElement("td");
+      if (item.own_ad===true) {
+        const button=document.createElement("button");
+        button.type="button";
+        button.textContent=item.review_state==="locally_reviewed" ?
+          "Erneut vorlegen" : "Als geprüft markieren";
+        const sameIntent=JSON.stringify({
+          ad_id:item.ad_id, conversation_id:item.conversation_id,
+          action:item.review_state==="locally_reviewed" ? "reopen" : "review",
+          expected_revision:item.revision,
+        });
+        button.disabled=conversationPending!==null &&
+          conversationPending.intent!==sameIntent;
+        button.addEventListener("click",()=>void markConversation(item));
+        actionCell.append(button);
+      } else { actionCell.textContent="Nur eigene Anzeigen"; }
+      row.append(ad,identity,state,actionCell);
+      body.append(row);
+    }
+    if (data.has_more) {
+      conversationPageCursors[conversationPageIndex+1]=data.next_after;
+      conversationPageCursors.length=conversationPageIndex+2;
+    } else { conversationPageCursors.length=conversationPageIndex+1; }
+    status.textContent=data.conversations.length+" EML-Gespräche · Seite "+
+      (conversationPageIndex+1)+" · lokaler Prüfstand, kein Plattformstatus";
+    return true;
+  } catch (error) {
+    status.textContent="Lokal importierte Gespräche derzeit nicht verfügbar. "+error.message;
+    return false;
+  } finally {
+    conversationBusy=false;
+    conversationButtons();
+  }
+}
+async function markConversation(item) {
+  if (conversationBusy || !writeUiReady() || !item || item.own_ad!==true) return;
+  const action=item.review_state==="locally_reviewed" ? "reopen" : "review";
+  const payload={
+    ad_id:item.ad_id, conversation_id:item.conversation_id,
+    action, expected_revision:item.revision,
+  };
+  const intent=JSON.stringify(payload);
+  if (conversationPending && conversationPending.intent!==intent) {
+    byId("buyer-conversations-status").textContent=
+      "Ein anderer lokaler Vorgang ist noch nicht geklärt. Erst diesen prüfen.";
+    return;
+  }
+  if (!conversationPending) {
+    conversationPending={intent, key:_newJobRequestKey()};
+  }
+  conversationBusy=true; conversationButtons();
+  try {
+    const response=await fetch("/api/portfolio/conversations/review", {
+      method:"POST", cache:"no-store",
+      headers:{..._jobHeaders(),"Content-Type":"application/json"},
+      body:JSON.stringify({...payload,request_key:conversationPending.key}),
+    });
+    if (response.status===409) {
+      conversationPending=null;
+      throw new Error("Gespräch inzwischen geändert. Bitte neu laden.");
+    }
+    if (!response.ok) throw new Error("Lokale Prüfung nicht bestätigt.");
+    const result=await response.json();
+    if (!result || result.ad_id!==item.ad_id ||
+        result.conversation_id!==item.conversation_id ||
+        result.platform_writes!==0 ||
+        !Number.isSafeInteger(result.revision) ||
+        result.revision!==item.revision+1) {
+      throw new Error("Mehrdeutiges lokales Prüfergebnis.");
+    }
+    conversationPending=null;
+    byId("buyer-conversations-status").textContent="Nur lokaler Bearbeitungsstand geändert.";
+    conversationBusy=false;
+    await loadConversations(true);
+  } catch (error) {
+    byId("buyer-conversations-status").textContent=error.message+
+      " Kein automatischer erneuter Aufruf, keine Plattformaktion.";
+  } finally {
+    conversationBusy=false;
+    conversationButtons();
+  }
+}
+
 // Antworttexte bleiben nur im Browserformular. Kein Plattform-Postfach
 // und keine ausgehende Nachricht.
 function buyerReplyAvailability() {
@@ -5398,6 +5581,16 @@ byId("manage-activate").addEventListener(
 );
 byId("manage-delete").addEventListener("click", deleteManagedAd);
 byId("buyer-inquiries-load").addEventListener("click", () => loadInquiries(true));
+byId("buyer-conversations-load").addEventListener("click", () => loadConversations(true));
+byId("buyer-conversations-filter").addEventListener("change", () => loadConversations(true));
+byId("buyer-conversations-prev").addEventListener("click", () => {
+  if (conversationBusy || conversationPageIndex===0) return;
+  conversationPageIndex--; void loadConversations();
+});
+byId("buyer-conversations-next").addEventListener("click", () => {
+  if (conversationBusy || conversationPageIndex+1>=conversationPageCursors.length) return;
+  conversationPageIndex++; void loadConversations();
+});
 byId("buyer-inquiries-prev").addEventListener("click", () => {
   if (inquiryBusy || inquiryIndex===0) return;
   inquiryIndex--;
@@ -6529,6 +6722,40 @@ def _handler_factory(
                     return
                 self._send_json(200,result)
                 return
+            if path == "/api/portfolio/conversations":
+                # EML-Metadaten, kein Plattformpostfach und kein Versandstatus.
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error":"not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error":"write_session_required"})
+                    return
+                try:
+                    if len(target.query)>700 or target.fragment:
+                        raise ValueError("oversized conversation query")
+                    options=parse_qs(target.query,keep_blank_values=True,
+                        max_num_fields=4,encoding="utf-8",errors="strict")
+                    if (set(options)-{"after","limit","watermark","status"}
+                            or any(len(value)!=1 for value in options.values())):
+                        raise ValueError("invalid conversation query")
+                    count=options.get("limit",["25"])[0]
+                    bound=options.get("watermark",[None])[0]
+                    if (not count.isascii() or not count.isdecimal() or len(count)>2
+                        or (bound is not None and (not bound.isascii()
+                            or not bound.isdecimal() or len(bound)>19))):
+                        raise ValueError("invalid conversation numbers")
+                    answer=conversations_page(store,
+                        after=options.get("after",[""])[0],limit=int(count),
+                        watermark=int(bound) if bound is not None else None,
+                        status=options.get("status",["all"])[0])
+                except (ValueError,UnicodeError,ConversationError,OverflowError):
+                    self._send_json(400,{"error":"invalid_conversations_query"})
+                    return
+                except (sqlite3.Error,OSError):
+                    self._send_json(503,{"error":"conversations_storage_unavailable"})
+                    return
+                self._send_json(200,answer)
+                return
             if path == "/api/portfolio/inquiries":
                 # Imported EML metadata require the authenticated local session.
                 if type(store) is not SnapshotStore or write_proxy is None:
@@ -7134,6 +7361,39 @@ def _handler_factory(
                 return
             self._send_json(200,result)
 
+        def _portfolio_conversation_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/conversations/review"
+                    or target.query or target.fragment or target.path!=self.path
+                    or type(store) is not SnapshotStore or write_proxy is None):
+                self._send_json(404,{"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403,{"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400,{"error":"local_review_key_required_in_body"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                answer=update_conversation_review(store,payload)
+            except ConversationError as exc:
+                conflict=str(exc) in (
+                    "review state changed; reload",
+                    "request key reused for different action")
+                self._send_json(409 if conflict else 400,
+                    {"error":"conversation_review_conflict" if conflict
+                        else "invalid_conversation_review"})
+                return
+            except (ValueError,UnicodeError,TypeError,RecursionError):
+                self._send_json(400,{"error":"invalid_conversation_review"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503,{"error":"conversation_storage_unavailable"})
+                return
+            self._send_json(200,answer)
+
         def _portfolio_followup_command(self) -> None:
             target=urlsplit(self.path)
             if (target.path!="/api/portfolio/followups/mutate"
@@ -7291,6 +7551,9 @@ def _handler_factory(
             self._send_json(200,answer)
 
         def do_POST(self) -> None:
+            if urlsplit(self.path).path=="/api/portfolio/conversations/review":
+                self._portfolio_conversation_command()
+                return
             if urlsplit(self.path).path=="/api/portfolio/followups/mutate":
                 self._portfolio_followup_command()
                 return
