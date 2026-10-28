@@ -1138,6 +1138,9 @@ let catalogFilters = {search: "", status: "all"};
 let followupBusy = false;
 let followupActiveId = "";
 let followupRevision = 0;
+let followupHasLive = false;
+let followupDetailLoading = false;
+let followupDetailLoaded = false;
 let followupDetailsGeneration = 0;
 let followupPageGeneration = 0;
 let followupPageIndex = 0;
@@ -1665,13 +1668,14 @@ function renderFollowupControls() {
   const select = optionalById("followup-ad-select");
   if (!select) return;
   const selected = select.value;
-  const usable = !followupBusy && writeUiReady() && /^[0-9]{1,32}$/.test(selected);
+  const usable = !followupBusy && !followupDetailLoading && followupDetailLoaded
+    && writeUiReady() && /^[0-9]{1,32}$/.test(selected);
   const dateValue = byId("followup-date").value;
   byId("followup-save").disabled = !usable || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(dateValue);
-  byId("followup-delete").disabled = !usable || followupRevision < 1;
+  byId("followup-delete").disabled = !usable || !followupHasLive;
   select.disabled = followupBusy;
-  byId("followup-date").disabled = followupBusy;
-  byId("followup-note").disabled = followupBusy;
+  byId("followup-date").disabled = followupBusy || followupDetailLoading;
+  byId("followup-note").disabled = followupBusy || followupDetailLoading;
   byId("followup-refresh").disabled = followupBusy || followupLoading;
   byId("followup-prev").disabled = followupBusy || followupLoading || followupPageIndex === 0;
   byId("followup-next").disabled = followupBusy || followupLoading || followupNextAfter === null;
@@ -1731,6 +1735,9 @@ async function loadSelectedFollowup() {
   const seq = ++followupDetailsGeneration;
   followupActiveId = id;
   followupRevision = 0;
+  followupHasLive = false;
+  followupDetailLoaded = false;
+  followupDetailLoading = Boolean(id);
   byId("followup-date").value = "";
   byId("followup-note").value = "";
   renderFollowupControls();
@@ -1739,7 +1746,9 @@ async function loadSelectedFollowup() {
     const result = await followupGet(
       "/api/portfolio/followups/detail?ad_id=" + encodeURIComponent(id));
     if (seq !== followupDetailsGeneration || byId("followup-ad-select").value !== id) return;
-    if (!result || result.platform_expiry_status !== "unknown_no_verified_observation") {
+    if (!result || result.platform_expiry_status !== "unknown_no_verified_observation"
+        || !Number.isSafeInteger(result.tombstone_revision)
+        || result.tombstone_revision < 0) {
       throw new Error("Unvollständige lokale Wiedervorlage.");
     }
     const reminder = result.followup;
@@ -1749,10 +1758,18 @@ async function loadSelectedFollowup() {
           || typeof reminder.manual_followup_date !== "string") {
         throw new Error("Ungültiger Wiedervorlagenstand.");
       }
+      if (result.tombstone_revision !== 0) {
+        throw new Error("Widersprüchliche Wiedervorlage.");
+      }
       followupRevision = reminder.revision;
+      followupHasLive = true;
       byId("followup-date").value = reminder.manual_followup_date;
       byId("followup-note").value = reminder.manual_note || "";
+    } else {
+      // A deleted reminder keeps its generation for deliberate re-creation.
+      followupRevision = result.tombstone_revision;
     }
+    followupDetailLoaded = true;
     // An ambiguous prior local response must be reconciled, not submitted
     // with a fresh key merely because the user changed the selected ad.
     if (followupPending && followupPending.payload.ad_id === id) {
@@ -1761,7 +1778,8 @@ async function loadSelectedFollowup() {
           && reminder.manual_followup_date === expected.due_date
           && reminder.manual_note === expected.note) {
         followupPending = null;
-      } else if (!reminder && expected.action === "delete") {
+      } else if (!reminder && expected.action === "delete"
+          && result.tombstone_revision > expected.expected_revision) {
         followupPending = null;
       }
     }
@@ -1773,7 +1791,10 @@ async function loadSelectedFollowup() {
       byId("followup-feedback").textContent = error.message;
     }
   } finally {
-    if (seq === followupDetailsGeneration) renderFollowupControls();
+    if (seq === followupDetailsGeneration) {
+      followupDetailLoading = false;
+      renderFollowupControls();
+    }
   }
 }
 
@@ -1893,12 +1914,13 @@ async function changeFollowupPage(delta) {
 }
 
 async function mutateSelectedFollowup(action) {
-  if (followupBusy || !writeUiReady()) return;
+  if (followupBusy || followupDetailLoading || !followupDetailLoaded
+      || !writeUiReady()) return;
   const adId = byId("followup-ad-select").value;
   if (!/^[0-9]{1,32}$/.test(adId)) return;
   if (action !== "save" && action !== "delete") return;
   if (action === "delete" && (
-      followupRevision === 0 ||
+      !followupHasLive ||
       !window.confirm("Nur die eigene Wiedervorlage zu Anzeige " + adId
         + " entfernen? Die Plattformanzeige bleibt unverändert.")
   )) return;
@@ -1933,6 +1955,12 @@ async function mutateSelectedFollowup(action) {
     if (response.status === 409) {
       followupPending = null;
       throw new Error("Wiedervorlage inzwischen geändert. Bitte Stand neu laden.");
+    }
+    if (response.status === 400) {
+      // A validation rejection is definitive, unlike a lost response or 5xx.
+      // Do not poison later corrected form submissions with an old intent.
+      followupPending = null;
+      throw new Error("Wiedervorlage ungültig. Termin oder Notiz korrigieren.");
     }
     if (!response.ok) {
       throw new Error("Speichern nicht bestätigt. Dieselbe lokale Anfrage prüfen.");
