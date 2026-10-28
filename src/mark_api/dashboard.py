@@ -2907,13 +2907,16 @@ function clearBuyerReply(status = "") {
 function openBuyerReplyForAd(ad) {
   if (buyerBusy || !ad || ad.present !== true ||
       typeof ad.ad_id !== "string" || !/^[0-9]{1,32}$/.test(ad.ad_id)) return;
-  const title = typeof ad.title === "string" ? ad.title : "Ohne Titel";
+  // Display placeholder must never replace the observed identity value.
+  const sourceTitle = typeof ad.title === "string" ? ad.title : null;
+  const title = sourceTitle ?? "Ohne Titel";
   const changed = buyerTarget === null
     || buyerTarget.ad_id !== ad.ad_id
-    || buyerTarget.title !== title
+    || buyerTarget.source_title !== sourceTitle
     || buyerTarget.observed_at !== ad.observed_at;
   buyerTarget = Object.freeze({
-    ad_id: ad.ad_id, title, observed_at: ad.observed_at
+    ad_id: ad.ad_id, title, source_title: sourceTitle,
+    observed_at: ad.observed_at
   });
   byId("buyer-ad-id").value = ad.ad_id;
   byId("buyer-ad-title").value = title;
@@ -3002,7 +3005,7 @@ async function requestBuyerReply() {
     ))?.ad;
     if (current?.present !== true
         || current.ad_id !== selected.ad_id
-        || current.title !== selected.title
+        || current.title !== selected.source_title
         || current.observed_at !== selected.observed_at
         || buyerRevision !== version) {
       throw new Error("Anzeigenstand wurde verändert. Bitte neu auswählen.");
