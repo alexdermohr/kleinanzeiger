@@ -191,10 +191,12 @@ jobs:
           - Lokale KI-Stapelverwaltung für bis zu 5.000 Artikel mit Paginierung, Freigabe und atomarer lokaler Übernahme
           - Freigegebene KI-Einzelaufrufe oder bis zu zehn sequenzielle Anfragen pro Kundenaktion; Budgetreserve, manuelles Stoppen, UNKNOWN-Sperre
           - Keine automatische Plattform-Massenveröffentlichung; 10.000 synthetische Anzeigen im Katalog getestet
+          - Eigene Anzeigen in geprüften Stapeln von höchstens zehn einzeln pausieren/aktivieren; kontrollierte Sammellöschung nur nach Vorschau und zusätzlich exakter Eingabe LÖSCHEN N
+          - Vor jedem Write exakte Anzeigenbeobachtung prüfen, bestätigt ausgeführte IDs anzeigen, bei UNKNOWN/Recovery/Stopp sofort weitere Aktionen sperren
           - P3: Lagerorte, lokale Reservierungen und manuell verbuchte Verkäufe mit bekannten/unbekannten Kosten
           - P4: 7/30/90-Tage-Controlling, CSV-Tageszahlen, getrennte Erlöse und geschätzte KI-Ausgaben
           - P5: Bis zu 100 KI-Arbeitsvorlagen und passive Hinweise auf offene Prüfaufgaben
-          - Nicht enthalten: Konto-Nachrichtenversand, echte Plattform-Bulk-Writes, Autopilot, verifizierte KI-Providerrechnung
+          - Nicht enthalten: Konto-Nachrichtenversand, unbeaufsichtigte Plattform-Massenaktionen, automatische Massenpreisänderungen, Autopilot, verifizierte KI-Providerrechnung
           - Lokale Kleinanzeigen-E-Mails und Vergleichslabels über zentrale Bedienelemente pflegen
           - Vollständiges HTML-Benutzerhandbuch und Funktionsübersicht im Kundenpaket
           - Anzeigen ohne Neustart live mit Kleinanzeigen abgleichen; lokale Ansicht getrennt neu laden
