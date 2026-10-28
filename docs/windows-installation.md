@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.9 – Windows 11
+# Kleinanzeiger v0.1.10 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -110,13 +110,23 @@ CSV (UTF-8) oder Excel XLSX mit den Pflichtspalten `sku,title,description,catego
 
 ## Wenn Chrome angemeldet ist, das Dashboard aber nicht startet
 
+**Ab Version 0.1.10:** Kleinanzeiger erkennt mehrere offene Tabs im eigenen
+Chrome-Profil und sucht den richtigen Tab **Meine Anzeigen** statt pauschal
+nur ein einziges Browserfenster vorauszusetzen. Bei mehreren solchen Tabs
+verwendet es eine fest ausgewählte Tab-Identität; private Tabs und offene
+Anzeigen-Editoren werden nicht geschlossen oder ungefragt umgeleitet.
+Der Browser- und Lesezugriff bleibt lokal und lesend. Die Oberfläche zeigt
+**Fehlerdetails anzeigen** unter der Statuszeile.
+
+
+
 Kleinanzeiger verwendet ein eigenes Chrome-Profil unter
 %LOCALAPPDATA%\Kleinanzeiger\ChromeProfile. Die Anmeldung in einem anderen
 Chrome-Fenster genügt nicht. Ist **Meine Anzeigen** bereits in dem von
 Kleinanzeiger geöffneten Chrome-Fenster sichtbar, **ist die Meldung kein
 Beweis für eine fehlende Anmeldung**.
 
-Die Version 0.1.9 prüft nach dem Öffnen von Chrome höchstens 12 Sekunden, ob
+Die Version 0.1.10 prüft nach dem Öffnen von Chrome höchstens 12 Sekunden, ob
 dessen lokale Browsersteuerung auf 127.0.0.1:9222 antwortet. Erst dann
 wird der eigentliche Dienst gestartet. Bei einer nicht erreichbaren Steuerung
 wird ein eigener Hinweis statt einer vermeintlichen Login-Fehlermeldung

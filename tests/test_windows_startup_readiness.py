@@ -32,9 +32,11 @@ class WindowsStartReadinessTests(unittest.TestCase):
         self.assertLess(body.index("Wait-KleinanzeigerChromeDevTools -Port 9222"),
                         body.index("Start-PipedProcess $info 'product'"))
         self.assertIn("--timeout-seconds 12 --stop-on-stdin", body)
-        self.assertIn("Dienststart fehlgeschlagen. Bitte Details öffnen", script)
+        self.assertIn("Start fehlgeschlagen – Fehlerdetails unten öffnen.", script)
         self.assertIn("Kleinanzeiger-Prozess beendet (Exitcode $exit)", script)
         self.assertIn("readinessProbeCount", script)
+        self.assertIn("Fehlerdetails anzeigen", script)
+        self.assertIn("$detailsLink.SetBounds(28,490,220,26)", script)
         self.assertNotIn("Konnte nicht starten. Falls nötig in Chrome anmelden", script)
 
     def test_manual_console_start_also_checks_cdp_endpoint(self):

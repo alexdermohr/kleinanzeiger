@@ -115,10 +115,10 @@ $mail = Add-Button 'E-Mails importieren' 28 330 282 43
 $labels = Add-Button 'Anzeigen vergleichen' 330 330 282 43
 $products = Add-Button 'Artikel importieren' 28 389 282 43
 $productsExport = Add-Button 'Entwürfe exportieren' 330 389 282 43
-$statusLabel = Add-Label 'Bereit.' 28 450 584 44 $font $muted
+$statusLabel = Add-Label 'Bereit.' 28 450 584 34 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
-$detailsLink.Text = 'Details'
-$detailsLink.SetBounds(541,472,71,26)
+$detailsLink.Text = 'Fehlerdetails anzeigen'
+$detailsLink.SetBounds(28,490,220,26)
 $detailsLink.LinkColor = $accent
 $form.Controls.Add($detailsLink)
 $detailsLink.Add_Click({
@@ -577,7 +577,7 @@ function Handle-Line([string]$line,[bool]$isError) {
   if ($line -match '(?i)(write_token|generation_token|OPENAI_API_KEY|sk-proj-|Bearer\s)') { return }
   if ($script:details.Length -lt 4000) { $script:details += $line + [Environment]::NewLine }
   if ($isError -and $script:mode -eq 'product') {
-    Set-Status 'Dienststart fehlgeschlagen. Bitte Details öffnen; die Anmeldung kann bereits gültig sein.' $true
+    Set-Status 'Start fehlgeschlagen – Fehlerdetails unten öffnen.' $true
   }
 }
 function Drain-Stream([string]$kind) {
@@ -613,7 +613,7 @@ function Finish-Process {
       if ($script:details.Length -lt 3900) {
         $script:details += "Kleinanzeiger-Prozess beendet (Exitcode $exit)." + [Environment]::NewLine
       }
-      Set-Status 'Dienststart fehlgeschlagen. Bitte Details öffnen; die Anmeldung kann bereits gültig sein.' $true
+      Set-Status 'Start fehlgeschlagen – Fehlerdetails unten öffnen.' $true
     } elseif ($exit -ne 0) {
       Set-Status 'Kleinanzeiger wurde unerwartet beendet.' $true
     }

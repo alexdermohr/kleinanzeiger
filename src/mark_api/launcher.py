@@ -167,8 +167,26 @@ def _validated_inventory(
     if not isinstance(result, ReadResult):
         raise ProductLauncherError("private Web inventory result is invalid")
     if not result.is_success:
+        # Preserve only bounded, source-controlled diagnostics. A Chrome
+        # transport failure is not evidence that the customer is logged out.
+        hints = {
+            "cdp_inventory_wrong_target":
+                "Das gewaehlte Chrome-Tab zeigt nicht 'Meine Anzeigen'.",
+            "cdp_inventory_not_ready":
+                "Die Seite 'Meine Anzeigen' war noch nicht vollstaendig geladen.",
+            "cdp_connect":
+                "Chrome-Zieltab oder Browsersteuerung konnte nicht verbunden werden.",
+            "cdp_call":
+                "Die Browsersteuerung hat die Leseantwort nicht bestaetigt.",
+            "cdp_inventory_evaluate":
+                "Die Verwaltungsseite konnte die Anzeigen nicht abrufen.",
+            "cdp_inventory_fetch_failed":
+                "Die Antwort der Anzeigenverwaltung fehlt oder ist unvollstaendig.",
+        }
+        hint = hints.get(result.error) if result.status is ReadStatus.TRANSPORT_ERROR else None
         raise ProductLauncherError(
             f"private Web inventory read failed: {result.status.value}"
+            + (f" – {hint}" if hint else "")
         )
 
     snapshots = tuple(result.value or ())

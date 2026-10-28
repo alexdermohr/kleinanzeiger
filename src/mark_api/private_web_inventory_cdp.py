@@ -221,14 +221,27 @@ class CdpManagementInventoryReader:
         path again before its read-only fetch.
         """
         _require_private_web_cdp_authority()
-        current = self._value(client, _INVENTORY_TAB_PROBE)
-        if not (
-            isinstance(current, dict)
-            and current.get("readyState") == "complete"
-            and current.get("origin") == _ORIGIN
-            and current.get("path") == _MANAGER_PATH
-        ):
-            raise PrivateWebCdpError("inventory_wrong_target")
+        deadline = self._monotonic() + min(self._timeout, 10.0)
+        # Chrome's /json/version readiness precedes the real page load.
+        # Retry only the ACK-confirmed, DOM-only probe on this SAME pinned
+        # WebSocket. Never reconnect or retry a possibly issued platform GET.
+        for _ in range(61):
+            current = self._value(client, _INVENTORY_TAB_PROBE)
+            if not (
+                isinstance(current, dict)
+                and current.get("origin") == _ORIGIN
+                and current.get("path") == _MANAGER_PATH
+            ):
+                raise PrivateWebCdpError("inventory_wrong_target")
+            state = current.get("readyState")
+            if state == "complete":
+                return
+            if state not in ("loading", "interactive"):
+                raise PrivateWebCdpError("inventory_wrong_target")
+            if self._monotonic() >= deadline:
+                break
+            self._sleep(0.15)
+        raise PrivateWebCdpError("inventory_not_ready")
 
     @staticmethod
     def _page(client: _CdpClient, page: int) -> ReadResult[dict[str, Any]]:
@@ -239,9 +252,16 @@ class CdpManagementInventoryReader:
             client, expression, await_promise=True,
         )
         if not isinstance(payload, dict) or payload.get("error") is not None:
-            return ReadResult.failure(
-                ReadStatus.TRANSPORT_ERROR, error="cdp_inventory_failed",
+            # Do not return arbitrary browser-provided diagnostics or bodies.
+            fixed = payload.get("error") if isinstance(payload, dict) else None
+            code = (
+                "cdp_inventory_wrong_target"
+                if fixed == "wrong_origin_or_page"
+                else "cdp_inventory_fetch_failed"
+                if fixed == "missing_body"
+                else "cdp_inventory_failed"
             )
+            return ReadResult.failure(ReadStatus.TRANSPORT_ERROR, error=code)
         status = payload.get("status")
         body = payload.get("body")
         if (
@@ -371,6 +391,18 @@ class CdpManagementInventoryReader:
                 raise PrivateWebInventoryReadCancelled("inventory transport cancelled") from None
             except PrivateWebCdpReadSetupError:
                 raise PrivateWebInventoryReadSetupError("signal-safe CDP setup failed") from None
+            except PrivateWebCdpError as exc:
+                # Only a fixed, locally authored stage name may be reported.
+                # Never expose a browser URL, cookies, response body or provider
+                # exception text through the local dashboard.
+                if exc.stage in ("inventory_wrong_target", "inventory_not_ready",
+                                 "connect", "call", "inventory_evaluate"):
+                    return ReadResult.failure(
+                        ReadStatus.TRANSPORT_ERROR, error="cdp_" + exc.stage,
+                    )
+                return ReadResult.failure(
+                    ReadStatus.TRANSPORT_ERROR, error="cdp_inventory_failed",
+                )
             except Exception:
                 return ReadResult.failure(
                     ReadStatus.TRANSPORT_ERROR, error="cdp_inventory_failed",

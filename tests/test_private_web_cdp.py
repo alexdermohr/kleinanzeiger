@@ -3696,6 +3696,87 @@ class CdpPrivateWebPageTests(unittest.TestCase):
         self.assertTrue(raw_socket.closed)
         self.assertNotIn("secret", str(caught.exception))
 
+    def test_multi_tab_chrome_pins_canonical_manager_not_first_or_last_tab(self) -> None:
+        offsite = {
+            "type": "page",
+            "url": "https://example.invalid/some-news",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19610/devtools/page/other",
+        }
+        management = [
+            {
+                "type": "page",
+                "url": "https://www.kleinanzeigen.de/m-meine-anzeigen.html",
+                "webSocketDebuggerUrl":
+                    "ws://127.0.0.1:19610/devtools/page/manager-b",
+            },
+            {
+                "type": "page",
+                "url": "https://www.kleinanzeigen.de/m-meine-anzeigen.html?tab=active",
+                "webSocketDebuggerUrl":
+                    "ws://127.0.0.1:19610/devtools/page/manager-a",
+            },
+        ]
+        opened = []
+        for targets in (
+            [offsite, management[0], management[1]],
+            [management[1], offsite, management[0]],
+            [management[0], management[1], offsite],
+        ):
+            with self.subTest(targets=targets):
+                def open_ws(url, **_kwargs):
+                    opened.append(url)
+                    return FakeSocket([])
+                client = _LoopbackCdpClient(
+                    "http://127.0.0.1:19610",
+                    timeout_seconds=1,
+                    opener=lambda url, targets=targets, **_kw: FakeResponse(targets, url=url),
+                    websocket_factory=open_ws,
+                    tcp_socket_factory=lambda *_args, **_kw: FakeTcpSocket(),
+                )
+                self.assertEqual(
+                    client._target_websocket_url,
+                    "ws://127.0.0.1:19610/devtools/page/manager-a",
+                )
+                client.close()
+        self.assertEqual(
+            opened,
+            ["ws://127.0.0.1:19610/devtools/page/manager-a"] * 3,
+        )
+
+    def test_multi_tab_chrome_rejects_no_manager_spoofed_origin_and_bad_ws(self) -> None:
+        candidate = {
+            "type": "page",
+            "url": "https://www.kleinanzeigen.de/m-meine-anzeigen.html",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19610/devtools/page/valid",
+        }
+        other = {
+            "type": "page", "url": "https://example.invalid/",
+            "webSocketDebuggerUrl":
+                "ws://127.0.0.1:19610/devtools/page/news",
+        }
+        hostile = (
+            [other, {**candidate, "url": "https://attacker.invalid/m-meine-anzeigen.html"}],
+            [other, {**candidate, "url": "http://www.kleinanzeigen.de/m-meine-anzeigen.html"}],
+            [other, {**candidate, "url": "https://www.kleinanzeigen.de.evil.invalid/m-meine-anzeigen.html"}],
+            [other, {**candidate, "webSocketDebuggerUrl": "ws://example.invalid:19610/devtools/page/valid"}],
+            [candidate, candidate],
+        )
+        for targets in hostile:
+            with self.subTest(targets=targets):
+                invoked = []
+                with self.assertRaises(PrivateWebCdpError) as caught:
+                    _LoopbackCdpClient(
+                        "http://127.0.0.1:19610",
+                        timeout_seconds=1,
+                        opener=lambda url, targets=targets, **_kw: FakeResponse(targets, url=url),
+                        websocket_factory=lambda *a, **kw: invoked.append("ws"),
+                        tcp_socket_factory=lambda *a, **kw: invoked.append("tcp"),
+                    )
+                self.assertEqual(caught.exception.stage, "connect")
+                self.assertEqual(invoked, [])
+
     def test_loopback_client_requires_one_same_port_page_target(self) -> None:
         good_target = {
             "type": "page",
