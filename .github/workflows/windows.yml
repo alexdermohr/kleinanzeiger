@@ -185,6 +185,7 @@ jobs:
           - Ein einziges Kleinanzeiger-Fenster für Einrichtung, Start, Update, Backup und KI-Zugang
           - Bis zu 50 Anzeigen pro Katalogseite statt kompletten Bestands im Browser
           - Titelsuche, ID-Suche, Statusfilter, Vor/Zurück und seitenübergreifende Auswahl
+          - G1: Bis zu 10.000 lokale manuelle Wiedervorlagen mit Status überfällig/bald fällig; Plattform-Ablaufdaten bleiben unbekannt, keine automatische Verlängerung
           - Lokaler CSV-Export der ausgewählten Anzeigen-IDs ohne Massen-Write
           - CSV-/Excel-Import bis 5.000 lokale Artikelentwürfe: Vorschau, Prüfsummen, atomare Übernahme
           - Artikelnummern-Dubletten- und Fehlerprüfung, Entwurfs-Pagination im Dashboard, Export und Formularübernahme

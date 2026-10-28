@@ -34,6 +34,7 @@ from .analytics import (
 )
 from .portfolio_drafts import drafts_page
 from .portfolio_sales import SaleError, sale_detail, sales_page, sale_totals, update_manual_sale
+from .portfolio_followups import FollowupError, followup_detail, followups_page, mutate_followup
 from .portfolio_reporting import PortfolioReportError, report as portfolio_report
 from .portfolio_templates import WorkTemplateError, attention_counts, list_templates, mutate_template
 from .portfolio_item_templates import (
@@ -364,6 +365,37 @@ _DASHBOARD_HTML = """<!doctype html>
           <span id="catalog-page-label">Seite 1</span>
           <button id="catalog-next" type="button">Weiter</button>
         </div>
+        <details id="followup-pane" class="compact-details" hidden>
+          <summary>Wiedervorlagen · nächste Prüfung planen</summary>
+          <p class="note">Manueller Prüftermin für eigene Anzeigen. <strong>Ein Plattform-Ablaufdatum ist nicht bekannt.</strong> Kein automatisches Verlängern, keine KI-Kosten und keine Plattformänderung.</p>
+          <div class="catalog-toolbar">
+            <label>Eigene Anzeige aus aktueller Katalogseite
+              <select id="followup-ad-select"><option value="">Anzeige wählen …</option></select>
+            </label>
+            <label>Eigener Prüftermin (kein Plattformablauf)
+              <input id="followup-date" type="date" min="2020-01-01" max="2100-12-31">
+            </label>
+            <label>Notiz (optional)
+              <input id="followup-note" type="text" maxlength="120" placeholder="Zum Beispiel: Fotos prüfen">
+            </label>
+            <button id="followup-save" type="button" disabled>Wiedervorlage speichern</button>
+            <button id="followup-delete" type="button" disabled>Wiedervorlage entfernen</button>
+          </div>
+          <p id="followup-summary" class="note" aria-live="polite"></p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Anzeige</th><th>Eigener Termin</th><th>Status</th><th>Notiz</th><th>Aktion</th></tr></thead>
+              <tbody id="followup-body"></tbody>
+            </table>
+          </div>
+          <div class="catalog-pages">
+            <button id="followup-prev" type="button" disabled>Zurück</button>
+            <span id="followup-page-label">Seite 1</span>
+            <button id="followup-next" type="button" disabled>Weiter</button>
+            <button id="followup-refresh" type="button">Aktualisieren</button>
+          </div>
+          <p id="followup-feedback" role="status" aria-live="polite"></p>
+        </details>
         <p id="ad-cards-empty" class="empty" hidden>Hier erscheinen deine Anzeigen nach der Synchronisierung.</p>
         <details class="compact-details inventory-details">
           <summary>Alle Kennzahlen und Details anzeigen</summary>
@@ -1081,6 +1113,17 @@ let catalogNextAfter = null;
 let catalogLoading = false;
 let catalogGeneration = 0;
 let catalogFilters = {search: "", status: "all"};
+let followupBusy = false;
+let followupActiveId = "";
+let followupRevision = 0;
+let followupDetailsGeneration = 0;
+let followupPageGeneration = 0;
+let followupPageIndex = 0;
+let followupPageCursors = [""];
+let followupNextAfter = null;
+let followupPending = null;
+let followupLoaded = false;
+let followupLoading = false;
 let draftCursors = [""];
 let draftPageIndex = 0;
 let draftNextAfter = null;
@@ -1588,6 +1631,302 @@ function managedContentChanges(adId) {
 }
 
 
+
+function renderFollowupControls() {
+  const select = optionalById("followup-ad-select");
+  if (!select) return;
+  const selected = select.value;
+  const usable = !followupBusy && writeUiReady() && /^[0-9]{1,32}$/.test(selected);
+  const dateValue = byId("followup-date").value;
+  byId("followup-save").disabled = !usable || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(dateValue);
+  byId("followup-delete").disabled = !usable || followupRevision < 1;
+  select.disabled = followupBusy;
+  byId("followup-date").disabled = followupBusy;
+  byId("followup-note").disabled = followupBusy;
+  byId("followup-refresh").disabled = followupBusy || followupLoading;
+  byId("followup-prev").disabled = followupBusy || followupLoading || followupPageIndex === 0;
+  byId("followup-next").disabled = followupBusy || followupLoading || followupNextAfter === null;
+  byId("followup-page-label").textContent = "Seite " + (followupPageIndex + 1);
+}
+
+function renderFollowupChoices() {
+  const select = optionalById("followup-ad-select");
+  if (!select) return;
+  const selected = select.value || followupActiveId;
+  const options = new Map();
+  for (const ad of catalogRows) {
+    if (ad && ad.present === true && typeof ad.ad_id === "string"
+        && /^[0-9]{1,32}$/.test(ad.ad_id)) {
+      options.set(ad.ad_id, typeof ad.title === "string" ? ad.title : "Ohne Titel");
+    }
+  }
+  if (followupActiveId && !options.has(followupActiveId)) {
+    options.set(followupActiveId, "Zuvor gewählte Anzeige");
+  }
+  const nodes = [];
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "Eigene Anzeige wählen …";
+  nodes.push(blank);
+  for (const [id, title] of options) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = id + " · " + title.slice(0, 75);
+    nodes.push(option);
+  }
+  select.replaceChildren(...nodes);
+  select.value = options.has(selected) ? selected : "";
+  renderFollowupControls();
+}
+
+function selectFollowupAd(id, title) {
+  if (followupBusy || typeof id !== "string" || !/^[0-9]{1,32}$/.test(id)) return;
+  const select = byId("followup-ad-select");
+  // Saved reminders can be edited even when their listing is on another page.
+  const option = document.createElement("option");
+  option.value = id;
+  option.textContent = id + " · " + (typeof title === "string" ? title.slice(0, 75) : "");
+  select.append(option);
+  select.value = id;
+  void loadSelectedFollowup();
+}
+
+async function followupGet(path) {
+  const response = await fetch(path, {cache: "no-store", headers: _jobHeaders()});
+  if (!response.ok) throw new Error("Wiedervorlagen konnten nicht gelesen werden.");
+  return response.json();
+}
+
+async function loadSelectedFollowup() {
+  const id = byId("followup-ad-select").value;
+  const seq = ++followupDetailsGeneration;
+  followupActiveId = id;
+  followupRevision = 0;
+  byId("followup-date").value = "";
+  byId("followup-note").value = "";
+  renderFollowupControls();
+  if (!id) return;
+  try {
+    const result = await followupGet(
+      "/api/portfolio/followups/detail?ad_id=" + encodeURIComponent(id));
+    if (seq !== followupDetailsGeneration || byId("followup-ad-select").value !== id) return;
+    if (!result || result.platform_expiry_status !== "unknown_no_verified_observation") {
+      throw new Error("Unvollständige lokale Wiedervorlage.");
+    }
+    const reminder = result.followup;
+    if (reminder !== null) {
+      if (!reminder || reminder.ad_id !== id || reminder.source !== "manual_user_followup"
+          || !Number.isSafeInteger(reminder.revision) || reminder.revision < 1
+          || typeof reminder.manual_followup_date !== "string") {
+        throw new Error("Ungültiger Wiedervorlagenstand.");
+      }
+      followupRevision = reminder.revision;
+      byId("followup-date").value = reminder.manual_followup_date;
+      byId("followup-note").value = reminder.manual_note || "";
+    }
+    // An ambiguous prior local response must be reconciled, not submitted
+    // with a fresh key merely because the user changed the selected ad.
+    if (followupPending && followupPending.payload.ad_id === id) {
+      const expected = followupPending.payload;
+      if (reminder && reminder.revision > expected.expected_revision
+          && reminder.manual_followup_date === expected.due_date
+          && reminder.manual_note === expected.note) {
+        followupPending = null;
+      } else if (!reminder && expected.action === "delete") {
+        followupPending = null;
+      }
+    }
+    byId("followup-feedback").textContent = reminder
+      ? "Manuell geplante Wiedervorlage geladen. Das Plattform-Ablaufdatum bleibt unbekannt."
+      : "Für diese Anzeige ist noch kein eigener Prüftermin hinterlegt.";
+  } catch (error) {
+    if (seq === followupDetailsGeneration && byId("followup-ad-select").value === id) {
+      byId("followup-feedback").textContent = error.message;
+    }
+  } finally {
+    if (seq === followupDetailsGeneration) renderFollowupControls();
+  }
+}
+
+function renderFollowupRows(payload) {
+  if (!payload || !Array.isArray(payload.followups) || payload.followups.length > 50
+      || payload.platform_expiry_status !== "unknown_no_verified_observation"
+      || payload.platform_writes !== 0
+      || typeof payload.has_more !== "boolean"
+      || !Number.isSafeInteger(payload.total) || payload.total < 0
+      || !Number.isSafeInteger(payload.overdue) || payload.overdue < 0
+      || !Number.isSafeInteger(payload.due_soon) || payload.due_soon < 0
+      || (payload.has_more
+        && (typeof payload.next_after !== "string"
+          || !/^[0-9]{1,32}$/.test(payload.next_after)))) {
+    throw new Error("Ungültige Wiedervorlagenliste.");
+  }
+  const items = [];
+  for (const reminder of payload.followups) {
+    if (!reminder || typeof reminder.ad_id !== "string"
+        || !/^[0-9]{1,32}$/.test(reminder.ad_id)
+        || typeof reminder.manual_followup_date !== "string"
+        || reminder.platform_expiry_at !== null
+        || !["overdue", "due_soon", "scheduled"].includes(reminder.state)) {
+      throw new Error("Ungültige Terminangaben.");
+    }
+    const row = document.createElement("tr");
+    const labels = [
+      reminder.ad_id, reminder.title || "Ohne Titel",
+      reminder.manual_followup_date,
+      reminder.state === "overdue" ? "Überfällig"
+        : reminder.state === "due_soon" ? "In den nächsten 7 Tagen" : "Geplant",
+      reminder.manual_note || "",
+    ];
+    for (const label of labels) {
+      const cell = document.createElement("td");
+      cell.textContent = String(label);
+      row.append(cell);
+    }
+    const actionCell = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Bearbeiten";
+    button.addEventListener("click", () => selectFollowupAd(reminder.ad_id, reminder.title));
+    actionCell.append(button);
+    row.append(actionCell);
+    items.push(row);
+  }
+  byId("followup-body").replaceChildren(...items);
+  followupNextAfter = payload.has_more ? payload.next_after : null;
+  const total = payload.total;
+  byId("followup-summary").textContent =
+    String(total) + " eigene Wiedervorlagen · "
+    + String(payload.overdue) + " überfällig · "
+    + String(payload.due_soon) + " in den nächsten 7 Tagen"
+    + " · Plattform-Ablaufdatum unbekannt";
+  renderFollowupControls();
+}
+
+async function loadFollowups(reset = false) {
+  if (!writeUiReady()) return false;
+  if (reset) {
+    followupPageCursors = [""];
+    followupPageIndex = 0;
+    followupNextAfter = null;
+  }
+  const seq = ++followupPageGeneration;
+  followupLoading = true;
+  renderFollowupControls();
+  byId("followup-feedback").textContent = "Lade eigene Wiedervorlagen …";
+  try {
+    const options = new URLSearchParams({
+      limit: "50", after: followupPageCursors[followupPageIndex],
+    });
+    const payload = await followupGet("/api/portfolio/followups?" + options.toString());
+    if (seq !== followupPageGeneration) return false;
+    renderFollowupRows(payload);
+    followupLoaded = true;
+    byId("followup-feedback").textContent = payload.followups.length
+      ? "Einträge aus der lokalen Kundendatenbank."
+      : "Noch keine Wiedervorlagen hinterlegt.";
+    return true;
+  } catch (error) {
+    if (seq === followupPageGeneration) {
+      byId("followup-feedback").textContent =
+        "Wiedervorlagen konnten nicht geladen werden. Alte Daten bleiben sichtbar.";
+    }
+    return false;
+  } finally {
+    if (seq === followupPageGeneration) {
+      followupLoading = false;
+      renderFollowupControls();
+    }
+  }
+}
+
+async function changeFollowupPage(delta) {
+  if (followupBusy || followupLoading || !followupLoaded) return;
+  if (delta > 0 && followupNextAfter === null) return;
+  if (delta < 0 && followupPageIndex === 0) return;
+  const oldIndex = followupPageIndex;
+  const oldCursors = followupPageCursors.slice();
+  const oldNext = followupNextAfter;
+  if (delta > 0) {
+    followupPageCursors = [...followupPageCursors.slice(0, oldIndex + 1), followupNextAfter];
+    followupPageIndex++;
+  } else {
+    followupPageIndex--;
+  }
+  const request = loadFollowups();
+  const generation = followupPageGeneration;
+  if (!await request && generation === followupPageGeneration) {
+    followupPageIndex = oldIndex;
+    followupPageCursors = oldCursors;
+    followupNextAfter = oldNext;
+    renderFollowupControls();
+  }
+}
+
+async function mutateSelectedFollowup(action) {
+  if (followupBusy || !writeUiReady()) return;
+  const adId = byId("followup-ad-select").value;
+  if (!/^[0-9]{1,32}$/.test(adId)) return;
+  if (action !== "save" && action !== "delete") return;
+  if (action === "delete" && (
+      followupRevision === 0 ||
+      !window.confirm("Nur die eigene Wiedervorlage zu Anzeige " + adId
+        + " entfernen? Die Plattformanzeige bleibt unverändert.")
+  )) return;
+  const payload = {
+    action: action,
+    ad_id: adId,
+    due_date: action === "save" ? byId("followup-date").value : null,
+    note: action === "save" ? byId("followup-note").value.trim() : "",
+    expected_revision: followupRevision,
+  };
+  if (action === "save" && !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(payload.due_date)) {
+    byId("followup-feedback").textContent = "Einen gültigen manuellen Prüftermin wählen.";
+    return;
+  }
+  const intent = JSON.stringify(payload);
+  if (followupPending && followupPending.intent !== intent) {
+    byId("followup-feedback").textContent =
+      "Voriger lokaler Vorgang ist unklar. Zuerst denselben Eintrag erneut prüfen.";
+    return;
+  }
+  if (!followupPending) {
+    followupPending = {intent, payload, key: _newJobRequestKey()};
+  }
+  followupBusy = true;
+  renderFollowupControls();
+  try {
+    const response = await fetch("/api/portfolio/followups/mutate", {
+      method: "POST", cache: "no-store",
+      headers: {..._jobHeaders(), "Content-Type": "application/json"},
+      body: JSON.stringify({...payload, request_key: followupPending.key}),
+    });
+    if (response.status === 409) {
+      followupPending = null;
+      throw new Error("Wiedervorlage inzwischen geändert. Bitte Stand neu laden.");
+    }
+    if (!response.ok) {
+      throw new Error("Speichern nicht bestätigt. Dieselbe lokale Anfrage prüfen.");
+    }
+    const result = await response.json();
+    if (!result || result.ad_id !== adId || result.platform_writes !== 0
+        || !Number.isSafeInteger(result.revision)
+        || (action === "delete") !== (result.deleted === true)) {
+      throw new Error("Lokales Ergebnis nicht eindeutig bestätigt.");
+    }
+    followupPending = null;
+    byId("followup-feedback").textContent = "Wiedervorlage lokal bestätigt. Keine Plattformaktion.";
+    await loadSelectedFollowup();
+    await loadFollowups(true);
+  } catch (error) {
+    byId("followup-feedback").textContent = error.message
+      + " Kein automatischer Retry und keine Plattformaktion.";
+  } finally {
+    followupBusy = false;
+    renderFollowupControls();
+  }
+}
+
 function renderCatalogSelection() {
   // Existing standalone/legacy Dashboard render harnesses have no portfolio
   // toolbar. Selection remains inert rather than changing their Write flows.
@@ -1686,6 +2025,7 @@ async function loadCatalogPage({reset = false} = {}) {
     catalogNextAfter = payload.has_more ? payload.next_after : null;
     catalogRows = payload.ads;
     renderAds(payload.ads);
+    renderFollowupChoices();
     renderSaleChoices();
     byId("catalog-feedback").textContent = payload.ads.length +
       " Anzeigen auf dieser Seite" +
@@ -3547,6 +3887,8 @@ async function load() {
     }
     renderJobsAvailability();
     byId("buyer-imported").hidden = !jobsAvailable;
+    const followupPane = optionalById("followup-pane");
+    if (followupPane) followupPane.hidden = !jobsAvailable;
     salesAvailable = jobsAvailable;
     byId("sales-panel").hidden = !salesAvailable;
     byId("nav-sales").hidden = !salesAvailable;
@@ -4935,6 +5277,31 @@ byId("sales-disclosure").addEventListener("toggle",() => {
   if (byId("sales-disclosure").open)loadSales();
 });
 byId("draft-next").addEventListener("click", nextDraftsPage);
+const followupPaneControl = optionalById("followup-pane");
+if (followupPaneControl) followupPaneControl.addEventListener("toggle", () => {
+  if (followupPaneControl.open) {
+    renderFollowupChoices();
+    void loadFollowups(!followupLoaded);
+    if (byId("followup-ad-select").value) void loadSelectedFollowup();
+  }
+});
+const followupAdControl = optionalById("followup-ad-select");
+if (followupAdControl) followupAdControl.addEventListener("change", loadSelectedFollowup);
+const followupDateControl = optionalById("followup-date");
+if (followupDateControl) followupDateControl.addEventListener("change", renderFollowupControls);
+const followupSaveControl = optionalById("followup-save");
+if (followupSaveControl) followupSaveControl.addEventListener("click", () => mutateSelectedFollowup("save"));
+const followupDeleteControl = optionalById("followup-delete");
+if (followupDeleteControl) followupDeleteControl.addEventListener("click", () => mutateSelectedFollowup("delete"));
+const followupRefreshControl = optionalById("followup-refresh");
+if (followupRefreshControl) followupRefreshControl.addEventListener("click", () => {
+  void loadFollowups(true);
+  if (byId("followup-ad-select").value) void loadSelectedFollowup();
+});
+const followupPrevControl = optionalById("followup-prev");
+if (followupPrevControl) followupPrevControl.addEventListener("click", () => changeFollowupPage(-1));
+const followupNextControl = optionalById("followup-next");
+if (followupNextControl) followupNextControl.addEventListener("click", () => changeFollowupPage(1));
 byId("catalog-find").addEventListener("click", searchCatalog);
 byId("catalog-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -6142,6 +6509,42 @@ def _handler_factory(
                     return
                 self._send_json(200,result)
                 return
+            if path in ("/api/portfolio/followups", "/api/portfolio/followups/detail"):
+                # Human-entered follow-up dates are NOT platform expiry observations.
+                if type(store) is not SnapshotStore or write_proxy is None:
+                    self._send_json(404, {"error":"not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error":"write_session_required"})
+                    return
+                try:
+                    if len(target.query)>256:
+                        raise ValueError("oversized followup query")
+                    options=parse_qs(target.query,keep_blank_values=True,
+                        max_num_fields=3,encoding="utf-8",errors="strict")
+                    if (any(len(value)!=1 for value in options.values())
+                            or target.fragment):
+                        raise ValueError("invalid followup query")
+                    if path.endswith("/detail"):
+                        if set(options)!={"ad_id"}:
+                            raise ValueError("ad_id required")
+                        result=followup_detail(store,options["ad_id"][0])
+                    else:
+                        if set(options)-{"after","limit"}:
+                            raise ValueError("invalid followup fields")
+                        count=options.get("limit",["50"])[0]
+                        if not (count.isascii() and count.isdecimal() and len(count)<=2):
+                            raise ValueError("invalid followup limit")
+                        result=followups_page(store,
+                            after=options.get("after",[""])[0],limit=int(count))
+                except (ValueError,UnicodeError,FollowupError,OverflowError):
+                    self._send_json(400,{"error":"invalid_followup_query"})
+                    return
+                except (sqlite3.Error,OSError,TypeError):
+                    self._send_json(503,{"error":"followup_storage_unavailable"})
+                    return
+                self._send_json(200,result)
+                return
             if path == "/api/portfolio/report":
                 if type(store) is not SnapshotStore or write_proxy is None:
                     self._send_json(404, {"error": "not_found"})
@@ -6675,6 +7078,39 @@ def _handler_factory(
                 return
             self._send_json(200,result)
 
+        def _portfolio_followup_command(self) -> None:
+            target=urlsplit(self.path)
+            if (target.path!="/api/portfolio/followups/mutate"
+                    or target.query or target.fragment
+                    or target.path!=self.path or type(store) is not SnapshotStore
+                    or write_proxy is None):
+                self._send_json(404,{"error":"not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403,{"error":"write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400,{"error":"followup_key_required_in_body"})
+                return
+            try:
+                raw,_=self._read_proxy_body("local_json")
+                payload=strict_json_object(raw)
+                result=mutate_followup(store,payload)
+            except FollowupError as exc:
+                conflict=str(exc) in ("followup revision changed; reload",
+                                     "request key conflict")
+                self._send_json(409 if conflict else 400,{"error":
+                    "followup_revision_conflict" if conflict
+                    else "invalid_followup"})
+                return
+            except (ValueError,UnicodeError,TypeError,RecursionError):
+                self._send_json(400,{"error":"invalid_followup"})
+                return
+            except (sqlite3.Error,OSError):
+                self._send_json(503,{"error":"followup_storage_unavailable"})
+                return
+            self._send_json(200,result)
+
         def _portfolio_sale_command(self) -> None:
             target=urlsplit(self.path)
             if (target.path!="/api/portfolio/sales/update"
@@ -6799,6 +7235,9 @@ def _handler_factory(
             self._send_json(200,answer)
 
         def do_POST(self) -> None:
+            if urlsplit(self.path).path=="/api/portfolio/followups/mutate":
+                self._portfolio_followup_command()
+                return
             if urlsplit(self.path).path=="/api/portfolio/item-templates/mutate":
                 self._portfolio_item_template_command()
                 return
