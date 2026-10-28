@@ -56,3 +56,48 @@ function Install-KleinanzeigerChrome([string]$StateDirectory) {
     Remove-Item -LiteralPath $work -Force -Recurse -ErrorAction SilentlyContinue
   }
 }
+
+# A visible Chrome window is not evidence that its DevTools endpoint is ready.
+# Probe only our fixed loopback endpoint, never a public web service or user profile.
+function Test-KleinanzeigerChromeDevTools([int]$Port = 9222) {
+  if ($Port -lt 1 -or $Port -gt 65535) { return $false }
+  $response = $null
+  $reader = $null
+  try {
+    $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/json/version")
+    $request.Proxy = $null
+    $request.Timeout = 800
+    $request.ReadWriteTimeout = 800
+    $response = $request.GetResponse()
+    if ([int]$response.StatusCode -ne 200) { return $false }
+    $reader = [System.IO.StreamReader]::new($response.GetResponseStream())
+    $metadata = ConvertFrom-Json -InputObject $reader.ReadToEnd()
+    $browser = [string]$metadata.Browser
+    $socket = [string]$metadata.webSocketDebuggerUrl
+    return ($browser -match '^(Chrome|HeadlessChrome)/' -and
+            $socket -match "^ws://(127\.0\.0\.1|localhost):$Port/")
+  } catch {
+    return $false
+  } finally {
+    if ($reader) { $reader.Dispose() }
+    if ($response) { $response.Close() }
+  }
+}
+
+function Wait-KleinanzeigerChromeDevTools(
+    [int]$Port = 9222, [int]$TimeoutSeconds = 12,
+    [scriptblock]$Probe = $null) {
+  if ($Port -lt 1 -or $Port -gt 65535 -or $TimeoutSeconds -lt 0 -or $TimeoutSeconds -gt 30) {
+    throw 'Ungueltige Chrome-Startpruefung.'
+  }
+  if ($null -eq $Probe) {
+    $Probe = { param([int]$checkedPort) Test-KleinanzeigerChromeDevTools -Port $checkedPort }
+  }
+  $watch = [System.Diagnostics.Stopwatch]::StartNew()
+  do {
+    if (& $Probe $Port) { return }
+    if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) { break }
+    Start-Sleep -Milliseconds 250
+  } while ($true)
+  throw 'Chrome ist offen, aber die Browsersteuerung (Port 9222) ist nicht erreichbar. Bitte nur die von Kleinanzeiger gestarteten Chrome-Fenster vollstaendig schliessen und erneut starten; das normale Chrome-Profil nicht loeschen.'
+}

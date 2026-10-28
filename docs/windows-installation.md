@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.8 – Windows 11
+# Kleinanzeiger v0.1.9 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -106,3 +106,27 @@ Windows-Paket und sind über das zentrale Kontrollfenster erreichbar.
 ## Große Produktbestände als Entwürfe vorbereiten
 
 CSV (UTF-8) oder Excel XLSX mit den Pflichtspalten `sku,title,description,category,price_eur` und optional `images`. Deutsche Spaltennamen `Artikelnummer,Titel,Beschreibung,Kategorie,Preis,Bilder` werden automatisch zugeordnet. Kategorie als `Haus & Garten > Dekoration`, Preis als ganze Euro, bis 5000 Artikel je Datei, bis zehn Bilddateinamen (Semikolon-getrennt). Die Bilddateinamen sind nur Hinweise und noch keine Plattformuploads. Ein bestehender Artikel mit derselben SKU und abweichendem Inhalt wird ohne Änderung abgewiesen. Im Dashboard den Bereich **Artikelentwürfe** öffnen, suchen, seitenweise durchsehen und einen Entwurf mit ausdrücklichem Klick in das separate Neuanzeigenformular übernehmen. Dieser Schritt **veröffentlicht keine Anzeige** und erteilt keine Eigentümerfreigabe. Für Details siehe [Artikelimport](portfolio-import.md).
+
+
+## Wenn Chrome angemeldet ist, das Dashboard aber nicht startet
+
+Kleinanzeiger verwendet ein eigenes Chrome-Profil unter
+%LOCALAPPDATA%\Kleinanzeiger\ChromeProfile. Die Anmeldung in einem anderen
+Chrome-Fenster genügt nicht. Ist **Meine Anzeigen** bereits in dem von
+Kleinanzeiger geöffneten Chrome-Fenster sichtbar, **ist die Meldung kein
+Beweis für eine fehlende Anmeldung**.
+
+Die Version 0.1.9 prüft nach dem Öffnen von Chrome höchstens 12 Sekunden, ob
+dessen lokale Browsersteuerung auf 127.0.0.1:9222 antwortet. Erst dann
+wird der eigentliche Dienst gestartet. Bei einer nicht erreichbaren Steuerung
+wird ein eigener Hinweis statt einer vermeintlichen Login-Fehlermeldung
+angezeigt. Falls der Dienst später scheitert, im Kontrollfenster **Details**
+öffnen: dort steht die technische Fehlermeldung und der Exitcode.
+
+Wenn die Browsersteuerung nicht erreichbar ist, zunächst **nur die von
+Kleinanzeiger gestarteten Chrome-Fenster** vollständig schließen und über
+**Kleinanzeigen-Konto öffnen** neu aufrufen. Das private Standard-Chrome,
+das Chrome-Profil, die Datenbank und die Backups **nicht löschen**.
+Ein neu aufgerufener Browser-Tab beweist noch nicht, dass das
+Chrome-Debugging verbunden ist. Der Test auf einem anderen PC ersetzt keine
+Abnahme auf dem Kundenrechner.

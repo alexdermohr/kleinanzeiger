@@ -505,11 +505,20 @@ function Start-Worker([string]$action,[bool]$launchAfter=$false,[string]$backupN
 function Start-Product {
   if (Test-ActiveProduct) { throw 'Kleinanzeiger läuft bereits. Bitte die bestehende Anwendung zuerst beenden.' }
   if (!(Test-Path -LiteralPath $python -PathType Leaf)) { throw 'Kleinanzeiger ist nicht installiert.' }
+  $script:details = ''
+  Set-Status 'Öffne Chrome und prüfe die lokale Browsersteuerung …'
+  $statusLabel.Refresh()
   $chrome = Open-Kleinanzeigen
+  try {
+    Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 12
+  } catch {
+    $script:details = $_.Exception.Message
+    throw 'Chrome-Browsersteuerung nicht bereit. Bitte Details öffnen.'
+  }
   $info = [System.Diagnostics.ProcessStartInfo]::new()
   $info.UseShellExecute = $false
   $info.FileName = $python
-  $info.Arguments = '-m mark_api.launcher --db "' + $db + '" --cdp-port 9222 --stop-on-stdin'
+  $info.Arguments = '-m mark_api.launcher --db "' + $db + '" --cdp-port 9222 --timeout-seconds 12 --stop-on-stdin'
   if (!(Test-Path -LiteralPath $db -PathType Leaf)) { $info.Arguments += ' --init-db' }
   if (Test-Path -LiteralPath $keyFile -PathType Leaf) {
     try {
@@ -568,7 +577,7 @@ function Handle-Line([string]$line,[bool]$isError) {
   if ($line -match '(?i)(write_token|generation_token|OPENAI_API_KEY|sk-proj-|Bearer\s)') { return }
   if ($script:details.Length -lt 4000) { $script:details += $line + [Environment]::NewLine }
   if ($isError -and $script:mode -eq 'product') {
-    Set-Status 'Start fehlgeschlagen. Im Browser anmelden und erneut starten.' $true
+    Set-Status 'Dienststart fehlgeschlagen. Bitte Details öffnen; die Anmeldung kann bereits gültig sein.' $true
   }
 }
 function Drain-Stream([string]$kind) {
@@ -601,7 +610,10 @@ function Finish-Process {
     if ($script:stopRequested -and $exit -eq 0) {
       Set-Status 'Kleinanzeiger wurde beendet.'
     } elseif (!$script:openedDashboard) {
-      Set-Status 'Konnte nicht starten. Falls nötig in Chrome anmelden und erneut versuchen.' $true
+      if ($script:details.Length -lt 3900) {
+        $script:details += "Kleinanzeiger-Prozess beendet (Exitcode $exit)." + [Environment]::NewLine
+      }
+      Set-Status 'Dienststart fehlgeschlagen. Bitte Details öffnen; die Anmeldung kann bereits gültig sein.' $true
     } elseif ($exit -ne 0) {
       Set-Status 'Kleinanzeiger wurde unerwartet beendet.' $true
     }
@@ -757,9 +769,25 @@ $form.Add_Shown({
   }
 })
 if ($SelfTest) {
-  if (!(Get-Command -Name Find-KleinanzeigerChrome -CommandType Function -ErrorAction SilentlyContinue)) {
-    throw 'Chrome-Hilfe wurde nicht im gemeinsamen Fenster-Scope geladen.'
+  if (!(Get-Command -Name Find-KleinanzeigerChrome -CommandType Function -ErrorAction SilentlyContinue) -or
+      !(Get-Command -Name Wait-KleinanzeigerChromeDevTools -CommandType Function -ErrorAction SilentlyContinue)) {
+    throw 'Chrome-Hilfe oder Startpruefung wurde nicht im gemeinsamen Fenster-Scope geladen.'
   }
+  if (Test-KleinanzeigerChromeDevTools -Port 0) { throw 'Ungueltiger CDP-Port wurde akzeptiert.' }
+  $script:readinessProbeCount = 0
+  Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 1 -Probe {
+    param([int]$checkedPort)
+    $script:readinessProbeCount++
+    return ($checkedPort -eq 9222 -and $script:readinessProbeCount -eq 2)
+  }
+  if ($script:readinessProbeCount -ne 2) { throw 'Chrome-Startpruefung hat nicht gewartet.' }
+  $rejected = $false
+  try {
+    Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 0 -Probe { return $false }
+  } catch {
+    $rejected = ($_.Exception.Message -match 'Port 9222')
+  }
+  if (!$rejected) { throw 'Fehlende Chrome-Browsersteuerung nicht erkannt.' }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
     throw 'Die installierte Version wurde vom Kontrollfenster nicht erkannt.'
   }
