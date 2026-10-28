@@ -8,11 +8,17 @@ import re
 import secrets
 import sqlite3
 from .storage import SnapshotStore
+# Keep the management snapshot provenance available to offline readers without
+# importing platform adapters during ordinary package/module startup.
+# Must match DEFAULT_SOURCE in adapters/management.py.
+MANAGEMENT_SNAPSHOT_SOURCE = "kleinanzeigen-management"
 
 AD_ID=re.compile(r"[0-9]{1,32}\Z")
-# Explicitly admitted successful own-inventory readers; an arbitrary snapshot
-# source string or a local/EML listing is not an account ownership proof.
+# The production management reader uses its own ad_snapshot provenance.
+# private-web-* are sync journal labels, not the normal snapshot source.
+# Local/EML imports remain ineligible for manually recorded sales.
 OWN_INVENTORY_SOURCES=(
+    MANAGEMENT_SNAPSHOT_SOURCE,
     "private-web-product-launcher",
     "private-web-owner-inventory",
     "private-web-periodic-readonly",
@@ -109,7 +115,7 @@ def update_manual_sale(store:SnapshotStore,payload:dict)->dict:
             return json.loads(replay["response_json"])
         observed=conn.execute(
             "SELECT 1 FROM ad_snapshots WHERE ad_id=? COLLATE BINARY "
-            "AND source IN (?,?,?) LIMIT 1",
+            "AND source IN (?,?,?,?) LIMIT 1",
             (id,*OWN_INVENTORY_SOURCES)).fetchone()
         if observed is None:raise SaleError("ad has no owned inventory observation")
         old=conn.execute("SELECT revision FROM portfolio_sale_states "
