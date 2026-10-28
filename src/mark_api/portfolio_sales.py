@@ -8,7 +8,10 @@ import re
 import secrets
 import sqlite3
 from .storage import SnapshotStore
-from .adapters.management import DEFAULT_SOURCE as MANAGEMENT_SNAPSHOT_SOURCE
+# Keep the management snapshot provenance available to offline readers without
+# importing platform adapters during ordinary package/module startup.
+# Must match DEFAULT_SOURCE in adapters/management.py.
+MANAGEMENT_SNAPSHOT_SOURCE = "kleinanzeigen-management"
 
 AD_ID=re.compile(r"[0-9]{1,32}\Z")
 # The production management reader uses its own ad_snapshot provenance.
