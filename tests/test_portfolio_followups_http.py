@@ -109,6 +109,18 @@ class FollowupHttpTests(unittest.TestCase):
         self.assertEqual(self.request("GET","/api/portfolio/followups")[1]["total"],0)
         self.assertEqual(self.request("POST","/api/portfolio/followups/mutate",
               self.payload(action="delete",due_date=None,note="",request_key="c"*64,expected_revision=1)),removed)
+        tombstone=self.request("GET","/api/portfolio/followups/detail?ad_id=10001")
+        self.assertEqual(tombstone[0],200)
+        self.assertIsNone(tombstone[1]["followup"])
+        self.assertEqual(tombstone[1]["tombstone_revision"],2)
+        self.assertEqual(self.request("POST","/api/portfolio/followups/mutate",
+                         self.payload(request_key="d"*64,expected_revision=0))[0],409)
+        recreated=self.request("POST","/api/portfolio/followups/mutate",
+                         self.payload(request_key="e"*64,
+                                      expected_revision=tombstone[1]["tombstone_revision"]))
+        self.assertEqual(recreated[0],200)
+        self.assertEqual(recreated[1]["revision"],3)
+        self.assertEqual(self.request("GET","/api/portfolio/followups")[1]["total"],1)
 
     def test_untrusted_owner_date_and_bounded_query_denials(self):
         self.observe("999",source="local-catalog")

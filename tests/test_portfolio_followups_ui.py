@@ -55,7 +55,9 @@ let current={
   "456":{ad_id:"456",manual_followup_date:"2026-11-04",manual_note:"Andere Anzeige",
     revision:3,source:"manual_user_followup",platform_expiry_at:null},
 };
-let postCalls=[],getCalls=[],failNextPost=false,confirmRemoval=true,delayedResolve=null;
+let tombstones={};
+let postCalls=[],getCalls=[],failNextPost=false,rejectNextPost=false;
+let confirmRemoval=true,delayedResolve=null;
 let delayPage=false,releasePage=null;
 const success=(body,status=200)=>({ok:status>=200&&status<300,status,async json(){return body;}});
 const fetch=async(path,options)=>{
@@ -67,9 +69,11 @@ const fetch=async(path,options)=>{
     getCalls.push(id);
     if(id==="123" && delayedResolve){
       return new Promise(resolve=>{const done=delayedResolve;delayedResolve=null;done(()=>resolve(success({
-        followup:current[id]||null,platform_expiry_status:"unknown_no_verified_observation"})));});
+        followup:current[id]||null,tombstone_revision:tombstones[id]||0,
+        platform_expiry_status:"unknown_no_verified_observation"})));});
     }
-    return success({followup:current[id]||null,platform_expiry_status:"unknown_no_verified_observation"});
+    return success({followup:current[id]||null,tombstone_revision:tombstones[id]||0,
+      platform_expiry_status:"unknown_no_verified_observation"});
   }
   if(path.startsWith("/api/portfolio/followups?")){
     const params=new URL(path,"http://local.test").searchParams;
@@ -98,12 +102,19 @@ const fetch=async(path,options)=>{
     assert.equal(options.headers["Content-Type"],"application/json");
     const data=JSON.parse(options.body);
     postCalls.push(data);
+    if(rejectNextPost){
+      rejectNextPost=false;return success({error:"invalid_followup"},400);
+    }
     if(failNextPost){failNextPost=false;throw Error("lost local response");}
     const revision=data.expected_revision+1;
     if(data.action==="save"){
+      delete tombstones[data.ad_id];
       current[data.ad_id]={ad_id:data.ad_id,manual_followup_date:data.due_date,
         manual_note:data.note,revision,source:"manual_user_followup",platform_expiry_at:null};
-    }else{delete current[data.ad_id];}
+    }else{
+      tombstones[data.ad_id]=revision;
+      delete current[data.ad_id];
+    }
     return success({ad_id:data.ad_id,revision,platform_writes:0,
       ...(data.action==="delete"?{deleted:true}:{})});
   }
@@ -122,6 +133,9 @@ vm.runInContext([
  "let followupBusy=false;",
  "let followupActiveId='';",
  "let followupRevision=0;",
+ "let followupHasLive=false;",
+ "let followupDetailLoading=false;",
+ "let followupDetailLoaded=false;",
  "let followupDetailsGeneration=0;",
  "let followupPageGeneration=0;",
  "let followupPageIndex=0;",
@@ -147,6 +161,10 @@ const run=(expr)=>vm.runInContext(expr,context);
   delayedResolve=(finish)=>{window.finishA=finish;};
   get("followup-ad-select").value="123";
   const pendingA=run("loadSelectedFollowup()");
+  assert.equal(get("followup-date").disabled,true,
+    "edit input must remain disabled until current detail GET completes");
+  assert.equal(get("followup-note").disabled,true);
+  assert.equal(get("followup-save").disabled,true);
   get("followup-ad-select").value="456";
   await run("loadSelectedFollowup()");
   window.finishA();
@@ -156,6 +174,8 @@ const run=(expr)=>vm.runInContext(expr,context);
 
   get("followup-ad-select").value="123";
   await run("loadSelectedFollowup()");
+  assert.equal(get("followup-date").disabled,false);
+  assert.equal(get("followup-save").disabled,false);
   get("followup-date").value="2026-11-15";
   get("followup-note").value="Fotos und Titel prüfen";
   await run('mutateSelectedFollowup("save")');
@@ -212,7 +232,25 @@ const run=(expr)=>vm.runInContext(expr,context);
   assert.equal(postCalls[3].ad_id,"123");
   assert.equal(postCalls[3].due_date,null);
   assert.equal(postCalls[3].note,"");
-  assert.equal(run("followupRevision"),0);
+  assert.equal(run("followupRevision"),4,
+    "deleted follow-up tombstone revision must be preserved for CAS");
+  assert.equal(get("followup-delete").disabled,true,
+    "do not offer deletion of an already deleted reminder");
+
+  // A definitive 400 never persists an UNKNOWN intent lock; the user must
+  // be able to correct the invalid date without restarting Kleinanzeiger.
+  get("followup-date").value="2101-01-01";
+  rejectNextPost=true;
+  await run('mutateSelectedFollowup("save")');
+  assert.equal(postCalls.length,5);
+  assert.equal(postCalls[4].expected_revision,4);
+  assert.equal(run("followupPending"),null);
+  assert.match(get("followup-feedback").textContent,/korrigieren/);
+  get("followup-date").value="2026-11-20";
+  await run('mutateSelectedFollowup("save")');
+  assert.equal(postCalls.length,6);
+  assert.equal(postCalls[5].expected_revision,4);
+  assert.equal(run("followupRevision"),5);
   console.log("FOLLOWUP_UI_PASS");
 })().catch(error=>{console.error(error);process.exitCode=1});
 """

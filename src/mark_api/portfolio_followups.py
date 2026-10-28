@@ -222,7 +222,9 @@ def mutate_followup(
                 if old["revision"] >= 1_000_000:
                     raise FollowupError("followup revision exhausted")
                 if old["deleted"] == 1:
-                    if revision != 0:
+                    # A previous delete advanced this generation. Re-creation
+                    # must reference the observed tombstone, never revision 0.
+                    if revision != old["revision"]:
                         raise FollowupError("followup revision changed; reload")
                     if conn.execute(
                         "SELECT COUNT(*) FROM portfolio_followups WHERE deleted=0"
@@ -271,15 +273,24 @@ def followup_detail(
     today = _clock(now).date()
     with closing(store._connect()) as conn:
         if not _schema(conn, create=False):
-            return {"followup": None, "platform_expiry_status": "unknown_no_verified_observation"}
+            return {"followup": None, "tombstone_revision": 0,
+                    "platform_expiry_status": "unknown_no_verified_observation"}
         row = conn.execute(
-            "SELECT * FROM portfolio_followups WHERE ad_id=? COLLATE BINARY AND deleted=0",
+            "SELECT * FROM portfolio_followups WHERE ad_id=? COLLATE BINARY",
             (item,),
         ).fetchone()
         if row is None:
-            return {"followup": None, "platform_expiry_status": "unknown_no_verified_observation"}
+            return {"followup": None, "tombstone_revision": 0,
+                    "platform_expiry_status": "unknown_no_verified_observation"}
+        if row["deleted"] == 1:
+            # Return a deletion generation without exposing the removed note.
+            return {"followup": None, "tombstone_revision": row["revision"],
+                    "platform_expiry_status": "unknown_no_verified_observation"}
+        if row["deleted"] != 0:
+            raise sqlite3.DatabaseError("invalid followup tombstone")
         return {
             "followup": _public(row, _latest_owned(conn, item), today=today),
+            "tombstone_revision": 0,
             "platform_expiry_status": "unknown_no_verified_observation",
         }
 

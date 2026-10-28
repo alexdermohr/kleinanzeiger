@@ -41,6 +41,7 @@ class FollowupTests(unittest.TestCase):
     def test_empty_read_never_mutates_schema(self):
         self.assertEqual(followups_page(self.store)["total"], 0)
         self.assertIsNone(followup_detail(self.store, "123")["followup"])
+        self.assertEqual(followup_detail(self.store, "123")["tombstone_revision"], 0)
         with closing(self.store._connect()) as conn:
             self.assertFalse(_schema(conn, create=False))
             self.assertNotIn("portfolio_followups", {
@@ -94,9 +95,19 @@ class FollowupTests(unittest.TestCase):
         self.assertEqual(followups_page(self.store)["total"], 0)
         self.assertEqual(mutate_followup(self.store, self.payload(
             key="4"*64, revision=2, due=None, note="", action="delete"), now=NOW), removed)
-        with self.assertRaisesRegex(FollowupError, "revision changed"):
-            mutate_followup(self.store, self.payload(key="5"*64, revision=2, action="save"), now=NOW)
-        recreated = mutate_followup(self.store, self.payload(key="6"*64), now=NOW)
+        deleted_detail = followup_detail(self.store, "123", now=NOW)
+        self.assertIsNone(deleted_detail["followup"])
+        self.assertEqual(deleted_detail["tombstone_revision"], 3)
+        for stale_revision, key in ((0, "5"*64), (2, "7"*64)):
+            # Another tab may still see "no reminder" after deletion, but
+            # revision 0 must never resurrect a previously tombstoned entry.
+            with self.subTest(revision=stale_revision), self.assertRaisesRegex(
+                FollowupError, "revision changed"
+            ):
+                mutate_followup(self.store, self.payload(
+                    key=key, revision=stale_revision, action="save"), now=NOW)
+        recreated = mutate_followup(self.store, self.payload(
+            key="6"*64, revision=deleted_detail["tombstone_revision"]), now=NOW)
         self.assertEqual(recreated["revision"], 4)
         self.assertEqual(followup_detail(self.store, "123")["followup"]["revision"], 4)
         self.assertEqual(first["revision"], 1)
