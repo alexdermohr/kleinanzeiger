@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.12 – Windows 11
+# Kleinanzeiger v0.1.13 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -147,6 +147,8 @@ selbst im originalen Kleinanzeigen-Dialog.
 Im Dashboard **KI-Stapelaufträge** öffnen. Bis zu 5.000 lokale CSV-/XLSX-Entwürfe zu einem Auftrag sammeln, Originale und Vorschläge prüfen, einzeln freigeben und nur lokal übernehmen. Optional können nach eigener Modell-, Datenübertragungs- und Budgetbestätigung bis zu zehn KI-Aufrufe nacheinander ausgeführt werden; weitere Aufrufe lassen sich stoppen. Es werden keine Anzeigen automatisch massenhaft veröffentlicht oder gelöscht. Providerkosten sind nur konservativ geschätzt und nicht garantiert.
 
 ## Bestehende Daten und Updates
+
+**Ab v0.1.13** wird eine neue Python-Programmumgebung vollständig getrennt aufgebaut und vor dem Wechsel geprüft. Die bisherige Version bleibt bis zum erfolgreichen Aktivieren erhalten; eine vor oder während der Aktivierung fehlschlagende Aktualisierung wird auf die bisherige Umgebung zurückgestellt. Die vorherige Programmumgebung bleibt danach als eindeutig benannter Ordner `.venv-rollback-*` im lokalen Kleinanzeiger-Verzeichnis verfügbar. Diese Ordner enthalten Programmdateien, nicht die Anzeigendatenbank. Datenbank, Sicherungen und Chrome-Profil werden weder beim Pakettest noch beim Versionswechsel überschrieben. Es gibt noch keine automatische Bedienfunktion für den späteren bewussten Wechsel auf eine ältere Version; dafür ist gezielte technische Unterstützung erforderlich.
 
 Die stabil installierten Programmdateien liegen unter
 %LOCALAPPDATA%\Kleinanzeiger\App, die Datenbank unter
