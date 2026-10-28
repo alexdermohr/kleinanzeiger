@@ -3,6 +3,12 @@
 Stand: 26. Oktober 2026. Ausgangsversion: **Windows v0.1.5**, veröffentlichter
 Commit `b7ee2728bd7c1c7be9c501af65c733a677573e23`.
 
+**Ergänzung (27.10.2026):** Der
+[GitHub-Ideen-Anschlussplan](github-ideen-anschlussplan-2026-10-27.md)
+konkretisiert Ablauf, Vorlagen, Fotozuordnung, Abgleich, Preisregeln,
+Massenaktionen und Posteingang mit Abhängigkeiten und Abnahmekriterien.
+Er ergänzt P0–P5, ersetzt sie nicht und erklärt offene PRs nicht zu Releases.
+
 ## 1. Produktziel und Leitplanken
 
 **Marks Ziel:** Hunderte bis Tausende eigener Anzeigen, perspektivisch bis
