@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.10 – Windows 11
+# Kleinanzeiger v0.1.11 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -18,6 +18,19 @@ Keine Konsoleingaben, manuelles Python, Docker, WSL, Ubuntu oder Kopieren
 technischer Dashboard-URLs erforderlich.
 
 ## Alles an einem Ort
+
+Das Kontrollfenster startet in einer **kompakten Ansicht**: Starten,
+Installieren/Aktualisieren, Konto, Artikelimport, Sicherung und KI-Zugang
+sind direkt sichtbar. Über **Weitere Aktionen** lassen sich E-Mails
+importieren, Vergleichsmerkmale bearbeiten, Entwürfe exportieren und
+eine Sicherung in eine *noch nicht vorhandene* Datenbank wiederherstellen.
+**Weniger anzeigen** schließt diesen Bereich. Es sind keine weiteren
+Werkzeugfenster oder Konsoleingaben erforderlich.
+
+**Fehlerdetails anzeigen** erscheint nur bei einer fehlgeschlagenen
+Aktion unter der Statusmeldung. Kein Zugriff auf Login-Passwörter,
+Chrome-Profil oder bestehende Datenbank ist dafür erforderlich.
+
 
 Das Kleinanzeiger-Fenster bietet:
 
@@ -40,26 +53,36 @@ Das Kleinanzeiger-Fenster bietet:
   eigene Bestätigung im Dashboard.
 - **Kleinanzeigen-Konto öffnen**: für die erste Anmeldung und MFA im
   getrennten Chrome-Profil.
-- **Weitere Optionen / Wiederherstellen**: nur bei noch nicht vorhandener
+- **Weitere Aktionen / Wiederherstellen**: nur bei noch nicht vorhandener
   Datenbank samt WAL/SHM/Journal, mit ausdrücklicher Zustimmung und
   Manifestprüfung.
 
-Das Dashboard bleibt die zentrale Arbeitsfläche: Anzeigenkarten auswählen,
-rechts bearbeiten, neue Anzeigen erstellen sowie Analytics und KI-Entwürfe
-bei Bedarf aufklappen.
+Im Dashboard führen fünf Hauptverknüpfungen zu **Übersicht**,
+**Meine Anzeigen**, **Artikel & KI**, **Interessenten** und
+**Auswertungen**. **Weitere Bereiche** enthält die seltener benötigten
+Werkzeuge: Neue Anzeige, KI-Stapelaufträge, KI-Entwürfe,
+Verkäufe & Lager und Controlling. Es wird keine Funktion entfernt.
+Die Anzeigenverwaltung bleibt links, die Bearbeitung auf breiten
+Bildschirmen daneben; auf schmalen Fenstern stehen sie untereinander.
 
 Für größere Bestände zeigt **Meine Anzeigen** nur 50 Anzeigen pro Seite.
 Über **Suche nach Titel oder Anzeigen-ID** und **Status** kann der
 lokale Bestand gefiltert werden. **Weiter / Zurück** blättert seitenweise.
-Die Auswahlkästchen lassen sich über Seiten hinweg sammeln; **Auswahl
-als CSV** speichert ausschließlich die ausgewählten Anzeigen-IDs.
-**Auswahl leeren** setzt sie zurück. CSV-Export und Markieren allein ändern **keine** Plattformanzeige.
+Die Auswahlkästchen lassen sich über Seiten hinweg sammeln. Erst wenn
+mindestens eine Anzeige markiert ist, erscheint die **Aktionsleiste für
+ausgewählte Anzeigen**. **Auswahl als CSV** speichert ausschließlich die
+ausgewählten Anzeigen-IDs; **Auswahl leeren** setzt sie zurück. Bei mehr
+als zehn ausgewählten Anzeigen bleiben Plattform-Sammelaktionen gesperrt,
+die reine CSV-Auswahl ist weiterhin möglich. CSV-Export und Markieren allein ändern **keine** Plattformanzeige.
 Mit gültiger Schreibsitzung lassen sich **1 bis 10 eigene Anzeigen** nach
 vollständiger Bestätigung **nacheinander pausieren oder aktivieren**.
+Eine endgültige Sammellöschung erfordert zusätzlich die zweite,
+anzahlgebundene Bestätigung **LÖSCHEN N**.
 Vor jedem Einzelauftrag wird der lokale Stand erneut geprüft. Bei
 unbekanntem Ergebnis, geändertem Status, Recovery oder auf Wunsch wird
-der Stapel gestoppt, ohne automatischen Plattform-Retry. **Massenlöschen,
-Preisänderungen und Sammelveröffentlichung** sind nicht enthalten.
+der Stapel gestoppt, ohne automatischen Plattform-Retry.
+**Unbeaufsichtigtes Massenlöschen, Massenpreisänderungen und
+Sammelveröffentlichung** sind nicht enthalten.
 Einzelne Anzeigen werden weiterhin über **Bearbeiten** verwaltet.
 
 Über **Mit Kleinanzeigen abgleichen** werden eigene Anzeigen direkt aus der
@@ -110,7 +133,7 @@ CSV (UTF-8) oder Excel XLSX mit den Pflichtspalten `sku,title,description,catego
 
 ## Wenn Chrome angemeldet ist, das Dashboard aber nicht startet
 
-**Ab Version 0.1.10:** Kleinanzeiger erkennt mehrere offene Tabs im eigenen
+**Ab Version 0.1.11:** Kleinanzeiger erkennt mehrere offene Tabs im eigenen
 Chrome-Profil und sucht den richtigen Tab **Meine Anzeigen** statt pauschal
 nur ein einziges Browserfenster vorauszusetzen. Bei mehreren solchen Tabs
 verwendet es eine fest ausgewählte Tab-Identität; private Tabs und offene
@@ -126,7 +149,7 @@ Chrome-Fenster genügt nicht. Ist **Meine Anzeigen** bereits in dem von
 Kleinanzeiger geöffneten Chrome-Fenster sichtbar, **ist die Meldung kein
 Beweis für eine fehlende Anmeldung**.
 
-Die Version 0.1.10 prüft nach dem Öffnen von Chrome höchstens 12 Sekunden, ob
+Die Version 0.1.11 prüft nach dem Öffnen von Chrome höchstens 12 Sekunden, ob
 dessen lokale Browsersteuerung auf 127.0.0.1:9222 antwortet. Erst dann
 wird der eigentliche Dienst gestartet. Bei einer nicht erreichbaren Steuerung
 wird ein eigener Hinweis statt einer vermeintlichen Login-Fehlermeldung

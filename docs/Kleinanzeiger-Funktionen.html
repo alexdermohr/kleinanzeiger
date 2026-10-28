@@ -14,13 +14,14 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.10</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.11</p>
 <h1>Funktionsübersicht</h1>
 <p>Die folgende Übersicht unterscheidet Bedienoberfläche, unterstützte Funktion und praktische Grenzen.</p>
 <table><tr><th>Bereich</th><th>Funktion</th><th>Wo bedienen?</th></tr>
 <tr><td>Installation</td><td>Python/Chrome bereitstellen, Wheel installieren und Update prüfen</td><td>Kleinanzeiger-Fenster → Einrichten / aktualisieren</td></tr>
 <tr><td>Konto</td><td>Eigenes Kleinanzeigen-Konto im getrennten Chrome-Profil anmelden</td><td>Kleinanzeiger-Fenster → Konto öffnen</td></tr>
 <tr><td>Anzeigen</td><td>Eigene Anzeigen lesen, Karten auswählen, Titel/Beschreibung ändern, pausieren, aktivieren, löschen</td><td>Dashboard → Meine Anzeigen / Anzeige bearbeiten</td></tr>
+<tr><td>Fokussierte Bedienung (UX)</td><td>Fünf Dashboard-Hauptbereiche, weitere Funktionen einklappbar; im Windows-Kontrollfenster kompakte Hauptaktionen und erweiterte Werkzeuge über Weitere Aktionen; Fehlerdetails nur im Fehlerfall</td><td>Kleinanzeiger-Fenster / Dashboard → Weitere Bereiche</td></tr>
 <tr><td>Anzeigenkatalog</td><td>50er-Seiten, Titel-/ID-Suche, Statusfilter, seitenübergreifende Auswahl, ID-CSV-Export ohne Plattformänderung</td><td>Dashboard → Meine Anzeigen</td></tr>
 <tr><td>Wiedervorlagen (G1)</td><td>Bis zu 10.000 bewusst selbst gesetzte Prüftermine für belegte eigene Anzeigen, revisionsgeschützte Notizen, 50er-Seiten, überfällig/bald fällig, keine automatische Plattformaktion. Verlässliches Plattform-Ablaufdatum bleibt ausdrücklich unbekannt.</td><td>Dashboard → Meine Anzeigen → Wiedervorlagen</td></tr>
 <tr><td>Sammelstatusänderung</td><td>1–10 eigene Anzeigen nach vollständiger Vorschau bewusst freigeben; einzeln pausieren/aktivieren, vor jedem Schritt Status prüfen, bei Unklarheit, Recovery oder Stopp abbrechen; kein automatischer Plattform-Retry</td><td>Dashboard → Meine Anzeigen → Auswahl pausieren / aktivieren</td></tr>
@@ -41,7 +42,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <tr><td>KI-Arbeitsvorlagen</td><td>Bis zu 100 lokale Vorlagen mit Änderungsprüfung; auf Wunsch in Auftragstexte übernehmen, ohne KI-Aufruf</td><td>Dashboard → KI-Stapelaufträge → Arbeitsvorlagen &amp; Prüfhinweise</td></tr>
 <tr><td>Passive Prüfhinweise</td><td>Offene KI-Vorschläge, unklare KI-Ergebnisse, Verkäufe ohne bekannte Kosten und alte Reservierungen anzeigen</td><td>Dashboard → Arbeitsvorlagen &amp; Prüfhinweise</td></tr>
 <tr><td>Backup</td><td>SQLite-Online-Sicherung einschließlich bestätigter WAL-Inhalte, SHA-256 und Manifest</td><td>Kleinanzeiger-Fenster → Sicherung erstellen</td></tr>
-<tr><td>Restore</td><td>Nur in neue Datenbank, nie über bestehende Kundendaten</td><td>Kleinanzeiger-Fenster → Weitere Optionen → Sicherung wiederherstellen</td></tr>
+<tr><td>Restore</td><td>Nur in neue Datenbank, nie über bestehende Kundendaten</td><td>Kleinanzeiger-Fenster → Weitere Aktionen → Sicherung wiederherstellen</td></tr>
 <tr><td>Hilfe</td><td>Benutzerhandbuch und vollständige Featureliste im Kundenpaket</td><td>Kleinanzeiger-Fenster → Handbuch / Funktionen</td></tr></table>
 <h2>Wichtige Betriebsregeln</h2>
 <ul>
@@ -68,5 +69,5 @@ auslösen (Windows-Sitzung maximal 100 versuchte Anfragen); Stop und UNKNOWN
 beenden automatische Folgeaufrufe. OpenAI-Preise werden nur konservativ geschätzt,
 nicht als garantierte Abrechnung dargestellt. <strong>Nicht enthalten:</strong> Plattform-
 Massenveröffentlichung, automatisches Bulk-Löschen oder ungeprüfte Kontoänderungen.</p>
-<footer>Kleinanzeiger v0.1.10 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.11 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>
