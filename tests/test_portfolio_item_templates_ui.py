@@ -95,7 +95,7 @@ async function fetch(path,config={}){
  }
  throw new Error("unexpected network path "+path);
 }
-const source=fs.readFileSync(0,"utf8");
+const source=fs.readFileSync(0,"utf8").replace(/\r\n/g,"\n");
 const cutoff=source.indexOf("\nconsumeWriteToken();\nload();");
 assert.ok(cutoff>0);
 const context={document,window,console,fetch,Date,URLSearchParams,Uint8Array,Set,Map};

@@ -67,7 +67,7 @@ function file(name,folder,kind=null){
  return {name,webkitRelativePath:folder+"/"+name,type,size:content.length,
    slice:()=>({arrayBuffer:async()=>content.buffer.slice(0)})};
 }
-const source=fs.readFileSync(0,"utf8");
+const source=fs.readFileSync(0,"utf8").replace(/\r\n/g,"\n");
 const end=source.indexOf("\nconsumeWriteToken();\nload();");
 assert.ok(end>0,"dashboard should be cut before network boot");
 const ctx={document,window,console,URL,URLSearchParams,DataTransfer,fetch,Date};

@@ -18,7 +18,7 @@ class TemplateEditorUiTests(unittest.TestCase):
 const assert=require("node:assert/strict");
 const fs=require("node:fs");
 const vm=require("node:vm");
-const source=fs.readFileSync(0,"utf8");
+const source=fs.readFileSync(0,"utf8").replace(/\r\n/g,"\n");
 const start=source.indexOf("async function loadWorkTemplates() {");
 const end=source.indexOf("\nfunction renderSaleChoices() {",start);
 assert.ok(start>=0 && end>start,"shipped template controller required");
