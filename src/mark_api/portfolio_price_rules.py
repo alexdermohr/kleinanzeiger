@@ -339,3 +339,36 @@ def price_suggestions_page(
         "next_after": visible[-1]["sku"] if len(rows) > limit else None,
         "price_source": "local_imported_draft", "platform_writes": 0,
     }
+
+def price_rule_detail(
+    store: SnapshotStore, *, sku: str, now: datetime | None = None,
+) -> dict[str, Any]:
+    """Read one editable rule and its actual local draft price in one snapshot."""
+    item = _sku(sku)
+    instant = _now(now)
+    with closing(store._connect()) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        price = None
+        if _has_table(conn):
+            draft = conn.execute(
+                "SELECT price_eur,status FROM portfolio_drafts WHERE sku=? COLLATE BINARY",
+                (item,),
+            ).fetchone()
+            if draft is not None:
+                if (draft["status"] != "draft" or type(draft["price_eur"]) is not int
+                        or not 1 <= draft["price_eur"] <= _MAX_PRICE):
+                    raise sqlite3.DatabaseError("invalid local draft price")
+                price = draft["price_eur"]
+        rule = None
+        if _schema(conn, create=False):
+            row = conn.execute(
+                "SELECT sku,minimum_price_eur,reduction_step_eur,wait_days,"
+                "revision,deleted,updated_at,? AS local_price_eur "
+                "FROM portfolio_price_rules WHERE sku=? COLLATE BINARY AND deleted=0",
+                (price, item),
+            ).fetchone()
+            if row is not None:
+                rule = _suggestion(row, now=instant)
+        return {"sku": item, "local_price_eur": price, "rule": rule,
+                "price_source": "local_imported_draft", "platform_writes": 0}

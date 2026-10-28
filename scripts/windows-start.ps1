@@ -6,14 +6,21 @@ $db = Join-Path $state 'anzeigen.sqlite'
 if (!(Test-Path -LiteralPath $python -PathType Leaf)) { throw 'Zuerst Installieren.cmd ausfuehren.' }
 . (Join-Path $base 'windows-chrome.ps1')
 $chrome = Find-KleinanzeigerChrome -StateDirectory $state
-if (!$chrome) { throw 'Chrome fehlt. Bitte Installieren.cmd erneut starten, um Chrome automatisch nachzuladen.' }
-$profile = Join-Path $state 'ChromeProfile'
-New-Item -ItemType Directory -Path $profile -Force | Out-Null
-$chromeArgs = '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="' + $profile + '" https://www.kleinanzeigen.de/m-meine-anzeigen.html'
-Start-Process -FilePath $chrome -ArgumentList $chromeArgs
-Write-Host 'Im neuen, isolierten Chrome-Fenster bei Kleinanzeigen anmelden.'
-Read-Host 'Nach erfolgreichem Login ENTER druecken'
-Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 12
+if ($chrome) {
+  try {
+    $profile = Join-Path $state 'ChromeProfile'
+    New-Item -ItemType Directory -Path $profile -Force | Out-Null
+    $chromeArgs = '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="' + $profile + '" https://www.kleinanzeigen.de/m-meine-anzeigen.html'
+    Start-Process -FilePath $chrome -ArgumentList $chromeArgs
+    Write-Host 'Im isolierten Chrome-Fenster anmelden; bei Verbindungsproblemen ist lokales Arbeiten moeglich.'
+    Read-Host 'Nach dem Login oder fuer lokales Arbeiten ENTER druecken'
+    Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 12
+  } catch {
+    Write-Warning 'Browserverbindung nicht bereit. Der lokale Arbeitsbereich wird geprueft.'
+  }
+} else {
+  Write-Warning 'Chrome fehlt. Oeffne den lokalen Arbeitsbereich ohne Plattformaenderungen.'
+}
 $extra = @()
 if (!(Test-Path -LiteralPath $db -PathType Leaf)) { $extra += '--init-db' }
 $keyFile = Join-Path $state 'openai-key.dpapi'

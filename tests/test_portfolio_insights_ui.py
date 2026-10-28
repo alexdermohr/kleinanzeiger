@@ -1,0 +1,118 @@
+"""Run the shipped JavaScript controller, including stale reads and uncertain local saves."""
+from __future__ import annotations
+
+import shutil
+import subprocess
+import unittest
+
+from mark_api.dashboard import _DASHBOARD_JS
+from mark_api.portfolio_insights_ui import INSIGHTS_JS
+
+
+class PortfolioInsightsUiTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node required for shipped JavaScript")
+    def test_local_only_controls_epoch_preview_identity_and_uncertain_save(self):
+        harness = r'''
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const source = require("node:fs").readFileSync(0, "utf8");
+class Element {
+  constructor() { this.value=""; this.textContent=""; this.disabled=false; this.hidden=false; this.children=[]; this.listeners={}; }
+  addEventListener(type, handler) { this.listeners[type]=handler; }
+  appendChild(child) { this.children.push(child); }
+  replaceChildren(...children) { this.children=children; }
+  scrollIntoView() {}
+}
+const elements = new Map();
+const byId = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
+const sent=[];
+let ready=true, fetchImpl=async()=>{throw Error("unexpected fetch")}, key=0;
+const context={console,URLSearchParams,Number,document:{createElement:()=>new Element()},
+  byId,optionalById:byId,localUiReady:()=>ready,_jobHeaders:()=>({"X-Mark-Dashboard-Token":"local-token"}),
+  _newJobRequestKey:()=>String(++key).padStart(64,"0"),
+  fetch:async(path,options)=>{sent.push({path,options});return fetchImpl(path,options);}};
+vm.createContext(context);
+vm.runInContext("let jobsAvailable=true;\n"+source,context);
+const run = expression => vm.runInContext(expression,context);
+const success = value => ({ok:true,status:200,json:async()=>value});
+const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
+  revision,minimum_price_eur:40,reduction_step_eur:20,wait_days:0,reason:"Lokal",eligible_at:"2026-10-28T00:00:00Z"} : null});
+(async()=>{
+  // Local capability permits local work, without any platform Write capability.
+  run("renderPortfolioInsights()");
+  assert.equal(byId("price-rules-panel").hidden,false);
+  ready=false;run("renderPortfolioInsights()");
+  assert.equal(byId("price-rules-panel").hidden,true);
+  assert.equal(await run("loadPriceRule('SKU-1')"),false);
+  assert.equal(sent.length,0);
+  ready=true;
+  fetchImpl=async()=>success(detail("SKU-1"));
+  assert.equal(await run("loadPriceRule('SKU-1')"),true);
+  byId("price-rule-min").value="40"; byId("price-rule-step").value="20"; byId("price-rule-wait").value="7";
+  run("previewPriceRule()");
+  assert.match(byId("price-rule-preview").textContent,/50 € → 40 €/);
+  assert.match(byId("price-rule-preview").textContent,/7 Tage nach Speichern/);
+  assert.equal(byId("price-rule-save").disabled,false);
+  byId("price-rule-min").value="51";run("previewPriceRule()");
+  assert.equal(byId("price-rule-save").disabled,true);
+  byId("price-rule-min").value="40";
+  // A delayed result for one SKU cannot be displayed or saved as another SKU.
+  let finishOld;
+  fetchImpl=()=>new Promise(resolve=>{finishOld=resolve;});
+  const delayed=run("loadPriceRule('SKU-1')");
+  byId("price-rule-sku").value="SKU-2";
+  byId("price-rule-sku").listeners.input();
+  finishOld(success(detail("SKU-1",1)));
+  assert.equal(await delayed,false);
+  assert.equal(run("priceRuleTarget"),null);
+  assert.equal(byId("price-rule-save").disabled,true);
+  // Correct identity/revision, but an uncertain result must require rereading.
+  fetchImpl=async()=>success(detail("SKU-2",3));
+  assert.equal(await run("loadPriceRule('SKU-2')"),true);
+  let finishSave;
+  fetchImpl=()=>new Promise(resolve=>{finishSave=resolve;});
+  const saving=run("mutatePriceRule('set')");
+  const payload=JSON.parse(sent.at(-1).options.body);
+  assert.equal(payload.sku,"SKU-2");assert.equal(payload.expected_revision,3);
+  assert.equal(payload.minimum_price_eur,40);
+  assert.equal(byId("price-rule-save").disabled,true);
+  const before=sent.length;
+  assert.equal(await run("mutatePriceRule('set')"),false);
+  assert.equal(sent.length,before);
+  finishSave({ok:false,status:503});
+  assert.equal(await saving,false);
+  assert.equal(run("priceRuleTarget"),null);
+  assert.equal(await run("mutatePriceRule('set')"),false);
+  assert.equal(sent.length,before);
+  assert.match(byId("price-rule-status").textContent,/nicht blind wiederholen/);
+  // Inventory pages remain pinned; a drift error discards the stale comparison.
+  fetchImpl=async()=>success({items:[{ad_id:"10001",state:"changed",reason:"Text",
+    previous:{title:"Alt",state:"active"},current:{title:"<img onerror=bad()>",state:"active",source:"owner",observed_at:"now"}}],
+    state:"ready",epoch:"a".repeat(64),has_more:true,next_after:"10001",total:2,confirmed_at:"now",source:"owner"});
+  assert.equal(await run("loadInventoryDiff()"),true);
+  const row=byId("inventory-diff-body").children[0];
+  assert.match(row.children[3].textContent,/<img onerror=bad\(\)>/);
+  fetchImpl=async(path)=>{ assert.match(path,/after=10001/);assert.match(path,/epoch=a{64}/);return {ok:false,status:409};};
+  assert.equal(await run("loadInventoryDiff(true)"),false);
+  assert.equal(byId("inventory-diff-body").children.length,0);
+  assert.equal(byId("inventory-diff-next").disabled,true);
+  assert.equal(run("inventoryDiffCursor"),null);
+  assert.ok(sent.every(call=>call.path.startsWith("/api/portfolio/")));
+  assert.ok(sent.every(call=>!call.path.includes("/api/write")));
+  console.log("LOCAL_INSIGHTS_IDENTITY_EPOCH_NO_AUTOWRITE_PASS");
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+        self.assertIn(INSIGHTS_JS, _DASHBOARD_JS)
+        syntax = subprocess.run([shutil.which("node"), "--check", "-"],
+                                input=_DASHBOARD_JS, text=True, encoding="utf-8",
+                                capture_output=True, timeout=15)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        result = subprocess.run([shutil.which("node"), "-e", harness],
+                                input=INSIGHTS_JS, text=True, encoding="utf-8",
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("LOCAL_INSIGHTS_IDENTITY_EPOCH_NO_AUTOWRITE_PASS", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

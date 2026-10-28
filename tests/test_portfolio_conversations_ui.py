@@ -118,7 +118,7 @@ const fetch=async(path,options)=>{
 const context={
   document,fetch,URLSearchParams,Number,JSON,
   byId:(id)=>document.getElementById(id),
-  jobsAvailable:true,writeUiReady:()=>true,
+  jobsAvailable:true,writeUiReady:()=>true,localUiReady:()=>true,
   _jobHeaders:()=>({"X-Mark-Dashboard-Token":"owner-token"}),
   _newJobRequestKey:()=> "a".repeat(64),
 };

@@ -56,7 +56,7 @@ async function _jobGet(path){
 }
 const context={document,byId,fetch,_jobGet,_jobHeaders:()=>({}),
   _newJobRequestKey:()=> "a".repeat(64),
-  writeUiReady:()=>true,URLSearchParams,
+  writeUiReady:()=>true,localUiReady:()=>true,URLSearchParams,
   window:{confirm:()=>true},console};
 vm.createContext(context);
 vm.runInContext(`
