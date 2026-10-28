@@ -13,8 +13,13 @@ SCRIPTS = ROOT / "scripts"
 class WindowsInstallerContractTests(unittest.TestCase):
     def test_installer_verifies_pinned_wheel_before_network_or_setup(self):
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
-        self.assertIn("kleinanzeiger-0.1.12-py3-none-any.whl", script)
-        self.assertIn(r"kleinanzeiger-0\.1\.12-py3-none-any\.whl", script)
+        self.assertIn("kleinanzeiger-0.1.13-py3-none-any.whl", script)
+        self.assertIn("$wheelName = [IO.Path]::GetFileName($wheel)", script)
+        self.assertIn("[regex]::Escape($wheelName)", script)
+        self.assertEqual(script.count("function Test-Python("), 1)
+        self.assertEqual(script.count("& $stagePython -m pip install"), 1)
+        self.assertLess(script.index("$entry ="), script.index("Get-FileHash"))
+        self.assertNotIn(r"kleinanzeiger-0\.1\.12-py3-none-any\.whl", script)
         self.assertNotIn(r"kleinanzeiger-0\.1\.8-py3-none-any\.whl", script)
         self.assertNotIn(r"kleinanzeiger-0\.1\.3-py3-none-any\.whl", script)
         self.assertIn("SHA256SUMS.txt", script)
@@ -26,6 +31,15 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("'[private-web,generation]'", script)
         self.assertNotIn("Remove-Item -LiteralPath $state", script)
         self.assertNotIn("Restore", script)
+        self.assertIn("'.venv-stage-'", script)
+        self.assertIn("'.venv-rollback-'", script)
+        self.assertIn("'.venv-invalid-'", script)
+        self.assertIn("& $stagePython -m pip install", script)
+        self.assertNotIn("& $installedPython -m pip install", script)
+        self.assertLess(script.index("& $stagePython -m pip install"), script.index("Rename-Item -LiteralPath $venv"))
+        self.assertIn("Rename-Item -LiteralPath $rollback", script)
+        self.assertIn("if ($mayDisposeStage", script)
+        self.assertIn("m.version('kleinanzeiger') == '0.1.13'", script)
 
     def test_no_powershell_home_reserved_variable_write(self):
         for filename in ("windows-install.ps1", "windows-chrome.ps1"):
@@ -57,8 +71,8 @@ class WindowsInstallerContractTests(unittest.TestCase):
     def test_release_copy_manifest_and_version_are_consistent(self):
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.1.12"', metadata)
-        self.assertIn("Kleinanzeiger-v0.1.12-Windows.zip", workflow)
+        self.assertIn('version = "0.1.13"', metadata)
+        self.assertIn("Kleinanzeiger-v0.1.13-Windows.zip", workflow)
         for filename in (
             "Kleinanzeiger.cmd",
             "windows-install.ps1", "windows-center.ps1", "windows-worker.ps1", "windows-start.ps1", "windows-chrome.ps1",

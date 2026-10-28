@@ -43,6 +43,10 @@ Kundenunterlagen: [Handbuch](docs/Kleinanzeiger-Handbuch.html) und
 [Funktionsübersicht](docs/Kleinanzeiger-Funktionen.html).
 Die separate Linux-A6-Migration gehört nicht zur Windows-Neuinstallation.
 
+## Windows-Updates mit Rückfallumgebung (ab v0.1.13)
+
+Installationen bauen die neue Python-Programmumgebung zunächst in einem eigenen Stagingverzeichnis auf. Erst nach Paket-, Version- und Startprüfung wird sie aktiviert. Scheitert die Aktivierung, wird die vorherige Programmumgebung zurückgestellt; nach erfolgreichem Upgrade bleibt sie für einen technisch begleiteten Rückwechsel als `.venv-rollback-*` erhalten. Das Verfahren verändert keine Anzeigen-Datenbank, Chrome-Profile oder vorhandenen Sicherungen. Eine spätere manuelle Rollback-Schaltfläche ist noch nicht enthalten; die vollständige Kunden-PC-Abnahme bleibt offen.
+
 ## Lokaler Arbeitsmodus, Bestandsvergleich und Preisregeln (v0.1.12)
 
 Der normale Windows-/CLI-Start bleibt nach einem abgewickelten Browser- oder
