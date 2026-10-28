@@ -235,6 +235,29 @@ const run=(action)=>vm.runInContext('runCatalogBulkAction('+JSON.stringify(actio
   assert.ok(!preview.includes("\n999999"),"untrusted title may not spoof an extra ID line");
   assert.ok(!preview.includes("\u202e"),"untrusted title may not reorder visible IDs");
 
+  // Missing title is a real owner observation, not the literal name "Ohne Titel".
+  // Exercise the actual catalog checkbox path rather than a test-only map.
+  prepare([]);
+  window.fixture=[ad("790","paused",null)];
+  inventory=window.fixture;
+  vm.runInContext('const nullLabel=catalogCheckbox(window.fixture[0]); const nullCheck=nullLabel.children[0]; nullCheck.checked=true; nullCheck.listeners.change()',context);
+  assert.equal(vm.runInContext('catalogSelectedAds.get("790").title',context),null);
+  promptReply="LÖSCHEN 1";
+  window.write=async(scope,method,path,payload,opts)=>{
+    assert.equal(method,"DELETE");assert.equal(opts.adId,"790");writes.push(path);
+    return reply(opts.adId);
+  };
+  await run("delete");
+  assert.deepEqual(writes,["/api/write/ads/790"]);
+  assert.ok(preview.includes("790 · Ohne Titel (pausiert -> gelöscht)"));
+
+  prepare([ad("791","active",null)]);
+  inventory=[ad("791","active","Ohne Titel")]; // different original observation
+  promptReply="LÖSCHEN 1";
+  await run("delete");
+  assert.equal(writes.length,0,"null->literal title drift must block before DELETE");
+  assert.match(progress(),/verändert/);
+
   prepare([ad("123")]);
   promptReply="LÖSCHEN"; // missing the exact bound count
   await run("delete");

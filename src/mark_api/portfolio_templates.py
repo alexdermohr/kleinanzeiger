@@ -210,9 +210,10 @@ def attention_counts(store:SnapshotStore)->dict[str,object]:
     with closing(store._connect()) as conn:
         if jobs_schema(conn,create=False):
             pending=conn.execute(
-                "SELECT SUM(phase='proposed') proposed,"
-                "SUM(phase='unknown') unknown "
-                "FROM portfolio_job_items").fetchone()
+                "SELECT SUM(i.phase='proposed' AND j.state!='cancelled') proposed,"
+                "SUM(i.phase='unknown') unknown "
+                "FROM portfolio_job_items AS i "
+                "JOIN portfolio_jobs AS j ON j.job_id=i.job_id").fetchone()
             proposals=pending["proposed"] or 0
             ambiguous=pending["unknown"] or 0
         else:
