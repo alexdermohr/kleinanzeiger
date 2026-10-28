@@ -1,4 +1,4 @@
-"""Safety regression for confirmed multi-ad pause/activate UI actions.
+"""Safety regression for confirmed multi-ad pause/activate/delete UI actions.
 
 No real session, account, network or platform operation is created.
 """
@@ -15,7 +15,7 @@ class PortfolioBulkUiTests(unittest.TestCase):
     def test_visible_when_write_capability_is_present(self):
         for element in (
             'id="catalog-bulk-pause"', 'id="catalog-bulk-activate"',
-            'id="catalog-bulk-stop"', 'id="catalog-bulk-progress"',
+            'id="catalog-bulk-delete"', 'id="catalog-bulk-stop"', 'id="catalog-bulk-progress"',
         ):
             self.assertIn(element, _DASHBOARD_HTML)
         self.assertIn('await verifyCatalogBulkAd(ad)', _DASHBOARD_JS)
@@ -50,11 +50,14 @@ const document={
     return [];
   }
 };
-let confirmCount=0, preview="", allowConfirm=true, writes=[], reads=[];
+let confirmCount=0, promptCount=0, promptReply=null, challengeText="";
+let preview="", allowConfirm=true, writes=[], reads=[];
 const window={
   addEventListener(){},
   confirm(msg) {assert.equal(writes.length,0,"no write may precede confirmation");
-    confirmCount++;preview=msg;return allowConfirm;}
+    confirmCount++;preview=msg;return allowConfirm;},
+  prompt(msg) {assert.equal(writes.length,0,"no write before typed consent");
+    promptCount++;challengeText=msg;return promptReply;}
 };
 const context={document,window,console,URL,URLSearchParams,Date,fetch:()=>{throw Error("unexpected fetch")}};
 vm.createContext(context);
@@ -83,7 +86,8 @@ window.write=async(scope,method,path,payload,opts)=>{
 vm.runInContext('getJson=async(path)=>window.read(path);runPlatformWrite=async(...args)=>window.write(...args)',context);
 function prepare(ads) {
   inventory=ads;
-  writes=[];reads=[];confirmCount=0;preview="";allowConfirm=true;
+  writes=[];reads=[];confirmCount=0;promptCount=0;promptReply=null;
+  challengeText="";preview="";allowConfirm=true;
   reply=()=>({response:{status:200},payload:{operation_receipt:{outcome:"confirmed"}}});
   window.write=async(scope,method,path,payload,opts)=>{
     assert.equal(confirmCount,1);
@@ -189,6 +193,74 @@ const run=(action)=>vm.runInContext('runCatalogBulkAction('+JSON.stringify(actio
   assert.match(progress(),/gestoppt/);
   assert.equal(vm.runInContext("catalogBulkBusy",context),false);
   assert.equal(elements.get("catalog-bulk-stop").hidden,true);
+
+  // G6 deletion uses only the existing exact-ID DELETE Write API, after an
+  // ordinary preview confirm AND a typed, count-bound destructive challenge.
+  prepare([ad("123"),ad("456","paused")]);
+  promptReply="LÖSCHEN 2";
+  window.write=async(scope,method,path,payload,opts)=>{
+    assert.equal(confirmCount,1);
+    assert.equal(promptCount,1);
+    assert.equal(method,"DELETE");
+    assert.equal(payload,null);
+    assert.equal(scope,"ad:"+opts.adId+":delete");
+    assert.equal(path,"/api/write/ads/"+opts.adId);
+    writes.push(path);
+    return reply(opts.adId);
+  };
+  await run("delete");
+  assert.equal(confirmCount,1);
+  assert.equal(promptCount,1);
+  assert.ok(challengeText.includes("LÖSCHEN 2"));
+  assert.ok(preview.includes("123 · Anzeige 123 (aktiv -> gelöscht)"));
+  assert.ok(preview.includes("456 · Anzeige 456 (pausiert -> gelöscht)"));
+  assert.equal(writes.length,2);
+  assert.deepEqual(writes,["/api/write/ads/123","/api/write/ads/456"]);
+  assert.equal(reads.length,2);
+  assert.match(progress(),/2 von 2/);
+  assert.match(progress(),/IDs: 123, 456/);
+  assert.equal(vm.runInContext("catalogSelectedIds.size",context),0);
+
+  prepare([ad("123")]);
+  promptReply="LÖSCHEN"; // missing the exact bound count
+  await run("delete");
+  assert.equal(confirmCount,1);
+  assert.equal(promptCount,1);
+  assert.equal(writes.length,0);
+  assert.match(progress(),/abgebrochen/);
+
+  prepare([ad("123")]);
+  allowConfirm=false;
+  await run("delete");
+  assert.equal(confirmCount,1);
+  assert.equal(promptCount,0);
+  assert.equal(writes.length,0);
+
+  prepare([ad("123","pending")]);
+  promptReply="LÖSCHEN 1";
+  await run("delete");
+  assert.equal(confirmCount,0);
+  assert.equal(promptCount,0);
+  assert.equal(writes.length,0);
+
+  prepare([ad("123"),ad("456")]);
+  promptReply="LÖSCHEN 2";
+  window.write=async(scope,method,path)=>{
+    assert.equal(method,"DELETE");
+    writes.push(path);
+    return {response:{status:202},payload:{operation_receipt:{outcome:"ambiguous"}}};
+  };
+  await run("delete");
+  assert.equal(writes.length,1,"unknown DELETE outcome must block later deletions");
+  assert.match(progress(),/unklar/);
+  assert.equal(vm.runInContext("catalogSelectedIds.size",context),2);
+
+  prepare([ad("123"),ad("456")]);
+  promptReply="LÖSCHEN 2";
+  inventory=[ad("123","absent"),ad("456")];
+  await run("delete");
+  assert.equal(writes.length,0,"a changed owner listing must block deletion before the first write");
+  assert.match(progress(),/verändert/);
 })().catch(e=>{console.error(e);process.exitCode=1});
 """
         result = subprocess.run(

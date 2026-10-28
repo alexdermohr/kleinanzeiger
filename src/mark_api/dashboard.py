@@ -354,6 +354,7 @@ _DASHBOARD_HTML = """<!doctype html>
           <button type="button" id="catalog-export">Auswahl als CSV</button>
           <button type="button" id="catalog-bulk-pause" data-write-control hidden>Auswahl pausieren (max. 10)</button>
           <button type="button" id="catalog-bulk-activate" data-write-control hidden>Auswahl aktivieren (max. 10)</button>
+          <button type="button" id="catalog-bulk-delete" data-write-control hidden>Auswahl endgültig löschen (max. 10)</button>
           <button type="button" id="catalog-bulk-stop" hidden>Nach aktueller Anzeige stoppen</button>
           <span id="catalog-bulk-progress" role="status" aria-live="polite"></span>
         </div>
@@ -1601,7 +1602,7 @@ function renderCatalogSelection() {
   const canWrite = writeUiReady() && !catalogBulkBusy
     && !pendingRecoveryBlocked && pendingWrites.size === 0
     && count >= 1 && count <= 10;
-  for (const id of ["catalog-bulk-pause", "catalog-bulk-activate"]) {
+  for (const id of ["catalog-bulk-pause", "catalog-bulk-activate", "catalog-bulk-delete"]) {
     const control = optionalById(id);
     if (control) {
       control.hidden = !writeUiAvailable;
@@ -1765,23 +1766,28 @@ function clearCatalogSelection() {
 }
 
 function prepareCatalogBulkAction(action) {
-  if (action !== "pause" && action !== "activate") {
+  if (!["pause", "activate", "delete"].includes(action)) {
     throw new Error("Unbekannte Sammelaktion.");
   }
   const ids = Array.from(catalogSelectedIds);
   if (ids.length === 0 || ids.length > 10) {
     throw new Error("Bitte 1 bis 10 Anzeigen auswählen. Größere Bestände in kontrollierten Stapeln bearbeiten.");
   }
-  const sourceState = action === "pause" ? "active" : "paused";
+  const sourceState = action === "pause" ? "active"
+    : (action === "activate" ? "paused" : null);
   const ads = [];
   for (const id of ids) {
     const ad = catalogSelectedAds.get(id);
     if (!ad || !/^[0-9]{1,32}$/.test(id)
         || ad.ad_id !== id || ad.present !== true
         || typeof ad.observed_at !== "string" || !ad.observed_at
-        || ad.lifecycle_state !== sourceState) {
+        || (sourceState === null
+          ? !["active", "paused"].includes(ad.lifecycle_state)
+          : ad.lifecycle_state !== sourceState)) {
       throw new Error("Auswahl enthält eine unpassende Anzeige. Bestand abgleichen und "
-        + (action === "pause" ? "aktive" : "pausierte") + " Anzeigen wählen.");
+        + (action === "pause" ? "aktive"
+          : action === "activate" ? "pausierte" : "aktive oder pausierte")
+        + " Anzeigen wählen.");
     }
     ads.push(ad);
   }
@@ -1824,11 +1830,15 @@ async function runCatalogBulkAction(action) {
     showCatalogBulkProgress(error.message);
     return;
   }
-  const verb = action === "pause" ? "pausieren" : "aktivieren";
-  const from = action === "pause" ? "aktiv" : "pausiert";
-  const to = action === "pause" ? "pausiert" : "aktiv";
+  const destructive = action === "delete";
+  const verb = destructive ? "endgültig löschen"
+    : (action === "pause" ? "pausieren" : "aktivieren");
+  const from = destructive ? "aktiv/pausiert" : (action === "pause" ? "aktiv" : "pausiert");
+  const to = destructive ? "gelöscht" : (action === "pause" ? "pausiert" : "aktiv");
   const lines = ads.map((ad) =>
-    ad.ad_id + " · " + ad.title.slice(0, 70) + " (" + from + " -> " + to + ")"
+    ad.ad_id + " · " + ad.title.slice(0, 70) + " ("
+      + (destructive ? (ad.lifecycle_state === "active" ? "aktiv" : "pausiert") : from)
+      + " -> " + to + ")"
   );
   if (!window.confirm(
     "Diese " + ads.length + " eigenen Anzeigen wirklich " + verb + "?\\n\\n"
@@ -1836,12 +1846,24 @@ async function runCatalogBulkAction(action) {
       + "Jede Änderung wird einzeln geprüft. Bei unklarem Ergebnis stoppt der Stapel. "
       + "Keine automatische Wiederholung."
   )) return;
+  if (destructive) {
+    // A second deliberate approval is required before a destructive write.
+    const challenge = "LÖSCHEN " + ads.length;
+    if (window.prompt(
+      "Zum endgültigen Löschen dieser " + ads.length
+        + " Anzeigen bitte exakt " + challenge + " eingeben:", ""
+    ) !== challenge) {
+      showCatalogBulkProgress("Löschung abgebrochen. Keine Plattformaktion.");
+      return;
+    }
+  }
   catalogBulkBusy = true;
   catalogBulkStop = false;
   renderWriteAvailability();
   renderCatalogSelection();
   renderCatalogNavigation();
   let confirmed = 0;
+  const confirmedIds = [];
   let stopped = "";
   try {
     for (const ad of ads) {
@@ -1869,8 +1891,8 @@ async function runCatalogBulkAction(action) {
       );
       const result = await runPlatformWrite(
         "ad:" + ad.ad_id + ":" + action,
-        "POST",
-        "/api/write/ads/" + ad.ad_id + "/" + action,
+        destructive ? "DELETE" : "POST",
+        "/api/write/ads/" + ad.ad_id + (destructive ? "" : "/" + action),
         null, {adId: ad.ad_id},
       );
       if (!confirmedWriteResult(result)) {
@@ -1879,6 +1901,7 @@ async function runCatalogBulkAction(action) {
         break;
       }
       confirmed += 1;
+      confirmedIds.push(ad.ad_id);
       catalogSelectedIds.delete(ad.ad_id);
       catalogSelectedAds.delete(ad.ad_id);
       renderCatalogSelection();
@@ -1898,6 +1921,7 @@ async function runCatalogBulkAction(action) {
   }
   showCatalogBulkProgress(
     confirmed + " von " + ads.length + " Anzeigen bestätigt"
+    + (confirmedIds.length ? " · IDs: " + confirmedIds.join(", ") : "")
     + (stopped ? " · " + stopped : " · Stapel abgeschlossen.")
   );
 }
@@ -4921,6 +4945,7 @@ byId("catalog-clear").addEventListener("click", clearCatalogSelection);
 byId("catalog-export").addEventListener("click", exportCatalogSelection);
 byId("catalog-bulk-pause").addEventListener("click", () => runCatalogBulkAction("pause"));
 byId("catalog-bulk-activate").addEventListener("click", () => runCatalogBulkAction("activate"));
+byId("catalog-bulk-delete").addEventListener("click", () => runCatalogBulkAction("delete"));
 byId("catalog-bulk-stop").addEventListener("click", stopCatalogBulkAction);
 byId("sync-now").addEventListener("click", syncNow);
 byId("metric-select").addEventListener("change", loadAnalytics);
