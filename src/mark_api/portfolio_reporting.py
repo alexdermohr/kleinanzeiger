@@ -40,9 +40,10 @@ def report(store: SnapshotStore, *, days: int=7,
     start_day=start.isoformat()
     end_day=end.isoformat()
     sources=OWN_INVENTORY_SOURCES
+    placeholders=",".join("?" for _ in sources)
     where=(
         "EXISTS (SELECT 1 FROM ad_snapshots a WHERE "
-        "a.ad_id=e.ad_id COLLATE BINARY AND a.source IN (?,?,?)) "
+        f"a.ad_id=e.ad_id COLLATE BINARY AND a.source IN ({placeholders})) "
     )
     with closing(store._connect()) as conn:
         conn.execute("BEGIN")
@@ -50,7 +51,7 @@ def report(store: SnapshotStore, *, days: int=7,
         # inventory readers, not arbitrary e-mail-only IDs or CSV SKUs.
         ads=int(conn.execute(
             "SELECT COUNT(DISTINCT ad_id) FROM ad_snapshots "
-            "WHERE source IN (?,?,?)",sources).fetchone()[0])
+            f"WHERE source IN ({placeholders})",sources).fetchone()[0])
         # Invalid timestamps must fail closed rather than be silently omitted.
         invalid=conn.execute(
             "SELECT COUNT(*) FROM inbound_message_events e WHERE "

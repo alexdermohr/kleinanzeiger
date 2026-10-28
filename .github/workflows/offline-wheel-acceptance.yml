@@ -35,6 +35,15 @@ jobs:
           python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/mark-wheels" .
           python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/mark-wheels" \
             'websocket-client>=1.8,<2' 'Pillow>=10.4,<13'
+          # The protected native startup below deliberately uses the
+          # root-owned distro /usr/bin/python3 instead of setup-python.
+          # GitHub runner images can ship a different minor version; keep
+          # its Pillow wheel available without accessing the network in
+          # the later isolated --no-index customer-start check.
+          distro_version="$(sudo -n /usr/bin/python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          python -m pip download --only-binary=:all: --no-deps \
+            --python-version "$distro_version" \
+            --dest "$RUNNER_TEMP/mark-wheels" 'Pillow>=10.4,<13'
       - name: Exercise installed distribution and denied platform writes
         shell: bash
         run: |

@@ -999,6 +999,8 @@ let jobPageIndex = 0;
 let jobCursors = [""];
 let jobNextAfter = null;
 let jobBusy = false;
+let jobDetailGeneration = 0;
+let jobDisplayedId = "";
 let jobReviewSelected = new Set();
 let jobPendingRequest = null;
 let jobBatchBusy = false;
@@ -1010,6 +1012,7 @@ let salesNextAfter = null;
 let saleEntries = new Map();
 let salePending = null;
 let saleLoadSeq = 0;
+let saleVerifiedId = "";
 let saleSaveBusy = false;
 let reportingAvailable = false;
 let reportData = null;
@@ -3085,6 +3088,13 @@ async function syncNow() {
   }
 }
 
+function renderJobsAvailability() {
+  byId("jobs-panel").hidden = !jobsAvailable;
+  byId("nav-jobs").hidden = !jobsAvailable;
+  byId("job-provider-control").hidden =
+    !(jobsAvailable && generationUiAvailable);
+}
+
 async function load() {
   const status = byId("status");
   status.textContent = "Lade lokale Daten …";
@@ -3110,16 +3120,23 @@ async function load() {
     writeUiAvailable = dashboardConfig.write_ui_available === true;
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
-    jobsAvailable = dashboardConfig.portfolio_jobs_available === true;
-    byId("job-provider-control").hidden =
-      !(jobsAvailable && generationUiAvailable);
+    jobsAvailable = false;
+    renderJobsAvailability();
     byId("sync-now").hidden = !manualSyncAvailable;
     byId("sync-now").disabled = !writeUiReady() || syncInFlight;
     const genNavigation = optionalById("nav-generation");
     if (genNavigation) genNavigation.hidden = !generationUiAvailable;
     await refreshPendingWrites();
-    byId("jobs-panel").hidden = !jobsAvailable;
-    byId("nav-jobs").hidden = !jobsAvailable;
+    // Probe the authenticated local job route before showing job or sale controls.
+    if (writeUiReady()) {
+      try {
+        const available = await _jobGet("/api/portfolio/jobs?limit=1");
+        jobsAvailable = available && Array.isArray(available.jobs);
+      } catch (_error) {
+        jobsAvailable = false;
+      }
+    }
+    renderJobsAvailability();
     salesAvailable = jobsAvailable;
     byId("sales-panel").hidden = !salesAvailable;
     byId("nav-sales").hidden = !salesAvailable;
@@ -3368,6 +3385,9 @@ async function loadJobs() {
       " letzte lokale KI-Aufträge · keine automatische KI-Ausführung";
     if (choice) await loadJobDetails(true);
     else {
+      jobDetailGeneration++;
+      jobDisplayedId = "";
+      jobReviewSelected.clear();
       byId("job-items-body").replaceChildren();
       byId("job-progress").textContent = "Noch keine KI-Aufträge gespeichert.";
     }
@@ -3379,7 +3399,9 @@ async function loadJobs() {
   }
 }
 async function loadJobDetails(reset = false) {
-  if (!jobActiveId || !writeUiReady() || jobBusy) return false;
+  if (!jobActiveId || !writeUiReady()) return false;
+  const requestedId = jobActiveId;
+  const generation = ++jobDetailGeneration;
   if (reset) {
     jobPageIndex = 0;
     jobCursors = [""];
@@ -3387,12 +3409,16 @@ async function loadJobDetails(reset = false) {
     jobReviewSelected.clear();
   }
   jobBusy = true;
+  jobDisplayedId = "";
+  byId("job-items-body").replaceChildren();
+  byId("job-progress").textContent = "Prüfe ausgewählten KI-Auftrag …";
   try {
     const params = new URLSearchParams({
-      job_id: jobActiveId, limit: "50", after: jobCursors[jobPageIndex],
+      job_id: requestedId, limit: "50", after: jobCursors[jobPageIndex],
     });
     const job = await _jobGet("/api/portfolio/jobs/detail?" + params.toString());
-    if (!job || job.job_id !== jobActiveId || !Array.isArray(job.items)) {
+    if (generation !== jobDetailGeneration || requestedId !== jobActiveId) return false;
+    if (!job || job.job_id !== requestedId || !Array.isArray(job.items)) {
       throw new Error("Auftrag nicht gefunden");
     }
     jobNextAfter = job.has_more ? job.next_after : null;
@@ -3441,12 +3467,15 @@ async function loadJobDetails(reset = false) {
     byId("job-page-label").textContent="Seite " + (jobPageIndex+1);
     byId("job-prev").disabled=jobPageIndex===0;
     byId("job-next").disabled=!jobNextAfter;
+    jobDisplayedId = requestedId;
     return true;
   } catch (_error) {
-    byId("jobs-feedback").textContent="Auftrag konnte nicht geladen werden.";
+    if (generation === jobDetailGeneration) {
+      byId("jobs-feedback").textContent="Auftrag konnte nicht geladen werden.";
+    }
     return false;
   } finally {
-    jobBusy=false;
+    if (generation === jobDetailGeneration) jobBusy=false;
   }
 }
 async function createJob() {
@@ -3483,9 +3512,19 @@ async function createJob() {
   }
 }
 async function jobAction(name, payload) {
-  if (jobBusy || !jobActiveId) return;
+  if (jobBusy || !jobActiveId || jobDisplayedId !== jobActiveId) return;
+  const requestedId = jobActiveId;
   try {
-    await _jobPost(name,{job_id:jobActiveId,...payload});
+    const result = await _jobPost(name,{job_id:requestedId,...payload});
+    if (jobActiveId !== requestedId) return;
+    if (name === "apply-local" && result.applied > 0) {
+      // Never reuse stale draft objects for "In neue Anzeige" after an
+      // approved local AI edit. Hide old rows before refreshing, so a
+      // failed read cannot leave actionable stale article details.
+      draftLoaded = false;
+      byId("drafts-body").replaceChildren();
+      if (byId("drafts-disclosure").open) await loadDraftsPage();
+    }
     byId("jobs-feedback").textContent="Lokaler Vorgang bestätigt. Keine Plattformänderung.";
     await loadJobs();
   } catch (error) {
@@ -3493,6 +3532,10 @@ async function jobAction(name, payload) {
   }
 }
 function jobReview(approve) {
+  if (jobBusy || !jobActiveId || jobDisplayedId !== jobActiveId) {
+    byId("jobs-feedback").textContent="Den ausgewählten Auftrag zuerst erfolgreich laden und prüfen.";
+    return;
+  }
   if (!jobReviewSelected.size) {
     byId("jobs-feedback").textContent="Zuerst Vorschläge in der Tabelle auswählen.";
     return;
@@ -3508,7 +3551,7 @@ async function generateJobNext() {
   const consent=byId("job-provider-consent");
   const status=byId("job-provider-status");
   if (!writeUiReady() || !jobsAvailable || !generationUiAvailable ||
-      !generationToken || !jobActiveId) {
+      !generationToken || !jobActiveId || jobBusy || jobDisplayedId !== jobActiveId) {
     status.textContent="Die KI-Sitzung muss im Kleinanzeiger-Startfenster eingerichtet sein.";
     return;
   }
@@ -3556,7 +3599,7 @@ async function generateJobBatch() {
   const consent=byId("job-provider-consent");
   if (jobBatchBusy) return;
   if (!writeUiReady() || !jobsAvailable || !generationUiAvailable ||
-      !generationToken || !jobActiveId) {
+      !generationToken || !jobActiveId || jobBusy || jobDisplayedId !== jobActiveId) {
     status.textContent="Bitte Kleinanzeiger mit aktivierter KI-Sitzung starten.";
     return;
   }
@@ -3833,11 +3876,12 @@ async function loadSelectedSale() {
   // itself may have thousands of rows. Always fetch its exact revision.
   const id=byId("sale-ad-select").value;
   const seq=++saleLoadSeq;
+  saleVerifiedId="";
+  byId("sale-save").disabled=true;
   if (!id || !salesAvailable || !writeUiReady()) {
     fillSaleForm();
     return;
   }
-  byId("sale-save").disabled=true;
   let verified=false;
   try {
     const response=await _jobGet("/api/portfolio/sales/detail?"+
@@ -3850,6 +3894,7 @@ async function loadSelectedSale() {
     else saleEntries.delete(id);
     fillSaleForm();
     verified=true;
+    saleVerifiedId=id;
   } catch (_error) {
     if (seq===saleLoadSeq) {
       byId("sale-feedback").textContent=
@@ -3857,7 +3902,8 @@ async function loadSelectedSale() {
       return;
     }
   } finally {
-    if (seq===saleLoadSeq) byId("sale-save").disabled=!verified;
+    if (seq===saleLoadSeq) byId("sale-save").disabled=
+      !verified || saleVerifiedId!==id || saleSaveBusy;
   }
 }
 function fillSaleForm() {
@@ -3930,7 +3976,8 @@ function _saleWholeEur(id,required) {
 }
 async function saveSaleState() {
   if (!salesAvailable || !writeUiReady() || saleSaveBusy ||
-      byId("sale-save").disabled) return;
+      byId("sale-save").disabled ||
+      saleVerifiedId!==byId("sale-ad-select").value) return;
   saleSaveBusy=true;
   byId("sale-save").disabled=true;
   try {
@@ -3973,9 +4020,10 @@ async function saveSaleState() {
     saleSaveBusy=false;
     // A manual reload can reconcile a lost HTTP answer before any new
     // idempotency key is generated; a retry keeps the identical key/payload.
-    if (byId("sale-ad-select").value && salesAvailable && writeUiReady()) {
-      byId("sale-save").disabled=false;
-    }
+    byId("sale-save").disabled=!(
+      saleVerifiedId && saleVerifiedId===byId("sale-ad-select").value &&
+      salesAvailable && writeUiReady()
+    );
   }
 }
 async function loadPortfolioReport() {
