@@ -539,26 +539,56 @@ class _LoopbackCdpClient:
                 if isinstance(item, dict) and item.get("type") == "page"
             ]
             if len(pages) != 1:
-                raise ValueError("exactly one page target is required")
-            websocket_url = pages[0].get("webSocketDebuggerUrl")
-            if not isinstance(websocket_url, str):
-                raise ValueError("page target has no websocket URL")
-            parsed = urlparse(websocket_url)
-            try:
-                websocket_port = parsed.port
-            except ValueError:
-                websocket_port = None
-            if (
-                parsed.scheme != "ws"
-                or parsed.hostname != "127.0.0.1"
-                or websocket_port != self._port
-                or parsed.username is not None
-                or parsed.password is not None
-                or not parsed.path.startswith("/devtools/page/")
-                or parsed.query
-                or parsed.fragment
-            ):
-                raise ValueError("page websocket escaped loopback binding")
+                # Chrome reuses the dedicated user-data-dir and accumulates
+                # tabs across launches. Never attach to pages[0] arbitrarily:
+                # prefer only the *already open* canonical owner management
+                # page. No navigation, tab creation, cookie read or tab close.
+                manager_pages = []
+                for item in pages:
+                    raw_url = item.get("url")
+                    if type(raw_url) is not str:
+                        continue
+                    try:
+                        page_url = urlparse(raw_url)
+                    except ValueError:
+                        continue
+                    if (
+                        page_url.scheme == "https"
+                        and page_url.netloc == "www.kleinanzeigen.de"
+                        and page_url.path == _MANAGEMENT_PATH
+                    ):
+                        manager_pages.append(item)
+                if not manager_pages:
+                    raise ValueError("no canonical management target in multi-tab Chrome")
+                pages = manager_pages
+            validated_sockets = []
+            for page in pages:
+                candidate = page.get("webSocketDebuggerUrl")
+                if not isinstance(candidate, str):
+                    raise ValueError("page target has no websocket URL")
+                parsed = urlparse(candidate)
+                try:
+                    websocket_port = parsed.port
+                except ValueError:
+                    websocket_port = None
+                if (
+                    parsed.scheme != "ws"
+                    or parsed.hostname != "127.0.0.1"
+                    or websocket_port != self._port
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or not parsed.path.startswith("/devtools/page/")
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError("page websocket escaped loopback binding")
+                validated_sockets.append(candidate)
+            if len(set(validated_sockets)) != len(validated_sockets):
+                raise ValueError("duplicate page target identity")
+            # Multiple *identical-path* management tabs are equivalent inside
+            # the one dedicated Chrome profile; choose a stable page identity
+            # instead of depending on Chrome's mutable discovery list order.
+            websocket_url = min(validated_sockets)
             previous_target = self._target_websocket_url
             if previous_target is not None and websocket_url != previous_target:
                 raise ValueError("page target identity changed")

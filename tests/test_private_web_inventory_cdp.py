@@ -86,6 +86,61 @@ class BrowserInventoryTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_loading_manager_tab_waits_using_only_read_only_acknowledged_probes(self):
+        class LoadingClient(FakeClient):
+            def __init__(self):
+                super().__init__([payload([])])
+                self.states = iter(("loading", "interactive", "complete"))
+            def _synthetic_send(self, method, params=None):
+                params = dict(params or {})
+                if not params.get("awaitPromise"):
+                    self.calls.append((method, params))
+                    return {"result": {"value": {
+                        "readyState": next(self.states),
+                        "origin": "https://www.kleinanzeigen.de",
+                        "path": "/m-meine-anzeigen.html",
+                    }}}
+                return super()._synthetic_send(method, params)
+        client = LoadingClient()
+        slept = []
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610, timeout_seconds=0.5,
+            client_factory=lambda: client, sleep=lambda seconds: slept.append(seconds),
+        )
+        result = reader.read_ads()
+        self.assertEqual(result.status, ReadStatus.SUCCESS_EMPTY)
+        self.assertEqual(slept, [0.15, 0.15])
+        self.assertEqual(
+            [params.get("awaitPromise") for _, params in client.calls],
+            [False, False, False, True],
+        )
+        self.assertTrue(client.closed)
+
+    def test_wrong_tab_has_safe_specific_reason_not_a_login_assertion(self):
+        client = FakeClient([payload([])], path="/p-anzeige-bearbeiten.html")
+        result = self.reader(client).read_ads()
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(result.error, "cdp_inventory_wrong_target")
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(client.closed)
+
+    def test_missing_management_json_response_is_specific_but_not_untrusted(self):
+        client = FakeClient([{"error": "missing_body"}])
+        result = self.reader(client).read_ads()
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(result.error, "cdp_inventory_fetch_failed")
+        self.assertTrue(client.closed)
+        redirected = FakeClient([{"error": "wrong_origin_or_page"}])
+        result2 = self.reader(redirected).read_ads()
+        self.assertEqual(result2.error, "cdp_inventory_wrong_target")
+
+    def test_never_leak_untrusted_provider_errors_through_inventory(self):
+        client = FakeClient([RuntimeError("private@example.invalid Cookie=secret")])
+        result = self.reader(client).read_ads()
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(result.error, "cdp_inventory_failed")
+        self.assertNotIn("private@example.invalid", str(result))
+
     def test_owner_inventory_uses_only_fixed_same_origin_get_without_cookie_export(self):
         client = FakeClient([
             payload([{"id": "1234567890", "title": "Vase", "state": "active", "viewCount": 5, "watchCount": 2}],last=2),
