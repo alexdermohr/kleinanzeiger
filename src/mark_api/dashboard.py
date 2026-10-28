@@ -948,6 +948,7 @@ let salesNextAfter = null;
 let saleEntries = new Map();
 let salePending = null;
 let saleLoadSeq = 0;
+let saleVerifiedId = "";
 let saleSaveBusy = false;
 let managedAdBaseline = null;
 
@@ -3471,11 +3472,12 @@ async function loadSelectedSale() {
   // itself may have thousands of rows. Always fetch its exact revision.
   const id=byId("sale-ad-select").value;
   const seq=++saleLoadSeq;
+  saleVerifiedId="";
+  byId("sale-save").disabled=true;
   if (!id || !salesAvailable || !writeUiReady()) {
     fillSaleForm();
     return;
   }
-  byId("sale-save").disabled=true;
   let verified=false;
   try {
     const response=await _jobGet("/api/portfolio/sales/detail?"+
@@ -3488,6 +3490,7 @@ async function loadSelectedSale() {
     else saleEntries.delete(id);
     fillSaleForm();
     verified=true;
+    saleVerifiedId=id;
   } catch (_error) {
     if (seq===saleLoadSeq) {
       byId("sale-feedback").textContent=
@@ -3495,7 +3498,8 @@ async function loadSelectedSale() {
       return;
     }
   } finally {
-    if (seq===saleLoadSeq) byId("sale-save").disabled=!verified;
+    if (seq===saleLoadSeq) byId("sale-save").disabled=
+      !verified || saleVerifiedId!==id || saleSaveBusy;
   }
 }
 function fillSaleForm() {
@@ -3568,7 +3572,8 @@ function _saleWholeEur(id,required) {
 }
 async function saveSaleState() {
   if (!salesAvailable || !writeUiReady() || saleSaveBusy ||
-      byId("sale-save").disabled) return;
+      byId("sale-save").disabled ||
+      saleVerifiedId!==byId("sale-ad-select").value) return;
   saleSaveBusy=true;
   byId("sale-save").disabled=true;
   try {
@@ -3611,9 +3616,10 @@ async function saveSaleState() {
     saleSaveBusy=false;
     // A manual reload can reconcile a lost HTTP answer before any new
     // idempotency key is generated; a retry keeps the identical key/payload.
-    if (byId("sale-ad-select").value && salesAvailable && writeUiReady()) {
-      byId("sale-save").disabled=false;
-    }
+    byId("sale-save").disabled=!(
+      saleVerifiedId && saleVerifiedId===byId("sale-ad-select").value &&
+      salesAvailable && writeUiReady()
+    );
   }
 }
 const draftNavigation = optionalById("nav-drafts");
