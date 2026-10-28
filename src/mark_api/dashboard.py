@@ -4147,6 +4147,9 @@ async function load() {
     localWorkAvailable = dashboardConfig.local_work_available === true;
     const offlineNotice = optionalById("offline-notice");
     if (offlineNotice) offlineNotice.hidden = dashboardConfig.offline_mode !== true;
+    if (offlineNotice && dashboardConfig.offline_mode === true && !localWorkAvailable) {
+      offlineNotice.textContent = "Lokaler Lesemodus: Der gespeicherte Bestand kann veraltet sein. Diese Sitzung erlaubt keine lokalen oder Plattformänderungen. Für einen erneuten Kontoabgleich Kleinanzeiger neu starten.";
+    }
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
     jobsAvailable = false;
@@ -6073,6 +6076,7 @@ def _handler_factory(
     public_origin_port: int | None = None,
     sync_once: Callable[[], int] | None = None,
     local_session_token: str | None = None,
+    offline_mode: bool = False,
 ):
     local_work_available = write_proxy is not None or local_session_token is not None
     session_token = write_proxy.ui_token if write_proxy is not None else local_session_token
@@ -6605,8 +6609,10 @@ def _handler_factory(
                     200,
                     {
                         "write_ui_available": write_proxy is not None,
-                        **({"local_work_available": True, "offline_mode": True}
+                        **({"local_work_available": True}
                            if local_session_token is not None else {}),
+                        **({"offline_mode": True}
+                           if offline_mode or local_session_token is not None else {}),
                         **(
                             {"portfolio_jobs_available": True}
                             if type(store) is SnapshotStore and local_work_available
@@ -7774,6 +7780,7 @@ def create_server(
     public_origin_port: int | None = None,
     sync_once: Callable[[], int] | None = None,
     local_session_token: str | None = None,
+    offline_mode: bool = False,
 ) -> LoopbackDashboardServer:
     if host != "127.0.0.1":
         raise ValueError("dashboard must bind to 127.0.0.1")
@@ -7791,6 +7798,10 @@ def create_server(
 
     if generation_access is not None and not isinstance(generation_access, DashboardGenerationAccess):
         raise TypeError("generation_access must be DashboardGenerationAccess or None")
+    if type(offline_mode) is not bool:
+        raise TypeError("offline_mode must be bool")
+    if offline_mode and write_proxy is not None:
+        raise ValueError("offline workspace cannot have a platform writer")
     if local_session_token is not None:
         if (type(local_session_token) is not str or not 16 <= len(local_session_token) <= 256
                 or not local_session_token.isascii()
@@ -7819,6 +7830,7 @@ def create_server(
             public_origin_port=public_origin_port,
             sync_once=sync_once,
             local_session_token=local_session_token,
+            offline_mode=offline_mode,
         ),
     )
 

@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from mark_api.dashboard import DashboardWriteProxy, create_server
 from mark_api.domain import AdSnapshot, LifecycleState
-from mark_api.launcher import build_product_launcher, ProductLauncherError
+from mark_api.launcher import build_product_launcher, ProductLauncherError, EmailImportReport
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
 from mark_api.write_api import acquire_write_api_store_lock
@@ -78,7 +78,7 @@ class ProductOfflineWorkspaceTests(unittest.TestCase):
         self.addCleanup(worker.join, 3)
         self.addCleanup(runtime.close)
         self.port = runtime.server_address[1]
-        self.token = parse_qs(urlsplit(runtime.dashboard_url).fragment)["write_token"][0]
+        self.token = parse_qs(urlsplit(runtime.dashboard_url).fragment).get("write_token", ["not-an-issued-local-token"])[0]
         return runtime
 
     def request(self, method, path, data=None, *, token=True, origin=True, extra=None):
@@ -236,6 +236,44 @@ class ProductOfflineWorkspaceTests(unittest.TestCase):
                         {"local_session_token": "short"}, {"local_session_token": "x" * 20 + "\n"}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 create_server(self.store, port=0, **{"local_session_token": "l" * 32, **options})
+
+    def test_read_only_fallback_does_not_broaden_local_mutation_authority(self):
+        runtime = self.start(enable_writes=False)
+        self.assertNotIn("write_token", urlsplit(runtime.dashboard_url).fragment)
+        config = self.request("GET", "/api/dashboard/config")[1]
+        self.assertEqual(config, {"write_ui_available": False, "offline_mode": True})
+        for path in ("/api/portfolio/sales/update", "/api/portfolio/price-rules/mutate",
+                     "/api/portfolio/jobs/create", "/api/dashboard/sync", "/api/write/ads"):
+            with self.subTest(path=path):
+                self.assertGreaterEqual(self.request("POST", path, {})[0], 400)
+        self.assertEqual(self.store.ad_history("10001"), (self.snapshot,))
+        self.writer.assert_not_called()
+
+    def test_explicit_email_import_survives_offline_fallback_and_one_shot_paths(self):
+        paths = (self.path.with_name("one.eml"), self.path.with_name("two.eml"))
+        report = EmailImportReport(parsed_files=2, inserted_events=1, duplicate_events=1, ad_ids=("10001",))
+        importer = Mock(return_value=report)
+        runtime = self.start(email_paths=iter(paths), email_importer=importer, enable_writes=False)
+        importer.assert_called_once()
+        self.assertEqual(importer.call_args.args[1], paths)
+        self.assertEqual(importer.call_args.args[0].path, self.path)
+        self.assertIs(runtime.startup_email_import_report, report)
+        self.assertFalse(self.request("GET", "/api/dashboard/config")[1]["write_ui_available"])
+
+    def test_invalid_explicit_email_import_fails_and_releases_local_lease(self):
+        for importer in (Mock(side_effect=OSError("private mail path")), Mock(return_value=None)):
+            with self.subTest(importer=importer), self.assertRaisesRegex(ProductLauncherError, "local reaction email import failed"):
+                build_product_launcher(db_path=self.path, cdp_port=9222, dashboard_port=0,
+                    allow_offline=True, runtime_factory=self.factory,
+                    email_paths=(self.path.with_name("missing.eml"),), email_importer=importer)
+            importer.assert_called_once()
+            lease = acquire_write_api_store_lock(self.store)
+            lease.close()
+        with self.assertRaisesRegex(ProductLauncherError, "local reaction email import failed"):
+            build_product_launcher(db_path=self.path, cdp_port=9222, dashboard_port=0,
+                allow_offline=True, runtime_factory=self.factory,
+                email_paths=(self.path.with_name("missing.eml"),))
+        self.assertEqual(self.store.ad_history("10001"), (self.snapshot,))
 
     def test_dashboard_bind_failure_releases_offline_lease(self):
         occupied = socket.socket()

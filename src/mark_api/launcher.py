@@ -275,7 +275,7 @@ class ProductLauncherRuntime:
             port = self._public_origin_port
         base_url = f"http://{host}:{port}/"
         tokens: list[str] = []
-        if self._writes_enabled or self.offline_mode:
+        if self._writes_enabled or (self.offline_mode and self._dashboard_write_token):
             tokens.append("write_token=" + quote(self._dashboard_write_token, safe=""))
         if self._generation_token is not None:
             tokens.append("generation_token=" + quote(self._generation_token, safe=""))
@@ -797,6 +797,12 @@ def build_product_launcher(
     """
     if type(allow_offline) is not bool:
         raise TypeError("allow_offline must be bool")
+    # Freeze a one-shot iterable once; both paths must see the same import intent.
+    if "email_paths" in options:
+        try:
+            options["email_paths"] = tuple(options["email_paths"])
+        except TypeError as exc:
+            raise TypeError("email_paths must be iterable") from exc
     try:
         return _build_online_product_launcher(**options)
     except ProductInventoryUnavailable:
@@ -815,13 +821,28 @@ def build_product_launcher(
             clock=options.get("clock", _utc_now),
         )
         try:
-            token = (options.get("dashboard_token_factory") or _default_dashboard_write_token)()
+            local_writes = options.get("enable_writes", True)
+            token = ((options.get("dashboard_token_factory") or _default_dashboard_write_token)()
+                     if local_writes else "")
+            email_report = EmailImportReport(
+                parsed_files=0, inserted_events=0, duplicate_events=0, ad_ids=(),
+            )
+            if options.get("email_paths"):
+                try:
+                    email_report = options.get("email_importer", import_kleinanzeigen_email_files)(
+                        store, options["email_paths"],
+                    )
+                except Exception:
+                    raise ProductLauncherError("local reaction email import failed") from None
+                if not isinstance(email_report, EmailImportReport):
+                    raise ProductLauncherError("local reaction email import failed")
             generation_access = options.get("generation_access")
             server = (options.get("dashboard_factory") or create_server)(
                 store, host="127.0.0.1", port=options.get("dashboard_port", 8765),
                 analytics_contract=options.get("analytics_contract"),
-                local_session_token=token, sync_once=session.sync_once,
-                generation_access=generation_access,
+                local_session_token=token if local_writes else None,
+                sync_once=session.sync_once if local_writes else None,
+                offline_mode=True, generation_access=generation_access,
             )
         except BaseException:
             session.close()
@@ -834,9 +855,7 @@ def build_product_launcher(
             ),
             server=server, dashboard_write_token=token,
             startup_inventory_count=0, startup_persisted_count=0,
-            startup_email_import_report=EmailImportReport(
-                parsed_files=0, inserted_events=0, duplicate_events=0, ad_ids=(),
-            ),
+            startup_email_import_report=email_report,
             writes_enabled=False, offline_mode=True,
             generation_token=generation_access.ui_token if generation_access else None,
         )
