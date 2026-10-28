@@ -13,6 +13,7 @@ $chromeArgs = '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222
 Start-Process -FilePath $chrome -ArgumentList $chromeArgs
 Write-Host 'Im neuen, isolierten Chrome-Fenster bei Kleinanzeigen anmelden.'
 Read-Host 'Nach erfolgreichem Login ENTER druecken'
+Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 12
 $extra = @()
 if (!(Test-Path -LiteralPath $db -PathType Leaf)) { $extra += '--init-db' }
 $keyFile = Join-Path $state 'openai-key.dpapi'

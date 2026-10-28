@@ -14,13 +14,13 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.8</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.9</p>
 <h1>Kleinanzeiger – Benutzerhandbuch</h1>
 <p>Kleinanzeiger verwaltet Ihre eigenen Anzeigen, zeigt Kennzahlen, unterstützt Entwürfe mit KI und sichert lokale Daten. Alle häufigen Aufgaben starten über das Fenster <strong>Kleinanzeiger</strong>.</p>
 <nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#stapel">Stapelaufträge</a><a href="#verkauf">Verkäufe & Lager</a><a href="#controlling">Controlling</a><a href="#vorlagen">Vorlagen</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
 <h2 id="install">1. Installation und erster Start</h2>
 <ol>
-<li>Das offizielle <strong>Kleinanzeiger-v0.1.8-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
+<li>Das offizielle <strong>Kleinanzeiger-v0.1.9-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
 <li><strong>Kleinanzeiger.cmd</strong> doppelklicken. Das Windows-Kontrollfenster erscheint.</li>
 <li><strong>Einrichten und starten</strong> klicken. Fehlendes Python 3.12/3.13 sowie Chrome werden bei Bedarf über geprüfte offizielle Dateien bereitgestellt. Eine Internetverbindung ist dafür nötig.</li>
 <li>Im eigens gestarteten Chrome-Fenster bei <strong>kleinanzeigen.de</strong> anmelden; gegebenenfalls die Konto-Bestätigung selbst durchführen. Kleinanzeiger speichert kein Kontopasswort.</li>
@@ -94,7 +94,17 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <p>Im Kontrollfenster stehen <strong>Sicherung erstellen</strong> und <strong>Installieren / aktualisieren</strong> zur Verfügung. Vor einer Aktualisierung wird bei vorhandener Datenbank automatisch eine geprüfte Sicherung erzeugt. Die Datenbank liegt unter <code>%LOCALAPPDATA%\Kleinanzeiger\anzeigen.sqlite</code>, Sicherungen unter <code>%LOCALAPPDATA%\Kleinanzeiger\Backups</code>. Programmdateien liegen unter <code>%LOCALAPPDATA%\Kleinanzeiger\App</code>.</p>
 <p>Für <strong>Sicherung wiederherstellen</strong> zunächst über <strong>Weitere Optionen</strong> die Restore-Funktion öffnen. Diese stellt nur in eine <strong>noch nicht vorhandene</strong> Datenbank ohne WAL-/SHM-/Journal-Dateien wieder her. Eine vorhandene Datenbank wird niemals überschrieben. Die Sicherungsdatei benötigt ihr passendes Manifest.</p>
 <p class="note">Für einen sauberen Neuinstallationstest Datenbestand und Chrome-Profil zuerst separat sichern; ein Programmupdate löscht sie nicht. Nicht einfach die laufende SQLite-Datei kopieren oder ihren WAL-/SHM-Bestand löschen.</p>
-<h2 id="hilfe">7. Wenn etwas nicht funktioniert</h2>
+<h2 id="hilfe">
+<p><strong>Chrome ist angemeldet, Dashboard bleibt aber geschlossen?</strong>
+Die Anmeldung im normalen Chrome ist nicht dieselbe wie im eigenen
+Kleinanzeiger-Chrome-Profil. In Version 0.1.9 wird die lokale Chrome-Browsersteuerung
+vor dem Produktstart geprüft. Bei der Meldung „Browsersteuerung nicht bereit“
+nur die durch Kleinanzeiger geöffneten Chrome-Fenster schließen und erneut öffnen.
+Wenn „Meine Anzeigen“ sichtbar ist und der Dienst dennoch nicht startet,
+im Kontrollfenster <strong>Details</strong> öffnen; die generische Startmeldung
+ist kein Nachweis eines fehlenden Logins. Profile, Datenbank oder Backups
+nicht löschen.</p>
+7. Wenn etwas nicht funktioniert</h2>
 <table><tr><th>Beobachtung</th><th>Vorgehen</th></tr>
 <tr><td>Keine Anzeigen sichtbar</td><td>Im separaten Chrome anmelden, <strong>Mit Kleinanzeigen abgleichen</strong> auswählen und die Statusmeldung prüfen.</td></tr>
 <tr><td>Chrome, Python oder Installation fehlt</td><td>Im Kontrollfenster <strong>Installieren / aktualisieren</strong> wählen; Netzverbindung und technische Details prüfen.</td></tr>
@@ -150,5 +160,5 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <p>Die Vorlage startet keinen Auftrag. Prüfhinweise führen keine Plattformaktionen und keine kostenpflichtige KI-Verarbeitung aus. Wiederkehrende autonome Arbeitsregeln sind noch nicht enthalten.</p>
 <h2>14. Grenzen der aktuellen Ausgabe</h2>
 <p><strong>Noch nicht enthalten:</strong> Kontogebundene vollständige Nachrichtenkonversationen und ein kontrollierter Nachrichtenversand, automatische Plattform-Stapeländerungen/-veröffentlichungen, wiederkehrende KI-Autopilot-Regeln, eine unabhängig geprüfte Provider-Abrechnung sowie eine Freigabe auf Ihrem tatsächlichen Windows-Kunden-PC. Diese Funktionen dürfen nicht mit vorhandenen lokalen Notizen, KI-Vorschlägen oder simulierten Tests verwechselt werden.</p>
-<footer>Kleinanzeiger v0.1.8 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.9 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>
