@@ -57,6 +57,10 @@ class ProductLauncherError(RuntimeError):
     """The user-facing product launcher could not start or stop safely."""
 
 
+class ProductInventoryUnavailable(ProductLauncherError):
+    """A settled read failure; never a database or platform-write failure."""
+
+
 def _watch_local_stop_stdin(stream: object, request_stop: Callable[[], None]) -> None:
     """Request normal SIGINT cleanup only for STOP or an unexpectedly closed parent pipe.
 
@@ -184,7 +188,7 @@ def _validated_inventory(
                 "Die Antwort der Anzeigenverwaltung fehlt oder ist unvollstaendig.",
         }
         hint = hints.get(result.error) if result.status is ReadStatus.TRANSPORT_ERROR else None
-        raise ProductLauncherError(
+        raise ProductInventoryUnavailable(
             f"private Web inventory read failed: {result.status.value}"
             + (f" – {hint}" if hint else "")
         )
@@ -214,7 +218,7 @@ class ProductLauncherRuntime:
         self,
         *,
         inventory_runtime: _InventoryRuntime,
-        write_runtime: _WriteRuntime,
+        write_runtime: _WriteRuntime | None,
         write_access: WriteApiAccess,
         server: LoopbackDashboardServer,
         dashboard_write_token: str,
@@ -224,6 +228,7 @@ class ProductLauncherRuntime:
         writes_enabled: bool,
         generation_token: str | None = None,
         public_origin_port: int | None = None,
+        offline_mode: bool = False,
     ) -> None:
         self._inventory_runtime = inventory_runtime
         self._write_runtime = write_runtime
@@ -232,6 +237,7 @@ class ProductLauncherRuntime:
         self._dashboard_write_token = dashboard_write_token
         self._generation_token = generation_token
         self._writes_enabled = writes_enabled
+        self.offline_mode = offline_mode
         self._public_origin_port = public_origin_port
         self._startup_inventory_count = startup_inventory_count
         self._startup_persisted_count = startup_persisted_count
@@ -245,7 +251,7 @@ class ProductLauncherRuntime:
         self._serve_thread: Thread | None = None
         self._server_quiesced = False
         self._server_closed = False
-        self._write_closed = False
+        self._write_closed = write_runtime is None
         self._inventory_closed = False
         self._inventory_close_failed = False
 
@@ -269,7 +275,7 @@ class ProductLauncherRuntime:
             port = self._public_origin_port
         base_url = f"http://{host}:{port}/"
         tokens: list[str] = []
-        if self._writes_enabled:
+        if self._writes_enabled or (self.offline_mode and self._dashboard_write_token):
             tokens.append("write_token=" + quote(self._dashboard_write_token, safe=""))
         if self._generation_token is not None:
             tokens.append("generation_token=" + quote(self._generation_token, safe=""))
@@ -289,6 +295,8 @@ class ProductLauncherRuntime:
 
     @property
     def write_server_address(self) -> tuple[str, int]:
+        if self._write_runtime is None:
+            raise ProductLauncherError("offline workspace has no platform Write API")
         host, port = self._write_runtime.server_address
         return str(host), int(port)
 
@@ -301,6 +309,8 @@ class ProductLauncherRuntime:
         return self._writes_enabled
 
     def reconcile_media_submit(self) -> None:
+        if self._write_runtime is None:
+            return
         with self._state_lock:
             if self._write_closed:
                 raise ProductLauncherError("product launcher write runtime is closed")
@@ -464,7 +474,7 @@ class ProductLauncherRuntime:
         self.close()
 
 
-def build_product_launcher(
+def _build_online_product_launcher(
     *,
     db_path: Path,
     cdp_port: int,
@@ -598,7 +608,7 @@ def build_product_launcher(
             attempt_id, source=_LAUNCHER_SOURCE, completed_at=_validated_observed_at(clock),
             error_kind="runtime_unavailable",
         )
-        raise ProductLauncherError("private Web runtime startup failed") from None
+        raise ProductInventoryUnavailable("private Web runtime startup failed") from None
 
     server: LoopbackDashboardServer | None = None
     write_runtime: _WriteRuntime | None = None
@@ -610,7 +620,7 @@ def build_product_launcher(
                 attempt_id, source=_LAUNCHER_SOURCE, completed_at=_validated_observed_at(clock),
                 error_kind="reader_exception",
             )
-            raise
+            raise ProductInventoryUnavailable("private Web inventory reader unavailable") from None
         try:
             snapshots = _validated_inventory(result)
         except Exception:
@@ -712,7 +722,7 @@ def build_product_launcher(
         if public_origin_port is not None:
             dashboard_options["public_origin_port"] = public_origin_port
         server = dashboard_factory(store, **dashboard_options)
-    except ProductLauncherError:
+    except ProductLauncherError as startup_error:
         if write_runtime is not None:
             try:
                 write_runtime.close()
@@ -726,7 +736,8 @@ def build_product_launcher(
         try:
             inventory_runtime.close()
         except Exception:
-            pass
+            if isinstance(startup_error, ProductInventoryUnavailable):
+                raise ProductLauncherError("inventory cleanup failed; retain recovery state") from None
         raise
     except PrivateWebRuntimeDependencyError:
         if write_runtime is not None:
@@ -774,6 +785,80 @@ def build_product_launcher(
         generation_token=generation_access.ui_token if generation_access else None,
         public_origin_port=public_origin_port,
     )
+
+
+def build_product_launcher(
+    *, allow_offline: bool = False, **options: object,
+) -> ProductLauncherRuntime:
+    """Start the normal product; optionally keep local work usable after a read failure.
+
+    This fallback cannot catch database errors, unknown writes, failed cleanup,
+    or independent-witness startup. It constructs no platform Write API.
+    """
+    if type(allow_offline) is not bool:
+        raise TypeError("allow_offline must be bool")
+    # Freeze a one-shot iterable once; both paths must see the same import intent.
+    if "email_paths" in options:
+        try:
+            options["email_paths"] = tuple(options["email_paths"])
+        except TypeError as exc:
+            raise TypeError("email_paths must be iterable") from exc
+    try:
+        return _build_online_product_launcher(**options)
+    except ProductInventoryUnavailable:
+        if (not allow_offline or options.get("fence_witness") is not None
+                or options.get("public_origin_port") is not None
+                or options.get("store_factory", SnapshotStore) is not SnapshotStore):
+            raise
+        from .local_workspace import LocalWorkspaceSession
+
+        # Never create or replace a database as a side effect of falling back.
+        store = SnapshotStore(options["db_path"], create_if_missing=False)
+        session = LocalWorkspaceSession(
+            store=store, cdp_port=options["cdp_port"],
+            timeout_seconds=options.get("timeout_seconds", 5.0),
+            runtime_factory=options.get("runtime_factory", _DEFAULT_INVENTORY_RUNTIME),
+            clock=options.get("clock", _utc_now),
+        )
+        try:
+            local_writes = options.get("enable_writes", True)
+            token = ((options.get("dashboard_token_factory") or _default_dashboard_write_token)()
+                     if local_writes else "")
+            email_report = EmailImportReport(
+                parsed_files=0, inserted_events=0, duplicate_events=0, ad_ids=(),
+            )
+            if options.get("email_paths"):
+                try:
+                    email_report = options.get("email_importer", import_kleinanzeigen_email_files)(
+                        store, options["email_paths"],
+                    )
+                except Exception:
+                    raise ProductLauncherError("local reaction email import failed") from None
+                if not isinstance(email_report, EmailImportReport):
+                    raise ProductLauncherError("local reaction email import failed")
+            generation_access = options.get("generation_access")
+            server = (options.get("dashboard_factory") or create_server)(
+                store, host="127.0.0.1", port=options.get("dashboard_port", 8765),
+                analytics_contract=options.get("analytics_contract"),
+                local_session_token=token if local_writes else None,
+                sync_once=session.sync_once if local_writes else None,
+                offline_mode=True, generation_access=generation_access,
+            )
+        except BaseException:
+            session.close()
+            raise
+        return ProductLauncherRuntime(
+            inventory_runtime=session, write_runtime=None,
+            write_access=WriteApiAccess(
+                principal="mark-api-launch-local", bearer_token=_default_write_token(),
+                capabilities=frozenset(), writes_enabled=False,
+            ),
+            server=server, dashboard_write_token=token,
+            startup_inventory_count=0, startup_persisted_count=0,
+            startup_email_import_report=email_report,
+            writes_enabled=False, offline_mode=True,
+            generation_token=generation_access.ui_token if generation_access else None,
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1022,6 +1107,7 @@ def main(argv: list[str] | None = None) -> int:
                 builder_entered = True
                 try:
                     local_launcher = build_product_launcher(
+                        allow_offline=args.witness_socket is None and args.frontend_socket is None,
                         db_path=args.db,
                         initialize_db=args.init_db,
                         cdp_port=args.cdp_port,
@@ -1177,18 +1263,23 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = 2 if frontend_failed else 0
         try:
             if not shutdown_requested and not frontend_failed:
-                write_host, write_port = launcher.write_server_address
+                offline_mode = getattr(launcher, "offline_mode", False)
+                if not offline_mode:
+                    write_host, write_port = launcher.write_server_address
                 print(f"Kleinanzeiger dashboard: {launcher.dashboard_url}", flush=True)
-                print(
-                    f"Kleinanzeiger write API: http://{write_host}:{write_port}/api/write/",
-                    flush=True,
-                )
-                print(
-                    "Startup sync: "
-                    f"{launcher.startup_inventory_count} current ad(s), "
-                    f"{launcher.startup_persisted_count} observation(s) persisted.",
-                    flush=True,
-                )
+                if offline_mode:
+                    print("Kleinanzeiger offline: Lokaler Bestand; Plattformaenderungen gesperrt.", flush=True)
+                else:
+                    print(
+                        f"Kleinanzeiger write API: http://{write_host}:{write_port}/api/write/",
+                        flush=True,
+                    )
+                    print(
+                        "Startup sync: "
+                        f"{launcher.startup_inventory_count} current ad(s), "
+                        f"{launcher.startup_persisted_count} observation(s) persisted.",
+                        flush=True,
+                    )
                 if args.email_paths:
                     email_report = launcher.startup_email_import_report
                     print(

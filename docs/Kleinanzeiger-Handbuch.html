@@ -14,13 +14,13 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.11</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.12</p>
 <h1>Kleinanzeiger – Benutzerhandbuch</h1>
 <p>Kleinanzeiger verwaltet Ihre eigenen Anzeigen, zeigt Kennzahlen, unterstützt Entwürfe mit KI und sichert lokale Daten. Alle häufigen Aufgaben starten über das Fenster <strong>Kleinanzeiger</strong>.</p>
 <nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#stapel">Stapelaufträge</a><a href="#verkauf">Verkäufe & Lager</a><a href="#controlling">Controlling</a><a href="#vorlagen">Vorlagen</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
 <h2 id="install">1. Installation und erster Start</h2>
 <ol>
-<li>Das offizielle <strong>Kleinanzeiger-v0.1.11-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
+<li>Das offizielle <strong>Kleinanzeiger-v0.1.12-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
 <li><strong>Kleinanzeiger.cmd</strong> doppelklicken. Das Windows-Kontrollfenster erscheint.</li>
 <li><strong>Einrichten und starten</strong> klicken. Fehlendes Python 3.12/3.13 sowie Chrome werden bei Bedarf über geprüfte offizielle Dateien bereitgestellt. Eine Internetverbindung ist dafür nötig.</li>
 <li>Im eigens gestarteten Chrome-Fenster bei <strong>kleinanzeigen.de</strong> anmelden; gegebenenfalls die Konto-Bestätigung selbst durchführen. Kleinanzeiger speichert kein Kontopasswort.</li>
@@ -51,6 +51,14 @@ oder verändert allein eine Anzeige.</p>
 <li><strong>Ansicht neu laden:</strong> lädt nur die bereits lokal gespeicherten Informationen. Dies ist kein neuer Plattformabgleich.</li>
 </ul>
 <p>Bei fehlender Anmeldung oder einem unklaren Abgleich bleibt die letzte bestätigte lokale Anzeige erhalten. Ein Fehlschlag wird nicht als erfolgreicher Abgleich angezeigt.</p>
+<h3 id="offline">Bei Verbindungsproblemen lokal weiterarbeiten</h3>
+<p>Ab v0.1.12 startet bei einem abgewickelten Browser- oder Inventar-Lesefehler der <strong>lokale Arbeitsmodus</strong>. Der letzte gespeicherte Bestand bleibt sichtbar und wird als möglicherweise veraltet gekennzeichnet. Lokale Artikel, Aufträge, Verkaufsnotizen, Preisregeln und Auswertungen bleiben bedienbar. <strong>Plattformänderungen sind vollständig gesperrt.</strong> Ein fehlgeschlagener Abruf bedeutet weder einen leeren Bestand noch gelöschte Anzeigen.</p>
+<p><strong>Mit Kleinanzeigen abgleichen</strong> versucht einmal erneut zu lesen. Nach einem Erfolg sind die Daten frisch, die Sitzung bleibt jedoch lokal. Für Plattformänderungen Kleinanzeiger kontrolliert beenden und neu starten; erst ein erneut bestätigter Eigenbestand erlaubt die normale Schreibsitzung. Beschädigte Datenbanken oder ungeklärte Synchronisationen werden nicht umgangen. Profile, Datenbank oder Backups nicht löschen. Eine gültige Datenbank ohne jemals bestätigten Bestand ist kein Nachweis eines leeren Kundenkontos.</p>
+<h3 id="bestandsvergleich">Bestandsänderungen vergleichen (G4)</h3>
+<p>Unter <strong>Weitere Bereiche → Bestandsänderungen</strong> auf <strong>Bestand vergleichen</strong> klicken. Die letzten zwei erfolgreichen Kontoabgleiche werden mit Quelle und Zeitpunkt verglichen. Bis zu 50 Anzeigen pro Seite zeigen Original und aktuellen Stand. Bei einem fehlgeschlagenen oder laufenden Abgleich erscheinen Daten ausdrücklich als unbestätigt. <strong>Nicht mehr im Bestand</strong> bedeutet nicht automatisch verkauft oder gelöscht. Ändert sich der Bestand beim Blättern, den Vergleich neu laden statt unterschiedliche Zeitstände zu vermischen.</p>
+<h3 id="preisregeln">Preisregeln für lokale Artikel (G5)</h3>
+<p>In <strong>Artikelentwürfe</strong> den gewünschten importierten Artikel suchen und <strong>Preisregel</strong> anklicken. Alternativ unter <strong>Weitere Bereiche → Preisregeln</strong> die lokale Artikelnummer eingeben und <strong>Artikel laden</strong> wählen. Ausgangspreis, Mindestpreis, Änderungsschritt in ganzen Euro und Wartezeit prüfen. Die Vorschau zeigt genau einen Schritt bis höchstens zum Mindestpreis.</p>
+<p><strong>Regel lokal speichern</strong> speichert nur die Vorschlagsregel. Die Wartezeit zählt ab deren Speicherung; es wird kein Plattform-Preisänderungsdatum erfunden. <strong>Weder der lokale Artikelpreis noch eine veröffentlichte Anzeige wird automatisch geändert.</strong> Unter <strong>Gespeicherte Regeln</strong> vorhandene Regeln bearbeiten oder entfernen. Nach einer unklaren Speicherantwort zuerst den Artikel neu laden. Diese Funktion ist keine Preisoptimierung veröffentlichter Plattformanzeigen.</p>
 <h3>Bearbeiten, pausieren, aktivieren, löschen</h3>
 <ol>
 <li>Anzeige aus einer Karte oder der Auswahlliste wählen.</li>
@@ -102,21 +110,8 @@ oder verändert allein eine Anzeige.</p>
 <p>Im Kontrollfenster stehen <strong>Sicherung erstellen</strong> und <strong>Installieren / aktualisieren</strong> zur Verfügung. Vor einer Aktualisierung wird bei vorhandener Datenbank automatisch eine geprüfte Sicherung erzeugt. Die Datenbank liegt unter <code>%LOCALAPPDATA%\Kleinanzeiger\anzeigen.sqlite</code>, Sicherungen unter <code>%LOCALAPPDATA%\Kleinanzeiger\Backups</code>. Programmdateien liegen unter <code>%LOCALAPPDATA%\Kleinanzeiger\App</code>.</p>
 <p>Für <strong>Sicherung wiederherstellen</strong> zunächst über <strong>Weitere Aktionen</strong> die Restore-Funktion öffnen. Diese stellt nur in eine <strong>noch nicht vorhandene</strong> Datenbank ohne WAL-/SHM-/Journal-Dateien wieder her. Eine vorhandene Datenbank wird niemals überschrieben. Die Sicherungsdatei benötigt ihr passendes Manifest.</p>
 <p class="note">Für einen sauberen Neuinstallationstest Datenbestand und Chrome-Profil zuerst separat sichern; ein Programmupdate löscht sie nicht. Nicht einfach die laufende SQLite-Datei kopieren oder ihren WAL-/SHM-Bestand löschen.</p>
-<h2 id="hilfe">
-<p><strong>Chrome ist angemeldet, Dashboard bleibt aber geschlossen?</strong>
-Ab Version 0.1.11 werden mehrere Chrome-Tabs im eigenen Profil
-unterstützt: Kleinanzeiger wählt nur den kanonischen Tab „Meine Anzeigen“.
-Andere Tabs und offene Anzeigen-Editoren bleiben unangetastet.
-Der Link <strong>Fehlerdetails anzeigen</strong> steht unter der Statuszeile.
-Die Anmeldung im normalen Chrome ist nicht dieselbe wie im eigenen
-Kleinanzeiger-Chrome-Profil. In Version 0.1.11 wird die lokale Chrome-Browsersteuerung
-vor dem Produktstart geprüft. Bei der Meldung „Browsersteuerung nicht bereit“
-nur die durch Kleinanzeiger geöffneten Chrome-Fenster schließen und erneut öffnen.
-Wenn „Meine Anzeigen“ sichtbar ist und der Dienst dennoch nicht startet,
-im Kontrollfenster <strong>Details</strong> öffnen; die generische Startmeldung
-ist kein Nachweis eines fehlenden Logins. Profile, Datenbank oder Backups
-nicht löschen.</p>
-7. Wenn etwas nicht funktioniert</h2>
+<h2 id="hilfe">7. Wenn etwas nicht funktioniert</h2>
+<p><strong>Chrome ist angemeldet, aber kein aktueller Bestand verfügbar?</strong> Kleinanzeiger verwendet ein eigenes Chrome-Profil und wählt darin ausschließlich den kanonischen Tab „Meine Anzeigen“. Die Anmeldung im normalen Chrome ersetzt diese Sitzung nicht. Ein Browserfehler beweist aber auch keine fehlende Anmeldung. Ab v0.1.12 kann nach einem abgewickelten Lesefehler lokal weitergearbeitet werden. Unter <strong>Fehlerdetails anzeigen</strong> sind technische Details eines echten Startfehlers erreichbar. Profile, Datenbank oder Backups nicht löschen.</p>
 <table><tr><th>Beobachtung</th><th>Vorgehen</th></tr>
 <tr><td>Keine Anzeigen sichtbar</td><td>Im separaten Chrome anmelden, <strong>Mit Kleinanzeigen abgleichen</strong> auswählen und die Statusmeldung prüfen.</td></tr>
 <tr><td>Chrome, Python oder Installation fehlt</td><td>Im Kontrollfenster <strong>Installieren / aktualisieren</strong> wählen; Netzverbindung und technische Details prüfen.</td></tr>
@@ -162,7 +157,7 @@ nicht löschen.</p>
 <li>Importierte E-Mail-Nachrichten, unterschiedliche importierte Gespräche und Tageswerte im gewählten Zeitraum mit dem Quellenhinweis prüfen.</li>
 <li>Manuelle Verkaufs-/Reservierungsbestände, bekannte Erlöse und Kosten sowie geschätzte KI-Ausgaben getrennt lesen. <strong>Tageszahlen als CSV</strong> exportiert nur die Tagesanzahlen.</li>
 </ol>
-<p class="note">Der Zeitfilter betrifft importierte Nachrichten, nicht die zeitliche Zuordnung manueller Verkäufe. Unbekannte Kosten sind kein Gewinn von null. KI-Ausgaben in USD sind Schätzungen, Erlöse in EUR werden nicht ohne Kurs umgerechnet. Es gibt noch keine verlässlich belegte Postfach-Vollstatistik, keine Preisoptimierung und keinen Kausalitätsnachweis.</p>
+<p class="note">Der Zeitfilter betrifft importierte Nachrichten, nicht die zeitliche Zuordnung manueller Verkäufe. Unbekannte Kosten sind kein Gewinn von null. KI-Ausgaben in USD sind Schätzungen, Erlöse in EUR werden nicht ohne Kurs umgerechnet. Es gibt noch keine verlässlich belegte Postfach-Vollstatistik, keine bestätigte Plattform-Preisoptimierung und keinen Kausalitätsnachweis.</p>
 <h2 id="vorlagen">13. Wiederverwendbare KI-Arbeitsvorlagen und Prüfhinweise</h2>
 <ol>
 <li>Im Bereich <strong>KI-Stapelaufträge</strong> → <strong>Arbeitsvorlagen &amp; Prüfhinweise</strong> eine passende Anweisung eingeben und mit <strong>Aktuelle Anweisung speichern</strong> unter einem eindeutigen Namen sichern.</li>
@@ -172,5 +167,5 @@ nicht löschen.</p>
 <p>Die Vorlage startet keinen Auftrag. Prüfhinweise führen keine Plattformaktionen und keine kostenpflichtige KI-Verarbeitung aus. Wiederkehrende autonome Arbeitsregeln sind noch nicht enthalten.</p>
 <h2>14. Grenzen der aktuellen Ausgabe</h2>
 <p><strong>Noch nicht enthalten:</strong> Kontogebundene vollständige Nachrichtenkonversationen und ein kontrollierter Nachrichtenversand, automatische Plattform-Stapeländerungen/-veröffentlichungen, wiederkehrende KI-Autopilot-Regeln, eine unabhängig geprüfte Provider-Abrechnung sowie eine Freigabe auf Ihrem tatsächlichen Windows-Kunden-PC. Diese Funktionen dürfen nicht mit vorhandenen lokalen Notizen, KI-Vorschlägen oder simulierten Tests verwechselt werden.</p>
-<footer>Kleinanzeiger v0.1.11 – Kundenunterlagen. Stand: 26. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.12 – Kundenunterlagen. Stand: 28. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>

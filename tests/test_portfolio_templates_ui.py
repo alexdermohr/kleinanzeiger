@@ -59,7 +59,7 @@ const _jobGet=async path=>{
 let sequence=0;
 const context={document,byId,window,console,_jobGet,fetch,
   _jobHeaders:()=>({}),_newJobRequestKey:()=>String(++sequence).padStart(64,"0"),
-  writeUiReady:()=>true};
+  writeUiReady:()=>true,localUiReady:()=>true};
 vm.createContext(context);
 vm.runInContext(`
 let jobsAvailable=true,workTemplates=[],workTemplatePending=null,workTemplateBusy=false;

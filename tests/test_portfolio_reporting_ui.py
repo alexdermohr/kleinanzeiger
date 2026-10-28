@@ -44,7 +44,7 @@ assert.equal(saved,null);
 """
         node=shutil.which("node") or "node"
         proc=subprocess.run([node,"-e",script],input=_DASHBOARD_JS,
-            text=True,capture_output=True,timeout=30)
+            text=True, encoding="utf-8",capture_output=True,timeout=30)
         self.assertEqual(proc.returncode,0,proc.stderr)
 
 if __name__=="__main__":

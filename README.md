@@ -1,13 +1,13 @@
 # Kleinanzeiger
 
-> **Verbindlicher Fortsetzungsstand vom 28.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). v0.1.11 ist technisch getestet und veröffentlicht, aber noch nicht am echten Kunden-PC vollständig abgenommen.
+> **Verbindlicher Fortsetzungsstand vom 28.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Die Ausgabe v0.1.12 ergänzt den sicheren lokalen Arbeitsmodus und die bedienbare G4-/G5-Integration. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC fehlt weiterhin.
 
 **Kleinanzeiger** verwaltet eigene Kleinanzeigen über eine lokale Weboberfläche: Anzeige erstellen und veröffentlichen, Bilder zuordnen, Titel und Beschreibung bearbeiten, pausieren, aktivieren, löschen, Bestand synchronisieren sowie Historie, Views, Reaktionen, E-Mail-Daten und Auswertungen einsehen. Hinzu kommen KI-Text- und Bildentwürfe sowie lokale Datensicherung und Wiederherstellung.
 
 - **Repository:** https://github.com/alexdermohr/kleinanzeiger
 - **Python:** ab 3.12; CI-Zielmatrix Python 3.12 und 3.13
 - **Distribution:** `kleinanzeiger`; bestehende interne Module `mark_api` und `mark-api-*`-Kommandos bleiben kompatibel
-- **Technischer Lieferstatus:** Erst die bestandenen Tests, der Installationsnachweis, ein unabhängiger Sicherheitsreview und ein freigegebener Merge des konkreten Liefercommits ergeben die Produktabnahme. Kein Ersatz durch ein rein lokales Dashboard.
+- **Technischer Lieferstatus:** Implementiert, getestet, integriert, veröffentlicht und am Kunden-PC abgenommen sind getrennte Stufen. Erforderliche CI, Branchschutz und reale Berechtigungen bleiben verbindlich. Der Auftraggeber hat unabhängige Reviews ausdrücklich abbedungen; es besteht keine zusätzliche Review-Warteschleife.
 
 ## KI-Portfolio-Ausbau für hunderte bis tausende Anzeigen
 
@@ -43,6 +43,23 @@ Kundenunterlagen: [Handbuch](docs/Kleinanzeiger-Handbuch.html) und
 [Funktionsübersicht](docs/Kleinanzeiger-Funktionen.html).
 Die separate Linux-A6-Migration gehört nicht zur Windows-Neuinstallation.
 
+## Lokaler Arbeitsmodus, Bestandsvergleich und Preisregeln (v0.1.12)
+
+Der normale Windows-/CLI-Start bleibt nach einem abgewickelten Browser- oder
+Inventar-Lesefehler mit gesunder bestehender Datenbank nutzbar. Lokale Artikel,
+Aufträge, Notizen und Auswertungen sind erreichbar; alle Plattformschreibwege
+bleiben ohne Write-Proxy gesperrt. Fehlgeschlagene Reads ändern keinen Bestand.
+Der Wiederabgleich ist ausdrücklich manuell. Ein Erfolg aktualisiert Daten,
+erzeugt aber keine Schreibautorität: dafür ist ein regulärer Neustart mit erneut
+bestätigtem Eigenbestand erforderlich. DB-/Recovery-Fehler werden nicht umgangen.
+
+**G4:** Dashboard → Weitere Bereiche → Bestandsänderungen vergleicht die letzten
+zwei verifizierten Produkt-/Sync-Runden mit Quellen, Zeitpunkten und gebundenen
+50er-Seiten. **G5:** Artikelentwürfe → Preisregel lädt den lokalen Ausgangspreis
+und macht Mindestpreis, Änderungsschritt, Wartezeit und Vorschau bedienbar.
+Gespeichert wird nur die Regel, nicht ein neuer Artikel- oder Plattformpreis.
+Ein lokaler Vorschlag ist keine automatische oder veröffentlichte Preissenkung.
+
 ## Installation und Bedienstart
 
 Aus dem Repository, in einer isolierten Python-Umgebung:
@@ -58,7 +75,7 @@ kleinanzeiger --db /pfad/kleinanzeiger.sqlite --init-db --cdp-port 9222
 kleinanzeiger --db /pfad/kleinanzeiger.sqlite --cdp-port 9222
 ```
 
-Der Starter zeigt die lokale Dashboard-URL mit einem sitzungsgebundenen Zugriffstoken an. Der Start aktiviert standardmäßig die **vollständige Anzeigenverwaltung einschließlich Write und Media**. Wer ausnahmsweise nur lesen möchte, verwendet `--read-only`.
+Der Starter zeigt die lokale Dashboard-URL mit einem sitzungsgebundenen Zugriffstoken an. Der erfolgreiche Online-Start aktiviert die **Anzeigenverwaltung einschließlich Write und Media**; der gekennzeichnete lokale Fallback tut dies ausdrücklich nicht. Wer ausnahmsweise nur lesen möchte, verwendet `--read-only`.
 
 Der normale `kleinanzeiger`-Starter nutzt zur Kompatibilität SQLite unter
 der aufrufenden lokalen UID. Für den streng getrennten, durch unabhängige
@@ -113,8 +130,8 @@ Kleinanzeiger-Prozess darf denselben CDP-Target-Claim verwenden.
 **Liefergrenze:** Der native geschützte Start und die synthetische, installierte
 Kundenkette sind belegbar. Bestehende Legacy-Datenbanken werden durch
 `--init-new` nicht übernommen. Ein Host-Cutover mit alten
-FD-/MAP_SHARED-/WAL-/SHM-Rechten und die unabhängige Sicherheitsfreigabe sind
-weiterhin gesondert nachzuweisen. Ein externer Plattformfreigabeprozess ist
+FD-/MAP_SHARED-/WAL-/SHM-Rechten ist weiterhin gesondert technisch nachzuweisen.
+Eine zusätzliche unabhängige Review-Freigabe ist laut aktuellem Auftrag nicht erforderlich. Ein externer Plattformfreigabeprozess ist
 nicht Teil der technischen Implementierung.
 
 **Geschütztes A6-Frontend (separater installierter Einstieg):** Das Wheel
@@ -173,6 +190,6 @@ Zusätzliche CLI-Kommandos: `kleinanzeiger-dashboard` für ein eigenständiges D
 
 Die Entwicklung und technische Abnahme sind unabhängig von einer allgemeinen externen Plattformgenehmigung. Sämtliche Mark-eigenen Read-/Write-/Media-/Sync-Funktionen werden auch ohne ein echtes Kleinanzeigen-Konto mit **zustandsbehafteten synthetischen Gegenstellen** getestet, einschließlich unklarer HTTP-Antwort, Restart, Idempotenz, beschädigter Datenbank und Recovery. Echte Fremdplattform-Zugriffe benötigen eine geeignete authentifizierte Kundensitzung und die jeweilige tatsächliche Berechtigung des Betreibers; Tests verwenden keine fingierten Credentials, keine Login-Umgehung und keinen kostenpflichtigen Provider.
 
-Die erforderlichen CI- und Sicherheitsreviews gelten stets nur für den **konkret geprüften Commit**. Ein Merge darf nicht allein wegen grüner CI an den Review-/Captain-Gates vorbei erfolgen. Offene technische Sicherheitsbefunde werden nicht durch einen pauschalen Plattformhinweis ersetzt.
+Die erforderlichen CI- und Sicherheitsprüfungen gelten stets nur für den **konkret geprüften Commit**. Tatsächlicher GitHub-Branchschutz und Berechtigungen werden nicht umgangen. Zusätzliche unabhängige Review-/Captain-Freigaben sind nicht Teil des aktuellen Auftrags. Offene technische Sicherheitsbefunde werden nicht durch einen pauschalen Plattformhinweis ersetzt.
 
 **Normative Anforderungen:** [Produktspezifikation](docs/product-spec.md), [Entscheidungen D-028 und D-029](docs/DECISIONS.md). Spezialisierte Hintergründe: [Generierung](docs/generation.md), [Synchronisation](docs/periodic-sync.md).

@@ -130,7 +130,7 @@ assert.equal(cards.children[0].children[1].children.filter(c=>c.tag==="button").
 """
         result = subprocess.run(
             [shutil.which("node") or "node", "-e", harness],
-            input=_DASHBOARD_JS, text=True, capture_output=True, timeout=20, check=False,
+            input=_DASHBOARD_JS, text=True, encoding="utf-8", capture_output=True, timeout=20, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 

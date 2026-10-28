@@ -524,12 +524,17 @@ function Start-Product {
   $script:details = ''
   Set-Status 'Öffne Chrome und prüfe die lokale Browsersteuerung …'
   $statusLabel.Refresh()
-  $chrome = Open-Kleinanzeigen
+  $browserReady = $false
   try {
+    $chrome = Open-Kleinanzeigen
     Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 12
+    $browserReady = $true
   } catch {
+    # A browser failure is not a login failure and must not hide local work.
+    # The Python launcher validates the database and never enables writes
+    # without a fresh, verified owner inventory.
     $script:details = $_.Exception.Message
-    throw 'Chrome-Browsersteuerung nicht bereit. Bitte Details öffnen.'
+    Set-Status 'Browserverbindung nicht bereit. Öffne den lokalen Arbeitsbereich …'
   }
   $info = [System.Diagnostics.ProcessStartInfo]::new()
   $info.UseShellExecute = $false
@@ -557,8 +562,8 @@ function Start-Product {
   $info.RedirectStandardInput = $true
   $script:openedDashboard = $false
   $script:stopRequested = $false
-  $script:details = ''
-  Set-Status 'Verbinde mit deinem Kleinanzeigen-Konto …'
+  if ($browserReady) { Set-Status 'Verbinde mit deinem Kleinanzeigen-Konto …' }
+  else { Set-Status 'Prüfe den gespeicherten Bestand und öffne den lokalen Arbeitsbereich …' }
   Start-PipedProcess $info 'product'
 }
 function Stop-Product {
@@ -582,12 +587,22 @@ function Handle-Line([string]$line,[bool]$isError) {
     if (!$script:openedDashboard) {
       $script:openedDashboard = $true
       try {
+        $dashboardAddress = $Matches[1]
         $chrome = (Find-KleinanzeigerChrome -StateDirectory $state)
-        $arg = '--user-data-dir="' + $profile + '" "' + $Matches[1] + '"'
-        Start-Process -FilePath $chrome -ArgumentList $arg
+        if ($chrome) {
+          $arg = '--user-data-dir="' + $profile + '" "' + $dashboardAddress + '"'
+          Start-Process -FilePath $chrome -ArgumentList $arg
+        } else {
+          # Local work only; no platform browser automation in this fallback.
+          Start-Process -FilePath $dashboardAddress
+        }
         Set-Status 'Kleinanzeiger ist geöffnet. Anzeigen können jetzt verwaltet werden.'
       } catch { Set-Status 'Dashboard konnte nicht geöffnet werden.' $true }
     }
+    return
+  }
+  if ($line -like 'Kleinanzeiger offline:*') {
+    Set-Status 'Lokaler Arbeitsmodus. Gespeicherte Daten können veraltet sein; Plattformänderungen sind gesperrt.'
     return
   }
   if ($line -match '(?i)(write_token|generation_token|OPENAI_API_KEY|sk-proj-|Bearer\s)') { return }

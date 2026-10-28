@@ -107,7 +107,7 @@ assert.equal(elements.get("manage-ad-id").value, "");
             [shutil.which("node") or "node", "-e", harness],
             input=_DASHBOARD_JS,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=15,
             check=False,
         )

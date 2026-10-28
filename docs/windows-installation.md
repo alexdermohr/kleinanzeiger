@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.11 – Windows 11
+# Kleinanzeiger v0.1.12 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -89,6 +89,43 @@ Einzelne Anzeigen werden weiterhin über **Bearbeiten** verwaltet.
 angemeldeten Browser-Sitzung neu gelesen. **Ansicht neu laden** aktualisiert
 hingegen ausschließlich die lokal gespeicherte Darstellung.
 
+## Bei Verbindungsproblemen lokal weiterarbeiten
+
+Ab v0.1.12 öffnet der normale Start bei nicht erreichbarer Browsersteuerung oder
+fehlgeschlagenem ersten Inventarabruf den **lokalen Arbeitsmodus**, sofern die
+bestehende Datenbank gesund ist und kein ungeklärter Synchronisationsvorgang
+vorliegt. Der zuletzt gespeicherte Bestand bleibt erhalten. Ein fehlgeschlagener
+Abruf bedeutet **nicht**, dass Anzeigen gelöscht wurden oder das Konto leer ist.
+Die Oberfläche kennzeichnet den veralteten Stand ausdrücklich.
+
+Lokale Artikel, Preisregeln, Aufträge, Verkaufsnotizen und Auswertungen bleiben
+bedienbar. **Sämtliche Plattformänderungen sind gesperrt.** Mit **Mit Kleinanzeigen
+abgleichen** wird einmal ausdrücklich erneut gelesen. Nach einem erfolgreichen
+Abgleich bleibt diese Sitzung lokal: Für Plattformänderungen Kleinanzeiger
+beenden und neu starten. Der Neustart muss den Eigenbestand erneut bestätigen.
+Es werden keine Browserprofile, Datenbanken oder Recovery-Zustände zurückgesetzt.
+Bei beschädigter Datenbank oder ungeklärten Vorgängen gibt es keinen scheinbar
+erfolgreichen Fallback. Ein noch nie bestätigter Bestand wird nicht als bestätigtes
+leeres Konto ausgegeben. KI bleibt optional und benötigt weiterhin ihre Kostenfreigabe.
+
+## Bestandsänderungen und lokale Preisregeln
+
+**Weitere Bereiche → Bestandsänderungen → Bestand vergleichen** zeigt neue,
+geänderte, unveränderte und nicht mehr sichtbare Anzeigen aus den letzten zwei
+bestätigten Kontoabgleichen, mit Quelle und Zeitpunkt. Bei einem fehlgeschlagenen
+Abgleich bleibt die Aussage unbestätigt. Nicht mehr sichtbar ist kein Beleg für
+Verkauf oder Löschung. Bei Änderungen während des Blätterns den Vergleich neu laden.
+
+Unter **Artikelentwürfe** einen importierten Artikel suchen und **Preisregel**
+wählen; alternativ **Weitere Bereiche → Preisregeln** öffnen und die lokale
+Artikelnummer laden. Ausgangspreis, Mindestpreis, Änderungsschritt in ganzen Euro
+und Wartezeit in Tagen prüfen. Die Vorschau zeigt genau einen möglichen Schritt,
+begrenzt durch den Mindestpreis. **Regel lokal speichern** speichert ausschließlich
+die Regel. Die Wartezeit beginnt mit dieser Speicherung, nicht mit einem vermuteten
+Plattformereignis. Weder der lokale Artikelpreis noch eine Plattformanzeige wird
+geändert. Gespeicherte Regeln lassen sich laden, ändern und entfernen. Nach einer
+unklaren Speicherantwort zuerst neu laden, nicht blind wiederholen.
+
 ## Interessenten und Antwortentwürfe
 
 Unter **Meine Anzeigen** eine eigene Anzeige suchen und **Antwort vorbereiten**
@@ -133,7 +170,7 @@ CSV (UTF-8) oder Excel XLSX mit den Pflichtspalten `sku,title,description,catego
 
 ## Wenn Chrome angemeldet ist, das Dashboard aber nicht startet
 
-**Ab Version 0.1.11:** Kleinanzeiger erkennt mehrere offene Tabs im eigenen
+**Bereits ab Version 0.1.10:** Kleinanzeiger erkennt mehrere offene Tabs im eigenen
 Chrome-Profil und sucht den richtigen Tab **Meine Anzeigen** statt pauschal
 nur ein einziges Browserfenster vorauszusetzen. Bei mehreren solchen Tabs
 verwendet es eine fest ausgewählte Tab-Identität; private Tabs und offene
@@ -149,12 +186,12 @@ Chrome-Fenster genügt nicht. Ist **Meine Anzeigen** bereits in dem von
 Kleinanzeiger geöffneten Chrome-Fenster sichtbar, **ist die Meldung kein
 Beweis für eine fehlende Anmeldung**.
 
-Die Version 0.1.11 prüft nach dem Öffnen von Chrome höchstens 12 Sekunden, ob
-dessen lokale Browsersteuerung auf 127.0.0.1:9222 antwortet. Erst dann
-wird der eigentliche Dienst gestartet. Bei einer nicht erreichbaren Steuerung
-wird ein eigener Hinweis statt einer vermeintlichen Login-Fehlermeldung
-angezeigt. Falls der Dienst später scheitert, im Kontrollfenster **Details**
-öffnen: dort steht die technische Fehlermeldung und der Exitcode.
+Die Version 0.1.12 prüft nach dem Öffnen von Chrome höchstens 12 Sekunden, ob
+dessen lokale Browsersteuerung auf 127.0.0.1:9222 antwortet. Auch bei einem
+Fehlschlag wird der Produktstarter für den sicheren lokalen Arbeitsmodus
+aufgerufen. Datenbank- oder Recovery-Probleme werden dadurch nicht übergangen.
+Bei einem echten Startfehler **Fehlerdetails anzeigen** (Details) öffnen: dort
+stehen die technische Fehlermeldung und gegebenenfalls der Exitcode.
 
 Wenn die Browsersteuerung nicht erreichbar ist, zunächst **nur die von
 Kleinanzeiger gestarteten Chrome-Fenster** vollständig schließen und über

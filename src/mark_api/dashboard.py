@@ -58,6 +58,13 @@ from .query import (
     reaction_snapshot_to_dict,
     summary_to_dict,
 )
+from .portfolio_insights_http import (
+    READ_PATHS as INSIGHT_READ_PATHS, PRICE_MUTATE_PATH,
+    InsightRequestError, read_insight, mutate_price_rule,
+)
+from .portfolio_inventory_diff import InventoryDiffError
+from .portfolio_price_rules import PriceRuleError
+from .portfolio_insights_ui import INSIGHTS_HTML, INSIGHTS_JS
 from .storage import DashboardPendingWrite, SnapshotStore
 from .storage_owner import StorageOwnerClient, StorageOwnerError
 from .strict_json import strict_json_object
@@ -310,6 +317,8 @@ _DASHBOARD_HTML = """<!doctype html>
         <summary>Weitere Bereiche</summary>
         <div class="nav-more-links">
           <a id="nav-create" href="#create-disclosure">Neue Anzeige</a>
+          <a id="nav-inventory-diff" href="#inventory-diff-panel" hidden>Bestandsänderungen</a>
+          <a id="nav-price-rules" href="#price-rules-panel" hidden>Preisregeln</a>
           <a id="nav-jobs" href="#jobs-panel" hidden>KI-Stapelaufträge</a>
           <a id="nav-generation" href="#generation-panel" hidden>KI-Entwürfe</a>
           <a id="nav-sales" href="#sales-panel" hidden>Verkäufe &amp; Lager</a>
@@ -317,6 +326,12 @@ _DASHBOARD_HTML = """<!doctype html>
         </div>
       </details>
     </nav>
+    <section id="offline-notice" class="status warning" role="status" hidden>
+      Lokaler Arbeitsmodus: Der gespeicherte Bestand kann veraltet sein. Entwürfe, Aufträge
+      und Auswertungen bleiben verfügbar. Änderungen auf Kleinanzeigen sind gesperrt.
+      „Mit Kleinanzeigen abgleichen“ versucht die Verbindung erneut. Für Plattformänderungen
+      anschließend Kleinanzeiger beenden und neu starten; der Start prüft den Eigenbestand erneut.
+    </section>
     <section id="status" class="status" role="status" aria-live="polite"></section>
 
     <section class="cards" aria-label="Übersicht">
@@ -577,6 +592,7 @@ _DASHBOARD_HTML = """<!doctype html>
       </details>
     </section>
 
+""" + INSIGHTS_HTML + """
     <section id="jobs-panel" class="panel secondary-panel" hidden>
       <details id="jobs-disclosure" class="feature-disclosure">
         <summary><span>KI-Stapelaufträge</span><small>Lokale Artikel auswählen, Bearbeitung vorbereiten und Vorschläge freigeben</small></summary>
@@ -1127,6 +1143,7 @@ const pendingWrites = new Map();
 // Only this page session may remember an observed terminal result.
 const pendingAckOnly = new Map();
 let writeUiAvailable = false;
+let localWorkAvailable = false;
 let manualSyncAvailable = false;
 let syncInFlight = false;
 let writeToken = null;
@@ -1288,6 +1305,12 @@ function writeUiReady() {
   );
 }
 
+function localUiReady() {
+  return (writeUiAvailable || localWorkAvailable)
+    && typeof writeToken === "string" && writeToken.length >= 16
+    && !pendingRecoveryBlocked;
+}
+
 function validPendingEntry(entry) {
   if (!entry || typeof entry !== "object") return false;
   if (
@@ -1430,7 +1453,12 @@ function renderWriteAvailability() {
   const createNavigation = typeof optionalById === "function"
     ? optionalById("nav-create") : null;
   if (createNavigation) createNavigation.hidden = !writeUiAvailable;
-  if (!writeUiAvailable) return;
+  if (!writeUiAvailable) {
+    for (const element of document.querySelectorAll("[data-write-control]")) {
+      element.disabled = true;
+    }
+    return;
+  }
   if (pendingRecoveryBlocked) {
     byId("write-session-note").hidden = true;
     for (const element of document.querySelectorAll("[data-write-control]")) {
@@ -1690,7 +1718,7 @@ function renderFollowupControls() {
   if (!select) return;
   const selected = select.value;
   const usable = !followupBusy && !followupDetailLoading && followupDetailLoaded
-    && writeUiReady() && /^[0-9]{1,32}$/.test(selected);
+    && localUiReady() && /^[0-9]{1,32}$/.test(selected);
   const dateValue = byId("followup-date").value;
   byId("followup-save").disabled = !usable || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(dateValue);
   byId("followup-delete").disabled = !usable || !followupHasLive;
@@ -1875,7 +1903,7 @@ function renderFollowupRows(payload) {
 }
 
 async function loadFollowups(reset = false) {
-  if (!writeUiReady()) return false;
+  if (!localUiReady()) return false;
   if (reset) {
     followupPageCursors = [""];
     followupPageIndex = 0;
@@ -1936,7 +1964,7 @@ async function changeFollowupPage(delta) {
 
 async function mutateSelectedFollowup(action) {
   if (followupBusy || followupDetailLoading || !followupDetailLoaded
-      || !writeUiReady()) return;
+      || !localUiReady()) return;
   const adId = byId("followup-ad-select").value;
   if (!/^[0-9]{1,32}$/.test(adId)) return;
   if (action !== "save" && action !== "delete") return;
@@ -3419,7 +3447,7 @@ function inquiryButtons() {
     inquiryCursors.length <= inquiryIndex + 1;
 }
 async function loadInquiries(reset = false) {
-  if (!jobsAvailable || !writeUiReady() || inquiryBusy) return;
+  if (!jobsAvailable || !localUiReady() || inquiryBusy) return;
   if (reset) { inquiryCursors=[""]; inquiryIndex=0; inquiryWatermark=null; }
   inquiryBusy = true;
   inquiryButtons();
@@ -3494,7 +3522,7 @@ function conversationButtons() {
   byId("buyer-conversations-filter").disabled=conversationBusy;
 }
 async function loadConversations(reset=false) {
-  if (!jobsAvailable || !writeUiReady() || conversationBusy) return false;
+  if (!jobsAvailable || !localUiReady() || conversationBusy) return false;
   if (reset) {
     conversationPageCursors=[""]; conversationPageIndex=0; conversationWatermark=null;
   }
@@ -3591,7 +3619,7 @@ async function loadConversations(reset=false) {
   }
 }
 async function markConversation(item) {
-  if (conversationBusy || !writeUiReady() || !item || item.own_ad!==true) return;
+  if (conversationBusy || !localUiReady() || !item || item.own_ad!==true) return;
   const action=item.review_state==="locally_reviewed" ? "reopen" : "review";
   const payload={
     ad_id:item.ad_id, conversation_id:item.conversation_id,
@@ -4049,7 +4077,7 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
 }
 
 async function syncNow() {
-  if (!manualSyncAvailable || !writeUiReady() || syncInFlight) return;
+  if (!manualSyncAvailable || !localUiReady() || syncInFlight) return;
   syncInFlight = true;
   const button = byId("sync-now");
   button.disabled = true;
@@ -4075,12 +4103,13 @@ async function syncNow() {
       status.textContent = "Bestand abgeglichen, aber lokale Ansicht konnte nicht neu geladen werden. Bitte Ansicht neu laden.";
       return;
     }
-    status.textContent = result.current_ads + " Anzeigen aus dem Kundenkonto abgeglichen.";
+    status.textContent = result.current_ads + " Anzeigen aus dem Kundenkonto abgeglichen."
+      + (localWorkAvailable ? " Plattformänderungen bleiben bis zum Neustart gesperrt." : "");
   } catch (_error) {
     status.textContent = "Abgleich fehlgeschlagen. Vorhandene Anzeigen bleiben gespeichert; bitte Anmeldung und Verbindungsstatus prüfen.";
   } finally {
     syncInFlight = false;
-    button.disabled = !writeUiReady();
+    button.disabled = !localUiReady();
   }
 }
 
@@ -4089,6 +4118,7 @@ function renderJobsAvailability() {
   byId("nav-jobs").hidden = !jobsAvailable;
   byId("job-provider-control").hidden =
     !(jobsAvailable && generationUiAvailable);
+  renderPortfolioInsights();
 }
 
 async function load() {
@@ -4114,17 +4144,23 @@ async function load() {
     byId("replies").textContent =
       `${summary.replies_total_known} / ${summary.replies_observed_ads} Ads`;
     writeUiAvailable = dashboardConfig.write_ui_available === true;
+    localWorkAvailable = dashboardConfig.local_work_available === true;
+    const offlineNotice = optionalById("offline-notice");
+    if (offlineNotice) offlineNotice.hidden = dashboardConfig.offline_mode !== true;
+    if (offlineNotice && dashboardConfig.offline_mode === true && !localWorkAvailable) {
+      offlineNotice.textContent = "Lokaler Lesemodus: Der gespeicherte Bestand kann veraltet sein. Diese Sitzung erlaubt keine lokalen oder Plattformänderungen. Für einen erneuten Kontoabgleich Kleinanzeiger neu starten.";
+    }
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
     jobsAvailable = false;
     renderJobsAvailability();
     byId("sync-now").hidden = !manualSyncAvailable;
-    byId("sync-now").disabled = !writeUiReady() || syncInFlight;
+    byId("sync-now").disabled = !localUiReady() || syncInFlight;
     const genNavigation = optionalById("nav-generation");
     if (genNavigation) genNavigation.hidden = !generationUiAvailable;
     await refreshPendingWrites();
     // Probe the authenticated local job route before showing job or sale controls.
-    if (writeUiReady()) {
+    if (localUiReady()) {
       try {
         const available = await _jobGet("/api/portfolio/jobs?limit=1");
         jobsAvailable = available && Array.isArray(available.jobs);
@@ -4144,7 +4180,7 @@ async function load() {
     byId("nav-report").hidden = !reportingAvailable;
     renderWriteAvailability();
     renderItemTemplateControls();
-    byId("sync-now").disabled = !writeUiReady() || syncInFlight;
+    byId("sync-now").disabled = !localUiReady() || syncInFlight;
     renderGenerationAvailability();
     buyerReplyAvailability();
     await loadCatalogPage();
@@ -4399,7 +4435,7 @@ function selectedItemTemplate() {
   return itemTemplates.find(item=>item.template_id===id)||null;
 }
 function renderItemTemplateControls() {
-  const enabled=writeUiReady()&&!itemTemplateBusy;
+  const enabled=localUiReady()&&!itemTemplateBusy;
   for (const id of ["item-template-save","item-template-from","item-template-copy",
                     "item-template-delete","item-template-refresh"]) byId(id).disabled=!enabled;
 }
@@ -4420,7 +4456,7 @@ function chooseItemTemplateSource(draft,mode) {
   renderItemTemplateControls();
 }
 async function loadItemTemplates() {
-  if (!writeUiReady()) {
+  if (!localUiReady()) {
     byId("item-template-feedback").textContent="Artikelvorlagen benötigen die reguläre lokale Sitzung.";
     renderItemTemplateControls();
     return false;
@@ -4457,7 +4493,7 @@ async function loadItemTemplates() {
   }
 }
 async function itemTemplateCommand(action) {
-  if (!writeUiReady() || itemTemplateBusy) return false;
+  if (!localUiReady() || itemTemplateBusy) return false;
   const chosen=selectedItemTemplate();
   const source=byId("item-template-source").value.trim();
   const newSku=byId("item-template-new-sku").value.trim();
@@ -4572,14 +4608,20 @@ function renderDraftRows(items) {
     actions.append(button);
     const templateButton=document.createElement("button");
     templateButton.type="button";templateButton.textContent="Als Vorlage";
-    templateButton.disabled=!writeUiReady();
+    templateButton.disabled=!localUiReady();
     templateButton.addEventListener("click",()=>chooseItemTemplateSource(draft,"save"));
     actions.append(templateButton);
     const copyButton=document.createElement("button");
     copyButton.type="button";copyButton.textContent="Duplizieren";
-    copyButton.disabled=!writeUiReady();
+    copyButton.disabled=!localUiReady();
     copyButton.addEventListener("click",()=>chooseItemTemplateSource(draft,"copy"));
     actions.append(copyButton);
+    const priceRuleButton = document.createElement("button");
+    priceRuleButton.type = "button";
+    priceRuleButton.textContent = "Preisregel";
+    priceRuleButton.disabled = !localUiReady();
+    priceRuleButton.addEventListener("click", () => loadPriceRule(draft.sku));
+    actions.append(priceRuleButton);
     row.append(actions);
     body.append(row);
   }
@@ -4704,7 +4746,7 @@ async function _jobGet(path) {
   return response.json();
 }
 async function _jobPost(name, payload) {
-  if (!jobsAvailable || !writeUiReady()) throw new Error("Kleinanzeiger bitte regulär starten.");
+  if (!jobsAvailable || !localUiReady()) throw new Error("Kleinanzeiger bitte regulär starten.");
   const response = await fetch("/api/portfolio/jobs/" + name, {
     method: "POST", cache: "no-store",
     headers: {..._jobHeaders(),"Content-Type":"application/json"},
@@ -4714,7 +4756,7 @@ async function _jobPost(name, payload) {
   return response.json();
 }
 async function loadJobs() {
-  if (!jobsAvailable || !writeUiReady()) return false;
+  if (!jobsAvailable || !localUiReady()) return false;
   try {
     const data = await _jobGet("/api/portfolio/jobs?limit=50");
     if (!data || !Array.isArray(data.jobs)) throw new Error("Ungültige Antwort.");
@@ -4751,7 +4793,7 @@ async function loadJobs() {
   }
 }
 async function loadJobDetails(reset = false) {
-  if (!jobActiveId || !writeUiReady()) return false;
+  if (!jobActiveId || !localUiReady()) return false;
   const requestedId = jobActiveId;
   const generation = ++jobDetailGeneration;
   if (reset) {
@@ -4902,7 +4944,7 @@ async function applyJobLocally() {
 async function generateJobNext() {
   const consent=byId("job-provider-consent");
   const status=byId("job-provider-status");
-  if (!writeUiReady() || !jobsAvailable || !generationUiAvailable ||
+  if (!localUiReady() || !jobsAvailable || !generationUiAvailable ||
       !generationToken || !jobActiveId || jobBusy || jobDisplayedId !== jobActiveId) {
     status.textContent="Die KI-Sitzung muss im Kleinanzeiger-Startfenster eingerichtet sein.";
     return;
@@ -4950,7 +4992,7 @@ async function generateJobBatch() {
   const status=byId("job-provider-status");
   const consent=byId("job-provider-consent");
   if (jobBatchBusy) return;
-  if (!writeUiReady() || !jobsAvailable || !generationUiAvailable ||
+  if (!localUiReady() || !jobsAvailable || !generationUiAvailable ||
       !generationToken || !jobActiveId || jobBusy || jobDisplayedId !== jobActiveId) {
     status.textContent="Bitte Kleinanzeiger mit aktivierter KI-Sitzung starten.";
     return;
@@ -4983,7 +5025,7 @@ async function generateJobBatch() {
   let done=0;
   try {
     for (let index=0;index<count&&!jobBatchStop;index++) {
-      if (!writeUiReady() || !generationUiAvailable || !generationToken) break;
+      if (!localUiReady() || !generationUiAvailable || !generationToken) break;
       status.textContent=(index+1)+" von "+count+" KI-Vorschlägen wird erzeugt …";
       let response;
       try {
@@ -5080,7 +5122,7 @@ byId("jobs-disclosure").addEventListener("toggle",() => {
   if (byId("jobs-disclosure").open && !jobsLoaded) loadJobs();
 });
 async function loadWorkTemplates() {
-  if (!jobsAvailable || !writeUiReady()) return false;
+  if (!jobsAvailable || !localUiReady()) return false;
   const generation=++workTemplateLoadGeneration;
   try {
     const [items,attention]=await Promise.all([
@@ -5153,7 +5195,7 @@ function useWorkTemplate() {
     "Vorlage lokal eingefügt; Auftrag und KI-Kosten werden nicht automatisch gestartet.";
 }
 async function mutateWorkTemplate(remove=false) {
-  if (workTemplateBusy || !jobsAvailable || !writeUiReady()) return;
+  if (workTemplateBusy || !jobsAvailable || !localUiReady()) return;
   const selected=selectedWorkTemplate();
   const selectedId=byId("work-template-select").value;
   if (workTemplateSelectionRequiresRecheck ||
@@ -5275,7 +5317,7 @@ async function loadSelectedSale() {
   const seq=++saleLoadSeq;
   saleVerifiedId="";
   byId("sale-save").disabled=true;
-  if (!id || !salesAvailable || !writeUiReady()) {
+  if (!id || !salesAvailable || !localUiReady()) {
     fillSaleForm();
     return;
   }
@@ -5316,7 +5358,7 @@ function fillSaleForm() {
   salePending=null;
 }
 async function loadSales() {
-  if (!salesAvailable || !writeUiReady()) return false;
+  if (!salesAvailable || !localUiReady()) return false;
   try {
     const [list,totals]=await Promise.all([
       _jobGet("/api/portfolio/sales?"+new URLSearchParams({
@@ -5372,7 +5414,7 @@ function _saleWholeEur(id,required) {
   return Number(raw);
 }
 async function saveSaleState() {
-  if (!salesAvailable || !writeUiReady() || saleSaveBusy ||
+  if (!salesAvailable || !localUiReady() || saleSaveBusy ||
       byId("sale-save").disabled ||
       saleVerifiedId!==byId("sale-ad-select").value) return;
   saleSaveBusy=true;
@@ -5419,12 +5461,12 @@ async function saveSaleState() {
     // idempotency key is generated; a retry keeps the identical key/payload.
     byId("sale-save").disabled=!(
       saleVerifiedId && saleVerifiedId===byId("sale-ad-select").value &&
-      salesAvailable && writeUiReady()
+      salesAvailable && localUiReady()
     );
   }
 }
 async function loadPortfolioReport() {
-  if (!reportingAvailable || !writeUiReady()) return false;
+  if (!reportingAvailable || !localUiReady()) return false;
   const selected=byId("report-days").value;
   if (!["7","30","90"].includes(selected)) return false;
   const seq=++reportLoadSeq;
@@ -5620,6 +5662,7 @@ byId("catalog-bulk-pause").addEventListener("click", () => runCatalogBulkAction(
 byId("catalog-bulk-activate").addEventListener("click", () => runCatalogBulkAction("activate"));
 byId("catalog-bulk-delete").addEventListener("click", () => runCatalogBulkAction("delete"));
 byId("catalog-bulk-stop").addEventListener("click", stopCatalogBulkAction);
+""" + INSIGHTS_JS + """
 byId("sync-now").addEventListener("click", syncNow);
 byId("metric-select").addEventListener("change", loadAnalytics);
 byId("dimension-select").addEventListener("change", loadAnalytics);
@@ -6032,7 +6075,12 @@ def _handler_factory(
     *,
     public_origin_port: int | None = None,
     sync_once: Callable[[], int] | None = None,
+    local_session_token: str | None = None,
+    offline_mode: bool = False,
 ):
+    local_work_available = write_proxy is not None or local_session_token is not None
+    session_token = write_proxy.ui_token if write_proxy is not None else local_session_token
+
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "mark-api-readonly/0.1"
         sys_version = ""
@@ -6149,7 +6197,7 @@ def _handler_factory(
             )
 
         def _write_token_authorized(self, *, require_origin: bool) -> bool:
-            if write_proxy is None:
+            if session_token is None:
                 return False
             marker = self.headers.get_all(_DASHBOARD_WRITE_MARKER_HEADER) or []
             tokens = self.headers.get_all(_DASHBOARD_WRITE_TOKEN_HEADER) or []
@@ -6157,7 +6205,7 @@ def _handler_factory(
                 len(marker) != 1
                 or marker[0] != _DASHBOARD_WRITE_MARKER_VALUE
                 or len(tokens) != 1
-                or not hmac.compare_digest(tokens[0], write_proxy.ui_token)
+                or not hmac.compare_digest(tokens[0], session_token)
             ):
                 return False
             if self.headers.get("Authorization") is not None:
@@ -6561,9 +6609,13 @@ def _handler_factory(
                     200,
                     {
                         "write_ui_available": write_proxy is not None,
+                        **({"local_work_available": True}
+                           if local_session_token is not None else {}),
+                        **({"offline_mode": True}
+                           if offline_mode or local_session_token is not None else {}),
                         **(
                             {"portfolio_jobs_available": True}
-                            if type(store) is SnapshotStore and write_proxy is not None
+                            if type(store) is SnapshotStore and local_work_available
                             else {}
                         ),
                         **(
@@ -6715,8 +6767,30 @@ def _handler_factory(
                     return
                 self._send_json(200, drafts)
                 return
+            if path in INSIGHT_READ_PATHS:
+                if type(store) is not SnapshotStore or not local_work_available:
+                    self._send_json(404, {"error": "not_found"})
+                    return
+                if not self._write_token_authorized(require_origin=False):
+                    self._send_json(403, {"error": "local_session_required"})
+                    return
+                try:
+                    if target.fragment:
+                        raise InsightRequestError("fragment not supported")
+                    response = read_insight(store, path, target.query)
+                except InventoryDiffError:
+                    self._send_json(409, {"error": "inventory_changed_reload"})
+                    return
+                except (InsightRequestError, PriceRuleError, ValueError, UnicodeError):
+                    self._send_json(400, {"error": "invalid_insight_query"})
+                    return
+                except (sqlite3.Error, OSError, TypeError):
+                    self._send_json(503, {"error": "local_insight_storage_unavailable"})
+                    return
+                self._send_json(200, response)
+                return
             if path in ("/api/portfolio/jobs", "/api/portfolio/jobs/detail"):
-                if type(store) is not SnapshotStore or write_proxy is None:
+                if type(store) is not SnapshotStore or not local_work_available:
                     self._send_json(404, {"error": "not_found"})
                     return
                 if not self._write_token_authorized(require_origin=False):
@@ -6751,7 +6825,7 @@ def _handler_factory(
                 self._send_json(200,answer)
                 return
             if path == "/api/portfolio/item-templates":
-                if type(store) is not SnapshotStore or write_proxy is None:
+                if type(store) is not SnapshotStore or not local_work_available:
                     self._send_json(404, {"error":"not_found"})
                     return
                 if not self._write_token_authorized(require_origin=False):
@@ -6768,7 +6842,7 @@ def _handler_factory(
                 self._send_json(200,response)
                 return
             if path in ("/api/portfolio/templates", "/api/portfolio/attention"):
-                if type(store) is not SnapshotStore or write_proxy is None:
+                if type(store) is not SnapshotStore or not local_work_available:
                     self._send_json(404, {"error": "not_found"})
                     return
                 if not self._write_token_authorized(require_origin=False):
@@ -6787,7 +6861,7 @@ def _handler_factory(
                 return
             if path == "/api/portfolio/conversations":
                 # EML-Metadaten, kein Plattformpostfach und kein Versandstatus.
-                if type(store) is not SnapshotStore or write_proxy is None:
+                if type(store) is not SnapshotStore or not local_work_available:
                     self._send_json(404, {"error":"not_found"})
                     return
                 if not self._write_token_authorized(require_origin=False):
@@ -6821,7 +6895,7 @@ def _handler_factory(
                 return
             if path == "/api/portfolio/inquiries":
                 # Imported EML metadata require the authenticated local session.
-                if type(store) is not SnapshotStore or write_proxy is None:
+                if type(store) is not SnapshotStore or not local_work_available:
                     self._send_json(404, {"error": "not_found"})
                     return
                 if not self._write_token_authorized(require_origin=False):
@@ -6857,7 +6931,7 @@ def _handler_factory(
                 return
             if path in ("/api/portfolio/followups", "/api/portfolio/followups/detail"):
                 # Human-entered follow-up dates are NOT platform expiry observations.
-                if type(store) is not SnapshotStore or write_proxy is None:
+                if type(store) is not SnapshotStore or not local_work_available:
                     self._send_json(404, {"error":"not_found"})
                     return
                 if not self._write_token_authorized(require_origin=False):
@@ -6892,7 +6966,7 @@ def _handler_factory(
                 self._send_json(200,result)
                 return
             if path == "/api/portfolio/report":
-                if type(store) is not SnapshotStore or write_proxy is None:
+                if type(store) is not SnapshotStore or not local_work_available:
                     self._send_json(404, {"error": "not_found"})
                     return
                 if not self._write_token_authorized(require_origin=False):
@@ -6920,7 +6994,7 @@ def _handler_factory(
                         "/api/portfolio/sales/detail"):
                 # Account-evidenced manual ledger, inaccessible to unauthenticated
                 # read-only frontends or cross-origin pages.
-                if type(store) is not SnapshotStore or write_proxy is None:
+                if type(store) is not SnapshotStore or not local_work_available:
                     self._send_json(404, {"error": "not_found"})
                     return
                 if not self._write_token_authorized(require_origin=False):
@@ -7330,7 +7404,7 @@ def _handler_factory(
             }
             if (target.path not in commands or target.query or target.fragment
                     or target.path!=self.path or type(store) is not SnapshotStore
-                    or write_proxy is None):
+                    or not local_work_available):
                 self._send_json(404, {"error": "not_found"})
                 return
             if not self._write_session_authorized():
@@ -7428,7 +7502,7 @@ def _handler_factory(
             target=urlsplit(self.path)
             if (target.path!="/api/portfolio/conversations/review"
                     or target.query or target.fragment or target.path!=self.path
-                    or type(store) is not SnapshotStore or write_proxy is None):
+                    or type(store) is not SnapshotStore or not local_work_available):
                 self._send_json(404,{"error":"not_found"})
                 return
             if not self._write_session_authorized():
@@ -7462,7 +7536,7 @@ def _handler_factory(
             if (target.path!="/api/portfolio/followups/mutate"
                     or target.query or target.fragment
                     or target.path!=self.path or type(store) is not SnapshotStore
-                    or write_proxy is None):
+                    or not local_work_available):
                 self._send_json(404,{"error":"not_found"})
                 return
             if not self._write_session_authorized():
@@ -7490,12 +7564,39 @@ def _handler_factory(
                 return
             self._send_json(200,result)
 
+        def _portfolio_price_rule_command(self) -> None:
+            target = urlsplit(self.path)
+            if (target.path != PRICE_MUTATE_PATH or target.path != self.path
+                    or target.query or target.fragment or type(store) is not SnapshotStore
+                    or not local_work_available):
+                self._send_json(404, {"error": "not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error": "local_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error": "ledger_key_required_in_body"})
+                return
+            try:
+                raw, _ = self._read_proxy_body("local_json")
+                response = mutate_price_rule(store, raw)
+            except PriceRuleError:
+                self._send_json(409, {"error": "invalid_or_stale_price_rule"})
+                return
+            except (InsightRequestError, ValueError, UnicodeError, TypeError):
+                self._send_json(400, {"error": "invalid_price_rule_request"})
+                return
+            except (sqlite3.Error, OSError):
+                self._send_json(503, {"error": "price_rule_storage_unavailable"})
+                return
+            self._send_json(200, response)
+
         def _portfolio_sale_command(self) -> None:
             target=urlsplit(self.path)
             if (target.path!="/api/portfolio/sales/update"
                     or target.query or target.fragment
                     or target.path!=self.path or type(store) is not SnapshotStore
-                    or write_proxy is None):
+                    or not local_work_available):
                 self._send_json(404, {"error":"not_found"})
                 return
             if not self._write_session_authorized():
@@ -7525,7 +7626,7 @@ def _handler_factory(
             target=urlsplit(self.path)
             if (target.path!="/api/portfolio/templates/mutate"
                     or target.query or target.fragment or target.path!=self.path
-                    or type(store) is not SnapshotStore or write_proxy is None):
+                    or type(store) is not SnapshotStore or not local_work_available):
                 self._send_json(404, {"error":"not_found"})
                 return
             if not self._write_session_authorized():
@@ -7558,7 +7659,7 @@ def _handler_factory(
             target=urlsplit(self.path)
             if (target.path!="/api/portfolio/item-templates/mutate"
                     or target.query or target.fragment or target.path!=self.path
-                    or type(store) is not SnapshotStore or write_proxy is None):
+                    or type(store) is not SnapshotStore or not local_work_available):
                 self._send_json(404, {"error":"not_found"})
                 return
             if not self._write_session_authorized():
@@ -7614,6 +7715,9 @@ def _handler_factory(
             self._send_json(200,answer)
 
         def do_POST(self) -> None:
+            if urlsplit(self.path).path == PRICE_MUTATE_PATH:
+                self._portfolio_price_rule_command()
+                return
             if urlsplit(self.path).path=="/api/portfolio/conversations/review":
                 self._portfolio_conversation_command()
                 return
@@ -7675,6 +7779,8 @@ def create_server(
     generation_access: DashboardGenerationAccess | None = None,
     public_origin_port: int | None = None,
     sync_once: Callable[[], int] | None = None,
+    local_session_token: str | None = None,
+    offline_mode: bool = False,
 ) -> LoopbackDashboardServer:
     if host != "127.0.0.1":
         raise ValueError("dashboard must bind to 127.0.0.1")
@@ -7692,8 +7798,21 @@ def create_server(
 
     if generation_access is not None and not isinstance(generation_access, DashboardGenerationAccess):
         raise TypeError("generation_access must be DashboardGenerationAccess or None")
-    if sync_once is not None and (not callable(sync_once) or write_proxy is None):
-        raise ValueError("manual sync requires an authenticated local Write session")
+    if type(offline_mode) is not bool:
+        raise TypeError("offline_mode must be bool")
+    if offline_mode and write_proxy is not None:
+        raise ValueError("offline workspace cannot have a platform writer")
+    if local_session_token is not None:
+        if (type(local_session_token) is not str or not 16 <= len(local_session_token) <= 256
+                or not local_session_token.isascii()
+                or any(c.isspace() or ord(c) < 33 or ord(c) > 126 for c in local_session_token)
+                or write_proxy is not None or type(store) is not SnapshotStore
+                or public_origin_port is not None):
+            raise ValueError("invalid isolated local session")
+    if sync_once is not None and (
+        not callable(sync_once) or (write_proxy is None and local_session_token is None)
+    ):
+        raise ValueError("manual sync requires an authenticated local session")
     if write_proxy is not None and (
         isinstance(store, StorageOwnerClient) or write_proxy.owner_reconciliation_enabled
     ):
@@ -7710,6 +7829,8 @@ def create_server(
             store, query, analytics, write_proxy, generation_access,
             public_origin_port=public_origin_port,
             sync_once=sync_once,
+            local_session_token=local_session_token,
+            offline_mode=offline_mode,
         ),
     )
 

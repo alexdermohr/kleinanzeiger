@@ -1771,7 +1771,7 @@ class CdpPrivateWebMediaPageTests(unittest.TestCase):
             check = subprocess.run(
                 ["node", "--check", "-"],
                 input=source,
-                text=True,
+                text=True, encoding="utf-8",
                 capture_output=True,
                 timeout=10,
                 check=False,

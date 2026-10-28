@@ -15,7 +15,9 @@ import sqlite3
 from typing import Any
 
 from .domain import AdSnapshot, LifecycleState
-from .adapters.management import DEFAULT_SOURCE as _OBSERVED_SOURCE
+# Persisted provenance label; importing a reader here would activate drivers
+# even when loading the standalone offline dashboard.
+_OBSERVED_SOURCE = "kleinanzeigen-management"
 from .storage import (
     SnapshotStore, SyncAttemptRecord, _sync_attempt_from_row,
     _unresolved_sync_attempt_summary,
@@ -23,6 +25,9 @@ from .storage import (
 
 
 _OWNER_SOURCE = "private-web-owner-inventory"
+_PRODUCT_SOURCES = (
+    _OWNER_SOURCE, "private-web-product-launcher", "private-web-periodic-readonly",
+)
 _PAGE_MAX = 100
 _HISTORY_LIMIT = 4096
 _SUCCESS = frozenset(("success_empty", "success_nonempty"))
@@ -45,8 +50,8 @@ def _validate_cursor(after: object, limit: object, epoch: object) -> None:
         raise InventoryDiffError("Ungueltiger Bestandscursor oder Seitengroesse.")
 
 
-def _attempt(conn: sqlite3.Connection, sql: str) -> SyncAttemptRecord | None:
-    row = conn.execute(sql, (_OWNER_SOURCE,)).fetchone()
+def _attempt(conn: sqlite3.Connection, sql: str, sources: tuple[str, ...]) -> SyncAttemptRecord | None:
+    row = conn.execute(sql, sources).fetchone()
     return _sync_attempt_from_row(row) if row is not None else None
 
 
@@ -120,13 +125,16 @@ def _overlapping_other_sync(
     return False
 
 
-def _owner_history(conn: sqlite3.Connection, ad_id: str) -> tuple[AdSnapshot, ...] | None:
+def _owner_history(
+    conn: sqlite3.Connection, ad_id: str, observation_sources: tuple[str, ...],
+) -> tuple[AdSnapshot, ...] | None:
+    placeholders = ",".join("?" for _ in observation_sources)
     rows = conn.execute(
         "SELECT id,ad_id,observed_at,source,lifecycle_state,title,"
         "description,views,watch_count,reply_count,metric_source "
         "FROM ad_snapshots WHERE ad_id=? COLLATE BINARY "
-        "AND source IN (?,?) ORDER BY id DESC LIMIT ?",
-        (ad_id, _OBSERVED_SOURCE, _OWNER_SOURCE, _HISTORY_LIMIT + 1),
+        f"AND source IN ({placeholders}) ORDER BY id DESC LIMIT ?",
+        (ad_id, *observation_sources, _HISTORY_LIMIT + 1),
     ).fetchall()
     if len(rows) > _HISTORY_LIMIT:
         return None
@@ -218,9 +226,10 @@ def _change(
     }
 
 
-def owner_inventory_diff_page(
+def _inventory_diff_page(
     store: SnapshotStore, *, after: str = "", limit: int = 50,
     expected_epoch: str | None = None,
+    sync_sources: tuple[str, ...],
 ) -> dict[str, Any]:
     """Return an ID-keyset page pinned to one authoritative journal generation.
 
@@ -230,6 +239,9 @@ def owner_inventory_diff_page(
     if type(store) is not SnapshotStore:
         raise TypeError("A verified SnapshotStore is required.")
     _validate_cursor(after, limit, expected_epoch)
+    source_slots = ",".join("?" for _ in sync_sources)
+    observation_sources = (_OBSERVED_SOURCE, *sync_sources)
+    observation_slots = ",".join("?" for _ in observation_sources)
     with closing(store._connect()) as conn:
         conn.execute("PRAGMA query_only=ON")
         # The native-key check opens the consistent read transaction and
@@ -243,13 +255,14 @@ def owner_inventory_diff_page(
             _sync_attempt_from_row(global_row) if global_row is not None else None
         )
         latest = _attempt(
-            conn, "SELECT * FROM sync_attempts WHERE source=? ORDER BY id DESC LIMIT 1",
+            conn, f"SELECT * FROM sync_attempts WHERE source IN ({source_slots}) ORDER BY id DESC LIMIT 1",
+            sync_sources,
         )
         successes = tuple(
             _sync_attempt_from_row(row) for row in conn.execute(
-                "SELECT * FROM sync_attempts WHERE source=? "
+                f"SELECT * FROM sync_attempts WHERE source IN ({source_slots}) "
                 "AND outcome IN ('success_empty','success_nonempty') "
-                "ORDER BY id DESC LIMIT 2", (_OWNER_SOURCE,),
+                "ORDER BY id DESC LIMIT 2", sync_sources,
             )
         )
         successful = successes[0] if successes else None
@@ -275,10 +288,10 @@ def owner_inventory_diff_page(
         if expected_epoch is not None and epoch != expected_epoch:
             raise InventoryDiffError("Bestand seit letzter Seite geaendert; bitte neu laden.")
         rows = conn.execute(
-            "SELECT DISTINCT ad_id FROM ad_snapshots WHERE source IN (?,?) "
+            f"SELECT DISTINCT ad_id FROM ad_snapshots WHERE source IN ({observation_slots}) "
             "AND ad_id > ? COLLATE BINARY "
             "ORDER BY ad_id COLLATE BINARY LIMIT ?",
-            (_OBSERVED_SOURCE, _OWNER_SOURCE, after, limit + 1),
+            (*observation_sources, after, limit + 1),
         ).fetchall()
         items = [
             store._required_observation_ad_id(row["ad_id"])
@@ -286,19 +299,22 @@ def owner_inventory_diff_page(
         ]
         count = conn.execute(
             "SELECT COUNT(DISTINCT ad_id) FROM ad_snapshots "
-            "WHERE source IN (?,?)",
-            (_OBSERVED_SOURCE, _OWNER_SOURCE),
+            f"WHERE source IN ({observation_slots})",
+            observation_sources,
         ).fetchone()[0]
         results = [
             _change(ad_id, verified=verified,
-                    snapshots=_owner_history(conn, ad_id) if verified else (),
+                    snapshots=_owner_history(conn, ad_id, observation_sources) if verified else (),
                     current_attempt=latest if verified else None,
                     previous_attempt=previous if verified else None)
             for ad_id in items
         ]
         return {
             "state": "ready" if verified else "unverified",
-            "source": _OWNER_SOURCE,
+            "source": latest.source if latest else sync_sources[0],
+            "last_confirmed_at": successful.completed_at.isoformat() if successful else None,
+            "previous_confirmed_at": previous.completed_at.isoformat() if previous else None,
+            "previous_source": previous.source if previous else None,
             "latest_attempt_id": latest.id if latest else None,
             "previous_success_id": previous.id if previous else None,
             "confirmed_at": (
@@ -310,3 +326,29 @@ def owner_inventory_diff_page(
             "next_after": items[-1] if len(rows) > limit else None,
             "platform_writes": 0,
         }
+
+
+def owner_inventory_diff_page(
+    store: SnapshotStore, *, after: str = "", limit: int = 50,
+    expected_epoch: str | None = None,
+) -> dict[str, Any]:
+    """Compare the separate owner CLI rounds, preserving its existing contract."""
+    return _inventory_diff_page(
+        store, after=after, limit=limit, expected_epoch=expected_epoch,
+        sync_sources=(_OWNER_SOURCE,),
+    )
+
+
+def product_inventory_diff_page(
+    store: SnapshotStore, *, after: str = "", limit: int = 50,
+    expected_epoch: str | None = None,
+) -> dict[str, Any]:
+    """Compare real product-start and explicit-sync rounds, not just the CLI.
+
+    All three are verified owner-inventory readers. Failed/overlapping reads
+    remain unverified; observations are never a platform Write capability.
+    """
+    return _inventory_diff_page(
+        store, after=after, limit=limit, expected_epoch=expected_epoch,
+        sync_sources=_PRODUCT_SOURCES,
+    )

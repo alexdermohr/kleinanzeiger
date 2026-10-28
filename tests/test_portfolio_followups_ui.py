@@ -125,7 +125,7 @@ const window={
 };
 const context={document,window,fetch,URL,URLSearchParams,encodeURIComponent,
   byId:(id)=>document.getElementById(id),
-  optionalById:(id)=>document.getElementById(id),writeUiReady:()=>true,
+  optionalById:(id)=>document.getElementById(id),writeUiReady:()=>true,localUiReady:()=>true,
   _jobHeaders:()=>({"X-Mark-Dashboard-Token":"token"}),
   _newJobRequestKey:()=> "a".repeat(64),console,Number,String};
 vm.createContext(context);

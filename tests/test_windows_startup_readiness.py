@@ -42,7 +42,7 @@ class WindowsStartReadinessTests(unittest.TestCase):
     def test_manual_console_start_also_checks_cdp_endpoint(self):
         script = (SCRIPTS / "windows-start.ps1").read_text(encoding="utf-8")
         self.assertRegex(
-            script, r"Read-Host 'Nach erfolgreichem Login ENTER druecken'\s+"
+            script, r"Read-Host 'Nach dem Login oder fuer lokales Arbeiten ENTER druecken'\s+"
                     r"Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 12"
         )
         self.assertIn("ChromeProfile", script)

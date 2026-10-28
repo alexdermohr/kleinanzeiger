@@ -274,7 +274,7 @@ class CdpPrivateWebPageTests(unittest.TestCase):
                 ["node", "--check", "-"],
                 input=expression,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
                 check=False,
             )
@@ -406,7 +406,7 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             ["node", "--check", "-"],
             input=expression,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
             check=False,
         )
@@ -917,7 +917,7 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             ["node", "--check", "-"],
             input=expression,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
             check=False,
         )
@@ -1158,7 +1158,7 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             ["node", "--check", "-"],
             input=expression,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
             check=False,
         )
@@ -1200,7 +1200,7 @@ class CdpPrivateWebPageTests(unittest.TestCase):
             ["node", "--check", "-"],
             input=confirmation_expression,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
             check=False,
         )
@@ -4440,7 +4440,7 @@ class CdpPrivateWebStatePageTests(unittest.TestCase):
             ["node", "--check", "-"],
             input=expression,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
             check=False,
         )
@@ -4527,7 +4527,7 @@ process.stdout.write(JSON.stringify(result));
                     ["node", "-"],
                     input=script,
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8",
                     timeout=10,
                     check=False,
                 )
@@ -4630,7 +4630,7 @@ process.stdout.write(JSON.stringify(result));
             ["node", "--check", "-"],
             input=expression,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
             check=False,
         )
@@ -4930,7 +4930,7 @@ class CdpPrivateWebDeletePageTests(unittest.TestCase):
             ["node", "--check", "-"],
             input=expression,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
             check=False,
         )
@@ -4963,7 +4963,7 @@ class CdpPrivateWebDeletePageTests(unittest.TestCase):
             ["node", "--check", "-"],
             input=expression,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
             check=False,
         )
