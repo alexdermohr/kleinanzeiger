@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.16 – Windows 11
+# Kleinanzeiger v0.1.17 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -68,10 +68,14 @@ Bildschirmen daneben; auf schmalen Fenstern stehen sie untereinander.
 Für größere Bestände zeigt **Meine Anzeigen** nur 50 Anzeigen pro Seite.
 Über **Suche nach Titel oder Anzeigen-ID** und **Status** kann der
 lokale Bestand gefiltert werden. **Weiter / Zurück** blättert seitenweise.
-Die Auswahlkästchen lassen sich über Seiten hinweg sammeln. Erst wenn
-mindestens eine Anzeige markiert ist, erscheint die **Aktionsleiste für
-ausgewählte Anzeigen**. **Auswahl als CSV** speichert ausschließlich die
-ausgewählten Anzeigen-IDs; **Auswahl leeren** setzt sie zurück. Bei mehr
+Die Auswahlkästchen lassen sich über Seiten hinweg sammeln. Im
+**Ab v0.1.17** wählen **Sichtbare auswählen (max. 50)**
+und **Sichtbare abwählen** ausschließlich die bereits geladenen Anzeigen
+dieser Katalogseite; eine Auswahl von anderen Seiten bleibt erhalten.
+Die beiden Schaltflächen lösen weder eine Plattformaktion noch einen
+KI-Aufruf aus. Erst wenn mindestens eine Anzeige markiert ist, erscheint
+die **Aktionsleiste für ausgewählte Anzeigen**. **Auswahl als CSV**
+speichert ausschließlich die ausgewählten Anzeigen-IDs; **Auswahl leeren** setzt sie zurück. Bei mehr
 als zehn ausgewählten Anzeigen bleiben Plattform-Sammelaktionen gesperrt,
 die reine CSV-Auswahl ist weiterhin möglich. CSV-Export und Markieren allein ändern **keine** Plattformanzeige.
 Mit gültiger Schreibsitzung lassen sich **1 bis 10 eigene Anzeigen** nach
