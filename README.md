@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-> **Verbindlicher Fortsetzungsstand vom 29.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Ab v0.1.19 nennt **Mit Kleinanzeigen abgleichen** im Fehlerfall einen zutreffenden sicheren Grund und eine konkrete Lösung; dies behauptet keinen gelösten Chrome-Transport. Bereits v0.1.18 ergänzte gebundene KI-Prüfaufträge für bis zu 5.000 bestätigte eigene veröffentlichte Anzeigen mit Budget, höchstens zehn Generierungen je bestätigtem Stapel sowie lokaler Vorschau und Freigabe ohne Plattform-Write. v0.1.17 ergänzte die einfache Auswahl und Abwahl aller bis zu 50 sichtbaren Anzeigen einer Katalogseite, ohne automatische Plattformaktionen. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC und Konto fehlt weiterhin.
+> **Verbindlicher Fortsetzungsstand vom 29.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Neu in v0.1.20 bleibt nach einem initial fehlgeschlagenen Browserread das Offline-Dashboard bestehen und zeigt beim ausdrücklichen manuellen Wiederverbinden die tatsächliche sichere Klassifikation statt einer pauschalen Fehlermeldung. Die gezielten Online-Diagnosen sind seit v0.1.19 verfügbar; v0.1.18 ergänzte gebundene KI-Prüfaufträge für bis zu 5.000 bestätigte eigene veröffentlichte Anzeigen mit Budget, höchstens zehn Generierungen je bestätigtem Stapel sowie lokaler Vorschau und Freigabe ohne Plattform-Write. v0.1.17 ergänzte die einfache Auswahl und Abwahl aller bis zu 50 sichtbaren Anzeigen einer Katalogseite, ohne automatische Plattformaktionen. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC und Konto fehlt weiterhin.
 
 **Kleinanzeiger** verwaltet eigene Kleinanzeigen über eine lokale Weboberfläche: Anzeige erstellen und veröffentlichen, Bilder zuordnen, Titel und Beschreibung bearbeiten, pausieren, aktivieren, löschen, Bestand synchronisieren sowie Historie, Views, Reaktionen, E-Mail-Daten und Auswertungen einsehen. Hinzu kommen KI-Text- und Bildentwürfe sowie lokale Datensicherung und Wiederherstellung.
 
@@ -58,11 +58,15 @@ Kundenunterlagen: [Handbuch](docs/Kleinanzeiger-Handbuch.html) und
 [Funktionsübersicht](docs/Kleinanzeiger-Funktionen.html).
 Die separate Linux-A6-Migration gehört nicht zur Windows-Neuinstallation.
 
-Ab v0.1.19 ordnet **Mit Kleinanzeigen abgleichen** einen Fehler gezielt Browser/Chrome,
+Seit v0.1.19 ordnet **Mit Kleinanzeigen abgleichen** einen Fehler gezielt Browser/Chrome,
 Anmeldung, Netzwerk, einem laufenden Abgleich, Recovery oder lokalem Speicher zu und
-zeigt eine konkrete sichere Lösung. Das ist keine Zusage, dass ein Chrome-Transportfehler
-behoben wurde. Die Bedienung bleibt in einem Windows-Fenster; vorhandene Daten,
-Sicherungen und Chrome-Profile bleiben unangetastet.
+zeigt eine konkrete sichere Lösung. In v0.1.20 gilt dies auch für das manuelle
+Wiederverbinden aus dem nach einem initialen Lesefehler bestehen bleibenden
+Offline-Dashboard. Es gibt keine Blind-Retries, keine Datenüberschreibung und keine
+wiedererlangten Plattformwrites ohne neue Sitzung. Das ist keine Zusage, dass ein
+Chrome-Transportfehler auf einem realen Kunden-PC behoben wurde. Die Bedienung bleibt
+in einem Windows-Fenster; vorhandene Daten, Sicherungen und Chrome-Profile bleiben
+unangetastet.
 
 ## Vorherige Programmversion verwenden (ab v0.1.14)
 
