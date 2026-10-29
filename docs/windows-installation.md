@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.17 – Windows 11
+# Kleinanzeiger v0.1.18 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -154,9 +154,13 @@ keine Nachrichten.** Die Nachricht und der Antwortentwurf werden in dieser
 Ansicht nicht dauerhaft gespeichert. Der Nutzer versendet den kopierten Text
 selbst im originalen Kleinanzeigen-Dialog.
 
-## Lokale KI-Stapelaufträge
+## Bestehende Eigenanzeigen mit KI prüfen
 
-Im Dashboard **KI-Stapelaufträge** öffnen. Bis zu 5.000 lokale CSV-/XLSX-Entwürfe zu einem Auftrag sammeln, Originale und Vorschläge prüfen, einzeln freigeben und nur lokal übernehmen. Optional können nach eigener Modell-, Datenübertragungs- und Budgetbestätigung bis zu zehn KI-Aufrufe nacheinander ausgeführt werden; weitere Aufrufe lassen sich stoppen. Es werden keine Anzeigen automatisch massenhaft veröffentlicht oder gelöscht. Providerkosten sind nur konservativ geschätzt und nicht garantiert.
+Im Dashboard **Bestehende Eigenanzeigen mit KI prüfen** öffnen. Bestätigte eigene veröffentlichte Anzeigen entweder aus der Katalogauswahl oder über **Alle passenden** wählen; ein Auftrag umfasst höchstens 5.000 Anzeigen. Die erfassten Originaldaten, Quellen und Anzeigen-IDs bleiben an den Auftrag gebunden.
+
+Vor dem ersten kostenpflichtigen Vorschlag das USD-Gesamtbudget und die externe Datenübertragung ausdrücklich bestätigen. **Nächster Vorschlag** verarbeitet eine Anzeige, die Stapelverarbeitung höchstens zehn nacheinander. Der Stapel lässt sich stoppen und später fortsetzen. Bei **UNKNOWN**, Kommunikationsfehlern oder unklarem Providerergebnis nicht blind wiederholen; mögliche Kosten zuerst klären. Jeden Original-/Vorschlagsvergleich anzeigenweise prüfen und den Vorschlag lokal **freigeben** oder **ablehnen**. Es erfolgt keine automatische Plattform-Veröffentlichung und keine sonstige Plattformänderung. Alle Kostenwerte sind konservative Schätzungen, keine garantierte Providerabrechnung.
+
+Die bisherigen KI-Stapelaufträge für lokale CSV-/XLSX-Entwürfe bleiben separat verfügbar: bis zu 5.000 lokale Entwürfe sammeln, Vorschläge prüfen, einzeln freigeben und ausschließlich lokal übernehmen.
 
 ## Frühere Programmversion wiederherstellen
 

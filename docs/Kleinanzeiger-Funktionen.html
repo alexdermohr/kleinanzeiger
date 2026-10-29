@@ -14,7 +14,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.17</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.18</p>
 <h1>Funktionsübersicht</h1>
 <p>Die folgende Übersicht unterscheidet Bedienoberfläche, unterstützte Funktion und praktische Grenzen.</p>
 <table><tr><th>Bereich</th><th>Funktion</th><th>Wo bedienen?</th></tr>
@@ -41,6 +41,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <tr><td>Lokale EML-Gesprächsbearbeitung</td><td>Nach Gesprächen paginierte lokale Eingänge; neue EML-Ereignisse seit eigener Prüfung, manuell abhaken oder erneut vorlegen, persistente Revisionskontrolle. Kein echtes Plattform-Ungelesen und kein Versand.</td><td>Dashboard → Interessenten &amp; Antworten → EML-Gespräche bearbeiten</td></tr>
 <tr><td>Interessenten &amp; Antwortentwürfe</td><td>Anzeigengebundene manuelle Anfrage, kostenloser lokaler Antwortbaustein oder ausdrücklich kostenfreigegebener KI-Antwortvorschlag; Bearbeiten und Kopieren, kein Nachrichtenabruf oder Versand</td><td>Dashboard → Meine Anzeigen → Antwort vorbereiten → Interessenten &amp; Antworten</td></tr>
 <tr><td>KI-Stapelaufträge</td><td>Bis 5.000 eigene Entwürfe pro Auftrag, sichere Freigaben, 1 oder bis 10 ausdrücklich bestätigte KI-Vorschläge nacheinander, lokale Übernahme ohne Plattformänderung</td><td>Dashboard → KI-Stapelaufträge</td></tr>
+<tr><td>KI-Stapelprüfung bestehender Eigenanzeigen (ab v0.1.18)</td><td>Bis zu 5.000 bestätigte eigene veröffentlichte Anzeigen aus Katalogauswahl oder allen passenden Treffern mit gebundenen Originaldaten prüfen; ausdrückliches USD-Budget und Datentransferfreigabe, höchstens zehn Generierungen je Stapel, Stop/Fortsetzen und UNKNOWN-Sperre, anzeigenweise lokale Freigabe oder Ablehnung. Kosten sind Schätzwerte; keine automatische Plattformänderung oder Veröffentlichung.</td><td>Dashboard → Bestehende Eigenanzeigen mit KI prüfen</td></tr>
 <tr><td>KI-Bilder</td><td>Bildentwürfe generieren und in lokale Bildauswahl übernehmen</td><td>Dashboard → KI-Assistent → Als Anzeigenbild übernehmen</td></tr>
 <tr><td>Verkäufe &amp; Lager</td><td>Eigene Anzeigen lokal als verfügbar, reserviert oder verkauft verwalten, Lagerorte, manuelle Erlöse und bekannte Kosten mit Revisionsprüfung dokumentieren; keine Plattformänderung</td><td>Dashboard → Verkäufe &amp; Lager</td></tr>
 <tr><td>Controlling</td><td>7-/30-/90-Tage-Berichte; auswählbare Tageskennzahl für EML-Eingangsnachrichten oder verschiedene Gespräche je Tag, passender CSV-Export, eindeutige Käufer aus EML unbekannt; getrennte manuelle Verkäufe und geschätzte KI-Kosten</td><td>Dashboard → Controlling → Tageskennzahl</td></tr>
@@ -51,7 +52,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <tr><td>Hilfe</td><td>Benutzerhandbuch und vollständige Featureliste im Kundenpaket</td><td>Kleinanzeiger-Fenster → Handbuch / Funktionen</td></tr></table>
 <h2>Wichtige Betriebsregeln</h2>
 <ul>
-<li>Der Katalog kann nach ausdrücklicher Vorschau bis zu zehn eigene Anzeigen nacheinander pausieren, aktivieren oder nach einer zweiten, an die Anzahl gebundenen Freigabe endgültig löschen. Sammelveröffentlichung, Preisänderungen und unbeaufsichtigte Plattform-Automatik sind nicht verfügbar. KI-Stapelaufträge bearbeiten ausschließlich lokale Artikelentwürfe.</li>
+<li>Der Katalog kann nach ausdrücklicher Vorschau bis zu zehn eigene Anzeigen nacheinander pausieren, aktivieren oder nach einer zweiten, an die Anzahl gebundenen Freigabe endgültig löschen. Sammelveröffentlichung, Preisänderungen und unbeaufsichtigte Plattform-Automatik sind nicht verfügbar. KI-Stapelaufträge übernehmen Vorschläge ausschließlich lokal; auch die Prüfung bestehender Eigenanzeigen führt keinen Plattform-Write aus.</li>
 <li>Wirkliche Schreibaktionen werden bewusst vom Nutzer ausgelöst und bei unklarem Ausgang nicht blind wiederholt.</li>
 <li>E-Mail-Import und Labelpflege erfolgen als getrennte lokale SQLite-Aktionen nur bei beendetem Kleinanzeiger; danach den Start erneut ausführen.</li>
 <li>Für einen Vergleich müssen Werte vorhanden und Anzeigen einer Dimension zugeordnet sein. Reaktions- und E-Mail-Metriken bleiben getrennt.</li>
@@ -74,5 +75,5 @@ auslösen (Windows-Sitzung maximal 100 versuchte Anfragen); Stop und UNKNOWN
 beenden automatische Folgeaufrufe. OpenAI-Preise werden nur konservativ geschätzt,
 nicht als garantierte Abrechnung dargestellt. <strong>Nicht enthalten:</strong> Plattform-
 Massenveröffentlichung, automatisches Bulk-Löschen oder ungeprüfte Kontoänderungen.</p>
-<footer>Kleinanzeiger v0.1.17 – Kundenunterlagen. Stand: 29. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.18 – Kundenunterlagen. Stand: 29. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>
