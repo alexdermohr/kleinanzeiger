@@ -16,7 +16,7 @@ from mark_api.dashboard import (
 )
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.private_web_runtime import (
-    PrivateWebRuntimeSetupError, PrivateWebWriteApiRuntime,
+    OwnerInventorySyncFailure, PrivateWebRuntimeSetupError, PrivateWebWriteApiRuntime,
 )
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
@@ -70,6 +70,9 @@ class DashboardManualSyncHttpTests(unittest.TestCase):
         self.assertIn('id="reload"', _DASHBOARD_HTML)
         self.assertIn("Ansicht neu laden", _DASHBOARD_HTML)
         self.assertIn('fetch("/api/dashboard/sync"', _DASHBOARD_JS)
+        self.assertIn("owner_inventory_busy", _DASHBOARD_JS)
+        self.assertIn("owner_inventory_login_required", _DASHBOARD_JS)
+        self.assertIn("owner_inventory_recovery_required", _DASHBOARD_JS)
 
         code, body = self._request("GET", "/api/dashboard/config")
         self.assertEqual(code, 200)
@@ -112,6 +115,43 @@ class DashboardManualSyncHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"status": "success", "current_ads": 1})
         self.assertEqual(self.calls, ["once"])
+
+    def test_classified_failures_are_sanitized_and_not_retried(self):
+        for kind, expected_status in (
+            ("busy", 409), ("recovery_required", 409),
+            ("login_required", 503), ("browser_unavailable", 503),
+            ("connection_unavailable", 503), ("storage_unavailable", 503),
+            ("read_failed", 503),
+        ):
+            with self.subTest(kind=kind):
+                calls = []
+                def fails():
+                    calls.append(1)
+                    raise OwnerInventorySyncFailure(kind)
+                proxy = DashboardWriteProxy(
+                    host="127.0.0.1", port=19080,
+                    bearer_token=self.BACKEND, ui_token=self.TOKEN,
+                )
+                server = create_server(self.store, port=0, write_proxy=proxy, sync_once=fails)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    port = server.server_address[1]
+                    connection = HTTPConnection("127.0.0.1", port, timeout=5)
+                    try:
+                        connection.request("POST", "/api/dashboard/sync",
+                            headers={**self.auth(), "Origin": f"http://127.0.0.1:{port}"})
+                        response = connection.getresponse()
+                        payload = response.read().decode("utf-8")
+                        self.assertEqual(response.status, expected_status)
+                        self.assertEqual(json.loads(payload), {"error": "owner_inventory_" + kind})
+                        self.assertEqual(calls, [1])
+                    finally:
+                        connection.close()
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
 
     def test_sync_is_not_a_standalone_or_arbitrary_untrusted_callback(self):
         with self.assertRaises(ValueError):
@@ -207,14 +247,22 @@ class OwnerManualSyncRuntimeTests(unittest.TestCase):
         runtime, reader = self.runtime(
             ReadResult.failure(ReadStatus.TRANSPORT_ERROR),
         )
-        with self.assertRaises(PrivateWebRuntimeSetupError):
+        with self.assertRaises(OwnerInventorySyncFailure) as caught:
             runtime.sync_owner_inventory()
+        self.assertEqual(caught.exception.kind, "connection_unavailable")
         self.assertEqual(reader.calls, 1)
         self.assertEqual(self.store.tracked_ad_ids(), ("12345678",))
         self.assertNotIn(
             self.store.latest_sync_attempt().outcome,
             ("success_empty", "success_nonempty"),
         )
+
+    def test_unauthenticated_read_is_distinguished_from_transport_errors(self):
+        runtime, reader = self.runtime(ReadResult.failure(ReadStatus.UNAUTHENTICATED))
+        with self.assertRaises(OwnerInventorySyncFailure) as caught:
+            runtime.sync_owner_inventory()
+        self.assertEqual(caught.exception.kind, "login_required")
+        self.assertEqual(reader.calls, 1)
 
     def test_existing_unknown_sync_blocks_another_platform_read(self):
         self.store.begin_sync_attempt(
