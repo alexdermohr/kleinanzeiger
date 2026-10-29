@@ -228,18 +228,22 @@ class MarkQueryService:
                     break
         else:
             cursor = after
+            # Native SQLite loads 16 distinct ID histories in one short read
+            # instead of reopening and recertifying the DB for each ID.
+            # A page is fully materialized before returning, so filtering
+            # never holds a live SQLite reader lock across UI work.
             while True:
-                ids = self._store.catalog_ad_ids_page(after=cursor, limit=128)
-                if not ids:
+                page = self._store.catalog_ad_histories_page(after=cursor, limit=16)
+                if not page:
                     break
                 found_more = False
-                for ad_id in ids:
-                    if admit(ad_id, self._store.ad_history(ad_id)):
+                for ad_id, history in page:
+                    if admit(ad_id, history):
                         found_more = True
                         break
-                if found_more or len(ids) < 128:
+                if found_more or len(page) < 16:
                     break
-                cursor = ids[-1]
+                cursor = page[-1][0]
 
         more = len(items) > limit
         visible = items[:limit]
