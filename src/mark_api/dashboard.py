@@ -4335,6 +4335,29 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
   });
 }
 
+function syncFailureMessage(response, result) {
+  if (response.status === 403 && result?.error === "write_session_required") {
+    return "Lokale Kleinanzeiger-Sitzung ungültig. Bitte Kleinanzeiger neu starten. Gespeicherte Anzeigen bleiben erhalten.";
+  }
+  if (response.status === 503 && result?.error === "owner_inventory_refresh_failed") {
+    const knownReasons = {
+      unauthenticated: "Bitte im von Kleinanzeiger geöffneten Chrome-Fenster bei Kleinanzeigen anmelden.",
+      transport_error: "Die Browser- oder Internetverbindung zum Kleinanzeigen-Konto prüfen.",
+      http_error: "Kleinanzeigen hat die Bestandsabfrage abgewiesen. Konto und Verbindung im zugehörigen Chrome prüfen.",
+      parse_error: "Die Antwort von Kleinanzeigen konnte nicht gelesen werden. Kleinanzeiger aktualisieren.",
+      reader_exception: "Die Browserabfrage wurde unterbrochen. Kleinanzeiger neu starten.",
+      runtime_unavailable: "Der für Kleinanzeiger gestartete Chrome ist nicht erreichbar. Kleinanzeiger neu starten.",
+      persistence_error: "Der lokale Speicher konnte nicht aktualisiert werden. Speicherplatz und Datenbank prüfen.",
+      invalid_inventory: "Der gelesene Anzeigenbestand war ungültig. Kleinanzeiger aktualisieren.",
+    };
+    const reason = Object.prototype.hasOwnProperty.call(knownReasons, result.read_error)
+      ? knownReasons[result.read_error]
+      : "Konto, Browserverbindung oder ausstehende Synchronisierung prüfen.";
+    return "Abgleich fehlgeschlagen: " + reason + " Gespeicherte Anzeigen bleiben erhalten.";
+  }
+  return "Abgleich fehlgeschlagen. Gespeicherte Anzeigen bleiben erhalten; Kleinanzeiger und Verbindung prüfen.";
+}
+
 async function syncNow() {
   if (!manualSyncAvailable || !localUiReady() || syncInFlight) return;
   syncInFlight = true;
@@ -4353,7 +4376,11 @@ async function syncNow() {
       cache: "no-store",
     });
     const result = await response.json();
-    if (!response.ok || result.status !== "success"
+    if (!response.ok) {
+      status.textContent = syncFailureMessage(response, result);
+      return;
+    }
+    if (result.status !== "success"
       || !Number.isSafeInteger(result.current_ads) || result.current_ads < 0) {
       throw new Error("Abgleich nicht bestätigt");
     }
@@ -7658,11 +7685,38 @@ def _handler_factory(
             except ValueError:
                 self._send_json(400, {"error": "sync_request_body_not_allowed"})
                 return
+            # Only label the failure when THIS click produced a new, failed
+            # local journal entry. Never attach a stale earlier diagnosis.
+            previous_id = None
+            baseline_known = False
+            try:
+                previous = store.latest_sync_attempt()
+                previous_id = None if previous is None else previous.id
+                baseline_known = True
+            except Exception:
+                pass
             try:
                 count = sync_once()
             except Exception:
                 # Never leak CDP credentials, browser state or local paths.
-                self._send_json(503, {"error": "owner_inventory_refresh_failed"})
+                payload = {"error": "owner_inventory_refresh_failed"}
+                if baseline_known:
+                    try:
+                        latest = store.latest_sync_attempt()
+                        if (
+                            latest is not None
+                            and latest.id != previous_id
+                            and latest.outcome == "failed"
+                            and latest.error_kind in (
+                                "unauthenticated", "transport_error", "http_error",
+                                "parse_error", "reader_exception", "runtime_unavailable",
+                                "persistence_error", "invalid_inventory",
+                            )
+                        ):
+                            payload["read_error"] = latest.error_kind
+                    except Exception:
+                        pass
+                self._send_json(503, payload)
                 return
             if type(count) is not int or count < 0:
                 self._send_json(503, {"error": "owner_inventory_refresh_failed"})

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -70,6 +72,9 @@ class DashboardManualSyncHttpTests(unittest.TestCase):
         self.assertIn('id="reload"', _DASHBOARD_HTML)
         self.assertIn("Ansicht neu laden", _DASHBOARD_HTML)
         self.assertIn('fetch("/api/dashboard/sync"', _DASHBOARD_JS)
+        self.assertIn("function syncFailureMessage(response, result)", _DASHBOARD_JS)
+        self.assertIn("von Kleinanzeiger geöffneten Chrome-Fenster", _DASHBOARD_JS)
+        self.assertIn("Lokale Kleinanzeiger-Sitzung ungültig", _DASHBOARD_JS)
 
         code, body = self._request("GET", "/api/dashboard/config")
         self.assertEqual(code, 200)
@@ -77,6 +82,38 @@ class DashboardManualSyncHttpTests(unittest.TestCase):
             "write_ui_available": True, "manual_sync_available": True,
             "portfolio_jobs_available": True,
         })
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js needed for dashboard JS test")
+    def test_sync_failure_messages_are_actionable_and_do_not_echo_arbitrary_codes(self):
+        start = _DASHBOARD_JS.index("function syncFailureMessage(response, result) {")
+        end = _DASHBOARD_JS.index("\nasync function syncNow() {", start)
+        snippet = _DASHBOARD_JS[start:end]
+        script = r"""
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const source = require("node:fs").readFileSync(0, "utf8");
+const context = {};
+vm.createContext(context);
+vm.runInContext(source, context);
+const format = context.syncFailureMessage;
+assert.match(format({status: 403}, {error: "write_session_required"}), /Kleinanzeiger neu starten/);
+assert.match(format({status: 503}, {
+  error: "owner_inventory_refresh_failed", read_error: "unauthenticated"
+}), /geöffneten Chrome-Fenster/);
+assert.match(format({status: 503}, {
+  error: "owner_inventory_refresh_failed", read_error: "parse_error"
+}), /aktualisieren/);
+const unknown = format({status: 503}, {
+  error: "owner_inventory_refresh_failed", read_error: "private cookie secret"
+});
+assert.doesNotMatch(unknown, /cookie secret/);
+assert.match(unknown, /Gespeicherte Anzeigen bleiben erhalten/);
+"""
+        result = subprocess.run(
+            ["node", "-e", script], input=snippet,
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_only_explicit_local_token_bound_post_triggers_one_sync(self):
         for headers, body in (
@@ -112,6 +149,90 @@ class DashboardManualSyncHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"status": "success", "current_ads": 1})
         self.assertEqual(self.calls, ["once"])
+
+    def test_failure_reports_only_fresh_allowlisted_read_error(self):
+        store = self.store
+        now = datetime.now(timezone.utc)
+        def unauthenticated():
+            attempt = store.begin_sync_attempt(
+                source="manual-sync-test", started_at=now,
+            )
+            store.append_inventory_result(
+                ReadResult.failure(ReadStatus.UNAUTHENTICATED),
+                observed_at=now, source="manual-sync-test",
+                attempt_id=attempt, completed_at=now,
+            )
+            raise RuntimeError("private browser cookie secret")
+        proxy = DashboardWriteProxy(
+            host="127.0.0.1", port=19081,
+            bearer_token=self.BACKEND, ui_token=self.TOKEN,
+        )
+        other = create_server(store, port=0, write_proxy=proxy, sync_once=unauthenticated)
+        thread = threading.Thread(target=other.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = other.server_address[1]
+            connection = HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                connection.request("POST", "/api/dashboard/sync", headers={
+                    **self.auth(), "Origin": f"http://127.0.0.1:{port}",
+                })
+                response = connection.getresponse()
+                body = response.read().decode("utf-8")
+                self.assertEqual(response.status, 503)
+                self.assertEqual(json.loads(body), {
+                    "error": "owner_inventory_refresh_failed",
+                    "read_error": "unauthenticated",
+                })
+                self.assertNotIn("cookie secret", body)
+                self.assertEqual(store.tracked_ad_ids(), ())
+            finally:
+                connection.close()
+        finally:
+            other.shutdown()
+            other.server_close()
+            thread.join(timeout=3)
+
+    def test_prior_failed_attempt_does_not_label_a_new_preflight_failure(self):
+        now = datetime.now(timezone.utc)
+        prior = self.store.begin_sync_attempt(
+            source="manual-sync-test", started_at=now,
+        )
+        self.store.append_inventory_result(
+            ReadResult.failure(ReadStatus.UNAUTHENTICATED),
+            observed_at=now, source="manual-sync-test",
+            attempt_id=prior, completed_at=now,
+        )
+        proxy = DashboardWriteProxy(
+            host="127.0.0.1", port=19081,
+            bearer_token=self.BACKEND, ui_token=self.TOKEN,
+        )
+        other = create_server(
+            self.store, port=0, write_proxy=proxy,
+            sync_once=lambda: (_ for _ in ()).throw(
+                PrivateWebRuntimeSetupError("owner inventory busy")
+            ),
+        )
+        thread = threading.Thread(target=other.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = other.server_address[1]
+            connection = HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                connection.request("POST", "/api/dashboard/sync", headers={
+                    **self.auth(), "Origin": f"http://127.0.0.1:{port}",
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 503)
+                self.assertEqual(json.loads(response.read()), {
+                    "error": "owner_inventory_refresh_failed",
+                })
+            finally:
+                connection.close()
+        finally:
+            other.shutdown()
+            other.server_close()
+            thread.join(timeout=3)
 
     def test_sync_is_not_a_standalone_or_arbitrary_untrusted_callback(self):
         with self.assertRaises(ValueError):
