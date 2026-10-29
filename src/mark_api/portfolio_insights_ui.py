@@ -23,6 +23,17 @@ INSIGHTS_HTML = """
         <thead><tr><th>Anzeigen-ID</th><th>Änderung</th><th>Vorher</th><th>Jetzt</th><th>Quelle und Zeitpunkt</th></tr></thead>
         <tbody id="inventory-diff-body"></tbody>
       </table></div>
+      <details id="autopilot-disclosure" class="feature-disclosure">
+        <summary>Priorisierter Tagesplan (lokal und kostenlos)</summary>
+        <p>Vorrang für unklare KI-Kosten, neue importierte E-Mail-Hinweise, manuelle Wiedervorlagen und offene KI-Vorschläge. Nur Prüfvorschläge aus gespeicherten Daten; keine automatische Kontoaktion, kein Nachrichtenversand, kein KI-Aufruf.</p>
+        <button id="autopilot-load" type="button">Aufgaben prüfen</button>
+        <button id="autopilot-next" type="button" disabled>Nächste 50 Aufgaben</button>
+        <p id="autopilot-status" role="status" aria-live="polite">Noch keine Aufgabenprüfung durchgeführt.</p>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Priorität</th><th>Anzeige</th><th>Prüfschritt</th><th>Lokaler Nachweis</th></tr></thead>
+          <tbody id="autopilot-body"></tbody>
+        </table></div>
+      </details>
     </section>
     <section id="price-rules-panel" class="panel" hidden>
       <h2>Preisregeln für lokale Artikel</h2>
@@ -60,6 +71,8 @@ let priceRuleTarget = null;
 let priceRuleBusy = false;
 let priceRuleListBusy = false;
 let priceRuleLoadSerial = 0;
+let autopilotNextOffset = null;
+let autopilotBusy = false;
 
 function renderPortfolioInsights() {
   const available = jobsAvailable && localUiReady();
@@ -136,6 +149,67 @@ async function loadInventoryDiff(next = false) {
     inventoryDiffBusy = false;
     byId("inventory-diff-load").disabled = !localUiReady();
     byId("inventory-diff-next").disabled = !inventoryDiffCursor || !localUiReady();
+  }
+}
+
+async function loadAutopilotAttention(next = false) {
+  if (!jobsAvailable || !localUiReady() || autopilotBusy || (next && autopilotNextOffset === null)) return false;
+  const offset = next ? autopilotNextOffset : 0;
+  autopilotBusy = true;
+  byId("autopilot-load").disabled = true;
+  byId("autopilot-next").disabled = true;
+  const status = byId("autopilot-status");
+  status.textContent = "Prüfe ausschließlich lokal gespeicherte Aufgaben …";
+  try {
+    const query = new URLSearchParams({offset: String(offset), limit: "50"});
+    const page = await readInsight("/api/portfolio/attention?" + query.toString());
+    if (!page || !Array.isArray(page.items) || page.offset !== offset ||
+        page.platform_writes !== 0 || page.provider_requests !== 0 ||
+        page.platform_messages_read !== false ||
+        page.automatic_execution_authorized !== false ||
+        !Number.isSafeInteger(page.total) || page.total < 0 ||
+        page.items.length > 50 || typeof page.has_more !== "boolean" ||
+        (page.has_more && (!Number.isSafeInteger(page.next_offset) || page.next_offset <= offset))) {
+      throw new Error("Unklare lokale Priorisierung. Erneut laden; keine Aktion starten.");
+    }
+    const labels = {
+      ai_uncertain: "Unklaren KI-Anbieteraufruf unabhängig prüfen; nie blind wiederholen",
+      eml_unreviewed: "Neue importierte E-Mail-Benachrichtigung lokal prüfen; kein Live-Posteingang",
+      manual_overdue: "Manuelle Wiedervorlage überfällig; kein Plattform-Ablaufbeleg",
+      ai_proposal: "Gespeicherten KI-Vorschlag mit Original vergleichen und lokal freigeben/ablehnen",
+      manual_due_soon: "Manuelle Wiedervorlage innerhalb von sieben Tagen prüfen"
+    };
+    const body = byId("autopilot-body");
+    body.replaceChildren();
+    for (const item of page.items) {
+      if (!Object.prototype.hasOwnProperty.call(labels, item.kind) ||
+          !Number.isSafeInteger(item.priority) || typeof item.ad_id !== "string" ||
+          typeof item.reference !== "string" || typeof item.evidence !== "string") {
+        throw new Error("Ungültige lokale Aufgabendaten. Keine Aktion starten.");
+      }
+      const row = document.createElement("tr");
+      insightCell(row, item.priority + 1);
+      insightCell(row, item.ad_id);
+      insightCell(row, labels[item.kind]);
+      insightCell(row, item.reference + " · " + item.evidence);
+      body.appendChild(row);
+    }
+    autopilotNextOffset = page.has_more ? page.next_offset : null;
+    status.textContent = page.total + " lokale Prüfpunkte; davon " +
+      (page.counts?.ai_uncertain || 0) + " unklare/laufende KI-Vorgänge und " +
+      (page.counts?.eml_unreviewed || 0) + " neue importierte Hinweise. " +
+      "Keine KI-Kosten oder Plattformaktion durch die Prüfung. Seite " +
+      (Math.floor(offset / 50) + 1) + ".";
+    return true;
+  } catch (error) {
+    autopilotNextOffset = null;
+    byId("autopilot-body").replaceChildren();
+    status.textContent = error.message;
+    return false;
+  } finally {
+    autopilotBusy = false;
+    byId("autopilot-load").disabled = !localUiReady();
+    byId("autopilot-next").disabled = autopilotNextOffset === null || !localUiReady();
   }
 }
 
@@ -279,6 +353,7 @@ async function mutatePriceRule(action) {
 
 for (const [id, handler] of [
   ["inventory-diff-load", () => loadInventoryDiff()], ["inventory-diff-next", () => loadInventoryDiff(true)],
+  ["autopilot-load", () => loadAutopilotAttention()], ["autopilot-next", () => loadAutopilotAttention(true)],
   ["nav-inventory-diff", () => loadInventoryDiff()], ["nav-price-rules", () => loadPriceRules()],
   ["price-rule-open", () => loadPriceRule(byId("price-rule-sku").value)],
   ["price-rule-list", () => loadPriceRules()], ["price-rule-next", () => loadPriceRules(true)],

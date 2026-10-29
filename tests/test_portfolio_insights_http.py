@@ -13,9 +13,10 @@ import unittest
 from unittest.mock import patch
 
 from mark_api.dashboard import create_server, _DASHBOARD_HTML, _DASHBOARD_JS
-from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.domain import AdSnapshot, InboundMessageEvent, LifecycleState
 from mark_api.portfolio_drafts import import_drafts, preview_import
 from mark_api.portfolio_price_rules import price_rule_detail
+from mark_api.portfolio_followups import mutate_followup
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
 
@@ -81,6 +82,46 @@ class PortfolioInsightsHttpTests(unittest.TestCase):
         self.store.append_inventory_result(result, source=source, attempt_id=attempt,
                                           observed_at=start + timedelta(seconds=2),
                                           completed_at=start + timedelta(seconds=5), tracked_ad_ids=tracked)
+
+    def test_local_autopilot_attention_http_is_token_bound_and_never_platform_write(self):
+        self.round(0, "private-web-product-launcher", [("10001", "Belegt")])
+        mutate_followup(self.store, {
+            "action": "save", "ad_id": "10001",
+            "due_date": "2026-10-25", "note": "Nicht öffentlich",
+            "expected_revision": 0, "request_key": "c"*64,
+        }, now=self.start)
+        self.store.append_inbound_message_events((InboundMessageEvent(
+            ad_id="10001", conversation_id="chat_10001",
+            provider_message_id="eml-10001", observed_at=self.start,
+            source="kleinanzeigen-email",
+        ),))
+        endpoint = "/api/portfolio/attention"
+        self.assertEqual(self.request("GET", endpoint, token=False)[0], 403)
+        status, first = self.request("GET", endpoint + "?offset=0&limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(first["total"], 2)
+        self.assertEqual(first["items"][0]["kind"], "eml_unreviewed")
+        self.assertEqual(first["platform_writes"], 0)
+        self.assertEqual(first["provider_requests"], 0)
+        self.assertEqual(first["provider_cost_cents"], 0)
+        self.assertFalse(first["platform_messages_read"])
+        self.assertFalse(first["automatic_execution_authorized"])
+        self.assertTrue(first["has_more"])
+        self.assertEqual(first["next_offset"], 1)
+        status, second = self.request("GET", endpoint + "?offset=1&limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(second["items"][0]["kind"], "manual_overdue")
+        self.assertEqual(second["items"][0]["evidence"], "2026-10-25")
+        self.assertNotIn("Nicht öffentlich", str(second))
+        for query in ("?offset=-1", "?offset=1&offset=2",
+                      "?offset=999999", "?limit=51", "?limit=True",
+                      "?state=all", "?after=0", "?offset=%FF"):
+            with self.subTest(query=query):
+                self.assertEqual(self.request("GET", endpoint + query)[0], 400)
+        with self.store._connect() as conn:
+            conn.execute(
+                "UPDATE portfolio_followups SET due_date='corrupt' WHERE ad_id='10001'")
+        self.assertEqual(self.request("GET", endpoint)[0], 503)
 
     def test_g4_compares_actual_launcher_and_explicit_retry_not_only_cli_rounds(self):
         self.round(0, "private-web-product-launcher", [("10001", "Alt"), ("10002", "Bleibt")])
