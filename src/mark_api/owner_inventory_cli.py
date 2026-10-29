@@ -23,7 +23,7 @@ from .private_web_runtime import build_private_web_inventory_runtime
 from .results import ReadResult, ReadStatus
 from .fence_witness import _canonical_json
 from .storage_owner import (
-    StorageOwnerClient, StorageOwnerError, _MAX_FRAME, _VERSION,
+    StorageOwnerClient, StorageOwnerError, _MAX_FRAME, _MAX_SYNC_ITEMS, _VERSION,
     _snapshot_as_json, _snapshot_from_json,
 )
 
@@ -86,7 +86,7 @@ def _read_status(result: object) -> tuple[ReadResult[tuple[AdSnapshot, ...]], in
         raise OwnerInventorySyncError(
             "private inventory status contradicts records", kind="invalid_inventory",
         )
-    if len(snapshots) > 2048:
+    if len(snapshots) > _MAX_SYNC_ITEMS:
         raise OwnerInventorySyncError(
             "private inventory exceeds owner RPC bound", kind="invalid_inventory",
         )
@@ -102,7 +102,7 @@ def _read_status(result: object) -> tuple[ReadResult[tuple[AdSnapshot, ...]], in
             # ASCII escaping. The real client chunks only after this check.
             frame = _canonical_json({
                 "version": _VERSION, "op": "sync_stage",
-                "attempt": 2**63 - 1, "offset": 2048,
+                "attempt": 2**63 - 1, "offset": _MAX_SYNC_ITEMS,
                 "snapshots": [wire],
             }).encode("utf-8")
             if len(frame) + 1 > _MAX_FRAME + 1:
