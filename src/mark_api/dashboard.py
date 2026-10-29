@@ -760,6 +760,12 @@ _DASHBOARD_HTML = """<!doctype html>
               <option value="90">Letzte 90 Tage</option>
             </select>
           </label>
+          <label>Tageskennzahl (lokale EML)
+            <select id="report-metric">
+              <option value="messages">Eingegangene Nachrichten</option>
+              <option value="conversations">Unterschiedliche Gespräche je Tag</option>
+            </select>
+          </label>
           <button id="report-refresh" type="button">Bericht berechnen</button>
           <button id="report-download" type="button" disabled>Tageszahlen als CSV</button>
         </div>
@@ -768,13 +774,15 @@ _DASHBOARD_HTML = """<!doctype html>
         <p id="report-sales-summary" class="muted"></p>
         <p id="report-ai-summary" class="muted"></p>
         <div class="table-wrap"><table>
-          <thead><tr><th>Kalendertag (UTC)</th><th>Importierte Eingangsnachrichten</th></tr></thead>
+          <thead><tr><th>Kalendertag (UTC)</th><th id="report-daily-metric-heading">Importierte Eingangsnachrichten</th></tr></thead>
           <tbody id="report-daily-body"></tbody>
         </table></div>
         <p class="muted">Angezeigt werden höchstens die letzten 14 Tageszeilen;
         der CSV-Export enthält den vollständigen gewählten Zeitraum.
         Die E-Mail-Importzahl ist keine vollständige Kleinanzeigen-Nachrichtenstatistik.
-        Erlöse sind der aktuelle manuelle Gesamtbestand, nicht einem Zeitraum
+        Gespräche werden je Tag eindeutig gezählt, können jedoch an mehreren Tagen
+        erscheinen. Die Zahl unterschiedlicher Käufer ist aus EML-Daten nicht
+        zuverlässig bestimmbar. Erlöse sind der aktuelle manuelle Gesamtbestand, nicht einem Zeitraum
         zugerechnete Verkäufe. KI-Ausgaben sind unbestätigte USD-Schätzungen,
         keine Anbieterrechnung. Keine Kausal- oder Konversionsbehauptung.</p>
       </details>
@@ -5465,6 +5473,28 @@ async function saveSaleState() {
     );
   }
 }
+function renderPortfolioReportDaily() {
+  if (!reportData) return;
+  const metric=byId("report-metric").value;
+  const field=metric==="messages"?"imported_messages":
+    metric==="conversations"?"imported_conversations":null;
+  if (!field) return;
+  byId("report-daily-metric-heading").textContent=metric==="messages"
+    ?"Importierte Eingangsnachrichten":"Unterschiedliche importierte Gespräche je Tag";
+  const body=byId("report-daily-body");
+  body.replaceChildren();
+  for (const item of reportData.imported_messages_per_day.slice(-14)) {
+    const value=item[field];
+    if (!Number.isSafeInteger(value) || value<0) throw new Error("Ungültige Tageszahl");
+    const row=document.createElement("tr");
+    for (const itemValue of [item.day_utc,value]) {
+      const cell=document.createElement("td");
+      cell.textContent=String(itemValue);
+      row.append(cell);
+    }
+    body.append(row);
+  }
+}
 async function loadPortfolioReport() {
   if (!reportingAvailable || !localUiReady()) return false;
   const selected=byId("report-days").value;
@@ -5479,7 +5509,9 @@ async function loadPortfolioReport() {
     if (!data || data.window_days!==Number(selected) ||
         !Array.isArray(data.imported_messages_per_day) ||
         data.imported_messages_per_day.length!==Number(selected) ||
-        data.platform_writes!==0 || data.revenue_period_attributed!==false) {
+        data.platform_writes!==0 || data.revenue_period_attributed!==false ||
+        data.unique_buyer_count_supported!==false ||
+        data.imported_unique_buyers_window!==null) {
       throw new Error("Ungültige Daten");
     }
     reportData=data;
@@ -5487,7 +5519,8 @@ async function loadPortfolioReport() {
       " bis "+data.end_day_utc+" (UTC) · Eigene Anzeigen mit belegter Bestandshistorie: "+
       data.own_ads_with_inventory_history+" · Lokal importierte Eingangsnachrichten: "+
       data.imported_inbound_messages_window+" · Unterschiedliche importierte Gespräche: "+
-      data.imported_conversations_window;
+      data.imported_conversations_window+
+      " · Unterschiedliche Käufer: aus EML nicht zuverlässig bestimmbar.";
     const sale=data.manual_sales_current_all_time;
     byId("report-sales-summary").textContent="Manueller Verkaufsstand (alle Zeiten): "+
       sale.manually_sold+" als verkauft, "+sale.manually_reserved+
@@ -5503,17 +5536,7 @@ async function loadPortfolioReport() {
       (cost.usd_cent_reserved/100).toFixed(2)+" USD reserviert; "+
       cost.unknown_outcomes+" unklare Ergebnisse." :
       "Noch keine lokalen KI-Auftragskosten erfasst; kein Rechnungsabgleich.";
-    const body=byId("report-daily-body");
-    body.replaceChildren();
-    for (const item of data.imported_messages_per_day.slice(-14)) {
-      const row=document.createElement("tr");
-      for (const value of [item.day_utc,item.imported_messages]) {
-        const cell=document.createElement("td");
-        cell.textContent=String(value);
-        row.append(cell);
-      }
-      body.append(row);
-    }
+    renderPortfolioReportDaily();
     byId("report-download").disabled=false;
     byId("report-feedback").textContent=
       "Lokal berechnet. Keine Veröffentlichung und keine Anbieteranfrage.";
@@ -5531,20 +5554,24 @@ async function loadPortfolioReport() {
 }
 function downloadPortfolioReportCsv() {
   if (!reportData || byId("report-days").value!==String(reportData.window_days)) return;
-  const rows=["tag_utc,importierte_eingangsnachrichten"];
+  const metric=byId("report-metric").value;
+  if (!["messages","conversations"].includes(metric)) return;
+  const field=metric==="messages"?"imported_messages":"imported_conversations";
+  const rows=["tag_utc,"+(metric==="messages"?
+    "importierte_eingangsnachrichten":"unterschiedliche_gespraeche_je_tag")];
   for (const item of reportData.imported_messages_per_day) {
     // Fixed ISO date and integer counts cannot start spreadsheet formulas.
+    const value=item[field];
     if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(item.day_utc) ||
-        !Number.isSafeInteger(item.imported_messages) ||
-        item.imported_messages<0) return;
-    rows.push(item.day_utc+","+String(item.imported_messages));
+        !Number.isSafeInteger(value) || value<0) return;
+    rows.push(item.day_utc+","+String(value));
   }
   const file=new Blob(["\\uFEFF"+rows.join("\\r\\n")+"\\r\\n"],
                       {type:"text/csv;charset=utf-8"});
   const url=URL.createObjectURL(file);
   const a=document.createElement("a");
   a.href=url;
-  a.download="kleinanzeiger-nachrichten-"+
+  a.download="kleinanzeiger-"+(metric==="messages"?"nachrichten":"gespraeche")+"-"+
     reportData.window_days+"-tage.csv";
   document.body.append(a);
   a.click();
@@ -5552,6 +5579,7 @@ function downloadPortfolioReportCsv() {
   URL.revokeObjectURL(url);
 }
 byId("report-refresh").addEventListener("click",loadPortfolioReport);
+byId("report-metric").addEventListener("change",renderPortfolioReportDaily);
 byId("report-days").addEventListener("change",() => {
   reportData=null;
   byId("report-download").disabled=true;

@@ -76,11 +76,25 @@ def report(store: SnapshotStore, *, days: int=7,
             " GROUP BY date(e.observed_at) ORDER BY day",params,
         ).fetchall()
         daily_counts={row["day"]:int(row["quantity"]) for row in rows}
+        # Conversations are distinct by (owned ad, conversation identifier)
+        # PER DAY; a conversation active on two days appears on both days.
+        # These daily counts must not be summed to infer the distinct
+        # conversations over the entire selected window.
+        conversation_rows=conn.execute(
+            "SELECT day,COUNT(*) quantity FROM ("
+            "SELECT date(e.observed_at) day,e.ad_id,e.conversation_id "
+            "FROM inbound_message_events e "+filt+
+            " GROUP BY date(e.observed_at),e.ad_id,e.conversation_id"
+            ") GROUP BY day ORDER BY day",params,
+        ).fetchall()
+        daily_conversations={row["day"]:int(row["quantity"])
+                             for row in conversation_rows}
         daily=[]
         for j in range(days):
             key=(start+timedelta(days=j)).isoformat()
             daily.append({"day_utc":key,
-                          "imported_messages":daily_counts.get(key,0)})
+                          "imported_messages":daily_counts.get(key,0),
+                          "imported_conversations":daily_conversations.get(key,0)})
         if sales_schema(conn):
             sale=conn.execute(
                 "SELECT SUM(state='sold') sold,SUM(state='reserved') reserved,"
@@ -128,6 +142,11 @@ def report(store: SnapshotStore, *, days: int=7,
         "own_ads_with_inventory_history":ads,
         "imported_inbound_messages_window":messages,
         "imported_conversations_window":conversations,
+        # Local EML data hold conversation IDs, NOT a verified buyer ID.
+        # Unknown differs from zero and must not be derived from a
+        # conversation count or an ad-level reaction counter.
+        "imported_unique_buyers_window":None,
+        "unique_buyer_count_supported":False,
         "imported_messages_per_day":daily,
         "manual_sales_current_all_time":sales,
         "ai_usage_estimate_all_time":ai,
