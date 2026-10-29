@@ -45,11 +45,14 @@ def _canon(path: Path) -> Path:
     return path
 
 
+_LINUX_UCRED = struct.Struct("=iII")  # pid_t signed, uid_t/gid_t unsigned
+
+
 def _peer_uid(peer: socket.socket) -> int:
-    raw = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-    if len(raw) != 12:
+    raw = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, _LINUX_UCRED.size)
+    if type(raw) is not bytes or len(raw) != _LINUX_UCRED.size:
         raise ProtectedGenerationError("unverified generation peer")
-    return struct.unpack("3i", raw)[1]
+    return _LINUX_UCRED.unpack(raw)[1]
 
 
 def _wire(data: dict[str, object]) -> bytes:

@@ -61,7 +61,13 @@ def _serve(generator):
         parent.mkdir()
         os.chmod(parent, 0o2710)
         if os.geteuid() != os.getegid():
-            os.chown(parent, os.geteuid(), os.geteuid())
+            try:
+                os.chown(parent, os.geteuid(), os.geteuid())
+            except PermissionError:
+                # This host cannot create the required multi-UID directory.
+                # Keep real UDS coverage on capable Linux/CI hosts; the
+                # credential frame regression above is always synthetic.
+                raise unittest.SkipTest("cannot set frontend UID-owned socket group")
         path = parent / "gen.sock"
         server = ProtectedGenerationServer(
             socket_path=path, frontend_uid=os.geteuid(),
@@ -80,6 +86,22 @@ def _serve(generator):
 
 
 class ProtectedGenerationTransportTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(socket, "SO_PEERCRED"), "Linux peer credentials required")
+    def test_linux_peer_uid_unsigned_high_bit_and_malformed_frames(self):
+        from unittest.mock import MagicMock
+        from mark_api.protected_generation import ProtectedGenerationError, _peer_uid
+        high_uid = 2**31 + 7
+        peer = MagicMock()
+        peer.getsockopt.return_value = struct.pack("=iII", 123, high_uid, 50042)
+        self.assertEqual(_peer_uid(peer), high_uid)
+        peer.getsockopt.assert_called_with(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, 12
+        )
+        for raw in (b"", b"\x00" * 11, b"\x00" * 13, bytearray(12)):
+            with self.subTest(raw=raw), self.assertRaises(ProtectedGenerationError):
+                peer.getsockopt.return_value = raw
+                _peer_uid(peer)
+
     def test_real_peer_authenticated_unix_text_and_image_drafts_no_publish(self):
         fake = _FakeGenerator()
         with _serve(fake) as path:
