@@ -162,6 +162,63 @@ class ProductOfflineWorkspaceTests(unittest.TestCase):
         self.assertFalse(self.request("GET", "/api/dashboard/config")[1]["write_ui_available"])
         self.writer.assert_not_called()
 
+    def test_explicit_resync_classifies_safe_read_failures_once(self):
+        self.start()
+        for result, error in (
+            (ReadResult.failure(ReadStatus.TRANSPORT_ERROR, error="cookie=secret"),
+             "owner_inventory_connection_unavailable"),
+            (ReadResult.failure(ReadStatus.UNAUTHENTICATED, http_status=401),
+             "owner_inventory_login_required"),
+            (ReadResult.failure(ReadStatus.PARSE_ERROR, error="corrupt /private/path"),
+             "owner_inventory_read_failed"),
+        ):
+            with self.subTest(error=error):
+                before = len(self.readers)
+                self.result = result
+                self.assertEqual(self.request("POST", "/api/dashboard/sync"),
+                                 (503, {"error": error}))
+                self.assertEqual(len(self.readers), before + 1)
+                self.assertEqual(self.store.ad_history("10001"), (self.snapshot,))
+        self.writer.assert_not_called()
+
+    def test_explicit_resync_classifies_busy_recovery_and_storage_without_read(self):
+        runtime = self.start()
+        session = runtime._inventory_runtime
+        before = len(self.readers)
+        self.assertTrue(session._operation_lock.acquire(blocking=False))
+        try:
+            self.assertEqual(self.request("POST", "/api/dashboard/sync"),
+                             (409, {"error": "owner_inventory_busy"}))
+        finally:
+            session._operation_lock.release()
+        self.assertEqual(len(self.readers), before)
+
+        prior = self.store.begin_sync_attempt(source="unfinished", started_at=self.now)
+        self.assertEqual(self.request("POST", "/api/dashboard/sync"),
+                         (409, {"error": "owner_inventory_recovery_required"}))
+        self.assertEqual(len(self.readers), before)
+        self.store.fail_sync_attempt(prior, source="unfinished",
+                                     error_kind="parse_error",
+                                     completed_at=self.now)
+
+        with patch.object(SnapshotStore, "sync_recovery_status",
+                          side_effect=OSError("database /private/path unavailable")):
+            self.assertEqual(self.request("POST", "/api/dashboard/sync"),
+                             (503, {"error": "owner_inventory_storage_unavailable"}))
+        self.assertEqual(len(self.readers), before)
+        self.assertEqual(self.store.ad_history("10001"), (self.snapshot,))
+        self.writer.assert_not_called()
+
+    def test_explicit_resync_classifies_runtime_start_failure_without_retry(self):
+        factory = Mock(side_effect=RuntimeError("cookie secret in /private/path"))
+        self.start(runtime_factory=factory)
+        self.assertEqual(factory.call_count, 1)
+        self.assertEqual(self.request("POST", "/api/dashboard/sync"),
+                         (503, {"error": "owner_inventory_browser_unavailable"}))
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(self.store.ad_history("10001"), (self.snapshot,))
+        self.writer.assert_not_called()
+
     def test_only_confirmed_empty_inventory_can_mark_absent(self):
         self.start()
         self.assertEqual(self.store.ad_history("10001")[-1].lifecycle_state, LifecycleState.ACTIVE)
