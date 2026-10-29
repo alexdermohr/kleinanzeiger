@@ -43,6 +43,10 @@ Kundenunterlagen: [Handbuch](docs/Kleinanzeiger-Handbuch.html) und
 [Funktionsübersicht](docs/Kleinanzeiger-Funktionen.html).
 Die separate Linux-A6-Migration gehört nicht zur Windows-Neuinstallation.
 
+## Vorherige Programmversion verwenden (ab v0.1.14)
+
+Über **Weitere Aktionen** im zentralen Windows-Kontrollfenster die frühere Programmversion auswählen und nach ausdrücklicher Bestätigung aktivieren. **Kleinanzeiger starten** verwendet danach die ausgewählte Version. Eine erneute Aktualisierung erfolgt nur über **Installieren / aktualisieren**. Der Rückwechsel prüft die auswählbare Python-Programmumgebung vor und nach dem Wechsel, bewahrt die bisherige Umgebung und setzt nur den ausführbaren Programmstand zurück. Anzeigen, Backups, Chrome-Profile und Recovery-Zustände werden nicht überschrieben. Ein zweites externes, geschütztes Backup ist noch offen.
+
 ## Windows-Updates mit Rückfallumgebung (ab v0.1.13)
 
 Installationen bauen die neue Python-Programmumgebung zunächst in einem eigenen Stagingverzeichnis auf. Erst nach Paket-, Version- und Startprüfung wird sie aktiviert. Scheitert die Aktivierung, wird die vorherige Programmumgebung zurückgestellt; nach erfolgreichem Upgrade bleibt sie für einen technisch begleiteten Rückwechsel als `.venv-rollback-*` erhalten. Das Verfahren verändert keine Anzeigen-Datenbank, Chrome-Profile oder vorhandenen Sicherungen. Eine spätere manuelle Rollback-Schaltfläche ist noch nicht enthalten; die vollständige Kunden-PC-Abnahme bleibt offen.
