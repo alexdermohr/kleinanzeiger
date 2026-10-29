@@ -635,5 +635,48 @@ class BrowserInventoryTechnicalBoundaryTests(unittest.TestCase):
                 self.assertTrue(client.closed)
 
 
+class BrowserInventoryDeniedTransportTests(unittest.TestCase):
+    """Denied admission must make even injected raw CDP clients inert."""
+
+    def test_denied_preconnected_close_cannot_execute_injected_client(self):
+        effects = []
+
+        class EffectfulClient:
+            def close(self):
+                effects.append("unexpected_transport")
+
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610, preconnected_client=EffectfulClient(),
+        )
+        with patch(
+            "mark_api.private_web_inventory_cdp._require_private_web_cdp_authority",
+            side_effect=PrivateWebCdpError("not_admitted"),
+        ):
+            reader.close()
+        self.assertEqual(effects, [])
+        self.assertEqual(reader.read_ads().status, ReadStatus.TRANSPORT_ERROR)
+
+    def test_denied_raw_helpers_cannot_touch_preconnected_client(self):
+        client = FakeClient([payload([])])
+        reader = CdpManagementInventoryReader(
+            cdp_port=19610, preconnected_client=client,
+        )
+        with patch(
+            "mark_api.private_web_inventory_cdp._require_private_web_cdp_authority",
+            side_effect=PrivateWebCdpError("not_admitted"),
+        ):
+            with self.assertRaises(PrivateWebCdpError):
+                CdpManagementInventoryReader._value(client, "2 + 2")
+            with self.assertRaises(PrivateWebCdpError):
+                reader._open_management(client)
+            with self.assertRaises(PrivateWebCdpError):
+                reader._page(client, 1)
+            result = reader.read_ads()
+            reader.close()
+        self.assertEqual(result.status, ReadStatus.TRANSPORT_ERROR)
+        self.assertEqual(client.calls, [])
+        self.assertFalse(client.closed)
+
+
 if __name__ == "__main__":
     unittest.main()
