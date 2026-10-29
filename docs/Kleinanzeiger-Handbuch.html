@@ -14,7 +14,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.15</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.16</p>
 <h1>Kleinanzeiger – Benutzerhandbuch</h1>
 <p>Kleinanzeiger verwaltet Ihre eigenen Anzeigen, zeigt Kennzahlen, unterstützt Entwürfe mit KI und sichert lokale Daten. Alle häufigen Aufgaben starten über das Fenster <strong>Kleinanzeiger</strong>.</p>
 <nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#stapel">Stapelaufträge</a><a href="#verkauf">Verkäufe & Lager</a><a href="#controlling">Controlling</a><a href="#vorlagen">Vorlagen</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
@@ -22,7 +22,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <p class="note"><strong>Ab v0.1.14:</strong> Unter <strong>Weitere Aktionen → Vorherige Programmversion verwenden …</strong> nach beendetem Kleinanzeiger eine erhaltene frühere Programmversion auswählen und ausdrücklich bestätigen. Die ausgewählte Programmumgebung und ihre lesende Datenbankkompatibilität werden vor der Aktivierung geprüft; der Start nach dem Wechsel wird ebenfalls geprüft. Bei Fehlern wird die zuvor aktive Version wiederhergestellt; Anzeigen, Datenbank, Chrome-Profil und Backups bleiben unberührt. Dieser Knopf ist kein Zurücksetzen der Daten. <strong>Kleinanzeiger starten</strong> verwendet anschließend die bewusst ausgewählte Version; die Schaltfläche <strong>Installieren / aktualisieren</strong> führt bei Bedarf wieder ein Update aus.</p>
 <p class="note"><strong>Update mit Rückfallmöglichkeit (v0.1.13):</strong> Die neue Version wird zuerst getrennt installiert und am endgültigen Ort geprüft. Scheitert die Installation oder der Wechsel, wird die vorherige funktionsfähige Programmumgebung wiederhergestellt. Die zuvor installierte Version bleibt als <code>.venv-rollback-*</code> erhalten. Anzeigendaten, Backups und Chrome-Profil werden nicht ersetzt. Seit v0.1.14 lässt sich eine geprüfte ältere Version nach ausdrücklicher Bestätigung im Kontrollfenster auswählen.</p>
 <ol>
-<li>Das offizielle <strong>Kleinanzeiger-v0.1.15-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
+<li>Das offizielle <strong>Kleinanzeiger-v0.1.16-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
 <li><strong>Kleinanzeiger.cmd</strong> doppelklicken. Das Windows-Kontrollfenster erscheint.</li>
 <li><strong>Einrichten und starten</strong> klicken. Fehlendes Python 3.12/3.13 sowie Chrome werden bei Bedarf über geprüfte offizielle Dateien bereitgestellt. Eine Internetverbindung ist dafür nötig.</li>
 <li>Im eigens gestarteten Chrome-Fenster bei <strong>kleinanzeigen.de</strong> anmelden; gegebenenfalls die Konto-Bestätigung selbst durchführen. Kleinanzeiger speichert kein Kontopasswort.</li>
@@ -108,14 +108,14 @@ oder verändert allein eine Anzeige.</p>
 <li>Textentwurf oder Bildentwurf erzeugen. Ergebnisse im Formular prüfen, bei Bedarf ändern und erst mit gesondertem Klick eine Anzeige erstellen.</li>
 </ol>
 <p>Die tatsächlichen Kosten hängen vom Provider und der Nutzung ab. Keine sensiblen Kontodaten in Prompts eingeben. Generierte Bilder sind nicht automatisch authentische Fotos des angebotenen Gegenstands.</p>
-<h3>KI-Textvorschläge für bereits veröffentlichte eigene Anzeigen (Folgeversion nach v0.1.15)</h3>
+<h3>KI-Textvorschläge für bereits veröffentlichte eigene Anzeigen (ab v0.1.16)</h3>
 <ol>
 <li>In <strong>Meine Anzeigen</strong> eine bestätigte eigene, aktive oder pausierte Anzeige über <strong>Bearbeiten</strong> wählen. Im Anzeigeneditor auf <strong>KI-Textvorschlag für diese Anzeige vorbereiten</strong> klicken. Kleinanzeiger prüft die Originaldaten zur exakten Anzeigen-ID nochmals lokal.</li>
 <li>Im eingeblendeten <strong>KI-Assistenten</strong> den vorbereiteten Prompt mit dem Originaltext sorgfältig kontrollieren. Nur bekannte Produktfakten übermitteln, sensible Daten entfernen, Modellkosten beachten und jede Anfrage einzeln bestätigen. Die Vorbereitung allein ist kostenlos.</li>
 <li>Nach der KI-Antwort <strong>Gesicherten Ausgangstext</strong> und <strong>KI-Vorschlag</strong> für Titel und Beschreibung vollständig vergleichen. Erst nach Prüfung den Vorschlag ins vorhandene Bearbeitungsformular übernehmen. Abweichende, entfernte oder zwischenzeitlich geänderte Anzeigen blockieren die Übernahme.</li>
 <li>Änderungen im Anzeigeneditor nochmals prüfen. <strong>Änderungen speichern</strong> ist eine separate Aktion und nur in einer für Plattformänderungen zulässigen Sitzung möglich; das KI-Ergebnis löst niemals eigenmächtig eine Plattformänderung aus.</li>
 </ol>
-<p class="note">Diese Textoptimierung gehört zum neueren Entwicklungsstand und ist <strong>noch nicht</strong> Bestandteil des veröffentlichten Windows-Pakets v0.1.15. Bildänderungen bereits veröffentlichter Anzeigen, automatische Massenübernahmen und echte Nachrichtenversandautomatik sind damit nicht freigegeben.</p>
+<p class="note">Diese Textoptimierung gehört zum ab v0.1.16 vorgesehenen, vollständig geprüften Windows-Kundenpaket. Der KI-Vorschlag selbst und die lokale Formularübernahme führen weiterhin keine Plattformänderung aus. Bildänderungen bereits veröffentlichter Anzeigen, automatische Massenübernahmen und echte Nachrichtenversandautomatik sind damit nicht freigegeben.</p>
 <h2 id="daten">6. Datensicherung, Wiederherstellung und Updates</h2>
 <p>Im Kontrollfenster stehen <strong>Sicherung erstellen</strong> und <strong>Installieren / aktualisieren</strong> zur Verfügung. Vor einer Aktualisierung wird bei vorhandener Datenbank automatisch eine geprüfte Sicherung erzeugt. Die Datenbank liegt unter <code>%LOCALAPPDATA%\Kleinanzeiger\anzeigen.sqlite</code>, Sicherungen unter <code>%LOCALAPPDATA%\Kleinanzeiger\Backups</code>. Programmdateien liegen unter <code>%LOCALAPPDATA%\Kleinanzeiger\App</code>.</p>
 <p>Für <strong>Sicherung wiederherstellen</strong> zunächst über <strong>Weitere Aktionen</strong> die Restore-Funktion öffnen. Diese stellt nur in eine <strong>noch nicht vorhandene</strong> Datenbank ohne WAL-/SHM-/Journal-Dateien wieder her. Eine vorhandene Datenbank wird niemals überschrieben. Die Sicherungsdatei benötigt ihr passendes Manifest.</p>
@@ -177,5 +177,5 @@ oder verändert allein eine Anzeige.</p>
 <p>Die Vorlage startet keinen Auftrag. Prüfhinweise führen keine Plattformaktionen und keine kostenpflichtige KI-Verarbeitung aus. Wiederkehrende autonome Arbeitsregeln sind noch nicht enthalten.</p>
 <h2>14. Grenzen der aktuellen Ausgabe</h2>
 <p><strong>Noch nicht enthalten:</strong> Kontogebundene vollständige Nachrichtenkonversationen und ein kontrollierter Nachrichtenversand, automatische Plattform-Stapeländerungen/-veröffentlichungen, wiederkehrende KI-Autopilot-Regeln, eine unabhängig geprüfte Provider-Abrechnung sowie eine Freigabe auf Ihrem tatsächlichen Windows-Kunden-PC. Diese Funktionen dürfen nicht mit vorhandenen lokalen Notizen, KI-Vorschlägen oder simulierten Tests verwechselt werden.</p>
-<footer>Kleinanzeiger v0.1.15 – Kundenunterlagen. Stand: 29. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.16 – Kundenunterlagen. Stand: 29. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>

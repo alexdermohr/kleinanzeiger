@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.15 – Windows 11
+# Kleinanzeiger v0.1.16 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
