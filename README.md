@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-> **Verbindlicher Fortsetzungsstand vom 28.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Die Ausgabe v0.1.16 ergänzt die bereits in v0.1.15 vorhandenen G4-Globalfilter für bis zu 10.000 Anzeigen, die getrennten EML-Gesprächs-/Nachrichtenzahlen, CDP-Negativtests und den manuellen Programm-Rückwechsel um den KI-Textvergleich bereits veröffentlichter eigener Anzeigen (nur nach Einzelkostenfreigabe, kein automatisches Speichern) sowie die A6-UID-Dekoderkorrektur. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC fehlt weiterhin.
+> **Verbindlicher Fortsetzungsstand vom 28.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Die Ausgabe v0.1.17 ergänzt den vorhandenen Funktionsumfang um die einfache Auswahl und Abwahl aller bis zu 50 sichtbaren Anzeigen einer Katalogseite, ohne automatische Plattformaktionen. Bereits v0.1.16 ergänzte die bereits in v0.1.15 vorhandenen G4-Globalfilter für bis zu 10.000 Anzeigen, die getrennten EML-Gesprächs-/Nachrichtenzahlen, CDP-Negativtests und den manuellen Programm-Rückwechsel um den KI-Textvergleich bereits veröffentlichter eigener Anzeigen (nur nach Einzelkostenfreigabe, kein automatisches Speichern) sowie die A6-UID-Dekoderkorrektur. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC fehlt weiterhin.
 
 **Kleinanzeiger** verwaltet eigene Kleinanzeigen über eine lokale Weboberfläche: Anzeige erstellen und veröffentlichen, Bilder zuordnen, Titel und Beschreibung bearbeiten, pausieren, aktivieren, löschen, Bestand synchronisieren sowie Historie, Views, Reaktionen, E-Mail-Daten und Auswertungen einsehen. Hinzu kommen KI-Text- und Bildentwürfe sowie lokale Datensicherung und Wiederherstellung.
 
@@ -16,7 +16,7 @@ anschließenden KI-/Massenaufträgen liegt in
 [docs/roadmap-ki-portfolio-2026-10-26.md](docs/roadmap-ki-portfolio-2026-10-26.md).
 **P0:** Anzeigen im Dashboard mit indexierten Katalogseiten (jeweils maximal
 50 sichtbar), Titelsuche, ID-Suche, Statusfilter und seitenübergreifender
-lokaler Mehrfachauswahl. Ein CSV-Export enthält ausschließlich ausgewählte
+lokaler Mehrfachauswahl. Bis zu 50 sichtbare Einträge lassen sich in einem Schritt auswählen oder abwählen, ohne andere Seiten zu beeinflussen. Ein CSV-Export enthält ausschließlich ausgewählte
 Anzeigen-IDs; Auswahl löst **keine** Plattformaktion aus. Die frühere
 `/api/ads`-Schnittstelle bleibt für bisherige Integrationen kompatibel.
 
@@ -179,7 +179,7 @@ Der Starter gibt eine gemeinsame Dashboard-URL für Anzeigenverwaltung und Gener
 
 Im aktuellen Entwicklungsbranch kann eine bestehende eigene Anzeige aus **Meine Anzeigen → Verwalten** über **KI-Textvorschlag für diese Anzeige vorbereiten** zur Verbesserung ausgewählt werden. Die Anzeige muss aus einer der bestätigten Eigenbestandsquellen stammen und einen bekannten Titel sowie eine bekannte Beschreibung besitzen. Vor einer kostenpflichtigen KI-Anfrage wird der Originalstand noch einmal per exakter Anzeigen-ID **ausschließlich lokal** gelesen; die KI erhält erst nach Sichtprüfung des Prompts und erneuter Einzelkosten-/Datenübertragungsfreigabe die gewählten Angaben. Der vollständige **Original-/Vorschlagsvergleich** zeigt Titel und Beschreibung. Nach bewusster Bestätigung wird ausschließlich das vorhandene **Bearbeitungsformular** gefüllt; **erst die gesonderte Schaltfläche „Änderungen speichern“** benutzt den bestehenden geschützten Plattform-Write-/Readback-Weg, sofern dieser für das Konto tatsächlich zulässig und freigeschaltet ist. Unklare Ergebnisse werden niemals automatisch erneut gesendet. Bildänderungen an bereits veröffentlichten Anzeigen und ein automatischer Serien-Rollout gehören nicht zu dieser Teilfunktion.
 
-**Wichtig:** Der KI-Textvergleich ist in der Quellcode-Version v0.1.16 enthalten; die tatsächliche Kundenfreigabe setzt weiterhin die veröffentlichten ZIP-/Wheel-Assets mit exakter SHA256-/Manifest- und nativer Windows-Prüfung voraus. Der KI-Aufruf selbst bleibt kostenpflichtig, ein KI-Vorschlag ist kein Plattformwrite.
+**Wichtig:** Der KI-Textvergleich ist seit v0.1.16 in der veröffentlichten Windows-Ausgabe enthalten. Die tatsächliche Nutzung erfordert weiterhin ein korrekt geprüftes Paket, die angemeldete eigene Anzeige und eine explizite Freigabe jedes möglicherweise kostenpflichtigen KI-Aufrufs. Der KI-Aufruf selbst bleibt kostenpflichtig, ein KI-Vorschlag ist kein Plattformwrite.
 
 ## Lokales Controlling – Nachrichten und Gespräche unterscheiden (ab v0.1.15)
 
