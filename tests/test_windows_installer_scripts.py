@@ -13,7 +13,7 @@ SCRIPTS = ROOT / "scripts"
 class WindowsInstallerContractTests(unittest.TestCase):
     def test_installer_verifies_pinned_wheel_before_network_or_setup(self):
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
-        self.assertIn("kleinanzeiger-0.1.17-py3-none-any.whl", script)
+        self.assertIn("kleinanzeiger-0.1.18-py3-none-any.whl", script)
         self.assertIn("$wheelName = [IO.Path]::GetFileName($wheel)", script)
         self.assertIn("[regex]::Escape($wheelName)", script)
         self.assertEqual(script.count("function Test-Python("), 1)
@@ -39,7 +39,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertLess(script.index("& $stagePython -m pip install"), script.index("Rename-Item -LiteralPath $venv"))
         self.assertIn("Rename-Item -LiteralPath $rollback", script)
         self.assertIn("if ($mayDisposeStage", script)
-        self.assertIn("m.version('kleinanzeiger') == '0.1.17'", script)
+        self.assertIn("m.version('kleinanzeiger') == '0.1.18'", script)
 
     def test_no_powershell_home_reserved_variable_write(self):
         for filename in ("windows-install.ps1", "windows-chrome.ps1"):
@@ -71,8 +71,8 @@ class WindowsInstallerContractTests(unittest.TestCase):
     def test_release_copy_manifest_and_version_are_consistent(self):
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.1.17"', metadata)
-        self.assertIn("Kleinanzeiger-v0.1.17-Windows.zip", workflow)
+        self.assertIn('version = "0.1.18"', metadata)
+        self.assertIn("Kleinanzeiger-v0.1.18-Windows.zip", workflow)
         for filename in (
             "Kleinanzeiger.cmd",
             "windows-install.ps1", "windows-center.ps1", "windows-worker.ps1", "windows-start.ps1", "windows-chrome.ps1",
@@ -81,6 +81,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
             self.assertTrue((SCRIPTS / filename).is_file(), filename)
             self.assertIn(filename, workflow)
         self.assertIn("test_dashboard_managed_ad_picker.py", workflow)
+        self.assertIn("test_dashboard_existing_ai_jobs.py", workflow)
 
 
 if __name__ == "__main__":

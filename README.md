@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-> **Verbindlicher Fortsetzungsstand vom 28.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Die Ausgabe v0.1.17 ergänzt den vorhandenen Funktionsumfang um die einfache Auswahl und Abwahl aller bis zu 50 sichtbaren Anzeigen einer Katalogseite, ohne automatische Plattformaktionen. Bereits v0.1.16 ergänzte die bereits in v0.1.15 vorhandenen G4-Globalfilter für bis zu 10.000 Anzeigen, die getrennten EML-Gesprächs-/Nachrichtenzahlen, CDP-Negativtests und den manuellen Programm-Rückwechsel um den KI-Textvergleich bereits veröffentlichter eigener Anzeigen (nur nach Einzelkostenfreigabe, kein automatisches Speichern) sowie die A6-UID-Dekoderkorrektur. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC fehlt weiterhin.
+> **Verbindlicher Fortsetzungsstand vom 29.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Die Ausgabe v0.1.18 ergänzt den vorhandenen Funktionsumfang um gebundene KI-Prüfaufträge für bis zu 5.000 bestätigte eigene veröffentlichte Anzeigen. v0.1.17 ergänzte die einfache Auswahl und Abwahl aller bis zu 50 sichtbaren Anzeigen einer Katalogseite, ohne automatische Plattformaktionen. Bereits v0.1.16 ergänzte die vorhandenen G4-Globalfilter, Controlling- und Sicherheitsprüfungen um den einzelnen KI-Textvergleich eigener Anzeigen. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC fehlt weiterhin.
 
 **Kleinanzeiger** verwaltet eigene Kleinanzeigen über eine lokale Weboberfläche: Anzeige erstellen und veröffentlichen, Bilder zuordnen, Titel und Beschreibung bearbeiten, pausieren, aktivieren, löschen, Bestand synchronisieren sowie Historie, Views, Reaktionen, E-Mail-Daten und Auswertungen einsehen. Hinzu kommen KI-Text- und Bildentwürfe sowie lokale Datensicherung und Wiederherstellung.
 
@@ -19,6 +19,21 @@ anschließenden KI-/Massenaufträgen liegt in
 lokaler Mehrfachauswahl. Bis zu 50 sichtbare Einträge lassen sich in einem Schritt auswählen oder abwählen, ohne andere Seiten zu beeinflussen. Ein CSV-Export enthält ausschließlich ausgewählte
 Anzeigen-IDs; Auswahl löst **keine** Plattformaktion aus. Die frühere
 `/api/ads`-Schnittstelle bleibt für bisherige Integrationen kompatibel.
+
+### KI-Stapelprüfung bestehender eigener Anzeigen (ab v0.1.18)
+
+Unter **Dashboard → Bestehende Eigenanzeigen mit KI prüfen** werden bestätigte
+eigene veröffentlichte Anzeigen aus der aktuellen Katalogauswahl oder als
+gesamte passende Auswahl in einen Auftrag übernommen, höchstens 5.000. Für jede
+Anzeige bleiben ID, Quelle und Originaltitel/-beschreibung an den Auftrag
+gebunden. Vor der Generierung müssen Datenübertragung und ein USD-Kostenbudget
+ausdrücklich bestätigt werden; verarbeitet werden höchstens zehn Vorschläge je
+Stapel. Ein Stapel kann gestoppt und später fortgesetzt werden. Bei
+**UNKNOWN** oder unklarem Providerergebnis erfolgt keine blinde Wiederholung.
+Jeder Original-/Vorschlagsvergleich wird einzeln lokal freigegeben oder
+abgelehnt. Die Funktion schreibt weder automatisch auf die Plattform noch
+veröffentlicht sie Anzeigen; Kostenanzeigen sind Schätzwerte, keine garantierte
+Providerabrechnung.
 
 ## Native Windows-Kundenanwendung (ab v0.1.8)
 
