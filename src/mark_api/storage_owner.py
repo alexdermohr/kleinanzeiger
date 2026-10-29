@@ -64,7 +64,7 @@ _SHA = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _OWNER = re.compile(r"[A-Za-z0-9._:@-]{1,128}\Z", re.ASCII)
 _MAX_PEERS = 8
 _MAX_SYNC_BATCH = 4
-_MAX_SYNC_ITEMS = 2048
+_MAX_SYNC_ITEMS = 12_000
 _MAX_INBOX_BATCH = 4
 _MAX_INBOX_ITEMS = 2048
 _TRACKED_PAGE = 64
@@ -562,6 +562,7 @@ class _SyncStage:
     attempt: int
     source: str
     snapshots: list[AdSnapshot] = field(default_factory=list)
+    ad_ids: set[str] = field(default_factory=set)
     digest: str = _SYNC_DIGEST_SEED
 
 
@@ -1071,13 +1072,15 @@ class StorageOwnerServer(
                 # The attempt source attests only the sync journal identity;
                 # each snapshot retains its original observation provenance.
                 # Neither field grants write-completion or recovery authority.
-                existing = {item.ad_id for item in stage.snapshots}
                 added = [item.ad_id for item in snapshots]
-                if len(set(added)) != len(added) or any(key in existing for key in added):
+                if len(set(added)) != len(added) or any(
+                    key in stage.ad_ids for key in added
+                ):
                     raise StorageOwnerError("inventory duplicate ad identity")
                 serialized = [_snapshot_as_json(item) for item in snapshots]
                 digest = _sync_digest(stage.digest, serialized)
                 stage.snapshots.extend(snapshots)
+                stage.ad_ids.update(added)
                 stage.digest = digest
                 return {"accepted": len(stage.snapshots), "digest": stage.digest}
         if op == "sync_fail" and set(request) == {
@@ -1774,12 +1777,20 @@ class StorageOwnerClient:
                 error_kind=result.status.value,
             )
             return 0
-        snapshots = tuple(result.value or ())
+        raw_snapshots = result.value
+        if raw_snapshots is None:
+            snapshots: tuple[AdSnapshot, ...] = ()
+        elif type(raw_snapshots) is not tuple:
+            # Do not consume a caller-controlled iterable before its capacity
+            # can be proven. The typed owner-inventory contract is a tuple.
+            raise StorageOwnerError("invalid inventory read result")
+        else:
+            snapshots = raw_snapshots
         if (
             (result.status is ReadStatus.SUCCESS_EMPTY and snapshots)
             or (result.status is ReadStatus.SUCCESS_NONEMPTY and not snapshots)
-            or any(not isinstance(item, AdSnapshot) for item in snapshots)
             or len(snapshots) > _MAX_SYNC_ITEMS
+            or any(not isinstance(item, AdSnapshot) for item in snapshots)
         ):
             raise StorageOwnerError("invalid inventory read result")
         digest = _SYNC_DIGEST_SEED
