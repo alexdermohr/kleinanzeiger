@@ -19,6 +19,7 @@ from mark_api.dashboard import (
 )
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.storage import SnapshotStore
+from mark_api.portfolio_existing_jobs import claim_next, details as existing_job_details
 
 
 class ExistingAiDashboardTests(unittest.TestCase):
@@ -67,9 +68,85 @@ class ExistingAiDashboardTests(unittest.TestCase):
     def test_dashboard_contains_complete_existing_ad_workflow(self):
         for control in ("existing-ai-create", "existing-ai-start", "existing-ai-pause",
                         "existing-ai-next-call", "existing-ai-batch", "existing-ai-stop",
-                        "existing-ai-approve", "existing-ai-reject", "existing-ai-next"):
+                        "existing-ai-approve", "existing-ai-reject", "existing-ai-next",
+                        "existing-ai-recovery", "existing-ai-recover",
+                        "existing-ai-unknown-ad", "existing-ai-checked-cents",
+                        "existing-ai-checked", "existing-ai-settle-unknown"):
             self.assertIn(f'id="{control}"', _DASHBOARD_HTML)
         self.assertNotIn("existing-ai-apply", _DASHBOARD_HTML)
+
+    def test_interrupted_existing_ai_uses_same_origin_checked_local_settlement(self):
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="4712", observed_at=datetime.now(timezone.utc),
+            source="private-web-owner-inventory",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Zweite Anzeige", description="Nur bekannte Fakten",
+        ))
+        access=DashboardGenerationAccess(
+            ui_token="g"*32,generator_factory=lambda:None,
+        )
+        self.start_server(access)
+        payload={"mode":"selected","ad_ids":["4711","4712"],
+                 "instruction":"Faktengetreu optimieren",
+                 "budget_cents":70,"estimate_cents":20,
+                 "request_key":"f"*64}
+        code,job=self.request("POST","/api/portfolio/existing-ai/create",payload)
+        self.assertEqual(code,200)
+        jid=job["job_id"]
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/state",
+            {"job_id":jid,"action":"start"})[0],200)
+        claim=claim_next(self.store,jid)
+        self.assertEqual(claim["ad_id"],"4711")
+        uri="/api/portfolio/existing-ai/recover"
+        # Other billable requests exclude accounting changes even though
+        # these local endpoints require no provider token themselves.
+        self.assertTrue(access._lock.acquire(blocking=False))
+        try:
+            self.assertEqual(self.request("POST",uri,{"job_id":jid})[0],409)
+            self.assertEqual(existing_job_details(self.store,jid)["counts"]["inflight"],1)
+        finally:
+            access._lock.release()
+        self.assertEqual(self.request("POST",uri,{"job_id":jid},token="wrong")[0],403)
+        self.assertEqual(self.request("POST",uri,{"job_id":jid},
+            origin="http://evil.invalid")[0],403)
+        self.assertEqual(self.request("POST",uri,{"job_id":jid,"extra":True})[0],400)
+        code,recovered=self.request("POST",uri,{"job_id":jid})
+        self.assertEqual(code,200)
+        self.assertEqual(recovered["state"],"needs_attention")
+        self.assertEqual(recovered["counts"]["unknown"],1)
+        self.assertEqual(recovered["reserved_cents"],20)
+        self.assertEqual(self.request("POST",uri,{"job_id":jid})[1]["counts"],recovered["counts"])
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/state",
+            {"job_id":jid,"action":"resume"})[0],400)
+        settle="/api/portfolio/existing-ai/settle-unknown"
+        missing={"job_id":jid,"ad_id":"4711","actual_cents":7,
+                 "explicitly_checked":False}
+        self.assertEqual(self.request("POST",settle,missing)[0],400)
+        self.assertEqual(self.request("POST",settle,{**missing,
+            "explicitly_checked":True,"actual_cents":True})[0],400)
+        self.assertEqual(self.request("POST",settle,{**missing,
+            "explicitly_checked":True,"ad_id":"4712"})[0],400)
+        self.assertEqual(self.request("POST",settle,{**missing,
+            "explicitly_checked":True},token="wrong")[0],403)
+        self.assertTrue(access._lock.acquire(blocking=False))
+        try:
+            self.assertEqual(self.request("POST",settle,
+                {**missing,"explicitly_checked":True})[0],409)
+        finally:
+            access._lock.release()
+        code,cleared=self.request("POST",settle,
+            {**missing,"explicitly_checked":True})
+        self.assertEqual(code,200)
+        self.assertEqual(cleared["platform_writes"],0)
+        self.assertEqual(cleared["state"],"paused")
+        self.assertEqual(cleared["actual_cents"],7)
+        self.assertEqual(cleared["reserved_cents"],0)
+        self.assertEqual(cleared["counts"]["queued"],1)
+        self.assertEqual(cleared["counts"]["rejected"],1)
+        self.assertEqual(self.request("POST",settle,
+            {**missing,"explicitly_checked":True})[0],400)
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/state",
+            {"job_id":jid,"action":"resume"})[0],200)
 
     def test_generation_requires_second_token_and_provider_cost_floor(self):
         calls=[]
