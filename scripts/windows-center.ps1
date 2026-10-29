@@ -119,6 +119,7 @@ $mail = Add-Button 'E-Mails importieren' 28 390 282 43
 $labels = Add-Button 'Anzeigen vergleichen' 330 390 282 43
 $productsExport = Add-Button 'Entwürfe exportieren' 28 449 282 43
 $restore = Add-Button 'Sicherung wiederherstellen …' 330 449 282 43
+$rollback = Add-Button 'Vorherige Programmversion verwenden …' 28 508 584 43
 $statusLabel = Add-Label 'Bereit.' 28 397 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
 $detailsLink.Text = 'Fehlerdetails anzeigen'
@@ -133,13 +134,13 @@ $detailsLink.Add_Click({
 $script:advancedExpanded = $false
 function Set-AdvancedLayout([bool]$expanded) {
   $script:advancedExpanded = $expanded
-  foreach ($control in @($mail,$labels,$productsExport,$restore)) {
+  foreach ($control in @($mail,$labels,$productsExport,$restore,$rollback)) {
     $control.Visible = $expanded
   }
   $advanced.Text = $(if($expanded){'Weniger anzeigen'}else{'Weitere Aktionen'})
-  $statusLabel.SetBounds(28,$(if($expanded){516}else{397}),584,44)
-  $detailsLink.SetBounds(28,$(if($expanded){572}else{453}),240,26)
-  $form.ClientSize = [System.Drawing.Size]::new(640,$(if($expanded){630}else{510}))
+  $statusLabel.SetBounds(28,$(if($expanded){567}else{397}),584,44)
+  $detailsLink.SetBounds(28,$(if($expanded){626}else{453}),240,26)
+  $form.ClientSize = [System.Drawing.Size]::new(640,$(if($expanded){682}else{510}))
 }
 Set-AdvancedLayout $false
 $help = [System.Windows.Forms.LinkLabel]::new()
@@ -172,7 +173,8 @@ function Refresh-Controls {
   } else {
     $versionLabel.Text = 'Noch nicht eingerichtet – ein Klick genügt.'
   }
-  $needsInstall = !$installed -or ($script:packageVersion -and [version]$installed -lt [version]$script:packageVersion)
+  # A user-selected older program version must start as selected. Updating is a separate button.
+  $needsInstall = !$installed
   $primary.Text = $(if($product){'Kleinanzeiger beenden'}elseif($needsInstall){'Einrichten und starten'}else{'Kleinanzeiger starten'})
   $primary.Enabled = !$busy -or $product
   $update.Enabled = !$busy
@@ -185,6 +187,8 @@ function Refresh-Controls {
   $productsExport.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $account.Enabled = !$busy
   $restore.Enabled = !$busy -and !(Test-Path -LiteralPath $db)
+  $rollback.Enabled = !$busy -and (Test-Path -LiteralPath $python -PathType Leaf) -and
+    (@(Get-ChildItem -LiteralPath $state -Directory -Filter '.venv-rollback-*' -ErrorAction SilentlyContinue).Count -gt 0)
 }
 
 function Show-KiDialog {
@@ -504,6 +508,7 @@ function Start-Worker([string]$action,[bool]$launchAfter=$false,[string]$backupN
     'OnlineUpdate' {'Prüfe Updates und installiere sie bei Bedarf …'}
     'Backup' {'Sichere deine Anzeigen …'}
     'Restore' {'Stelle die Sicherung wieder her …'}
+    'Rollback' {'Prüfe und aktiviere die ausgewählte Programmversion …'}
     'ImportMail' {'Importiere ausgewaehlte E-Mails …'}
     'Classify' {'Speichere Vergleichslabels …'}
     'ImportProducts' {'Pruefe und importiere Artikelentwuerfe …'}
@@ -663,6 +668,7 @@ function Finish-Process {
       'OnlineUpdate' {'Update abgeschlossen. Kleinanzeiger kann gestartet werden.'}
       'Backup' {'Sicherung erfolgreich erstellt.'}
       'Restore' {'Sicherung erfolgreich wiederhergestellt.'}
+      'Rollback' {'Vorherige Programmversion aktiviert. Anzeigen und Chrome-Profil sind unverändert.'}
       'ImportMail' {'E-Mails importiert. Anzeigen beim naechsten Start neu laden.'}
       'Classify' {'Vergleichslabels gespeichert. Auswertungen beim naechsten Start neu laden.'}
       'ImportProducts' {'Artikelentwuerfe gespeichert. Im Dashboard nach dem Start ansehen.'}
@@ -699,8 +705,7 @@ $primary.Add_Click({
         return
       }
       $installed = Get-InstalledVersion
-      if (!$installed -or ($script:packageVersion -and
-          [version]$installed -lt [version]$script:packageVersion)) {
+      if (!$installed) {
         Start-Worker 'Install' $true
       } else {
         Start-Product
@@ -736,6 +741,68 @@ $account.Add_Click({
 })
 $ai.Add_Click({ if (!$script:process) { Show-KiDialog } })
 $advanced.Add_Click({ Set-AdvancedLayout (!$script:advancedExpanded) })
+$rollback.Add_Click({
+  try {
+    if (Test-ActiveProduct) {
+      Set-Status 'Bitte Kleinanzeiger vor dem Versionswechsel vollständig beenden.' $true
+      return
+    }
+    $folders = @(Get-ChildItem -LiteralPath $state -Directory -Filter '.venv-rollback-*' -ErrorAction SilentlyContinue |
+      Where-Object {
+        $_.Name -match '^\.venv-rollback-\d{8}-\d{6}-\d{3}-[0-9a-f]{32}$' -and
+        -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+      } | Sort-Object Name -Descending)
+    if ($folders.Count -eq 0) {
+      Set-Status 'Keine frühere Programmversion vorhanden.'
+      return
+    }
+    $picker = [Windows.Forms.Form]::new()
+    $picker.Text = 'Vorherige Programmversion'
+    $picker.ClientSize = [Drawing.Size]::new(530,155)
+    $picker.FormBorderStyle = 'FixedDialog'
+    $picker.MaximizeBox = $false
+    $picker.StartPosition = 'CenterParent'
+    $select = [Windows.Forms.ComboBox]::new()
+    $select.DropDownStyle = 'DropDownList'
+    $select.SetBounds(18,17,494,32)
+    $names = @()
+    foreach ($folder in $folders) {
+      $exe = Join-Path $folder.FullName 'Scripts\python.exe'
+      if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { continue }
+      try {
+        $version = @(& $exe -c "import importlib.metadata as m; print(m.version('kleinanzeiger'))" 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $version.Count -ne 1 -or
+            [string]$version[0] -notmatch '^\d+\.\d+\.\d+$') { continue }
+      } catch { continue }
+      [void]$select.Items.Add(("Version " + [string]$version[0] + " – " + $folder.Name.Substring(15,19)))
+      $names += $folder.Name
+    }
+    if ($names.Count -eq 0) {
+      $picker.Dispose()
+      Set-Status 'Keine geprüfte vorherige Programmversion gefunden.' $true
+      return
+    }
+    $select.SelectedIndex = 0
+    $picker.Controls.Add($select)
+    $ok = [Windows.Forms.Button]::new()
+    $ok.Text = 'Weiter'
+    $ok.SetBounds(18,75,180,36)
+    $picker.Controls.Add($ok)
+    $ok.Add_Click({ $picker.DialogResult = [Windows.Forms.DialogResult]::OK; $picker.Close() })
+    $dialogResult = $picker.ShowDialog($form)
+    $index = $select.SelectedIndex
+    $picker.Dispose()
+    if ($dialogResult -ne [Windows.Forms.DialogResult]::OK -or $index -lt 0) { return }
+    $selected = [string]$names[$index]
+    $question = "Die ausgewählte frühere Programmversion aktivieren?" +
+      [Environment]::NewLine + [Environment]::NewLine +
+      "Die aktuelle Programmversion wird für den Rückwechsel erhalten." +
+      [Environment]::NewLine + "Anzeigen, Sicherungen und Chrome-Profil bleiben unverändert."
+    if ([Windows.Forms.MessageBox]::Show($question,'Kleinanzeiger – Programmversion wechseln',
+        [Windows.Forms.MessageBoxButtons]::YesNo) -ne [Windows.Forms.DialogResult]::Yes) { return }
+    Start-Worker 'Rollback' $false $selected
+  } catch { Set-Status $_.Exception.Message $true }
+})
 $restore.Add_Click({
   if (Test-Path -LiteralPath $db) {
     Set-Status 'Die Datenbank ist bereits vorhanden. Wiederherstellung gesperrt.' $true
@@ -839,16 +906,16 @@ if ($SelfTest) {
   Set-AdvancedLayout $true
   # Controls inherit Form.Visible; the headless SelfTest cannot assert
   # effective child Visible without showing a customer window.
-  if (!$script:advancedExpanded -or $form.ClientSize.Height -ne 630 -or
-      $advanced.Text -ne 'Weniger anzeigen' -or $statusLabel.Top -ne 516 -or
-      $detailsLink.Top -ne 572 -or
+  if (!$script:advancedExpanded -or $form.ClientSize.Height -ne 682 -or
+      $advanced.Text -ne 'Weniger anzeigen' -or $statusLabel.Top -ne 567 -or
+      $detailsLink.Top -ne 626 -or $rollback.Top -ne 508 -or
       $mail.Top -ne 390 -or $productsExport.Top -ne 449) {
     throw 'Erweiterte Kundenaktionen sind nicht vollstaendig erreichbar.'
   }
   Set-AdvancedLayout $false
   if ($form.Controls.Count -lt 12 -or $primary.Text -ne 'Kleinanzeiger starten' -or
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $restore -or
-      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $help -or $null -eq $features) {
+      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $rollback -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
   }
   $timer.Dispose()

@@ -73,7 +73,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertLess(worker.index("if ($null -eq $download)"),
                         worker.index("Write-Output 'ALREADY_CURRENT'"))
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn("-SelfTest -ExpectedInstalledVersion '0.1.13'", workflow)
+        self.assertIn("-SelfTest -ExpectedInstalledVersion '0.1.14'", workflow)
 
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
@@ -101,7 +101,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("'Weitere Aktionen'", gui)
         self.assertIn("'Weniger anzeigen'", gui)
         self.assertIn("$form.ClientSize = [System.Drawing.Size]::new(640,510)", gui)
-        self.assertIn("$(if($expanded){630}else{510})", gui)
+        self.assertIn("$(if($expanded){682}else{510})", gui)
         self.assertIn("$control.Visible = $expanded", gui)
         self.assertIn("$detailsLink.Visible = $failure", gui)
         self.assertIn("$detailsLink.SetBounds(28,453,240,26)", gui)
@@ -109,6 +109,41 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertNotIn("$advanced.Add_Click({ $restore.Visible = !$restore.Visible })", gui)
         self.assertLess(gui.index("$update = Add-Button"), gui.index("$account = Add-Button"))
         self.assertLess(gui.index("$account = Add-Button"), gui.index("$mail = Add-Button"))
+
+    def test_manual_rollback_is_explicit_and_preserves_customer_data(self) -> None:
+        worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
+        hub = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
+        self.assertIn("'Rollback' { Invoke-ProgramRollback $BackupName }", worker)
+        self.assertIn("function Invoke-ProgramRollback([string]$rollbackName)", worker)
+        action = worker.split("function Invoke-ProgramRollback", 1)[1].split(
+            "function Download-VerifiedRelease", 1
+        )[0]
+        self.assertIn("Assert-KleinanzeigerStopped", action)
+        self.assertGreaterEqual(action.count("Assert-KleinanzeigerStopped"), 2)
+        self.assertIn("'.venv-rollback-'", action)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", action)
+        self.assertIn("Rename-Item -LiteralPath $current", action)
+        self.assertIn("Rename-Item -LiteralPath $savedPath", action)
+        self.assertIn("mark_api.launcher --help", action)
+        self.assertIn("ROLLBACK_OK", action)
+        self.assertNotIn("Remove-Item -LiteralPath", action)
+        self.assertIn("mode=ro", action)
+        self.assertIn("SnapshotStore._validate_store_schema", action)
+        self.assertIn("Remove-Item Env:KLEINANZEIGER_ROLLBACK_DB_CHECK", action)
+        self.assertNotIn("Rename-Item -LiteralPath $db", action)
+        self.assertNotIn("Remove-Item -LiteralPath $db", action)
+        self.assertIn("Vorherige Programmversion verwenden", hub)
+        self.assertIn("$rollback.Add_Click({", hub)
+        self.assertIn("$needsInstall = !$installed", hub)
+        self.assertNotIn("if (!$installed -or ($script:packageVersion -and", hub)
+        self.assertIn("if (!$installed) {\n        Start-Worker 'Install' $true", hub)
+        self.assertIn("Start-Worker 'Rollback' $false $selected", hub)
+        self.assertIn("[Windows.Forms.MessageBoxButtons]::YesNo", hub)
+        self.assertIn("$(if($expanded){682}else{510})", hub)
+        self.assertIn("Verify Windows upgrade rollback and non-destructive failed staging", workflow)
+        self.assertIn("Native Windows manual rollback and untrusted path rejection", workflow)
+        self.assertIn("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -Action Rollback", workflow)
 
     def test_private_control_and_key_never_enter_log(self) -> None:
         gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8")
@@ -181,10 +216,10 @@ except KeyboardInterrupt:
         meta = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.1.13"', meta)
-        self.assertIn("kleinanzeiger-0.1.13-py3-none-any.whl", script)
-        self.assertIn("Kleinanzeiger-v0.1.13-Windows.zip", workflow)
-        self.assertIn("publish-windows-v0.1.13", workflow)
+        self.assertIn('version = "0.1.14"', meta)
+        self.assertIn("kleinanzeiger-0.1.14-py3-none-any.whl", script)
+        self.assertIn("Kleinanzeiger-v0.1.14-Windows.zip", workflow)
+        self.assertIn("publish-windows-v0.1.14", workflow)
 
 
 if __name__ == "__main__":
