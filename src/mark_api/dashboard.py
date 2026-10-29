@@ -372,6 +372,10 @@ _DASHBOARD_HTML = """<!doctype html>
           <span id="catalog-feedback" role="status" aria-live="polite">Lade Anzeigen …</span>
           <span id="catalog-selected-count">0 ausgewählt</span>
         </div>
+        <div class="catalog-page-selection" role="group" aria-label="Sichtbare Anzeigen dieser Seite auswählen">
+          <button type="button" id="catalog-select-page">Sichtbare auswählen (max. 50)</button>
+          <button type="button" id="catalog-deselect-page">Sichtbare abwählen</button>
+        </div>
         <div id="catalog-selection-actions" class="catalog-selection-actions" aria-label="Aktionen für ausgewählte Anzeigen" hidden>
           <button type="button" id="catalog-clear">Auswahl leeren</button>
           <button type="button" id="catalog-export">Auswahl als CSV</button>
@@ -1049,6 +1053,8 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .catalog-selection-actions:not([hidden]) { position: sticky; bottom: 8px; z-index: 9; padding: 11px; background: var(--surface); border: 1px solid #a9cbd3; border-radius: 12px; box-shadow: 0 8px 24px rgba(27,55,77,.12); }
 .catalog-selection-hint { flex-basis: 100%; color: var(--subtle); font-size: .8rem; }
 .catalog-summary { justify-content: space-between; font-size: .78rem; color: var(--subtle); }
+.catalog-page-selection { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.catalog-page-selection button { padding: 7px 10px; font-size: .78rem; }
 .catalog-pages { justify-content: space-between; margin-top: 12px; }
 .catalog-pages button, .catalog-selection-actions button { font-size: .8rem; }
 .catalog-select { display: inline-flex; align-items: center; gap: 5px; font-size: .78rem; color: var(--subtle); }
@@ -2063,10 +2069,58 @@ async function mutateSelectedFollowup(action) {
   }
 }
 
+// Page selection is local-only and never changes the full filtered inventory.
+function selectableCatalogPageRows() {
+  if (catalogLoading || catalogBulkBusy || !Array.isArray(catalogRows)
+      || catalogRows.length > 50) return null;
+  const ids = new Set();
+  for (const ad of catalogRows) {
+    if (!ad || typeof ad.ad_id !== "string"
+        || !/^[0-9]{1,32}$/.test(ad.ad_id) || ids.has(ad.ad_id)) return null;
+    ids.add(ad.ad_id);
+  }
+  return catalogRows;
+}
+
+function changeCatalogVisiblePageSelection(selected) {
+  const rows = selectableCatalogPageRows();
+  if (!rows || rows.length === 0) return false;
+  for (const ad of rows) {
+    if (selected) {
+      catalogSelectedIds.add(ad.ad_id);
+      catalogSelectedAds.set(ad.ad_id, Object.freeze({
+        ad_id: ad.ad_id,
+        title: typeof ad.title === "string" ? ad.title : null,
+        present: ad.present === true,
+        lifecycle_state: ad.lifecycle_state,
+        observed_at: ad.observed_at,
+      }));
+    } else {
+      catalogSelectedIds.delete(ad.ad_id);
+      catalogSelectedAds.delete(ad.ad_id);
+    }
+  }
+  const visibleTitles = new Set(rows.map(
+    (ad) => "Anzeige " + ad.ad_id + " in Arbeitsauswahl übernehmen"));
+  for (const checkbox of Array.from(document.querySelectorAll(".catalog-select input"))) {
+    if (visibleTitles.has(checkbox.title)) checkbox.checked = selected;
+  }
+  // Selecting 50 is allowed for CSV but never authorizes >10 platform writes.
+  renderCatalogSelection();
+  return true;
+}
+
 function renderCatalogSelection() {
   // Existing standalone/legacy Dashboard render harnesses have no portfolio
   // toolbar. Selection remains inert rather than changing their Write flows.
   const count = catalogSelectedIds.size;
+  const pageRows = selectableCatalogPageRows();
+  const selectPage = optionalById("catalog-select-page");
+  const deselectPage = optionalById("catalog-deselect-page");
+  if (selectPage) selectPage.disabled = !pageRows || pageRows.length === 0
+    || pageRows.every((ad) => catalogSelectedIds.has(ad.ad_id));
+  if (deselectPage) deselectPage.disabled = !pageRows || pageRows.length === 0
+    || !pageRows.some((ad) => catalogSelectedIds.has(ad.ad_id));
   const actions = optionalById("catalog-selection-actions");
   if (actions) actions.hidden = count === 0 && !catalogBulkBusy;
   const hint = optionalById("catalog-selection-hint");
@@ -5936,6 +5990,8 @@ byId("catalog-status").addEventListener("change", searchCatalog);
 byId("catalog-prev").addEventListener("click", previousCatalogPage);
 byId("catalog-next").addEventListener("click", nextCatalogPage);
 byId("catalog-clear").addEventListener("click", clearCatalogSelection);
+byId("catalog-select-page").addEventListener("click", () => changeCatalogVisiblePageSelection(true));
+byId("catalog-deselect-page").addEventListener("click", () => changeCatalogVisiblePageSelection(false));
 byId("catalog-export").addEventListener("click", exportCatalogSelection);
 byId("catalog-bulk-pause").addEventListener("click", () => runCatalogBulkAction("pause"));
 byId("catalog-bulk-activate").addEventListener("click", () => runCatalogBulkAction("activate"));
