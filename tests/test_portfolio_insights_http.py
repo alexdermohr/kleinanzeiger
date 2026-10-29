@@ -124,6 +124,47 @@ class PortfolioInsightsHttpTests(unittest.TestCase):
         self.round(10, "private-web-periodic-readonly", [], failed=True)
         self.assertEqual(self.request("GET", query)[0], 409)
 
+    def test_g4_global_state_filter_finds_changes_beyond_first_page_and_pins_filter(self):
+        original = [(f"{i:05d}", f"Titel {i}") for i in range(1, 121)]
+        revised = [(number, f"Geändert {number}" if number in {"00030", "00120"} else title)
+                   for number, title in original]
+        self.round(0, "private-web-product-launcher", original)
+        self.round(10, "private-web-periodic-readonly", revised)
+        code, page = self.request("GET", "/api/portfolio/inventory-diff?state=changed&limit=1")
+        self.assertEqual(code, 200, page)
+        self.assertEqual(page["state_filter"], "changed")
+        self.assertTrue(page["filter_is_global"])
+        self.assertIsNone(page["total"])
+        self.assertEqual(page["total_unfiltered"], 120)
+        self.assertEqual([item["ad_id"] for item in page["items"]], ["00030"])
+        self.assertTrue(page["has_more"])
+        second = self.request("GET", f"/api/portfolio/inventory-diff?state=changed&limit=1&after=00030&epoch={page['epoch']}")[1]
+        self.assertEqual([item["ad_id"] for item in second["items"]], ["00120"])
+        self.assertFalse(second["has_more"])
+        self.assertIsNone(second["next_after"])
+        # Changing the selection while retaining its old cursor cannot mix pages.
+        self.assertEqual(self.request("GET", f"/api/portfolio/inventory-diff?state=unchanged&limit=1&after=00030&epoch={page['epoch']}")[0], 409)
+        self.assertEqual(self.request("GET", "/api/portfolio/inventory-diff?state=changes")[0], 400)
+        self.assertEqual(self.request("GET", "/api/portfolio/inventory-diff?state=changed&state=unchanged")[0], 400)
+        self.round(20, "private-web-periodic-readonly", [], failed=True)
+        _, unverified = self.request("GET", "/api/portfolio/inventory-diff?state=changed")
+        self.assertEqual(unverified["state"], "unverified")
+        self.assertEqual(unverified["items"], [])
+        self.assertIsNone(unverified["confirmed_at"])
+
+    def test_g4_filter_finds_a_single_change_at_ad_10000(self):
+        originals = [(f"{i:05d}", "Unveraendert") for i in range(1, 10001)]
+        current = originals[:-1] + [("10000", "Geaendert am Ende")]
+        self.round(0, "private-web-product-launcher", originals)
+        self.round(10, "private-web-periodic-readonly", current)
+        status, result = self.request("GET", "/api/portfolio/inventory-diff?state=changed")
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["total_unfiltered"], 10000)
+        self.assertEqual([item["ad_id"] for item in result["items"]], ["10000"])
+        self.assertFalse(result["has_more"])
+        self.assertEqual(result["platform_writes"], 0)
+
     def test_g5_rule_is_bedienbar_persistent_idempotent_and_never_changes_price(self):
         path = "/api/portfolio/price-rules/mutate"
         detail = self.request("GET", "/api/portfolio/price-rules/detail?sku=SKU-1")[1]

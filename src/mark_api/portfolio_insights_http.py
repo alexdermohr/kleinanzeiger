@@ -43,7 +43,7 @@ def read_insight(store: SnapshotStore, path: str, query: str) -> dict:
         if set(options) != {"sku"}:
             raise InsightRequestError("missing sku")
         return price_rule_detail(store, sku=options["sku"])
-    options = _options(query, {"after", "limit", "epoch"} if path.endswith("inventory-diff")
+    options = _options(query, {"after", "limit", "epoch", "state"} if path.endswith("inventory-diff")
                        else {"after", "limit"})
     raw_limit = options.get("limit", "50")
     if not raw_limit.isascii() or not raw_limit.isdecimal() or len(raw_limit) > 3:
@@ -57,8 +57,12 @@ def read_insight(store: SnapshotStore, path: str, query: str) -> dict:
         # A later page must be bound to the original snapshot generation.
         if after and not epoch:
             raise InsightRequestError("pagination requires epoch")
+        state = options.get("state", "all")
+        if state not in ("all", "newly_observed", "changed", "paused",
+                         "unchanged", "no_baseline", "unclear", "unverified"):
+            raise InsightRequestError("invalid state filter")
         return product_inventory_diff_page(store, after=after, limit=limit,
-                                           expected_epoch=epoch)
+                                           expected_epoch=epoch, state_filter=state)
     return price_suggestions_page(store, after=options.get("after", ""), limit=limit)
 
 
