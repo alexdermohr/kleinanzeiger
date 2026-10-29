@@ -3298,6 +3298,45 @@ class SnapshotStore:
             ).fetchall()
         return tuple(self._required_observation_ad_id(row["ad_id"]) for row in rows)
 
+    def catalog_ad_histories_page(
+        self, *, after: str = "", limit: int = 16,
+    ) -> tuple[tuple[str, tuple[AdSnapshot, ...]], ...]:
+        """Read a bounded ID page and its histories with one shared SQLite read.
+
+        The existing ID-page method certifies native SQLite key types before
+        narrowing by cursor. Only the small page is then decoded, retaining
+        each historical observation and metric provenance exactly. One shared
+        connection avoids repeatedly opening and validating a SQLite snapshot
+        for every ID when a search scans thousands of nonmatching ads.
+
+        Both connections close before returning; callers never hold a SQLite
+        reader transaction while filtering, rendering or waiting for the UI.
+        The catalog is observational, not a platform write authorization.
+        """
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("invalid catalog history page size")
+        ids = self.catalog_ad_ids_page(after=after, limit=limit)
+        if not ids:
+            return ()
+        with closing(self._connect()) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            # _assert_native_history_ad_ids starts the shared read snapshot.
+            self._assert_native_history_ad_ids(connection, "ad_snapshots")
+            page = []
+            for ad_id in ids:
+                rows = connection.execute(
+                    """SELECT id, ad_id, observed_at, source, lifecycle_state,
+                              title, description, views, watch_count,
+                              reply_count, metric_source
+                       FROM ad_snapshots WHERE ad_id=? COLLATE BINARY""",
+                    (ad_id,),
+                ).fetchall()
+                history = self._decode_ad_history(rows)
+                if not history:
+                    raise sqlite3.DatabaseError("catalog ID without history")
+                page.append((ad_id, history))
+        return tuple(page)
+
     def tracked_ad_ids(self) -> tuple[str, ...]:
         """Return every ad ID ever observed by this store."""
         with self._connect() as connection:

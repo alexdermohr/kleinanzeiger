@@ -73,6 +73,17 @@ class PortfolioCatalogTests(unittest.TestCase):
         self.assertEqual(
             self.store.catalog_ad_ids_page(after="00002", limit=5), ("00003",)
         )
+        batch = self.store.catalog_ad_histories_page(limit=2)
+        self.assertEqual([ad_id for ad_id, _ in batch], ["00001", "00002"])
+        self.assertEqual(
+            [snapshot.title for snapshot in batch[0][1]], ["A", "A neu"],
+        )
+        self.assertEqual(
+            [ad_id for ad_id, _ in self.store.catalog_ad_histories_page(
+                after="00002", limit=2,
+            )],
+            ["00003"],
+        )
         for kwargs in (
             {"limit": 0}, {"limit": True}, {"limit": 257},
             {"after": None}, {"after": "\n"}, {"after": "a"*161},
@@ -124,6 +135,35 @@ class PortfolioCatalogTests(unittest.TestCase):
             self.assertEqual(row["title"], legacy[row["ad_id"]].title)
             self.assertEqual(row["lifecycle_state"], legacy[row["ad_id"]].lifecycle_state.value)
         # Selection from this read-only route has no Writer object or effect.
+
+    def test_320_ad_filter_uses_bounded_database_connections(self) -> None:
+        from unittest.mock import patch
+
+        stamp = T0.isoformat()
+        with self.store._connect() as conn:
+            conn.executemany(
+                """INSERT INTO ad_snapshots(
+                       ad_id, observed_at, source, lifecycle_state, title
+                   ) VALUES(?,?,?,?,?)""",
+                [
+                    (str(2_000_000 + number), stamp, "owner", "active",
+                     "Artikel " + str(number))
+                    for number in range(320)
+                ],
+            )
+        with patch.object(self.store, "_connect", wraps=self.store._connect) as opened:
+            result = self.query.catalog_page(
+                limit=50, search="nicht-im-bestand-vorhanden",
+            )
+        self.assertEqual(result, {"ads": [], "next_after": None, "has_more": False})
+        # Old N+1 search opened 320 separate read transactions plus ID pages.
+        # One 16-ID batch now uses at most two connections per 16 records.
+        self.assertLessEqual(opened.call_count, 45)
+
+    def test_history_batch_rejects_invalid_page_limits(self) -> None:
+        for invalid in (0, -1, 33, True, 1.5):
+            with self.subTest(limit=invalid), self.assertRaises(ValueError):
+                self.store.catalog_ad_histories_page(limit=invalid)
 
     def test_http_validation_and_read_only_compatibility(self) -> None:
         self.add("88888", "Vase", views=3)
