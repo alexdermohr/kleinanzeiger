@@ -34,7 +34,7 @@ def _ai_cost_source(conn: sqlite3.Connection, table: str) -> dict[str, int]:
         "typeof(actual_cents)!='integer' OR typeof(reserved_cents)!='integer' "
         "OR actual_cents<0 OR reserved_cents<0 "
         "OR (error_code='manually_settled' "
-        "AND (phase!='rejected' OR reserved_cents!=0)) "
+        "AND (phase NOT IN ('rejected','approved') OR reserved_cents!=0)) "
         "THEN 1 ELSE 0 END),0) corrupt "
         f"FROM {table}"
     ).fetchone()

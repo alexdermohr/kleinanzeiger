@@ -23,7 +23,10 @@ Die bisherigen Felder in `ai_usage_estimate_all_time` bleiben erhalten:
 
 Ergänzt:
 - `usd_cent_checked_unknown`: bei `error_code='manually_settled'`
-  unabhängig und ausdrücklich nachgeprüfte USD-Cent-Kosten.
+  unabhängig und ausdrücklich nachgeprüfte USD-Cent-Kosten. Der persistente
+  Status kann nach einem weiteren **lokalen** Review von \`rejected\` zu
+  \`approved\` wechseln, ohne dass ein neuer Vorschlag oder Plattformwrite
+  entsteht. Die bereits geprüften Kosten bleiben trotzdem ausweisbar.
 - `usd_cent_known_total`: Token-Schätzung plus nachgeprüfte UNKNOWN-Beträge,
   **ohne** reservierte, noch unklare Gebühren.
 - `source_breakdown.local_draft_jobs` und
