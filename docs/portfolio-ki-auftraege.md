@@ -118,8 +118,13 @@ Status, Titel und Beschreibung samt SHA-256 ein. Derselbe `request_key` ist nur
 für exakt dieselbe Nutzlast idempotent.
 
 Ein bestätigter Provider-Aufruf reserviert sein Budget vor dem Aufruf. Pro
-ausdrücklich bestätigtem UI-Stapel sind höchstens zehn Aufrufe möglich; die
-konfigurierte Dashboard-Generierungssitzung begrenzt alle Aufrufe global. Ein
+ausdrücklich bestätigtem UI-Stapel sind seit dem KI-100er-Ausbau höchstens
+100 sequenzielle Aufrufe möglich (Vorauswahl bleibt zehn). Vor jedem Stapel
+liest das Dashboard den persistenten Budgetstand und zeigt Anzahl sowie
+reservierten Höchstbetrag an; tatsächliche Providerkosten können abweichen.
+Die konfigurierte Dashboard-Generierungssitzung begrenzt alle Aufrufe global
+auf maximal 100 inklusive anderer Generationen. Doppelklicks erzeugen keine
+parallelen Stapel; Stop wirkt nach der laufenden Anfrage. Ein
 mehrdeutiger Fehler wird als `unknown` gespeichert, hält den Auftrag an und
 wird nie blind wiederholt. Pause/Resume und die seitenweise Detailansicht
 bleiben auch nach einem Neustart erhalten. Die Kosten sind konservative
@@ -149,7 +154,7 @@ lokalen Auftrag.
 
 Jeder Provider-Aufruf braucht die sichtbare Kostenbestätigung. Wahlweise wird
 genau der nächste Vorschlag oder ein ausdrücklich bestätigter Stapel von
-höchstens zehn nacheinander erzeugt; **Stop** verhindert den nächsten Aufruf,
+höchstens 100 nacheinander erzeugt (Vorauswahl: zehn); **Stop** verhindert den nächsten Aufruf,
 nicht den bereits laufenden. Vor jedem Aufruf prüft das Backend den
 eingefrorenen Originalstand, die chronologisch neueste Beobachtung als
 UTC-Instant und die weiterhin verifizierte Eigentumsquelle. Unklare,
