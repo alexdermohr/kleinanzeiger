@@ -14,6 +14,15 @@ from mark_api.domain import AdSnapshot, InboundMessageEvent, LifecycleState
 from mark_api.portfolio_reporting import PortfolioReportError, report
 from mark_api.portfolio_sales import update_manual_sale
 from mark_api.portfolio_jobs import create_job, change_state, process_one
+from mark_api.portfolio_existing_jobs import (
+    create_job as create_existing_job,
+    change_state as change_existing_job_state,
+    claim_next as claim_existing,
+    mark_unknown as mark_existing_unknown,
+    process_one as process_existing,
+    settle_unknown as settle_existing_unknown,
+    _schema as existing_jobs_schema,
+)
 from mark_api.portfolio_drafts import _DDL
 from mark_api.storage import SnapshotStore
 
@@ -29,6 +38,17 @@ class PortfolioReportingTests(unittest.TestCase):
         self.store.append_ad_snapshot(AdSnapshot(
           ad_id=id,title="Lampe",lifecycle_state=LifecycleState.ACTIVE,
           observed_at=NOW-timedelta(days=14),source=source))
+
+    def own_for_ai(self, ad_id):
+        # The actual published-ad AI gate requires a non-empty, evidenced
+        # original title and description, not merely a historical ad ID.
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id=ad_id, title="Belegter Artikel",
+            description="Faktenbasierte Originalbeschreibung",
+            lifecycle_state=LifecycleState.ACTIVE,
+            observed_at=NOW,
+            source="kleinanzeigen-management",
+        ))
 
     def message(self,id,conv,mid,at):
         self.store.append_inbound_message_events([InboundMessageEvent(
@@ -95,6 +115,145 @@ class PortfolioReportingTests(unittest.TestCase):
         self.assertEqual(estimate["usd_cent_estimate"],1)
         self.assertEqual(estimate["unknown_outcomes"],0)
         self.assertFalse(estimate["invoice_verified"])
+
+    def test_published_ad_costs_include_checked_unknown_and_unsettled_reserves(self):
+        # Each generator below is a local stub, not an OpenAI/provider call.
+        for ad_id in ("10001", "10002", "10003"):
+            self.own_for_ai(ad_id)
+        first = create_existing_job(
+            self.store, ["10001"], instruction="Nur Belegtes",
+            request_key="1"*64, budget_cents=80, estimate_cents=20,
+        )["job_id"]
+        change_existing_job_state(self.store, first, "start")
+        claim = claim_existing(self.store, first)
+        mark_existing_unknown(self.store, first, "10001", claim["claim_token"])
+        unresolved = report(self.store, days=7, now=NOW)["ai_usage_estimate_all_time"]
+        self.assertEqual(unresolved["usd_cent_estimate"], 0)
+        self.assertEqual(unresolved["usd_cent_reserved"], 20)
+        self.assertEqual(unresolved["unknown_outcomes"], 1)
+        self.assertEqual(unresolved["source_breakdown"]["local_draft_jobs"], None)
+        self.assertEqual(unresolved["source_breakdown"][
+            "published_owned_ad_jobs"]["unknown"], 1)
+        self.assertFalse(unresolved["invoice_verified"])
+        settle_existing_unknown(self.store, first, "10001",
+                                actual_cents=8, explicitly_checked=True)
+        second = create_existing_job(
+            self.store, ["10002"], instruction="Tatsachen pruefen",
+            request_key="2"*64, budget_cents=80, estimate_cents=20,
+        )["job_id"]
+        change_existing_job_state(self.store, second, "start")
+        process_existing(self.store, second, lambda *_: (
+            {"title": "Belegter Vorschlag", "description": "Aus vorhandenen Fakten"}, 5
+        ))
+        third = create_existing_job(
+            self.store, ["10003"], instruction="Nur Fakten",
+            request_key="3"*64, budget_cents=80, estimate_cents=20,
+        )["job_id"]
+        change_existing_job_state(self.store, third, "start")
+        claim_existing(self.store, third)
+        data = report(self.store, days=30, now=NOW)
+        costs = data["ai_usage_estimate_all_time"]
+        self.assertEqual(costs["usd_cent_estimate"], 5)
+        self.assertEqual(costs["usd_cent_checked_unknown"], 8)
+        self.assertEqual(costs["usd_cent_known_total"], 13)
+        self.assertEqual(costs["usd_cent_reserved"], 20)
+        self.assertEqual(costs["unknown_outcomes"], 0)
+        self.assertEqual(costs["inflight_outcomes"], 1)
+        self.assertEqual(costs["source_breakdown"][
+            "published_owned_ad_jobs"]["items"], 3)
+        self.assertEqual(costs["source_breakdown"][
+            "published_owned_ad_jobs"]["checked"], 8)
+        self.assertFalse(costs["invoice_verified"])
+        self.assertEqual(data["platform_writes"], 0)
+        # Running this report never makes a cost settlement or resumes work.
+        self.assertEqual(report(self.store, days=30, now=NOW), data)
+        with closing(self.store._connect()) as conn:
+            reserved = conn.execute(
+                "SELECT phase,reserved_cents FROM portfolio_existing_job_items "
+                "WHERE job_id=? AND ad_id='10003'", (third,),
+            ).fetchone()
+            self.assertEqual((reserved["phase"], reserved["reserved_cents"]),
+                             ("inflight", 20))
+
+    def test_existing_and_draft_ai_costs_are_combined_exactly_once(self):
+        self.own_for_ai("10001")
+        eid = create_existing_job(
+            self.store, ["10001"], instruction="Belegter Originaltext",
+            request_key="a"*64, budget_cents=80, estimate_cents=20,
+        )["job_id"]
+        change_existing_job_state(self.store, eid, "start")
+        process_existing(self.store, eid, lambda *_: (
+            {"title":"Sorgfältig geprüft","description":"Belegte Daten"},5))
+        with closing(self.store._connect()) as conn,conn:
+            conn.execute(_DDL)
+            conn.execute(
+                "INSERT INTO portfolio_drafts "
+                "(sku,title,description,category_json,price_eur,images_json,"
+                "source_sha256,source_name,created_at,status) "
+                "VALUES(?,?,?,?,?,?,?,?,?,'draft')",
+                ("S-001","Leuchte","Original", '["Haus","Licht"]',29,
+                 "[]","0"*64,"test.csv",NOW.isoformat()),
+            )
+        did = create_job(
+            self.store,["S-001"],instruction="Nur Fakten",
+            request_key="b"*64,budget_cents=80,estimate_cents=20,
+        )["job_id"]
+        change_state(self.store,did,"start")
+        process_one(self.store,did,lambda *_: (
+            {"title":"Belegte Leuchte","description":"Original"},3))
+        data=report(self.store,days=7,now=NOW)
+        cost=data["ai_usage_estimate_all_time"]
+        self.assertEqual(cost["usd_cent_estimate"],8)
+        self.assertEqual(cost["usd_cent_checked_unknown"],0)
+        self.assertEqual(cost["usd_cent_known_total"],8)
+        self.assertEqual(cost["source_breakdown"][
+            "local_draft_jobs"]["token_estimate"],3)
+        self.assertEqual(cost["source_breakdown"][
+            "published_owned_ad_jobs"]["token_estimate"],5)
+        self.assertEqual(data["platform_writes"],0)
+
+    def test_existing_ad_cost_corruption_fails_closed_instead_of_omitting_cost(self):
+        self.own_for_ai("10001")
+        jid = create_existing_job(
+            self.store, ["10001"], instruction="Belege",
+            request_key="9"*64, budget_cents=20, estimate_cents=20,
+        )["job_id"]
+        with closing(self.store._connect()) as conn,conn:
+            conn.execute(
+                "UPDATE portfolio_existing_job_items SET actual_cents=-4 WHERE job_id=?",
+                (jid,),
+            )
+        with self.assertRaises(sqlite3.DatabaseError):
+            report(self.store, days=7, now=NOW)
+
+    def test_ten_thousand_published_ad_ai_items_use_constant_size_report(self):
+        with closing(self.store._connect()) as conn,conn:
+            self.assertTrue(existing_jobs_schema(conn, create=True))
+            conn.execute(
+                "INSERT INTO portfolio_existing_jobs "
+                "(job_id,request_key,request_sha256,instruction,state,"
+                "budget_cents,estimate_cents,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                ("a"*32,"b"*64,"c"*64,"Fakten","paused",100000,20,
+                 NOW.isoformat(),NOW.isoformat()),
+            )
+            conn.executemany(
+                "INSERT INTO portfolio_existing_job_items "
+                "(job_id,ad_id,source_json,source_sha256,phase,actual_cents,updated_at)"
+                " VALUES(?,?, '{}', ?, 'proposed', 1, ?)",
+                (("a"*32,str(1000000000+i),"f"*64,NOW.isoformat())
+                 for i in range(10000)),
+            )
+        began=time.monotonic()
+        data=report(self.store,days=90,now=NOW)
+        usage=data["ai_usage_estimate_all_time"]
+        self.assertEqual(usage["usd_cent_estimate"], 10000)
+        self.assertEqual(usage["usd_cent_checked_unknown"], 0)
+        self.assertEqual(usage["usd_cent_known_total"], 10000)
+        self.assertEqual(usage["source_breakdown"]["published_owned_ad_jobs"]["items"],10000)
+        self.assertEqual(data["platform_writes"], 0)
+        self.assertLess(len(json.dumps(data)),16000)
+        self.assertLess(time.monotonic()-began,10)
 
     def test_conversation_per_day_is_not_an_unverified_buyer_count(self):
         self.ad("10001")

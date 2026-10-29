@@ -11,9 +11,40 @@ import sqlite3
 
 from .portfolio_sales import OWN_INVENTORY_SOURCES, schema as sales_schema
 from .portfolio_jobs import _schema as jobs_schema
+from .portfolio_existing_jobs import _schema as existing_jobs_schema
 from .storage import SnapshotStore
 
 _WINDOWS=(7,30,90)
+
+
+def _ai_cost_source(conn: sqlite3.Connection, table: str) -> dict[str, int]:
+    """Read one *known* provider-job item table; never query arbitrary SQL names."""
+    if table not in ("portfolio_job_items", "portfolio_existing_job_items"):
+        raise ValueError("unsupported AI cost source")
+    row = conn.execute(
+        "SELECT COUNT(*) items, "
+        "COALESCE(SUM(CASE WHEN error_code='manually_settled' "
+        "THEN 0 ELSE actual_cents END),0) token_estimate, "
+        "COALESCE(SUM(CASE WHEN error_code='manually_settled' "
+        "THEN actual_cents ELSE 0 END),0) checked, "
+        "COALESCE(SUM(reserved_cents),0) reserved, "
+        "COALESCE(SUM(phase='unknown'),0) unknown, "
+        "COALESCE(SUM(phase='inflight'),0) inflight, "
+        "COALESCE(SUM(CASE WHEN "
+        "typeof(actual_cents)!='integer' OR typeof(reserved_cents)!='integer' "
+        "OR actual_cents<0 OR reserved_cents<0 "
+        "OR (error_code='manually_settled' "
+        "AND (phase!='rejected' OR reserved_cents!=0)) "
+        "THEN 1 ELSE 0 END),0) corrupt "
+        f"FROM {table}"
+    ).fetchone()
+    if row is None or type(row["corrupt"]) is not int or row["corrupt"]:
+        raise sqlite3.DatabaseError("invalid local provider cost evidence")
+    keys = ("items", "token_estimate", "checked", "reserved", "unknown", "inflight")
+    if any(type(row[k]) is not int or row[k] < 0 for k in keys):
+        raise sqlite3.DatabaseError("invalid local provider cost total")
+    return {key: row[key] for key in keys}
+
 
 class PortfolioReportError(ValueError):
     """Invalid time window or untrusted source report parameters."""
@@ -119,19 +150,37 @@ def report(store: SnapshotStore, *, days: int=7,
                    "revenue_eur":0,"known_cost_eur":0,
                    "unknown_cost_count":0,"known_surplus_eur":0,
                    "known_surplus_sale_count":0}
-        if jobs_schema(conn,create=False):
-            cost=conn.execute(
-                "SELECT COALESCE(SUM(actual_cents),0) total,"
-                "COALESCE(SUM(reserved_cents),0) reserved,"
-                "SUM(phase='unknown') ambiguous,"
-                "SUM(phase='inflight') running "
-                "FROM portfolio_job_items",
-            ).fetchone()
-            ai={"usd_cent_estimate":int(cost["total"]),
-                "usd_cent_reserved":int(cost["reserved"]),
-                "unknown_outcomes":cost["ambiguous"] or 0,
-                "inflight_outcomes":cost["running"] or 0,
-                "invoice_verified":False}
+        draft_costs = (
+            _ai_cost_source(conn, "portfolio_job_items")
+            if jobs_schema(conn,create=False) else None
+        )
+        owned_costs = (
+            _ai_cost_source(conn, "portfolio_existing_job_items")
+            if existing_jobs_schema(conn,create=False) else None
+        )
+        if draft_costs is not None or owned_costs is not None:
+            cost_sources = {
+                "local_draft_jobs": draft_costs,
+                "published_owned_ad_jobs": owned_costs,
+            }
+            present = [value for value in cost_sources.values()
+                       if value is not None]
+            # The old UI labels usd_cent_estimate as a token-usage estimate.
+            # Never mix independently checked UNKNOWN settlements into that
+            # field. They are separately itemised, without pretending that
+            # these are a verified provider invoice.
+            ai = {
+                "usd_cent_estimate": sum(row["token_estimate"] for row in present),
+                "usd_cent_checked_unknown": sum(row["checked"] for row in present),
+                "usd_cent_reserved": sum(row["reserved"] for row in present),
+                "unknown_outcomes": sum(row["unknown"] for row in present),
+                "inflight_outcomes": sum(row["inflight"] for row in present),
+                "invoice_verified": False,
+                "source_breakdown": cost_sources,
+            }
+            ai["usd_cent_known_total"] = (
+                ai["usd_cent_estimate"] + ai["usd_cent_checked_unknown"]
+            )
         else:
             ai=None
     return {
