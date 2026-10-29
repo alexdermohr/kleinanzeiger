@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.18 – Windows 11
+# Kleinanzeiger v0.1.19 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -91,7 +91,11 @@ Einzelne Anzeigen werden weiterhin über **Bearbeiten** verwaltet.
 
 Über **Mit Kleinanzeigen abgleichen** werden eigene Anzeigen direkt aus der
 angemeldeten Browser-Sitzung neu gelesen. **Ansicht neu laden** aktualisiert
-hingegen ausschließlich die lokal gespeicherte Darstellung.
+hingegen ausschließlich die lokal gespeicherte Darstellung. Ab v0.1.19 nennt
+ein fehlgeschlagener manueller Abgleich einen zutreffenden sicheren Grund und
+eine konkrete Lösung für Browser/Chrome, Anmeldung, Netzwerk, einen bereits
+laufenden Abgleich, Recovery oder lokalen Speicher. Das behauptet keinen
+gelösten Chrome-Transport und löst keine automatische Wiederholung aus.
 
 ## Bei Verbindungsproblemen lokal weiterarbeiten
 
