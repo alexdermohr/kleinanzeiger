@@ -99,3 +99,69 @@ einen unsicheren Vorschlag und erzeugt keine weitere KI-Anfrage.
 - Keine realen Anzeigen und keine kostenpflichtigen Anbieteraufrufe
   sind Teil der synthetischen Tests. Die native Abnahme auf dem
   tatsächlichen Kunden-Windows-PC steht aus, nicht auf fotolabor.
+# KI-Optimierung bestehender eigener Anzeigen
+
+Neben lokalen CSV-Entwürfen unterstützt das Dashboard nun eine getrennte,
+persistente Arbeitsliste für bereits veröffentlichte Eigenanzeigen. Die HTTP-
+Schnittstelle liegt unter `/api/portfolio/existing-ai/` und verwendet dieselben
+Dashboard-Sitzungs-, CSRF- und Origin-Prüfungen wie die übrigen lokalen
+Portfolio-Befehle.
+
+Aufgenommen werden höchstens 5.000 Anzeigen, deren jeweils neueste Beobachtung
+aus einer der vier verifizierten Eigenbestandsquellen (Management, Product
+Launcher, Owner Inventory oder Periodic Readonly) stammt, den
+Status `active` oder `paused` hat und vollständigen Originaltext enthält.
+Fremde, lokale Import-, fehlende und `UNKNOWN`-Quellen werden abgewiesen. Beim
+Erstellen friert der Auftrag Anzeigen-ID, Beobachtungs-ID und -zeit, Quelle,
+Status, Titel und Beschreibung samt SHA-256 ein. Derselbe `request_key` ist nur
+für exakt dieselbe Nutzlast idempotent.
+
+Ein bestätigter Provider-Aufruf reserviert sein Budget vor dem Aufruf. Pro
+ausdrücklich bestätigtem UI-Stapel sind höchstens zehn Aufrufe möglich; die
+konfigurierte Dashboard-Generierungssitzung begrenzt alle Aufrufe global. Ein
+mehrdeutiger Fehler wird als `unknown` gespeichert, hält den Auftrag an und
+wird nie blind wiederholt. Pause/Resume und die seitenweise Detailansicht
+bleiben auch nach einem Neustart erhalten. Die Kosten sind konservative
+Nutzungswerte, keine verbindliche Providerrechnung.
+
+Vorschläge enthalten ausschließlich Titel und Beschreibung. Die geschützte
+Dashboard-API stellt eingefrorenes Original und Vorschlag in derselben
+Detailantwort nebeneinander bereit. Einzelne oder
+mehrere Vorschläge können lokal `approved` oder `rejected` werden. Vor einer
+Freigabe wird die aktuelle Originalrevision erneut mit dem Freeze verglichen;
+bei Änderungen schlägt die gesamte Freigabe fehl. Eine Freigabe ist **keine**
+Plattformautorisierung: dieses Feature enthält keinen Apply-, Publish- oder
+sonstigen Plattformaufruf (`platform_writes: 0`).
+
+## Bedienung im Dashboard
+
+Unter **KI-Stapelaufträge → Bestehende Eigenanzeigen mit KI prüfen** kann der
+Kunde entweder die auf der aktuellen Katalogseite markierten Anzeigen oder alle
+aktuell verifizierten Eigenanzeigen wählen. Danach werden Anweisung,
+Gesamtbudget und Reserve je Anfrage eingetragen und der Auftrag zunächst nur
+lokal angelegt. Die Auftragsauswahl und die enthaltenen Anzeigen sind
+seitenweise bedienbar; Start, Pause und Fortsetzen verändern ebenfalls nur den
+lokalen Auftrag.
+
+Jeder Provider-Aufruf braucht die sichtbare Kostenbestätigung. Wahlweise wird
+genau der nächste Vorschlag oder ein ausdrücklich bestätigter Stapel von
+höchstens zehn nacheinander erzeugt; **Stop** verhindert den nächsten Aufruf,
+nicht den bereits laufenden. Vor jedem Aufruf prüft das Backend den
+eingefrorenen Originalstand, die chronologisch neueste Beobachtung als
+UTC-Instant und die weiterhin verifizierte Eigentumsquelle. Unklare,
+unlesbare oder geänderte Quellen stoppen vor Providerkosten. Ein unklarer
+Providerausgang stoppt ebenfalls und wird nicht automatisch wiederholt.
+
+In der Tabelle lassen sich Original und Vorschlag für Titel und Beschreibung
+aufklappen und vergleichen. Freigabe und Ablehnung werden lokal gespeichert.
+Es gibt bewusst keinen Übernehmen-, Apply- oder Publish-Knopf: Die Freigabe ist
+keine Plattformautorisierung und erzeugt keinen Kleinanzeigen-Write.
+
+Aufträge und die Anzeigen eines Auftrags können jeweils mit 50 Einträgen pro
+Seite vollständig durchlaufen werden. Providerkosten sind konservative lokale
+Schätzwerte, keine garantierte
+Rechnungsobergrenze. Titel (65 Zeichen) und Beschreibung (4.000 Zeichen) werden
+vor Speicherung begrenzt; Modellantworten werden strikt als Objekt mit genau
+`title` und `description` akzeptiert. Die native Abnahme auf dem tatsächlichen
+Kunden-Windows-PC bleibt zusätzlich zu den automatisierten Browserlogik- und
+HTTP-Tests erforderlich.
