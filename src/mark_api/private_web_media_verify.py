@@ -307,10 +307,16 @@ def _require_private_web_public_media_transport_authority(
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
             peer.settimeout(1.0)
             peer.connect(authority.witness_socket)
+            # Linux SO_PEERCRED is pid_t, uid_t, gid_t: only pid is signed.
+            # A high-bit UID/GID must never alias a negative identity.
             raw = peer.getsockopt(
-                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"),
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("=iII"),
             )
-            _pid, uid, gid = struct.unpack("3i", raw)
+            if type(raw) is not bytes or len(raw) != struct.calcsize("=iII"):
+                raise _PrivateWebMediaAdmissionDenied(
+                    "private Web media Witness identity mismatch"
+                )
+            _pid, uid, gid = struct.unpack("=iII", raw)
             if (uid, gid) != (authority.witness_uid, authority.witness_uid):
                 raise _PrivateWebMediaAdmissionDenied(
                     "private Web media Witness identity mismatch"

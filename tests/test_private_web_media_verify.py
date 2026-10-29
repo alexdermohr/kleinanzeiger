@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import socket
 import time
 import tempfile
 import unittest
@@ -110,6 +111,37 @@ class _FakeMonotonic:
         if seconds < 0:
             raise AssertionError("sleep must not be negative")
         self.value += seconds
+
+
+@unittest.skipUnless(hasattr(socket, "SO_PEERCRED"),
+                     "Linux peer credentials required")
+class ProtectedMediaWitnessUidTests(unittest.TestCase):
+    def test_high_bit_witness_uid_and_gid_are_unsigned_and_exact(self):
+        import struct
+        import mark_api.private_web_media_verify as media
+        high_uid = 2**31 + 7
+        actor_uid = 2**31 + 9
+        authority = media.ProtectedMediaReadbackAuthority(
+            witness_socket="/tmp/synthetic-no-socket.sock",
+            witness_uid=high_uid, actor_uid=actor_uid,
+        )
+        with (patch.object(media.os, "geteuid", return_value=actor_uid),
+              patch.object(media.socket, "socket") as ctor):
+            peer = ctor.return_value.__enter__.return_value
+            peer.getsockopt.return_value = struct.pack("=iII", 123, high_uid, high_uid)
+            media._require_private_web_public_media_transport_authority(authority)
+            peer.connect.assert_called_once_with(authority.witness_socket)
+            for raw in (
+                struct.pack("=iII", 123, high_uid, 50042),
+                struct.pack("=iII", 123, 50042, high_uid),
+                b"\x00" * 11,
+                b"\x00" * 13,
+            ):
+                peer.getsockopt.return_value = raw
+                with self.subTest(raw=raw), self.assertRaises(
+                    media._PrivateWebMediaAdmissionDenied
+                ):
+                    media._require_private_web_public_media_transport_authority(authority)
 
 
 class PrivateWebMediaVerifierParserTests(unittest.TestCase):
