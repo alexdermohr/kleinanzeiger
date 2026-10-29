@@ -16,7 +16,7 @@ from typing import Callable
 
 from .storage import SnapshotStore
 
-MAX_ITEMS = 5000
+MAX_ITEMS = 10_000
 MAX_CONFIRMED_CALLS = 10
 _ID = re.compile(r"[0-9a-f]{32}\Z")
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
@@ -165,7 +165,7 @@ def eligible_ad_ids(store: SnapshotStore) -> list[str]:
             if len(result) > MAX_ITEMS:
                 break
     if len(result) > MAX_ITEMS:
-        raise ExistingJobError("more than 5000 eligible ads")
+        raise ExistingJobError(f"more than {MAX_ITEMS} eligible ads")
     if not result:
         raise ExistingJobError("no verified owned published ads")
     return result

@@ -108,7 +108,7 @@ Schnittstelle liegt unter `/api/portfolio/existing-ai/` und verwendet dieselben
 Dashboard-Sitzungs-, CSRF- und Origin-Prüfungen wie die übrigen lokalen
 Portfolio-Befehle.
 
-Aufgenommen werden höchstens 5.000 Anzeigen, deren jeweils neueste Beobachtung
+Aufgenommen werden höchstens 10.000 Anzeigen, deren jeweils neueste Beobachtung
 aus einer der vier verifizierten Eigenbestandsquellen (Management, Product
 Launcher, Owner Inventory oder Periodic Readonly) stammt, den
 Status `active` oder `paused` hat und vollständigen Originaltext enthält.
@@ -138,7 +138,10 @@ sonstigen Plattformaufruf (`platform_writes: 0`).
 
 Unter **KI-Stapelaufträge → Bestehende Eigenanzeigen mit KI prüfen** kann der
 Kunde entweder die auf der aktuellen Katalogseite markierten Anzeigen oder alle
-aktuell verifizierten Eigenanzeigen wählen. Danach werden Anweisung,
+aktuell verifizierten Eigenanzeigen (bis 10.000) wählen. Die Auswahl „alle“ wird
+ohne riesige ID-Liste als leeres ad_ids-Feld übertragen; eine nicht leere
+Liste im Modus all wird abgewiesen. Eine ausdrücklich markierte Auswahl
+bleibt auf 10.000 IDs und 2 MiB JSON-Nutzlast begrenzt. Danach werden Anweisung,
 Gesamtbudget und Reserve je Anfrage eingetragen und der Auftrag zunächst nur
 lokal angelegt. Die Auftragsauswahl und die enthaltenen Anzeigen sind
 seitenweise bedienbar; Start, Pause und Fortsetzen verändern ebenfalls nur den
