@@ -678,7 +678,7 @@ _DASHBOARD_HTML = """<!doctype html>
         verifizierten eigenen Anzeigen. Originalstand und Eigentum werden unmittelbar vor jeder
         möglicherweise kostenpflichtigen Anfrage erneut geprüft.</p>
         <div class="controls">
-          <label><input id="existing-ai-all" type="checkbox"> Alle verifizierten Eigenanzeigen (max. 5.000)</label>
+          <label><input id="existing-ai-all" type="checkbox"> Alle verifizierten Eigenanzeigen (max. 10.000)</label>
           <span id="existing-ai-selection">0 aktuelle Kataloganzeigen ausgewählt</span>
         </div>
         <label>Anweisung
@@ -5708,7 +5708,7 @@ async function createExistingAiJob() {
   try {
     const all=byId("existing-ai-all").checked;
     const ids=all?[]:Array.from(catalogSelectedIds).sort();
-    if (!all&&!ids.length) throw new Error("Im Katalog mindestens eine Eigenanzeige auswählen.");
+    if (!all&&(!ids.length||ids.length>10000)) throw new Error("Im Katalog 1 bis 10.000 Eigenanzeigen auswählen.");
     const base={mode:all?"all":"selected",ad_ids:ids,
       instruction:byId("existing-ai-instruction").value.trim(),
       budget_cents:_jobEuros("existing-ai-budget",true),estimate_cents:_jobEuros("existing-ai-estimate",false)};
@@ -8269,13 +8269,18 @@ def _handler_factory(
             try:
                 if self.headers.get("Content-Type","").split(";",1)[0].strip().lower()!="application/json":
                     raise ValueError("content type")
-                size=self._content_length(max_bytes=512*1024)
+                size=self._content_length(max_bytes=2*1024*1024 if target.path.endswith(("/create","/review")) else 512*1024)
                 payload=strict_json_object(self.rfile.read(size))
                 if target.path.endswith("/create"):
                     if set(payload)!={"mode","ad_ids","instruction","budget_cents","estimate_cents","request_key"}:
                         raise ExistingJobError("fields")
-                    ids=eligible_ad_ids(store) if payload["mode"]=="all" and payload["ad_ids"]==[] else payload["ad_ids"]
-                    if payload["mode"] not in ("all","selected"):
+                    if payload["mode"] == "all":
+                        if payload["ad_ids"] != []:
+                            raise ExistingJobError("all mode requires an empty selection")
+                        ids=eligible_ad_ids(store)
+                    elif payload["mode"] == "selected":
+                        ids=payload["ad_ids"]
+                    else:
                         raise ExistingJobError("mode")
                     result=create_existing_job(store,ids,instruction=payload["instruction"],
                         budget_cents=payload["budget_cents"],estimate_cents=payload["estimate_cents"],

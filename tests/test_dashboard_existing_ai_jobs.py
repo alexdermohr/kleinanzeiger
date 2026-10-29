@@ -18,6 +18,7 @@ from mark_api.dashboard import (
     _DASHBOARD_JS, create_server,
 )
 from mark_api.domain import AdSnapshot, LifecycleState
+from mark_api.results import ReadResult
 from mark_api.storage import SnapshotStore
 from mark_api.portfolio_existing_jobs import claim_next, details as existing_job_details
 
@@ -58,12 +59,61 @@ class ExistingAiDashboardTests(unittest.TestCase):
                  "budget_cents":200,"estimate_cents":20,"request_key":"e"*64}
         self.assertEqual(self.request("POST","/api/portfolio/existing-ai/create",payload,token="bad")[0],403)
         self.assertEqual(self.request("POST","/api/portfolio/existing-ai/create",payload,origin="http://evil.test")[0],403)
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/create",
+            {**payload,"ad_ids":["4711"]})[0],400)
         code,first=self.request("POST","/api/portfolio/existing-ai/create",payload)
         self.assertEqual(code,200)
         self.assertEqual(self.request("POST","/api/portfolio/existing-ai/create",payload)[1]["job_id"],first["job_id"])
         code,page=self.request("GET",f"/api/portfolio/existing-ai/detail?job_id={first['job_id']}")
         self.assertEqual(code,200); self.assertEqual(page["items"][0]["original"]["title"],"Original")
         self.assertEqual(page["platform_writes"],0)
+
+    def test_10000_item_http_all_selected_large_payload_and_overflow(self):
+        # 9,999 synthetic originals plus the single setUp owner ad.
+        # Large selection deliberately exceeds the old 512-KiB body bound.
+        now = datetime.now(timezone.utc)
+        ids = [f"item-{i:05d}-" + "x"*140 for i in range(9_999)]
+        records = tuple(AdSnapshot(
+            ad_id=ad_id, observed_at=now, source="kleinanzeigen-management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title=f"Lampe {i}", description="Belegte Originalbeschreibung",
+        ) for i, ad_id in enumerate(ids))
+        self.assertEqual(self.store.append_inventory_result(
+            ReadResult.success_nonempty(records), observed_at=now,
+            source="kleinanzeigen-management"), 9_999)
+        self.start_server()
+        base = {"mode":"all", "ad_ids":[], "instruction":"Nur belegte Fakten",
+                "budget_cents":20, "estimate_cents":20, "request_key":"4"*64}
+        code, all_job = self.request("POST", "/api/portfolio/existing-ai/create", base)
+        self.assertEqual(code, 200)
+        self.assertEqual(all_job["total"], 10_000)
+        self.assertEqual(all_job["platform_writes"], 0)
+        selected = {**base, "mode":"selected", "ad_ids":sorted(["4711"]+ids),
+                    "request_key":"5"*64}
+        raw_length = len(json.dumps(selected).encode("utf-8"))
+        self.assertGreater(raw_length, 512*1024)
+        self.assertLess(raw_length, 2*1024*1024)
+        code, selected_job = self.request(
+            "POST", "/api/portfolio/existing-ai/create", selected)
+        self.assertEqual(code, 200)
+        self.assertEqual(selected_job["total"], 10_000)
+        self.assertEqual(selected_job["platform_writes"], 0)
+        self.assertNotEqual(selected_job["job_id"], all_job["job_id"])
+        code, page = self.request("GET",
+            f"/api/portfolio/existing-ai/detail?job_id={selected_job['job_id']}")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(page["items"]), 50)
+        self.assertTrue(page["has_more"])
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="overflow", observed_at=now, source="kleinanzeigen-management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Neu", description="Belegte Originalbeschreibung"))
+        code, error = self.request("POST", "/api/portfolio/existing-ai/create",
+                                  {**base,"request_key":"6"*64})
+        self.assertEqual(code, 400)
+        with self.store._connect() as conn:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM portfolio_existing_jobs").fetchone()[0], 2)
 
     def test_dashboard_contains_complete_existing_ad_workflow(self):
         for control in ("existing-ai-create", "existing-ai-start", "existing-ai-pause",
@@ -74,6 +124,7 @@ class ExistingAiDashboardTests(unittest.TestCase):
                         "existing-ai-checked", "existing-ai-settle-unknown"):
             self.assertIn(f'id="{control}"', _DASHBOARD_HTML)
         self.assertNotIn("existing-ai-apply", _DASHBOARD_HTML)
+        self.assertIn("Alle verifizierten Eigenanzeigen (max. 10.000)", _DASHBOARD_HTML)
 
     def test_interrupted_existing_ai_uses_same_origin_checked_local_settlement(self):
         self.store.append_ad_snapshot(AdSnapshot(
