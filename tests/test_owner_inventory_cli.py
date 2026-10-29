@@ -10,6 +10,8 @@ from pathlib import Path
 import os
 import sqlite3
 import tempfile
+import time
+import tracemalloc
 import unittest
 from unittest.mock import patch
 
@@ -19,7 +21,9 @@ from mark_api.owner_inventory_cli import (
 )
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
-from mark_api.storage_owner import StorageOwnerClient, StorageOwnerError, StorageOwnerServer
+from mark_api.storage_owner import (
+    StorageOwnerClient, StorageOwnerError, StorageOwnerServer, _MAX_SYNC_ITEMS,
+)
 
 
 NOW = datetime(2026, 10, 12, 17, 0, tzinfo=timezone.utc)
@@ -372,6 +376,90 @@ class OwnerInventoryCliTests(unittest.TestCase):
                 runtime_factory=lambda **kw: runtime,
             )
         self.assertEqual(runtime.reads, 0)
+
+    def test_real_unix_socket_accepts_large_synthetic_browser_generations(self) -> None:
+        self.assertEqual(_MAX_SYNC_ITEMS, 12_000)
+        for count in (5_000, 10_000, 12_000):
+            with self.subTest(count=count):
+                snapshots = tuple(
+                    self._ad(f"synthetic-{count}-{index:05d}")
+                    for index in range(count)
+                )
+                runtime = _FakeRuntime(ReadResult.success_nonempty(snapshots))
+                previous_tracked = len(self.client.tracked_ad_ids())
+                if count == 12_000:
+                    tracemalloc.start()
+                started = time.perf_counter()
+                receipt = self._sync(runtime)
+                elapsed = time.perf_counter() - started
+                peak = tracemalloc.get_traced_memory()[1] if count == 12_000 else None
+                if count == 12_000:
+                    tracemalloc.stop()
+                self.assertEqual(receipt.observed_count, count)
+                self.assertEqual(receipt.persisted_count, count + previous_tracked)
+                self.assertEqual(runtime.reads, 1)
+                self.assertTrue(runtime.closed)
+                store = SnapshotStore(self.database, create_if_missing=False)
+                latest = store.latest_sync_attempt()
+                self.assertEqual(latest.snapshot_count, count)
+                self.assertEqual(latest.outcome, "success_nonempty")
+                if count == 12_000:
+                    original_ids = {snapshot.ad_id for snapshot in snapshots}
+                    self.assertEqual(
+                        original_ids & set(store.tracked_ad_ids()), original_ids,
+                    )
+                    with sqlite3.connect(self.database) as connection:
+                        active_original_ids = {
+                            row[0] for row in connection.execute(
+                                "SELECT ad_id FROM ad_snapshots "
+                                "WHERE ad_id LIKE 'synthetic-12000-%' "
+                                "AND lifecycle_state = ? AND source = ?",
+                                (LifecycleState.ACTIVE.value, "management-observed"),
+                            )
+                        }
+                    self.assertEqual(active_original_ids, original_ids)
+                    status = self.client.sync_status()
+                    self.assertEqual(status["state"], "success_nonempty")
+                    self.assertEqual(status["latest_attempt"]["id"], latest.id)
+                    self.assertEqual(status["latest_attempt"]["snapshot_count"], count)
+                print(
+                    f"owner_cli_unix_socket_capacity={count} elapsed_s={elapsed:.3f} "
+                    f"tracemalloc_peak_bytes={peak if peak is not None else 'not-measured'}"
+                )
+
+    def test_12001_and_non_tuple_values_fail_before_stage_and_preserve_data(self) -> None:
+        baseline = self._ad("preserved")
+        self._sync(_FakeRuntime(ReadResult.success_nonempty((baseline,))))
+        oversized = tuple(self._ad(f"overflow-{index:05d}") for index in range(12_001))
+        invalid_values = (
+            oversized,
+            list(oversized),
+            (item for item in oversized),
+            True,
+        )
+        for value in invalid_values:
+            with self.subTest(value_type=type(value).__name__):
+                stages = 0
+                original_call = self.client._call
+
+                def count_stages(op: str, **kwargs):
+                    nonlocal stages
+                    if op == "sync_stage":
+                        stages += 1
+                    return original_call(op, **kwargs)
+
+                result = ReadResult(ReadStatus.SUCCESS_NONEMPTY, value=value)
+                with patch.object(self.client, "_call", side_effect=count_stages):
+                    with self.assertRaises(OwnerInventorySyncError) as outcome:
+                        self._sync(_FakeRuntime(result))
+                self.assertEqual(outcome.exception.kind, "invalid_inventory")
+                self.assertEqual(stages, 0)
+                self.assertEqual(self.client.sync_status()["state"], "failed")
+                self.assertEqual(
+                    self.client.sync_status()["latest_attempt"]["error_kind"],
+                    "invalid_inventory",
+                )
+                self.assertEqual(self.client.ad_history("preserved"), (baseline,))
 
 
 if __name__ == "__main__":
