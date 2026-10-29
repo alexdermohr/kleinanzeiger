@@ -339,11 +339,13 @@ class NetlessFrontendContractTests(unittest.TestCase):
         with closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as conn:
             conn.settimeout(1)
             conn.connect(str(self.sock))
-            conn.sendall(b"GET /readyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             try:
+                conn.sendall(b"GET /readyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
                 self.assertEqual(conn.recv(1), b"")
-            except ConnectionResetError:
-                pass  # The rejected peer never reaches the trusted backend.
+            except (BrokenPipeError, ConnectionResetError):
+                # The other-UID peer is rejected before serving HTTP. A fast
+                # reject can close before sendall rather than during recv.
+                pass
         self.assertTrue(relay.stop())
         self.assertFalse(self.sock.exists())
 
