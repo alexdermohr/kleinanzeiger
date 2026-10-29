@@ -8,7 +8,8 @@ import unittest
 from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.portfolio_existing_jobs import (
     ExistingJobError, change_state, claim_next, create_job, details,
-    eligible_ad_ids, finish_claim, process_one, review_items,
+    eligible_ad_ids, finish_claim, process_one, recover_interrupted, review_items,
+    settle_unknown,
 )
 from mark_api.storage import SnapshotStore
 
@@ -62,6 +63,79 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         process_one(self.store,jid,lambda o,i:({"title":"Neu","description":o["description"]},1))
         self.add("owned",title="Extern geändert",observed=self.now+timedelta(seconds=1))
         with self.assertRaises(ExistingJobError): review_items(self.store,jid,["owned"],approve=True)
+
+    def test_interrupted_paid_claim_quarantined_and_manually_settled(self):
+        for ad_id in ("10501", "10502"):
+            self.add(ad_id)
+        job = create_job(self.store, ["10501", "10502"], instruction="Nur Fakten",
+                         request_key="9"*64,budget_cents=60,estimate_cents=20)
+        jid = job["job_id"]
+        change_state(self.store, jid, "start")
+        started = claim_next(self.store, jid)
+        self.assertEqual(started["ad_id"], "10501")
+        self.assertEqual(details(self.store,jid)["reserved_cents"], 20)
+        with self.assertRaises(ExistingJobError):
+            claim_next(self.store, jid)
+        recovered = recover_interrupted(self.store,jid)
+        self.assertEqual(recovered["state"], "needs_attention")
+        self.assertEqual(recovered["counts"]["unknown"],1)
+        self.assertEqual(recovered["reserved_cents"],20)
+        self.assertEqual(recover_interrupted(self.store,jid),recovered)
+        with self.assertRaises(ExistingJobError):
+            change_state(self.store,jid,"resume")
+        for invalid in (False, None, 0, "yes"):
+            with self.subTest(checked=invalid), self.assertRaises(ExistingJobError):
+                settle_unknown(self.store,jid,"10501",actual_cents=7,
+                               explicitly_checked=invalid)
+        for invalid in (-1, True, 1.5, 100_000_001):
+            with self.subTest(cents=invalid), self.assertRaises(ExistingJobError):
+                settle_unknown(self.store,jid,"10501",actual_cents=invalid,
+                               explicitly_checked=True)
+        with self.assertRaises(ExistingJobError):
+            settle_unknown(self.store,jid,"10502",actual_cents=7,
+                           explicitly_checked=True)
+        resolved = settle_unknown(self.store,jid,"10501",actual_cents=7,
+                                  explicitly_checked=True)
+        self.assertEqual(resolved["state"],"paused")
+        self.assertEqual(resolved["counts"]["rejected"],1)
+        self.assertEqual(resolved["counts"]["queued"],1)
+        self.assertEqual(resolved["reserved_cents"],0)
+        self.assertEqual(resolved["actual_cents"],7)
+        self.assertEqual(details(self.store,jid)["items"][0]["error_code"],
+                         "manually_settled")
+        with self.assertRaises(ExistingJobError):
+            finish_claim(self.store,jid,"10501",started["claim_token"],
+                         {"title":"Outdated","description":"Unknown"},actual_cents=1)
+        with self.assertRaises(ExistingJobError):
+            settle_unknown(self.store,jid,"10501",actual_cents=7,
+                           explicitly_checked=True)
+        change_state(self.store,jid,"resume")
+        seen=[]
+        response=process_one(self.store,jid,lambda original,instruction:(
+            seen.append((original["ad_id"],instruction))
+            or {"title":"Freigabe", "description":original["description"]},4))
+        self.assertTrue(response["claimed"])
+        self.assertEqual(seen,[("10502","Nur Fakten")])
+        self.assertEqual(details(self.store,jid)["actual_cents"],11)
+        self.assertEqual(details(self.store,jid)["counts"]["rejected"],1)
+        self.assertEqual(details(self.store,jid)["platform_writes"],0)
+
+    def test_existing_unknown_requires_manual_settlement_even_without_restart(self):
+        self.add("10503")
+        jid=create_job(self.store,["10503"],instruction="x",
+            request_key="8"*64,budget_cents=25,estimate_cents=20)["job_id"]
+        change_state(self.store,jid,"start")
+        with self.assertRaises(RuntimeError):
+            process_one(self.store,jid,lambda *_: (_ for _ in ()).throw(
+                RuntimeError("provider request outcome unknown")))
+        before=details(self.store,jid)
+        self.assertEqual(before["state"],"needs_attention")
+        again = recover_interrupted(self.store,jid)
+        self.assertEqual(again["counts"], before["counts"])
+        self.assertEqual(again["state"], before["state"])
+        self.assertEqual(again["reserved_cents"], before["reserved_cents"])
+        self.assertEqual(settle_unknown(self.store,jid,"10503",actual_cents=0,
+                                       explicitly_checked=True)["actual_cents"],0)
 
     def test_all_accepts_exactly_all_four_verified_sources(self):
         verified = (

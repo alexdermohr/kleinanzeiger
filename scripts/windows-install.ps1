@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $base = $PSScriptRoot
 $state = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
-$wheel = Join-Path $base 'kleinanzeiger-0.1.19-py3-none-any.whl'
+$wheel = Join-Path $base 'kleinanzeiger-0.1.20-py3-none-any.whl'
 $sums = Join-Path $base 'SHA256SUMS.txt'
 if (!(Test-Path -LiteralPath $wheel -PathType Leaf) -or !(Test-Path -LiteralPath $sums -PathType Leaf)) {
   throw 'Paket oder SHA256SUMS.txt fehlen. Bitte das gesamte Windows-ZIP entpacken.'
@@ -119,7 +119,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Die neue Paketinstallation ist fehlgeschlagen. Die bisherige Version bleibt erhalten.' }
   & $stagePython -m mark_api.launcher --help | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Die neue Version hat die Startpruefung nicht bestanden. Die bisherige Version bleibt erhalten.' }
-  & $stagePython -c "import importlib.metadata as m; assert m.version('kleinanzeiger') == '0.1.19'"
+  & $stagePython -c "import importlib.metadata as m; assert m.version('kleinanzeiger') == '0.1.20'"
   if ($LASTEXITCODE -ne 0) { throw 'Die neue Version stimmt nicht mit dem geprueften Paket ueberein.' }
 
   # Chrome readiness is checked BEFORE the old working application is moved.
@@ -149,7 +149,7 @@ try {
     if (!(Test-Python $installedPython)) { throw 'Neue Python-Umgebung ist nach dem Wechsel nicht startbar.' }
     & $installedPython -m mark_api.launcher --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Neue Version ist nach dem Wechsel nicht startbar.' }
-    & $installedPython -c "import importlib.metadata as m; assert m.version('kleinanzeiger') == '0.1.19'"
+    & $installedPython -c "import importlib.metadata as m; assert m.version('kleinanzeiger') == '0.1.20'"
     if ($LASTEXITCODE -ne 0) { throw 'Neue Paketversion ist nach dem Wechsel ungueltig.' }
   } catch {
     $activationError = $_.Exception.Message

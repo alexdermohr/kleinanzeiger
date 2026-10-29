@@ -51,7 +51,8 @@ from .portfolio_existing_jobs import (
     ExistingJobError, change_state as change_existing_job_state,
     create_job as create_existing_job, details as existing_job_details,
     eligible_ad_ids, list_jobs as list_existing_jobs,
-    process_one as process_one_existing, review_items as review_existing_items,
+    process_one as process_one_existing, recover_interrupted as recover_existing_interrupted,
+    review_items as review_existing_items, settle_unknown as settle_existing_unknown,
 )
 from .portfolio_provider import (
     PROVIDER_MODEL, PROVIDER_OUTPUT_TOKEN_LIMIT, PROVIDER_REQUIRED_RESERVE_CENTS,
@@ -242,6 +243,15 @@ class DashboardGenerationAccess:
     @property
     def ui_token(self) -> str:
         return self._token
+
+    def run_idle_local_recovery(self, operation):
+        """Atomically exclude provider calls during manual UNKNOWN accounting."""
+        if not self._lock.acquire(blocking=False):
+            raise DashboardGenerationBusy("generation still in progress")
+        try:
+            return operation()
+        finally:
+            self._lock.release()
 
     def generate(self, mode: str, prompt: str) -> object:
         if not self._lock.acquire(blocking=False):
@@ -707,6 +717,27 @@ _DASHBOARD_HTML = """<!doctype html>
           <button id="existing-ai-approve" type="button">Auswahl lokal freigeben</button>
           <button id="existing-ai-reject" type="button">Auswahl lokal ablehnen</button>
         </div>
+        <details id="existing-ai-recovery" class="feature-disclosure" hidden>
+          <summary>Unterbrochene oder unklare KI-Anfrage klären</summary>
+          <p class="muted">Nur nach beendetem Aufruf oder Programmneustart:
+            Noch offene Anfragen als unklar sichern. Es findet kein KI-Neuversuch statt.
+            Vor der manuellen Klärung Ergebnis und Kosten unabhängig beim Anbieter prüfen.
+            Der unklare Vorschlag wird endgültig verworfen.</p>
+          <button id="existing-ai-recover" type="button">Unterbrochene Anfrage als unklar sichern</button>
+          <div class="controls">
+            <label>Unklare Anzeige dieser Seite
+              <select id="existing-ai-unknown-ad"><option value="">Keine unklare Anzeige</option></select>
+            </label>
+            <label>Unabhängig geprüfte Kosten (US-Cent, 0 nur bei bestätigter Kostenfreiheit)
+              <input id="existing-ai-checked-cents" type="number" min="0" max="100000000" step="1" placeholder="z. B. 7">
+            </label>
+          </div>
+          <label><input id="existing-ai-checked" type="checkbox">
+            Ich habe den vorherigen Aufruf und dessen Kosten unabhängig geprüft.
+            Der Vorschlag soll ohne erneute Anbieteranfrage verworfen werden.
+          </label>
+          <button id="existing-ai-settle-unknown" type="button">Unklaren Vorgang endgültig klären</button>
+        </details>
         <p class="muted">Freigabe und Ablehnung bleiben ausschließlich lokal. Es gibt hier keinen Apply-, Publish- oder Plattformwrite.</p>
       </details>
     </section>
@@ -5620,6 +5651,10 @@ async function loadExistingAiDetails(reset=false) {
   if (!existingAiActiveId||existingAiBusy) return false;
   if (reset) { existingAiPageIndex=0; existingAiCursors=[""]; existingAiSelected.clear(); }
   existingAiBusy=true; existingAiDisplayedId="";
+  byId("existing-ai-recovery").hidden=true;
+  byId("existing-ai-unknown-ad").replaceChildren();
+  byId("existing-ai-checked").checked=false;
+  byId("existing-ai-checked-cents").value="";
   try {
     const params=new URLSearchParams({job_id:existingAiActiveId,limit:"50",
       after:existingAiCursors[existingAiPageIndex]});
@@ -5630,7 +5665,17 @@ async function loadExistingAiDetails(reset=false) {
     const c=job.counts||{};
     byId("existing-ai-progress").textContent="Status: "+job.state+" · "+job.total+
       " Anzeigen · "+(c.queued||0)+" offen · "+(c.proposed||0)+" Vorschläge · "+
-      (c.approved||0)+" lokal freigegeben · "+(job.actual_cents/100).toFixed(2)+" USD geschätzt";
+      (c.approved||0)+" lokal freigegeben · "+(c.unknown||0)+" unklar · "+
+      (c.inflight||0)+" laufend/unterbrochen · "+
+      (job.actual_cents/100).toFixed(2)+" USD geschätzt · "+
+      (job.reserved_cents/100).toFixed(2)+" USD bei unklaren Aufrufen reserviert";
+    byId("existing-ai-recovery").hidden=!(c.unknown>0||c.inflight>0);
+    byId("existing-ai-recover").disabled=!(c.inflight>0);
+    byId("existing-ai-settle-unknown").disabled=!(c.unknown>0);
+    const unknownChoice=byId("existing-ai-unknown-ad");
+    const emptyUnknown=document.createElement("option");
+    emptyUnknown.value="";emptyUnknown.textContent="Unklare Anzeige auswählen";
+    unknownChoice.append(emptyUnknown);
     const body=byId("existing-ai-items"); body.replaceChildren();
     for (const item of job.items) {
       const row=document.createElement("tr"),pick=document.createElement("input");
@@ -5645,6 +5690,11 @@ async function loadExistingAiDetails(reset=false) {
       const proposal=document.createElement("pre");proposal.textContent="Vorschlag\\n"+(item.proposal?.description||"—");
       details.append(summary,original,proposal);diff.append(details);row.append(diff);
       const phase=document.createElement("td");phase.textContent=item.phase;row.append(phase);body.append(row);
+      if (item.phase==="unknown") {
+        const option=document.createElement("option");
+        option.value=item.ad_id;option.textContent="Anzeige "+item.ad_id+" · unklar";
+        unknownChoice.append(option);
+      }
     }
     byId("existing-ai-page").textContent="Seite "+(existingAiPageIndex+1);
     byId("existing-ai-prev").disabled=existingAiPageIndex===0;
@@ -5674,6 +5724,47 @@ async function existingAiState(action) {
   if (!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId) return;
   try { await existingAiPost("state",{job_id:existingAiActiveId,action}); await loadExistingAiJobs(); }
   catch (error) { byId("existing-ai-feedback").textContent=error.message; }
+}
+async function recoverExistingAiInterrupted() {
+  if (existingAiBusy||!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId)
+    return;
+  if (!window.confirm(
+      "Nur nach beendetem Aufruf/Neustart: Unterbrochene Anfragen als UNKNOWN sichern? "+
+      "Es erfolgt kein KI-Neuversuch und keine Änderung auf Kleinanzeigen.")) return;
+  const id=existingAiActiveId;
+  try {
+    const result=await existingAiPost("recover",{job_id:id});
+    if (id!==existingAiActiveId||result.platform_writes!==0)
+      throw new Error("Auftrag oder Zustand geändert; bitte neu laden.");
+    await loadExistingAiJobs();
+    byId("existing-ai-feedback").textContent=
+      "Unterbrochene Anfrage gesichert. Ergebnis und Kosten unabhängig prüfen.";
+  } catch (error) { byId("existing-ai-feedback").textContent=error.message; }
+}
+async function settleExistingAiUnknown() {
+  if (existingAiBusy||!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId)
+    return;
+  const id=existingAiActiveId,adId=byId("existing-ai-unknown-ad").value;
+  const raw=byId("existing-ai-checked-cents").value.trim();
+  if (!adId||!/^(?:0|[1-9][0-9]{0,8})$/.test(raw)
+      ||Number(raw)>100000000||!byId("existing-ai-checked").checked) {
+    byId("existing-ai-feedback").textContent=
+      "Unklare Anzeige wählen, unabhängig geprüfte US-Cent eingeben und Prüfung bestätigen.";
+    return;
+  }
+  if (!window.confirm("Unklaren Aufruf für Anzeige "+adId+" mit "+raw+
+      " geprüften US-Cent ohne Anbieter-Neuversuch endgültig verwerfen?")) return;
+  // Per-item acknowledgement is never retained across a failed/unknown response.
+  byId("existing-ai-checked").checked=false;
+  try {
+    const result=await existingAiPost("settle-unknown",{
+      job_id:id,ad_id:adId,actual_cents:Number(raw),explicitly_checked:true});
+    if (id!==existingAiActiveId||result.platform_writes!==0)
+      throw new Error("Auftrag oder Zustand geändert; bitte neu laden.");
+    await loadExistingAiJobs();
+    byId("existing-ai-feedback").textContent=
+      "Unklarer Vorgang lokal geklärt; kein KI-Neuversuch. Weitere Anzeigen nur nach neuer Freigabe.";
+  } catch (error) { byId("existing-ai-feedback").textContent=error.message; }
 }
 async function reviewExistingAi(approve) {
   if (!existingAiSelected.size||existingAiDisplayedId!==existingAiActiveId) {
@@ -5718,6 +5809,8 @@ byId("existing-ai-jobs-next").addEventListener("click",()=>{if(existingAiJobsHas
 byId("existing-ai-choice").addEventListener("change",()=>{existingAiActiveId=byId("existing-ai-choice").value;loadExistingAiDetails(true);});
 for (const action of ["start","pause","resume"])
   byId("existing-ai-"+action).addEventListener("click",()=>existingAiState(action));
+byId("existing-ai-recover").addEventListener("click",recoverExistingAiInterrupted);
+byId("existing-ai-settle-unknown").addEventListener("click",settleExistingAiUnknown);
 byId("existing-ai-next-call").addEventListener("click",generateExistingAiNext);
 byId("existing-ai-batch").addEventListener("click",generateExistingAiBatch);
 byId("existing-ai-stop").addEventListener("click",()=>{existingAiBatchStop=true;});
@@ -8165,7 +8258,8 @@ def _handler_factory(
         def _portfolio_existing_ai_command(self) -> None:
             target=urlsplit(self.path)
             commands={"/api/portfolio/existing-ai/create","/api/portfolio/existing-ai/state",
-                      "/api/portfolio/existing-ai/review","/api/portfolio/existing-ai/generate-next"}
+                      "/api/portfolio/existing-ai/review","/api/portfolio/existing-ai/generate-next",
+                      "/api/portfolio/existing-ai/recover","/api/portfolio/existing-ai/settle-unknown"}
             if (target.path not in commands or target.query or target.fragment
                     or target.path!=self.path or type(store) is not SnapshotStore
                     or not local_work_available):
@@ -8192,6 +8286,20 @@ def _handler_factory(
                 elif target.path.endswith("/review"):
                     if set(payload)!={"job_id","ad_ids","approve"}: raise ExistingJobError("fields")
                     result=review_existing_items(store,payload["job_id"],payload["ad_ids"],approve=payload["approve"])
+                elif target.path.endswith("/recover"):
+                    if set(payload)!={"job_id"}: raise ExistingJobError("fields")
+                    operation=lambda:recover_existing_interrupted(store,payload["job_id"])
+                    result=(generation_access.run_idle_local_recovery(operation)
+                        if generation_access is not None else operation())
+                elif target.path.endswith("/settle-unknown"):
+                    if set(payload)!={"job_id","ad_id","actual_cents","explicitly_checked"}:
+                        raise ExistingJobError("fields")
+                    operation=lambda:settle_existing_unknown(
+                        store,payload["job_id"],payload["ad_id"],
+                        actual_cents=payload["actual_cents"],
+                        explicitly_checked=payload["explicitly_checked"])
+                    result=(generation_access.run_idle_local_recovery(operation)
+                        if generation_access is not None else operation())
                 else:
                     if (generation_access is None or set(payload)!={"job_id","acknowledge_provider_cost"}
                             or payload["acknowledge_provider_cost"] is not True):
