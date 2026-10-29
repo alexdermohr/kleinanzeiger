@@ -11,6 +11,7 @@ from mark_api.portfolio_existing_jobs import (
     eligible_ad_ids, finish_claim, process_one, recover_interrupted, review_items,
     settle_unknown,
 )
+from mark_api.results import ReadResult
 from mark_api.storage import SnapshotStore
 
 
@@ -43,6 +44,53 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         self.assertEqual(details(self.store,jid)["state"],"budget_exhausted")
         review_items(self.store,jid,[ids[0]],approve=True)
         self.assertEqual(details(self.store,jid)["counts"]["approved"],1)
+
+    def test_10000_verified_owned_ads_job_and_10001_rejection_are_atomic(self):
+        # A single synthetic observation transaction avoids 10,000 setup commits.
+        ids = [f"{i:05d}" for i in range(10_000)]
+        records = tuple(AdSnapshot(
+            ad_id=ad_id, observed_at=self.now,
+            source="kleinanzeigen-management", lifecycle_state=LifecycleState.ACTIVE,
+            title="Lampe " + ad_id, description="Belegte Originalbeschreibung",
+        ) for ad_id in ids)
+        self.assertEqual(self.store.append_inventory_result(
+            ReadResult.success_nonempty(records), source="kleinanzeigen-management",
+            observed_at=self.now), 10_000)
+        self.assertEqual(eligible_ad_ids(self.store), ids)
+        args = dict(instruction="Nur belegte Angaben", request_key="7"*64,
+                    budget_cents=20, estimate_cents=20)
+        job = create_job(self.store, ids, **args)
+        jid = job["job_id"]
+        self.assertEqual(job["total"], 10_000)
+        self.assertEqual(job["platform_writes"], 0)
+        self.assertEqual(create_job(self.store, ids, **args)["job_id"], jid)
+        page = details(self.store, jid)
+        self.assertEqual(len(page["items"]), 50)
+        self.assertTrue(page["has_more"])
+        self.assertEqual(details(self.store, jid, after=page["next_after"])["items"][0]["ad_id"], ids[50])
+        change_state(self.store, jid, "start")
+        first = claim_next(self.store, jid)
+        self.assertEqual(first["ad_id"], ids[0])
+        pending = recover_interrupted(self.store, jid)
+        self.assertEqual(pending["counts"]["unknown"], 1)
+        self.assertEqual(pending["reserved_cents"], 20)
+        with self.assertRaises(ExistingJobError):
+            change_state(self.store, jid, "resume")
+        settled = settle_unknown(self.store, jid, ids[0], actual_cents=6,
+                                 explicitly_checked=True)
+        self.assertEqual(settled["state"], "paused")
+        self.assertEqual(settled["counts"]["queued"], 9_999)
+        self.assertEqual(settled["actual_cents"], 6)
+        self.assertEqual(settled["platform_writes"], 0)
+        self.add("overflow")
+        with self.assertRaisesRegex(ExistingJobError, "more than 10000"):
+            eligible_ad_ids(self.store)
+        with self.assertRaises(ExistingJobError):
+            create_job(self.store, ids + ["overflow"], **{**args, "request_key":"6"*64})
+        self.assertEqual(details(self.store, jid)["total"], 10_000)
+        with self.store._connect() as conn:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM portfolio_existing_jobs").fetchone()[0], 1)
 
     def test_foreign_unknown_changed_and_ambiguous_call_fail_closed(self):
         self.add("owned")
