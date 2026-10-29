@@ -16,15 +16,15 @@ const start=input.indexOf("function downloadPortfolioReportCsv() {");
 const end=input.indexOf('byId("report-refresh").addEventListener',start);
 assert.ok(start>0 && end>start);
 const code=input.slice(start,end);
-let saved=null,clicks=0,appends=0;
+let saved=null,clicks=0,appends=0,metric="messages";
 class BlobCapture{
  constructor(parts,opts){saved=parts.join("");assert.equal(opts.type,"text/csv;charset=utf-8");}
 }
 const ctx={
  reportData:{window_days:7,imported_messages_per_day:[
-   {day_utc:"2026-10-25",imported_messages:0},
-   {day_utc:"2026-10-26",imported_messages:3}]},
- byId:()=>({value:"7"}),
+   {day_utc:"2026-10-25",imported_messages:0,imported_conversations:0},
+   {day_utc:"2026-10-26",imported_messages:3,imported_conversations:2}]},
+ byId:(id)=>({value:id==="report-metric"?metric:"7"}),
  Blob:BlobCapture,
  URL:{createObjectURL(){return "blob:test";},revokeObjectURL(){}},
  document:{createElement(){
@@ -36,10 +36,16 @@ vm.runInNewContext(code+";downloadPortfolioReportCsv()",ctx);
 assert.ok(saved.startsWith("\ufefftag_utc,importierte_eingangsnachrichten\r\n"));
 assert.ok(saved.includes("2026-10-26,3\r\n"));
 assert.equal(clicks,1);assert.equal(appends,1);
+metric="conversations";
+saved=null;
+vm.runInNewContext(code+";downloadPortfolioReportCsv()",ctx);
+assert.ok(saved.startsWith("\ufefftag_utc,unterschiedliche_gespraeche_je_tag\r\n"));
+assert.ok(saved.includes("2026-10-26,2\r\n"));
+assert.equal(clicks,2);
 saved=null;
 ctx.reportData.imported_messages_per_day=[{day_utc:"=HYPERLINK",imported_messages:1}];
 vm.runInNewContext(code+";downloadPortfolioReportCsv()",ctx);
-assert.equal(clicks,1,"formulas must abort export");
+assert.equal(clicks,2,"formulas must abort export");
 assert.equal(saved,null);
 """
         node=shutil.which("node") or "node"

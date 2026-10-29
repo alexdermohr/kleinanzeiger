@@ -57,6 +57,10 @@ class PortfolioReportingTests(unittest.TestCase):
         self.assertEqual(weekly["own_ads_with_inventory_history"],2)
         self.assertEqual(weekly["imported_inbound_messages_window"],3)
         self.assertEqual(weekly["imported_conversations_window"],2)
+        self.assertIsNone(weekly["imported_unique_buyers_window"])
+        self.assertFalse(weekly["unique_buyer_count_supported"])
+        self.assertEqual(weekly["imported_messages_per_day"][-1]["imported_conversations"],1)
+        self.assertEqual(weekly["imported_messages_per_day"][-3]["imported_conversations"],1)
         self.assertEqual(weekly["start_day_utc"],"2026-10-20")
         self.assertEqual(weekly["end_day_utc"],"2026-10-26")
         self.assertEqual(len(weekly["imported_messages_per_day"]),7)
@@ -92,9 +96,28 @@ class PortfolioReportingTests(unittest.TestCase):
         self.assertEqual(estimate["unknown_outcomes"],0)
         self.assertFalse(estimate["invoice_verified"])
 
+    def test_conversation_per_day_is_not_an_unverified_buyer_count(self):
+        self.ad("10001")
+        self.message("10001","conv-a","m-1",NOW-timedelta(days=1))
+        self.message("10001","conv-a","m-2",NOW)
+        self.message("10001","conv-a","m-3",NOW)
+        self.message("10001","conv-b","m-4",NOW)
+        weekly=report(self.store,days=7,now=NOW)
+        self.assertEqual(weekly["imported_inbound_messages_window"],4)
+        self.assertEqual(weekly["imported_conversations_window"],2)
+        self.assertEqual(weekly["imported_messages_per_day"][-2]["imported_conversations"],1)
+        self.assertEqual(weekly["imported_messages_per_day"][-1]["imported_conversations"],2)
+        self.assertEqual(sum(item["imported_conversations"]
+                         for item in weekly["imported_messages_per_day"]),3)
+        self.assertIsNone(weekly["imported_unique_buyers_window"])
+
     def test_empty_data_and_invalid_window_and_clock(self):
         empty=report(self.store,days=7,now=NOW)
         self.assertEqual(empty["own_ads_with_inventory_history"],0)
+        self.assertIsNone(empty["imported_unique_buyers_window"])
+        self.assertFalse(empty["unique_buyer_count_supported"])
+        self.assertTrue(all(row["imported_conversations"] == 0
+                            for row in empty["imported_messages_per_day"]))
         self.assertEqual(empty["manual_sales_current_all_time"]["manually_sold"],0)
         self.assertIsNone(empty["ai_usage_estimate_all_time"])
         with closing(self.store._connect()) as conn:
@@ -125,6 +148,8 @@ class PortfolioReportingTests(unittest.TestCase):
         self.assertEqual(data["own_ads_with_inventory_history"],10000)
         self.assertEqual(data["imported_inbound_messages_window"],0)
         self.assertEqual(len(data["imported_messages_per_day"]),90)
+        self.assertTrue(all(row["imported_conversations"] == 0
+                            for row in data["imported_messages_per_day"]))
         self.assertLess(len(json.dumps(data,ensure_ascii=False)),16_000)
         self.assertLess(time.monotonic()-started,10,"10k report should stay bounded")
 

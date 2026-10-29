@@ -49,6 +49,10 @@ class ReportingHttpTests(unittest.TestCase):
             self.assertEqual(len(data["imported_messages_per_day"]),days)
             self.assertEqual(data["own_ads_with_inventory_history"],1)
             self.assertEqual(data["imported_inbound_messages_window"],0)
+            self.assertIsNone(data["imported_unique_buyers_window"])
+            self.assertFalse(data["unique_buyer_count_supported"])
+            self.assertTrue(all(row["imported_conversations"] == 0
+                                for row in data["imported_messages_per_day"]))
             self.assertEqual(data["manual_sales_current_all_time"]["manually_sold"],0)
             self.assertIsNone(data["ai_usage_estimate_all_time"])
             self.assertFalse(data["conversion_rate_supported"])
@@ -82,11 +86,13 @@ class ReportingHttpTests(unittest.TestCase):
 
     def test_controlling_ui_and_no_billable_or_platform_commands(self):
         for text in ('id="report-panel"','id="report-days"',
+                     'id="report-metric"','id="report-daily-metric-heading"',
                      'id="report-refresh"','id="report-download"',
                      'id="report-daily-body"'):
             self.assertIn(text,_DASHBOARD_HTML)
         for text in ('/api/portfolio/report?days=',
-                     'known_surplus_eur','revenue_period_attributed'):
+                     'known_surplus_eur','revenue_period_attributed',
+                     'imported_conversations','unique_buyer_count_supported'):
             self.assertIn(text,_DASHBOARD_JS)
 
 
