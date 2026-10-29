@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-> **Verbindlicher Fortsetzungsstand vom 28.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Die Ausgabe v0.1.12 ergänzt den sicheren lokalen Arbeitsmodus und die bedienbare G4-/G5-Integration. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC fehlt weiterhin.
+> **Verbindlicher Fortsetzungsstand vom 28.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Die Ausgabe v0.1.15 enthält zusätzlich den globalen G4-Änderungsfilter für bis zu 10.000 eigene Anzeigen, getrennt auswählbare EML-Tageszahlen für Nachrichten oder Gespräche, neue CDP-Negativtests und die seit v0.1.14 bedienbare manuelle Rückkehr zu einer früheren Programmversion. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC fehlt weiterhin.
 
 **Kleinanzeiger** verwaltet eigene Kleinanzeigen über eine lokale Weboberfläche: Anzeige erstellen und veröffentlichen, Bilder zuordnen, Titel und Beschreibung bearbeiten, pausieren, aktivieren, löschen, Bestand synchronisieren sowie Historie, Views, Reaktionen, E-Mail-Daten und Auswertungen einsehen. Hinzu kommen KI-Text- und Bildentwürfe sowie lokale Datensicherung und Wiederherstellung.
 
@@ -49,7 +49,7 @@ Die separate Linux-A6-Migration gehört nicht zur Windows-Neuinstallation.
 
 ## Windows-Updates mit Rückfallumgebung (ab v0.1.13)
 
-Installationen bauen die neue Python-Programmumgebung zunächst in einem eigenen Stagingverzeichnis auf. Erst nach Paket-, Version- und Startprüfung wird sie aktiviert. Scheitert die Aktivierung, wird die vorherige Programmumgebung zurückgestellt; nach erfolgreichem Upgrade bleibt sie für einen technisch begleiteten Rückwechsel als `.venv-rollback-*` erhalten. Das Verfahren verändert keine Anzeigen-Datenbank, Chrome-Profile oder vorhandenen Sicherungen. Eine spätere manuelle Rollback-Schaltfläche ist noch nicht enthalten; die vollständige Kunden-PC-Abnahme bleibt offen.
+Installationen bauen die neue Python-Programmumgebung zunächst in einem eigenen Stagingverzeichnis auf. Erst nach Paket-, Version- und Startprüfung wird sie aktiviert. Scheitert die Aktivierung, wird die vorherige Programmumgebung zurückgestellt; nach erfolgreichem Upgrade bleibt sie für einen technisch begleiteten Rückwechsel als `.venv-rollback-*` erhalten. Das Verfahren verändert keine Anzeigen-Datenbank, Chrome-Profile oder vorhandenen Sicherungen. Ab v0.1.14 ist der manuell bestätigte Rückwechsel im zentralen Kontrollfenster unter Weitere Aktionen vorhanden; die tatsächliche Kunden-PC-Abnahme bleibt offen.
 
 ## Lokaler Arbeitsmodus, Bestandsvergleich und Preisregeln (v0.1.12)
 
@@ -63,7 +63,11 @@ bestätigtem Eigenbestand erforderlich. DB-/Recovery-Fehler werden nicht umgange
 
 **G4:** Dashboard → Weitere Bereiche → Bestandsänderungen vergleicht die letzten
 zwei verifizierten Produkt-/Sync-Runden mit Quellen, Zeitpunkten und gebundenen
-50er-Seiten. **G5:** Artikelentwürfe → Preisregel lädt den lokalen Ausgangspreis
+50er-Seiten. Ab v0.1.15 filtert **Änderungstyp** serverseitig den ganzen
+bestätigten Eigenbestand (nicht nur die sichtbare Seite): neu, geändert,
+pausiert, unklar, unverändert, ohne Vergleichsbasis oder unbestätigt. Ein
+Filterwechsel setzt Seitenposition und Vergleichs-Epoch zurück. Keine aus
+fehlgeschlagenem Sync abgeleitete Lösch- oder Verkaufsbehauptung. **G5:** Artikelentwürfe → Preisregel lädt den lokalen Ausgangspreis
 und macht Mindestpreis, Änderungsschritt, Wartezeit und Vorschau bedienbar.
 Gespeichert wird nur die Regel, nicht ein neuer Artikel- oder Plattformpreis.
 Ein lokaler Vorschlag ist keine automatische oder veröffentlichte Preissenkung.
@@ -170,6 +174,10 @@ kleinanzeiger --db /pfad/kleinanzeiger.sqlite --cdp-port 9222 --enable-generatio
 ```
 
 Der Starter gibt eine gemeinsame Dashboard-URL für Anzeigenverwaltung und Generierung aus. Text und Bilder entstehen zuerst als editierbare, unveröffentlichte Entwürfe und können in das Anzeigenformular übernommen werden. **Jeder einzelne kostenpflichtige Provideraufruf** benötigt eine erneute Bestätigung nach der sichtbaren Modell-/Kosteninformation. Durch die Übernahme wird keine Anzeige automatisch veröffentlicht. Synthetische Tests dürfen weder echte Kosten noch echte Plattformaktionen auslösen.
+
+## Lokales Controlling – Nachrichten und Gespräche unterscheiden (ab v0.1.15)
+
+Im Dashboard unter **Controlling** werden für 7, 30 oder 90 Tage ausschließlich lokal importierte EML-Daten ausgewertet. Unter **Tageskennzahl** lassen sich *eingegangene Nachrichten* oder *unterschiedliche Gespräche je Kalendertag* auswählen; die Tabelle und der CSV-Export folgen der Auswahl. Ein Gespräch kann an mehreren Tagen auftreten, wird im gesamten gewählten Zeitraum aber nur einmal gezählt. Die Zahl tatsächlich unterschiedlicher Käufer bleibt aus den vorhandenen EML-Daten **unbekannt**. Es wird kein echtes Plattformpostfach gelesen und keine Nachricht versendet.
 
 ## Interessenten und KI-Antwortentwürfe ohne automatischen Versand
 

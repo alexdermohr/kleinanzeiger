@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.14 – Windows 11
+# Kleinanzeiger v0.1.15 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -61,7 +61,7 @@ Im Dashboard führen fünf Hauptverknüpfungen zu **Übersicht**,
 **Meine Anzeigen**, **Artikel & KI**, **Interessenten** und
 **Auswertungen**. **Weitere Bereiche** enthält die seltener benötigten
 Werkzeuge: Neue Anzeige, KI-Stapelaufträge, KI-Entwürfe,
-Verkäufe & Lager und Controlling. Es wird keine Funktion entfernt.
+Verkäufe & Lager und Controlling. Es wird keine Funktion entfernt. Unter Controlling kann für lokale EML-Berichte die Tageskennzahl zwischen eingegangenen Nachrichten und unterschiedlichen Gesprächen je Tag umgeschaltet und entsprechend als CSV exportiert werden; eindeutige Käufer sind aus EML allein unbekannt.
 Die Anzeigenverwaltung bleibt links, die Bearbeitung auf breiten
 Bildschirmen daneben; auf schmalen Fenstern stehen sie untereinander.
 
@@ -112,7 +112,15 @@ leeres Konto ausgegeben. KI bleibt optional und benötigt weiterhin ihre Kostenf
 
 **Weitere Bereiche → Bestandsänderungen → Bestand vergleichen** zeigt neue,
 geänderte, unveränderte und nicht mehr sichtbare Anzeigen aus den letzten zwei
-bestätigten Kontoabgleichen, mit Quelle und Zeitpunkt. Bei einem fehlgeschlagenen
+bestätigten Kontoabgleichen, mit Quelle und Zeitpunkt. Ab v0.1.15 kann
+unter **Änderungstyp** ein globaler Filter für neue, geänderte, pausierte,
+unklare, unveränderte, ohne Vergleichsbasis oder unbestätigte Anzeigen
+gewählt werden. Die Filterung durchsucht den gesamten bestätigten
+Eigenbestand (synthetisch bis 10.000 Anzeigen geprüft), nicht nur die
+aktuelle 50er-Seite. **Nächste 50** blättert durch passende Treffer;
+ein Filterwechsel setzt den Cursor und den gebundenen Vergleichszeitstand
+zurück. Die Anzahl passender Treffer im gesamten Bestand wird nicht
+vorgetäuscht. Bei einem fehlgeschlagenen
 Abgleich bleibt die Aussage unbestätigt. Nicht mehr sichtbar ist kein Beleg für
 Verkauf oder Löschung. Bei Änderungen während des Blätterns den Vergleich neu laden.
 

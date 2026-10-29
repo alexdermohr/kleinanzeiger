@@ -14,7 +14,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.14</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.15</p>
 <h1>Funktionsübersicht</h1>
 <p>Die folgende Übersicht unterscheidet Bedienoberfläche, unterstützte Funktion und praktische Grenzen.</p>
 <table><tr><th>Bereich</th><th>Funktion</th><th>Wo bedienen?</th></tr>
@@ -30,7 +30,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <tr><td>Veröffentlichen</td><td>Neue Anzeige erstellen, Festpreis, Kategorie und JPG-/PNG-/WebP-Bilder angeben</td><td>Dashboard → Neue Anzeige erstellen</td></tr>
 <tr><td>Synchronisation</td><td>Echten Besitzerbestand neu einlesen oder nur lokale Ansicht laden</td><td>Dashboard → Mit Kleinanzeigen abgleichen / Ansicht neu laden</td></tr>
 <tr><td>Lokaler Arbeitsmodus</td><td>Bei Browser-/Inventar-Lesefehler mit gesundem gespeicherten Bestand weiterarbeiten; veraltete Daten sichtbar markieren, Plattformänderungen sperren, ausdrücklich erneut abgleichen. Kein Löschen oder Neuerstellen bestehender Daten.</td><td>Normaler Start; Dashboard → Mit Kleinanzeigen abgleichen</td></tr>
-<tr><td>Bestandsänderungen (G4)</td><td>Letzte zwei bestätigte Kontoabgleiche vergleichen, neue/geänderte/unklare und nicht mehr sichtbare Anzeigen mit Quelle und Zeitpunkt, 50er-Seiten und Schutz vor gemischten Zeitständen. Kein Verkaufs- oder Löschbeweis aus Abwesenheit.</td><td>Dashboard → Weitere Bereiche → Bestandsänderungen</td></tr>
+<tr><td>Bestandsänderungen (G4)</td><td>Letzte zwei bestätigte Kontoabgleiche mit Quelle und Zeitpunkt vergleichen. Ab v0.1.15 Auswahl von Änderungstyp (neu, geändert, pausiert, unklar, unverändert, ohne Vergleich, unbestätigt): serverseitig global über den Eigenbestand bis 10.000 Anzeigen; 50 passende Treffer je Seite mit filtergebundenem Epoch-/Cursor-Schutz. Keine erfundene Gesamtzahl passender Anzeigen und kein Verkaufs- oder Löschbeweis aus Abwesenheit.</td><td>Dashboard → Weitere Bereiche → Bestandsänderungen</td></tr>
 <tr><td>Lokale Preisregeln (G5)</td><td>Importierten Artikel mit echtem lokalen Ausgangspreis laden; Mindestpreis, Schritt, Wartezeit und Vorschau; revisionsgesichertes Speichern/Entfernen. Keine automatische Änderung des Artikels oder einer Plattformanzeige.</td><td>Artikelentwürfe → Preisregel; Weitere Bereiche → Preisregeln</td></tr>
 <tr><td>Auswertungen</td><td>Aufrufe, Merker, Antworten, Reaktionen und Quellenzeiten; Gruppen- und Anzeigenrankings, CSV-Export</td><td>Dashboard → Auswertungen und Rankings</td></tr>
 <tr><td>E-Mail</td><td>Eigene lokal gespeicherte <code>.eml</code>-Benachrichtigungen importieren und Reaktionen zuordnen</td><td>Kleinanzeiger-Fenster → E-Mails importieren, bei beendetem Produkt</td></tr>
@@ -42,7 +42,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <tr><td>KI-Stapelaufträge</td><td>Bis 5.000 eigene Entwürfe pro Auftrag, sichere Freigaben, 1 oder bis 10 ausdrücklich bestätigte KI-Vorschläge nacheinander, lokale Übernahme ohne Plattformänderung</td><td>Dashboard → KI-Stapelaufträge</td></tr>
 <tr><td>KI-Bilder</td><td>Bildentwürfe generieren und in lokale Bildauswahl übernehmen</td><td>Dashboard → KI-Assistent → Als Anzeigenbild übernehmen</td></tr>
 <tr><td>Verkäufe &amp; Lager</td><td>Eigene Anzeigen lokal als verfügbar, reserviert oder verkauft verwalten, Lagerorte, manuelle Erlöse und bekannte Kosten mit Revisionsprüfung dokumentieren; keine Plattformänderung</td><td>Dashboard → Verkäufe &amp; Lager</td></tr>
-<tr><td>Controlling</td><td>7-/30-/90-Tage-Berichte über importierte Nachrichten und Gespräche, täglicher CSV-Export, getrennte manuelle Verkaufszahlen und geschätzte KI-Kosten</td><td>Dashboard → Controlling</td></tr>
+<tr><td>Controlling</td><td>7-/30-/90-Tage-Berichte; auswählbare Tageskennzahl für EML-Eingangsnachrichten oder verschiedene Gespräche je Tag, passender CSV-Export, eindeutige Käufer aus EML unbekannt; getrennte manuelle Verkäufe und geschätzte KI-Kosten</td><td>Dashboard → Controlling → Tageskennzahl</td></tr>
 <tr><td>KI-Arbeitsvorlagen</td><td>Bis zu 100 lokale Vorlagen mit Änderungsprüfung; auf Wunsch in Auftragstexte übernehmen, ohne KI-Aufruf</td><td>Dashboard → KI-Stapelaufträge → Arbeitsvorlagen &amp; Prüfhinweise</td></tr>
 <tr><td>Passive Prüfhinweise</td><td>Offene KI-Vorschläge, unklare KI-Ergebnisse, Verkäufe ohne bekannte Kosten und alte Reservierungen anzeigen</td><td>Dashboard → Arbeitsvorlagen &amp; Prüfhinweise</td></tr>
 <tr><td>Backup</td><td>SQLite-Online-Sicherung einschließlich bestätigter WAL-Inhalte, SHA-256 und Manifest</td><td>Kleinanzeiger-Fenster → Sicherung erstellen</td></tr>
@@ -73,5 +73,5 @@ auslösen (Windows-Sitzung maximal 100 versuchte Anfragen); Stop und UNKNOWN
 beenden automatische Folgeaufrufe. OpenAI-Preise werden nur konservativ geschätzt,
 nicht als garantierte Abrechnung dargestellt. <strong>Nicht enthalten:</strong> Plattform-
 Massenveröffentlichung, automatisches Bulk-Löschen oder ungeprüfte Kontoänderungen.</p>
-<footer>Kleinanzeiger v0.1.14 – Kundenunterlagen. Stand: 28. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.15 – Kundenunterlagen. Stand: 29. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>
