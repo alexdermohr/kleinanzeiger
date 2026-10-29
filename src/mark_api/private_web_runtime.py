@@ -138,6 +138,26 @@ class PrivateWebRuntimeSetupError(WriteNotAttemptedError):
     """Per-call private-Web page setup failed before any platform write."""
 
 
+class OwnerInventorySyncFailure(PrivateWebRuntimeSetupError):
+    """Fixed safe reason code for owner inventory refresh; no CDP error details."""
+
+    _MESSAGES = {
+        "busy": "owner inventory busy",
+        "browser_unavailable": "pinned owner session unavailable",
+        "recovery_required": "previous inventory outcome requires reconciliation",
+        "storage_unavailable": "inventory recovery state unavailable",
+        "login_required": "owner inventory login required",
+        "connection_unavailable": "owner inventory connection unavailable",
+        "read_failed": "owner inventory read failed",
+    }
+
+    def __init__(self, kind: str) -> None:
+        if kind not in self._MESSAGES:
+            raise ValueError("invalid owner inventory failure kind")
+        self.kind = kind
+        super().__init__(self._MESSAGES[kind])
+
+
 @contextmanager
 def _bounded_write_shutdown_lock(lock):
     """Never hold service shutdown on an operation lock indefinitely."""
@@ -1202,25 +1222,21 @@ class PrivateWebWriteApiRuntime:
         this user-requested sync; no second CDP claim or platform write occurs.
         """
         if not self._operation_lock.acquire(blocking=False):
-            raise PrivateWebRuntimeSetupError("owner inventory busy")
+            raise OwnerInventorySyncFailure("busy")
         try:
             if self._stopping or self._closed:
                 raise PrivateWebRuntimeClosedError("owner inventory runtime closing")
             session = getattr(self._content_runtime, "_cdp_session", None)
             if session is None:
-                raise PrivateWebRuntimeSetupError("pinned owner session unavailable")
+                raise OwnerInventorySyncFailure("browser_unavailable")
             try:
                 recovery = self._store.sync_recovery_status()
                 if recovery.get("unresolved_count") != 0:
-                    raise PrivateWebRuntimeSetupError(
-                        "previous inventory outcome requires reconciliation"
-                    )
+                    raise OwnerInventorySyncFailure("recovery_required")
             except PrivateWebRuntimeSetupError:
                 raise
             except Exception:
-                raise PrivateWebRuntimeSetupError(
-                    "inventory recovery state unavailable"
-                ) from None
+                raise OwnerInventorySyncFailure("storage_unavailable") from None
 
             from .periodic_sync import PeriodicOwnerSync
 
@@ -1250,7 +1266,12 @@ class PrivateWebWriteApiRuntime:
             )
             result = sync.run_once()
             if not result.is_success:
-                raise PrivateWebRuntimeSetupError("owner inventory read failed")
+                # Expose only a trusted status enum, never cookies, paths or CDP text.
+                kind = {
+                    ReadStatus.UNAUTHENTICATED: "login_required",
+                    ReadStatus.TRANSPORT_ERROR: "connection_unavailable",
+                }.get(result.status, "read_failed")
+                raise OwnerInventorySyncFailure(kind)
             return len(result.value or ())
         finally:
             self._operation_lock.release()

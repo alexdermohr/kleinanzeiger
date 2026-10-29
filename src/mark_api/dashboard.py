@@ -4545,6 +4545,17 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
   });
 }
 
+const syncFailureHints = Object.freeze({
+  write_session_required: "Die lokale Sitzung ist abgelaufen. Kleinanzeiger vollständig beenden und neu starten.",
+  owner_inventory_busy: "Ein anderer Vorgang verwendet gerade den Browser. Danach erneut abgleichen.",
+  owner_inventory_browser_unavailable: "Der von Kleinanzeiger verwendete Chrome ist nicht erreichbar. Kleinanzeiger neu starten.",
+  owner_inventory_recovery_required: "Ein früherer Abgleich hat einen ungeklärten Zustand. Im Status nachsehen, nicht wiederholt auslösen.",
+  owner_inventory_storage_unavailable: "Der lokale Abgleichstatus ist nicht lesbar. Kleinanzeiger neu starten und Diagnose prüfen.",
+  owner_inventory_login_required: "Im von Kleinanzeiger geöffneten Chrome bei Kleinanzeigen anmelden, dann erneut abgleichen.",
+  owner_inventory_connection_unavailable: "Kleinanzeigen oder der Browser ist nicht erreichbar. Netzwerk und Kleinanzeiger-Chrome prüfen.",
+  owner_inventory_read_failed: "Die Anzeigenübersicht konnte nicht vollständig gelesen werden. Anzeigenübersicht im Kleinanzeiger-Chrome prüfen.",
+});
+
 async function syncNow() {
   if (!manualSyncAvailable || !localUiReady() || syncInFlight) return;
   syncInFlight = true;
@@ -4552,6 +4563,7 @@ async function syncNow() {
   button.disabled = true;
   const status = byId("status");
   status.textContent = "Gleiche Anzeigen mit Kleinanzeigen ab …";
+  let failureHint = "Verbindung zum Kleinanzeiger prüfen und gegebenenfalls die Anwendung neu starten.";
   try {
     const response = await fetch("/api/dashboard/sync", {
       method: "POST",
@@ -4565,6 +4577,10 @@ async function syncNow() {
     const result = await response.json();
     if (!response.ok || result.status !== "success"
       || !Number.isSafeInteger(result.current_ads) || result.current_ads < 0) {
+      if (result && typeof result.error === "string"
+          && Object.prototype.hasOwnProperty.call(syncFailureHints, result.error)) {
+        failureHint = syncFailureHints[result.error];
+      }
       throw new Error("Abgleich nicht bestätigt");
     }
     const reloaded = await load();
@@ -4575,7 +4591,7 @@ async function syncNow() {
     status.textContent = result.current_ads + " Anzeigen aus dem Kundenkonto abgeglichen."
       + (localWorkAvailable ? " Plattformänderungen bleiben bis zum Neustart gesperrt." : "");
   } catch (_error) {
-    status.textContent = "Abgleich fehlgeschlagen. Vorhandene Anzeigen bleiben gespeichert; bitte Anmeldung und Verbindungsstatus prüfen.";
+    status.textContent = "Abgleich fehlgeschlagen. Vorhandene Anzeigen bleiben gespeichert. " + failureHint;
   } finally {
     syncInFlight = false;
     button.disabled = !localUiReady();
@@ -8111,8 +8127,15 @@ def _handler_factory(
             except ValueError:
                 self._send_json(400, {"error": "sync_request_body_not_allowed"})
                 return
+            # Keep offline dashboard imports free of platform/CDP adapters.
+            from .private_web_runtime import OwnerInventorySyncFailure
             try:
                 count = sync_once()
+            except OwnerInventorySyncFailure as exc:
+                # Expose fixed reason codes, not browser credentials or error text.
+                status = 409 if exc.kind in ("busy", "recovery_required") else 503
+                self._send_json(status, {"error": "owner_inventory_" + exc.kind})
+                return
             except Exception:
                 # Never leak CDP credentials, browser state or local paths.
                 self._send_json(503, {"error": "owner_inventory_refresh_failed"})
