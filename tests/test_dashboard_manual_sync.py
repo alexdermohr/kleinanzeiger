@@ -111,7 +111,7 @@ assert.match(unknown, /Gespeicherte Anzeigen bleiben erhalten/);
 """
         result = subprocess.run(
             ["node", "-e", script], input=snippet,
-            text=True, capture_output=True, check=False,
+            text=True, encoding="utf-8", capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
