@@ -4,6 +4,18 @@ INSIGHTS_HTML = """
     <section id="inventory-diff-panel" class="panel" hidden>
       <h2>Bestandsänderungen</h2>
       <p>Vergleich der letzten zwei bestätigten Kontoabgleiche. Nicht mehr sichtbar bedeutet nicht automatisch verkauft oder gelöscht.</p>
+      <label>Änderungstyp
+        <select id="inventory-diff-filter">
+          <option value="all">Alle Anzeigen</option>
+          <option value="newly_observed">Neu beobachtet</option>
+          <option value="changed">Geändert</option>
+          <option value="paused">Pausiert</option>
+          <option value="unclear">Unklar / nicht sichtbar</option>
+          <option value="unchanged">Unverändert</option>
+          <option value="no_baseline">Ohne Vergleichsrunde</option>
+          <option value="unverified">Nicht aktuell bestätigt</option>
+        </select>
+      </label>
       <button id="inventory-diff-load" type="button">Bestand vergleichen</button>
       <button id="inventory-diff-next" type="button" disabled>Nächste 50</button>
       <p id="inventory-diff-status" role="status" aria-live="polite">Noch kein Vergleich geladen.</p>
@@ -41,6 +53,7 @@ INSIGHTS_HTML = """
 INSIGHTS_JS = r"""
 let inventoryDiffCursor = null;
 let inventoryDiffEpoch = null;
+let inventoryDiffFilterSerial = 0;
 let inventoryDiffBusy = false;
 let priceRuleCursor = null;
 let priceRuleTarget = null;
@@ -74,6 +87,8 @@ async function readInsight(path) {
 
 async function loadInventoryDiff(next = false) {
   if (!jobsAvailable || !localUiReady() || inventoryDiffBusy || (next && !inventoryDiffCursor)) return false;
+  const filter = byId("inventory-diff-filter").value || "all";
+  const filterSerial = inventoryDiffFilterSerial;
   inventoryDiffBusy = true;
   byId("inventory-diff-load").disabled = true;
   byId("inventory-diff-next").disabled = true;
@@ -81,9 +96,13 @@ async function loadInventoryDiff(next = false) {
   status.textContent = "Vergleiche gespeicherte Kontoabgleiche …";
   try {
     const query = new URLSearchParams({limit: "50"});
+    if (filter !== "all") query.set("state", filter);
     if (next) { query.set("after", inventoryDiffCursor); query.set("epoch", inventoryDiffEpoch); }
     const page = await readInsight("/api/portfolio/inventory-diff?" + query.toString());
-    if (!page || !Array.isArray(page.items) || typeof page.epoch !== "string") throw new Error("Ungültige Vergleichsdaten.");
+    if (filterSerial !== inventoryDiffFilterSerial ||
+        (byId("inventory-diff-filter").value || "all") !== filter) return false;
+    if (!page || !Array.isArray(page.items) || typeof page.epoch !== "string" ||
+        (page.state_filter && page.state_filter !== filter)) throw new Error("Ungültige Vergleichsdaten.");
     inventoryDiffCursor = page.has_more ? page.next_after : null;
     inventoryDiffEpoch = page.epoch;
     const body = byId("inventory-diff-body");
@@ -100,8 +119,11 @@ async function loadInventoryDiff(next = false) {
       insightCell(row, item.current ? item.current.source + " · " + item.current.observed_at : "—");
       body.appendChild(row);
     }
+    const summary = page.total === null
+      ? page.items.length + " passende Anzeigen auf dieser Seite (global gefiltert)."
+      : page.items.length + " von " + page.total + " Anzeigen.";
     status.textContent = page.state === "ready"
-      ? page.items.length + " von " + page.total + " Anzeigen. Aktuell: " + page.confirmed_at + " (" + page.source + "). Vorher: " + (page.previous_confirmed_at || "noch kein Vergleich") + "."
+      ? summary + " Aktuell: " + page.confirmed_at + " (" + page.source + "). Vorher: " + (page.previous_confirmed_at || "noch kein Vergleich") + "."
       : "Kein aktueller, vollständiger Vergleich bestätigt. Letzter erfolgreicher Abgleich: " + (page.last_confirmed_at || "noch keiner") + ". Fehlende Daten sind kein Löschbeleg.";
     return true;
   } catch (error) {
@@ -265,6 +287,18 @@ for (const [id, handler] of [
   const element = optionalById(id);
   if (element) element.addEventListener("click", handler);
 }
+const inventoryFilter = optionalById("inventory-diff-filter");
+if (inventoryFilter) inventoryFilter.addEventListener("change", () => {
+  // A changed filter invalidates both the cursor and every in-flight reply.
+  inventoryDiffFilterSerial += 1;
+  inventoryDiffCursor = null;
+  inventoryDiffEpoch = null;
+  byId("inventory-diff-body").replaceChildren();
+  byId("inventory-diff-next").disabled = true;
+  if (!inventoryDiffBusy) return loadInventoryDiff();
+  byId("inventory-diff-status").textContent = "Filter gewechselt. Den Vergleich danach erneut laden.";
+  return false;
+});
 for (const id of ["price-rule-min", "price-rule-step", "price-rule-wait"]) {
   const element = optionalById(id);
   if (element) element.addEventListener("input", previewPriceRule);

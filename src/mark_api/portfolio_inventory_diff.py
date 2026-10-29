@@ -31,6 +31,8 @@ _PRODUCT_SOURCES = (
 _PAGE_MAX = 100
 _HISTORY_LIMIT = 4096
 _SUCCESS = frozenset(("success_empty", "success_nonempty"))
+_FILTER_STATES = frozenset(("all", "newly_observed", "changed", "paused", "unchanged",
+                            "no_baseline", "unclear", "unverified"))
 
 
 class InventoryDiffError(ValueError):
@@ -229,7 +231,7 @@ def _change(
 def _inventory_diff_page(
     store: SnapshotStore, *, after: str = "", limit: int = 50,
     expected_epoch: str | None = None,
-    sync_sources: tuple[str, ...],
+    sync_sources: tuple[str, ...], state_filter: str = "all",
 ) -> dict[str, Any]:
     """Return an ID-keyset page pinned to one authoritative journal generation.
 
@@ -239,6 +241,8 @@ def _inventory_diff_page(
     if type(store) is not SnapshotStore:
         raise TypeError("A verified SnapshotStore is required.")
     _validate_cursor(after, limit, expected_epoch)
+    if type(state_filter) is not str or state_filter not in _FILTER_STATES:
+        raise InventoryDiffError("Ungueltiger Bestandsaenderungsfilter.")
     source_slots = ",".join("?" for _ in sync_sources)
     observation_sources = (_OBSERVED_SOURCE, *sync_sources)
     observation_slots = ",".join("?" for _ in observation_sources)
@@ -285,30 +289,56 @@ def _inventory_diff_page(
             conn, store, latest, watermark, latest_global=latest_global,
             unresolved=unresolved, oldest_unresolved=oldest_unresolved,
         )
-        if expected_epoch is not None and epoch != expected_epoch:
-            raise InventoryDiffError("Bestand seit letzter Seite geaendert; bitte neu laden.")
-        rows = conn.execute(
-            f"SELECT DISTINCT ad_id FROM ad_snapshots WHERE source IN ({observation_slots}) "
-            "AND ad_id > ? COLLATE BINARY "
-            "ORDER BY ad_id COLLATE BINARY LIMIT ?",
-            (*observation_sources, after, limit + 1),
-        ).fetchall()
-        items = [
-            store._required_observation_ad_id(row["ad_id"])
-            for row in rows[:limit]
-        ]
+        # A page cursor also binds the selected server-side filter; changing
+        # filters may never silently combine two different result sets.
+        page_epoch = (epoch if state_filter == "all" else
+                      hashlib.sha256((epoch + "|" + state_filter).encode("ascii")).hexdigest())
+        if expected_epoch is not None and page_epoch != expected_epoch:
+            raise InventoryDiffError("Bestand oder Filter seit letzter Seite geaendert; bitte neu laden.")
         count = conn.execute(
             "SELECT COUNT(DISTINCT ad_id) FROM ad_snapshots "
             f"WHERE source IN ({observation_slots})",
             observation_sources,
         ).fetchone()[0]
-        results = [
-            _change(ad_id, verified=verified,
-                    snapshots=_owner_history(conn, ad_id, observation_sources) if verified else (),
-                    current_attempt=latest if verified else None,
-                    previous_attempt=previous if verified else None)
-            for ad_id in items
-        ]
+
+        def describe(ad_id: str) -> dict[str, Any]:
+            return _change(
+                ad_id, verified=verified,
+                snapshots=_owner_history(conn, ad_id, observation_sources) if verified else (),
+                current_attempt=latest if verified else None,
+                previous_attempt=previous if verified else None,
+            )
+
+        if state_filter == "all":
+            # Preserve the cheap 50-row keyset path for the normal catalog.
+            rows = conn.execute(
+                f"SELECT DISTINCT ad_id FROM ad_snapshots WHERE source IN ({observation_slots}) "
+                "AND ad_id > ? COLLATE BINARY ORDER BY ad_id COLLATE BINARY LIMIT ?",
+                (*observation_sources, after, limit + 1),
+            ).fetchall()
+            ids = [store._required_observation_ad_id(row["ad_id"]) for row in rows[:limit]]
+            results = [describe(ad_id) for ad_id in ids]
+            has_more = len(rows) > limit
+            next_after = ids[-1] if has_more else None
+        else:
+            # Iterate the complete ordered ID stream *until* the next 51
+            # matching rows. Filtering only an unfiltered 50-row response
+            # would silently hide changes on later pages.
+            matched: list[dict[str, Any]] = []
+            for row in conn.execute(
+                f"SELECT DISTINCT ad_id FROM ad_snapshots WHERE source IN ({observation_slots}) "
+                "AND ad_id > ? COLLATE BINARY ORDER BY ad_id COLLATE BINARY",
+                (*observation_sources, after),
+            ):
+                ad_id = store._required_observation_ad_id(row["ad_id"])
+                item = describe(ad_id)
+                if item["state"] == state_filter:
+                    matched.append(item)
+                    if len(matched) > limit:
+                        break
+            has_more = len(matched) > limit
+            results = matched[:limit]
+            next_after = results[-1]["ad_id"] if has_more else None
         return {
             "state": "ready" if verified else "unverified",
             "source": latest.source if latest else sync_sources[0],
@@ -321,9 +351,11 @@ def _inventory_diff_page(
                 latest.completed_at.isoformat() if verified else None
             ),
             "unresolved_sync_attempts": unresolved,
-            "epoch": epoch, "total": count,
-            "items": results, "has_more": len(rows) > limit,
-            "next_after": items[-1] if len(rows) > limit else None,
+            "epoch": page_epoch, "total": count if state_filter == "all" else None,
+            "total_unfiltered": count, "state_filter": state_filter,
+            "filter_is_global": state_filter != "all",
+            "items": results, "has_more": has_more,
+            "next_after": next_after,
             "platform_writes": 0,
         }
 
@@ -341,7 +373,7 @@ def owner_inventory_diff_page(
 
 def product_inventory_diff_page(
     store: SnapshotStore, *, after: str = "", limit: int = 50,
-    expected_epoch: str | None = None,
+    expected_epoch: str | None = None, state_filter: str = "all",
 ) -> dict[str, Any]:
     """Compare real product-start and explicit-sync rounds, not just the CLI.
 
@@ -350,5 +382,5 @@ def product_inventory_diff_page(
     """
     return _inventory_diff_page(
         store, after=after, limit=limit, expected_epoch=expected_epoch,
-        sync_sources=_PRODUCT_SOURCES,
+        sync_sources=_PRODUCT_SOURCES, state_filter=state_filter,
     )

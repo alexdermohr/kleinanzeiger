@@ -97,6 +97,29 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(byId("inventory-diff-body").children.length,0);
   assert.equal(byId("inventory-diff-next").disabled,true);
   assert.equal(run("inventoryDiffCursor"),null);
+  // A filter operates across all ad IDs, not just the first displayed page.
+  byId("inventory-diff-filter").value="changed";
+  fetchImpl=async(path)=>{
+    assert.match(path,/state=changed/);
+    return success({items:[{ad_id:"00030",state:"changed",reason:"Titel",
+      previous:{title:"Alt",state:"active"},current:{title:"Neu",state:"active",source:"owner",observed_at:"now"}}],
+      state:"ready",state_filter:"changed",epoch:"b".repeat(64),has_more:false,
+      next_after:null,total:null,confirmed_at:"now",source:"owner"});
+  };
+  assert.equal(await byId("inventory-diff-filter").listeners.change(),true);
+  assert.equal(byId("inventory-diff-body").children.length,1);
+  assert.equal(byId("inventory-diff-body").children[0].children[0].textContent,"00030");
+  assert.match(byId("inventory-diff-status").textContent,/global gefiltert/);
+  // Late replies from an earlier selection must not repaint a changed filter.
+  let finishFiltered;
+  fetchImpl=()=>new Promise(resolve=>{finishFiltered=resolve;});
+  const oldFilterLoad=run("loadInventoryDiff()");
+  byId("inventory-diff-filter").value="unclear";
+  assert.equal(byId("inventory-diff-filter").listeners.change(),false);
+  finishFiltered(success({items:[],state_filter:"changed",epoch:"c".repeat(64),has_more:false}));
+  assert.equal(await oldFilterLoad,false);
+  assert.equal(byId("inventory-diff-body").children.length,0);
+  assert.equal(run("inventoryDiffCursor"),null);
   assert.ok(sent.every(call=>call.path.startsWith("/api/portfolio/")));
   assert.ok(sent.every(call=>!call.path.includes("/api/write")));
   console.log("LOCAL_INSIGHTS_IDENTITY_EPOCH_NO_AUTOWRITE_PASS");
