@@ -108,6 +108,14 @@ oder verändert allein eine Anzeige.</p>
 <li>Textentwurf oder Bildentwurf erzeugen. Ergebnisse im Formular prüfen, bei Bedarf ändern und erst mit gesondertem Klick eine Anzeige erstellen.</li>
 </ol>
 <p>Die tatsächlichen Kosten hängen vom Provider und der Nutzung ab. Keine sensiblen Kontodaten in Prompts eingeben. Generierte Bilder sind nicht automatisch authentische Fotos des angebotenen Gegenstands.</p>
+<h3>KI-Textvorschläge für bereits veröffentlichte eigene Anzeigen (Folgeversion nach v0.1.15)</h3>
+<ol>
+<li>In <strong>Meine Anzeigen</strong> eine bestätigte eigene, aktive oder pausierte Anzeige über <strong>Bearbeiten</strong> wählen. Im Anzeigeneditor auf <strong>KI-Textvorschlag für diese Anzeige vorbereiten</strong> klicken. Kleinanzeiger prüft die Originaldaten zur exakten Anzeigen-ID nochmals lokal.</li>
+<li>Im eingeblendeten <strong>KI-Assistenten</strong> den vorbereiteten Prompt mit dem Originaltext sorgfältig kontrollieren. Nur bekannte Produktfakten übermitteln, sensible Daten entfernen, Modellkosten beachten und jede Anfrage einzeln bestätigen. Die Vorbereitung allein ist kostenlos.</li>
+<li>Nach der KI-Antwort <strong>Gesicherten Ausgangstext</strong> und <strong>KI-Vorschlag</strong> für Titel und Beschreibung vollständig vergleichen. Erst nach Prüfung den Vorschlag ins vorhandene Bearbeitungsformular übernehmen. Abweichende, entfernte oder zwischenzeitlich geänderte Anzeigen blockieren die Übernahme.</li>
+<li>Änderungen im Anzeigeneditor nochmals prüfen. <strong>Änderungen speichern</strong> ist eine separate Aktion und nur in einer für Plattformänderungen zulässigen Sitzung möglich; das KI-Ergebnis löst niemals eigenmächtig eine Plattformänderung aus.</li>
+</ol>
+<p class="note">Diese Textoptimierung gehört zum neueren Entwicklungsstand und ist <strong>noch nicht</strong> Bestandteil des veröffentlichten Windows-Pakets v0.1.15. Bildänderungen bereits veröffentlichter Anzeigen, automatische Massenübernahmen und echte Nachrichtenversandautomatik sind damit nicht freigegeben.</p>
 <h2 id="daten">6. Datensicherung, Wiederherstellung und Updates</h2>
 <p>Im Kontrollfenster stehen <strong>Sicherung erstellen</strong> und <strong>Installieren / aktualisieren</strong> zur Verfügung. Vor einer Aktualisierung wird bei vorhandener Datenbank automatisch eine geprüfte Sicherung erzeugt. Die Datenbank liegt unter <code>%LOCALAPPDATA%\Kleinanzeiger\anzeigen.sqlite</code>, Sicherungen unter <code>%LOCALAPPDATA%\Kleinanzeiger\Backups</code>. Programmdateien liegen unter <code>%LOCALAPPDATA%\Kleinanzeiger\App</code>.</p>
 <p>Für <strong>Sicherung wiederherstellen</strong> zunächst über <strong>Weitere Aktionen</strong> die Restore-Funktion öffnen. Diese stellt nur in eine <strong>noch nicht vorhandene</strong> Datenbank ohne WAL-/SHM-/Journal-Dateien wieder her. Eine vorhandene Datenbank wird niemals überschrieben. Die Sicherungsdatei benötigt ihr passendes Manifest.</p>

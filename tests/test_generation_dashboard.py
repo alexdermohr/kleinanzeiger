@@ -519,6 +519,8 @@ globalThis.generationToken = "s".repeat(32);
 globalThis.generationBusy = false;
 globalThis.buyerBusy = false;
 globalThis.generationTextDraft = null;
+globalThis.generationExistingTarget = null;
+globalThis.generationExistingCheckGeneration = 0;
 globalThis.generationImageBlob = null;
 globalThis.generationImageSourcePrompt = null;
 globalThis.generationImagePreviewUrl = null;
@@ -711,6 +713,208 @@ const imageOk = {
             completed.returncode, 0, completed.stdout + completed.stderr,
         )
         self.assertIn("JS_DRAFT_RESET_PASS", completed.stdout)
+
+
+
+class ExistingAdGenerationBrowserTests(unittest.TestCase):
+    def test_customer_html_and_event_wiring_are_reachable(self):
+        from mark_api.dashboard import _DASHBOARD_HTML, _DASHBOARD_JS
+        for element_id in (
+            "manage-ai-improve", "generation-existing-preview",
+            "generation-existing-evidence", "generation-existing-original",
+            "generation-existing-suggestion", "generation-apply-existing",
+        ):
+            self.assertIn(f'id="{element_id}"', _DASHBOARD_HTML)
+        self.assertIn(
+            'byId("manage-ai-improve").addEventListener("click", prepareExistingAdGeneration)',
+            _DASHBOARD_JS,
+        )
+        self.assertIn(
+            'byId("generation-apply-existing").addEventListener("click", applyGenerationTextToExisting)',
+            _DASHBOARD_JS,
+        )
+
+    def test_existing_ad_bound_generation_diff_stale_races_and_no_auto_write(self):
+        import shutil
+        import subprocess
+        from mark_api.dashboard import _DASHBOARD_JS
+
+        if shutil.which("node") is None:
+            self.skipTest("Node.js required for real browser-JavaScript state test")
+        start = _DASHBOARD_JS.index("function generationUiReady() {")
+        end = _DASHBOARD_JS.index('if (typeof window !== "undefined" && typeof window.addEventListener === "function")')
+        handlers = _DASHBOARD_JS[start:end]
+        script = r"""
+const assert = require("node:assert/strict");
+const source = JSON.parse(process.argv[1]);
+const ids = [
+ "generation-panel","generation-session-note","generation-text","generation-image",
+ "generation-consent","generation-apply-text","generation-apply-image",
+ "generation-status","generation-prompt","generation-draft-title",
+ "generation-draft-description","generation-text-preview","generation-draft-image",
+ "generation-image-preview","generation-text-prompt","generation-image-prompt",
+ "manage-ai-improve","manage-ad-id","manage-title","manage-description",
+ "generation-existing-preview","generation-existing-evidence",
+ "generation-existing-original","generation-existing-suggestion",
+ "generation-apply-existing","generation-disclosure","manage-form",
+ "create-title","create-description"
+];
+const dom = Object.create(null);
+for (const id of ids) dom[id] = {
+ hidden:true, disabled:false, checked:false, open:false, value:"", textContent:"",
+ scrollIntoView() {}, removeAttribute() {},
+};
+globalThis.document = {getElementById:(id)=>dom[id]??null};
+globalThis.byId = (id) => {
+ if (!dom[id]) throw Error("unknown browser id "+id);
+ return dom[id];
+};
+globalThis.optionalById = (id)=>dom[id]??null;
+globalThis.generationUiAvailable = true;
+globalThis.generationToken = "s".repeat(32);
+globalThis.generationBusy = false;
+globalThis.buyerBusy = false;
+globalThis.createInFlight = false;
+globalThis.generationTextDraft = null;
+globalThis.generationExistingTarget = null;
+globalThis.generationExistingCheckGeneration = 0;
+globalThis.generationImageBlob = null;
+globalThis.generationImageSourcePrompt = null;
+globalThis.generationImagePreviewUrl = null;
+globalThis.pendingRecoveryBlocked = false;
+globalThis.pendingWrites = new Map();
+globalThis.pendingForAd = () => null;
+globalThis.writeUiReady = () => true;
+globalThis.latestAdsById = new Map();
+const original = {
+ ad_id:"123456789", title:"Massivholzregal",
+ description:"Massives Holz, 3 Fächer.", observed_at:"2026-10-29T08:00:00Z",
+ lifecycle_state:"active", present:true, source:"private-web-product-launcher",
+};
+function chooseOriginal(){
+ globalThis.managedAdBaseline = {
+   adId:original.ad_id,titleKnown:true,title:original.title,
+   descriptionKnown:true,description:original.description,
+ };
+ latestAdsById.set(original.ad_id,{...original});
+ dom["manage-ad-id"].value=original.ad_id;
+ dom["manage-title"].value=original.title;
+ dom["manage-description"].value=original.description;
+}
+chooseOriginal();
+let localRead = {...original};
+let localReads=0, providerCalls=0, confirmed=0, platformWrites=0;
+globalThis.getJson = async (path)=>{
+  assert.equal(path,"/api/catalog/ad?id=123456789");
+  localReads++;
+  return {ad:{...localRead}};
+};
+globalThis.window = {confirm:()=>{confirmed++;return true;}};
+globalThis.runAdAction=()=>{platformWrites++; throw Error("unwanted platform write");};
+globalThis.URL = {revokeObjectURL() {},createObjectURL:()=>""};
+globalThis.fetch=async (path,options)=>{
+  providerCalls++;
+  assert.equal(path,"/api/dashboard/generate");
+  assert.equal(options.method,"POST");
+  assert.equal(options.credentials,"omit");
+  assert.equal(options.redirect,"error");
+  assert.equal(options.body.includes('"acknowledge_provider_cost":true'),true);
+  return {ok:true,status:200,json:async()=>({
+    status:"draft",published:false,title:"Massivholzregal mit drei Fächern",
+    description:"Massives Holz, 3 Fächer. Gut lesbar."
+  })};
+};
+const {prepareExistingAdGeneration,applyGenerationTextToExisting,
+ requestGeneration,renderGenerationExistingPreview,
+ resetGenerationExistingTarget,onGenerationPromptChange} =
+ new Function(source+"\nreturn {prepareExistingAdGeneration,applyGenerationTextToExisting,requestGeneration,renderGenerationExistingPreview,resetGenerationExistingTarget,onGenerationPromptChange};")();
+(async()=>{
+  assert.equal(await prepareExistingAdGeneration(),true);
+  assert.equal(providerCalls,0,"preparing existing listing must never call provider");
+  assert.equal(localReads,1,"exact source lookup required");
+  assert.ok(dom["generation-prompt"].value.includes(original.title));
+  assert.ok(dom["generation-prompt"].value.includes(original.description));
+  assert.equal(dom["generation-disclosure"].open,true);
+  dom["generation-consent"].checked=true;
+  await requestGeneration("text");
+  assert.equal(providerCalls,1);
+  assert.equal(dom["generation-consent"].checked,false,"cost consent must be one use");
+  assert.equal(dom["generation-existing-preview"].hidden,false);
+  assert.equal(dom["generation-apply-existing"].disabled,false);
+  assert.match(dom["generation-existing-original"].textContent,/Massivholzregal/);
+  assert.match(dom["generation-existing-suggestion"].textContent,/mit drei Fächern/);
+  assert.equal(await applyGenerationTextToExisting(),true);
+  assert.equal(localReads,2,"owner observation must be read again on apply");
+  assert.equal(confirmed,1,"one separate local takeover confirmation");
+  assert.equal(dom["manage-title"].value,"Massivholzregal mit drei Fächern");
+  assert.equal(dom["manage-description"].value,"Massives Holz, 3 Fächer. Gut lesbar.");
+  assert.equal(platformWrites,0,"AI and local takeover may not submit a listing");
+  assert.equal(await applyGenerationTextToExisting(),false,"takeover is single-use");
+  assert.equal(platformWrites,0);
+
+  // Changed observed owner data after generation: discard rather than touch fields.
+  chooseOriginal();localRead={...original};
+  assert.equal(await prepareExistingAdGeneration(),true);
+  dom["generation-consent"].checked=true;
+  await requestGeneration("text");
+  localRead={...original,observed_at:"2026-10-29T09:00:00Z"};
+  assert.equal(await applyGenerationTextToExisting(),false);
+  assert.equal(dom["manage-title"].value,original.title);
+  assert.equal(platformWrites,0);
+  assert.match(dom["generation-status"].textContent,/(?:verändert|geändert)/);
+
+  // A different ad or local row seen while the provider is running invalidates
+  // a previously consented draft, without issuing a second provider request.
+  chooseOriginal();localRead={...original};
+  assert.equal(await prepareExistingAdGeneration(),true);
+  dom["generation-consent"].checked=true;
+  const priorFetch=globalThis.fetch;
+  let reply;
+  globalThis.fetch=()=>new Promise(resolve=>{reply=resolve;providerCalls++;});
+  const inFlight=requestGeneration("text");
+  latestAdsById.set(original.ad_id,{...original,title:"Changed during request"});
+  reply({ok:true,status:200,json:async()=>({
+    status:"draft",published:false,title:"Untrusted",description:"Not for same ad"})});
+  await inFlight;
+  assert.equal(generationTextDraft,null);
+  assert.equal(dom["generation-existing-preview"].hidden,true);
+  assert.equal(dom["manage-title"].value,original.title);
+  globalThis.fetch=priorFetch;
+
+  // A missing current owner listing cannot even prepare a billable request.
+  chooseOriginal();
+  latestAdsById.set(original.ad_id,{...original,present:false});
+  const before=providerCalls;
+  assert.equal(await prepareExistingAdGeneration(),false);
+  assert.equal(providerCalls,before);
+  // A plausible-looking manually imported ad is not verified inventory.
+  chooseOriginal();
+  latestAdsById.set(original.ad_id,{...original,source:"local-catalog"});
+  assert.equal(await prepareExistingAdGeneration(),false);
+  assert.equal(providerCalls,before);
+  chooseOriginal();
+  localRead={...original,source:"local-catalog"};
+  assert.equal(await prepareExistingAdGeneration(),false);
+  assert.equal(providerCalls,before);
+  localRead={...original};
+  const prevRead=globalThis.getJson;
+  let releaseRead;
+  globalThis.getJson=()=>new Promise(resolve=>{releaseRead=resolve;});
+  const pending=prepareExistingAdGeneration();
+  resetGenerationExistingTarget();
+  releaseRead({ad:{...original}});
+  assert.equal(await pending,false,"stale in-flight local recheck must not bind source");
+  globalThis.getJson=prevRead;
+  assert.equal(platformWrites,0);
+  console.log("EXISTING_AD_GENERATION_PASS");
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+        result = subprocess.run(
+            ["node", "-e", script, json.dumps(handlers)],
+            capture_output=True, text=True, timeout=25, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("EXISTING_AD_GENERATION_PASS", result.stdout)
 
 
 if __name__ == "__main__":
