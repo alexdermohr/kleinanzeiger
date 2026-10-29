@@ -32,7 +32,7 @@ interpretiert werden, da eine Anzeige mehrere lokale Prüfpunkte haben kann.
 
 ## Technische Grenzen
 
-Der read-only Endpunkt `GET /api/portfolio/attention?offset=0&limit=50`
+Der read-only Endpunkt `GET /api/portfolio/autopilot-attention?offset=0&limit=50`
 nutzt die vorhandene lokale Dashboard-Token-Prüfung und ist auf 50 Einträge je
 Seite begrenzt. `offset` darf höchstens 100.000 sein. Er erzeugt keine
 Tabellen, mutiert weder Anzeigen noch Reviews und liest keine neuen Plattform-

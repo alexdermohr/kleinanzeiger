@@ -14,7 +14,7 @@ from .storage import SnapshotStore
 
 READ_PATHS = frozenset((
     "/api/portfolio/inventory-diff", "/api/portfolio/price-rules",
-    "/api/portfolio/price-rules/detail", "/api/portfolio/attention",
+    "/api/portfolio/price-rules/detail", "/api/portfolio/autopilot-attention",
 ))
 PRICE_MUTATE_PATH = "/api/portfolio/price-rules/mutate"
 
@@ -39,7 +39,7 @@ def _options(query: str, allowed: set[str]) -> dict[str, str]:
 def read_insight(store: SnapshotStore, path: str, query: str) -> dict:
     if path not in READ_PATHS:
         raise InsightRequestError("unsupported insight")
-    if path == "/api/portfolio/attention":
+    if path == "/api/portfolio/autopilot-attention":
         options = _options(query, {"offset", "limit"})
         raw_offset = options.get("offset", "0")
         raw_limit = options.get("limit", "50")

@@ -95,7 +95,16 @@ class PortfolioInsightsHttpTests(unittest.TestCase):
             provider_message_id="eml-10001", observed_at=self.start,
             source="kleinanzeigen-email",
         ),))
-        endpoint = "/api/portfolio/attention"
+        endpoint = "/api/portfolio/autopilot-attention"
+        # Work-template attention is an older, independently authorised
+        # contract and must never be shadowed by the new read-only list.
+        previous_status, original_attention = self.request(
+            "GET", "/api/portfolio/attention")
+        self.assertEqual(previous_status, 200)
+        self.assertEqual(original_attention["provider_calls"], 0)
+        self.assertIn("unknown_ki_outcomes", original_attention)
+        self.assertNotIn("items", original_attention)
+        self.assertEqual(self.request("GET", "/api/portfolio/attention", token=False)[0], 403)
         self.assertEqual(self.request("GET", endpoint, token=False)[0], 403)
         status, first = self.request("GET", endpoint + "?offset=0&limit=1")
         self.assertEqual(status, 200)

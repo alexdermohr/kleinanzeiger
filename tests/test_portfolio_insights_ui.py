@@ -122,7 +122,7 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(run("inventoryDiffCursor"),null);
   // Autopilot: local read-only attention queue; never infer live inbox/sales.
   fetchImpl=async path=>{
-    assert.match(path,/^\/api\/portfolio\/attention\?/);
+    assert.match(path,/^\/api\/portfolio\/autopilot-attention\?/);
     if (path.includes("offset=0")) return success({
       items:[{kind:"ai_uncertain",priority:0,ad_id:"10001",
               reference:"a".repeat(32),evidence:"unknown"},

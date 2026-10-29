@@ -162,7 +162,7 @@ async function loadAutopilotAttention(next = false) {
   status.textContent = "Prüfe ausschließlich lokal gespeicherte Aufgaben …";
   try {
     const query = new URLSearchParams({offset: String(offset), limit: "50"});
-    const page = await readInsight("/api/portfolio/attention?" + query.toString());
+    const page = await readInsight("/api/portfolio/autopilot-attention?" + query.toString());
     if (!page || !Array.isArray(page.items) || page.offset !== offset ||
         page.platform_writes !== 0 || page.provider_requests !== 0 ||
         page.platform_messages_read !== false ||
