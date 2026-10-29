@@ -66,7 +66,6 @@ from .portfolio_inventory_diff import InventoryDiffError
 from .portfolio_price_rules import PriceRuleError
 from .portfolio_insights_ui import INSIGHTS_HTML, INSIGHTS_JS
 from .storage import DashboardPendingWrite, SnapshotStore
-from .private_web_runtime import OwnerInventorySyncFailure
 from .storage_owner import StorageOwnerClient, StorageOwnerError
 from .strict_json import strict_json_object
 from .write_api import _normalize_create_payload, _request_fingerprint
@@ -7675,6 +7674,8 @@ def _handler_factory(
             except ValueError:
                 self._send_json(400, {"error": "sync_request_body_not_allowed"})
                 return
+            # Keep offline dashboard imports free of platform/CDP adapters.
+            from .private_web_runtime import OwnerInventorySyncFailure
             try:
                 count = sync_once()
             except OwnerInventorySyncFailure as exc:
