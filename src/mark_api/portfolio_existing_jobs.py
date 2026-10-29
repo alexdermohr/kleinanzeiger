@@ -302,6 +302,77 @@ def mark_unknown(store: SnapshotStore, job_id: str, ad_id: str, token: str) -> d
         return _progress(conn,job_id)
 
 
+
+def recover_interrupted(store: SnapshotStore, job_id: str) -> dict[str, object]:
+    """Quarantine unfinished provider claims after a stopped session.
+
+    A client may call this only after no generation call is active. It does
+    not requeue, re-call or assume a possibly charged request was free.
+    Repeated recovery is idempotent and never resets an UNKNOWN claim.
+    """
+    with closing(store._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _job(conn, job_id)
+        stamp = _now()
+        changed = conn.execute(
+            "UPDATE portfolio_existing_job_items "
+            "SET phase='unknown',error_code='interrupted_outcome_unknown',updated_at=? "
+            "WHERE job_id=? AND phase='inflight'",
+            (stamp, job_id),
+        )
+        if changed.rowcount:
+            conn.execute(
+                "UPDATE portfolio_existing_jobs SET state='needs_attention',updated_at=? "
+                "WHERE job_id=? AND state!='cancelled'",
+                (stamp, job_id),
+            )
+        return _progress(conn, job_id)
+
+
+def settle_unknown(
+    store: SnapshotStore, job_id: str, ad_id: str, *,
+    actual_cents: int, explicitly_checked: bool,
+) -> dict[str, object]:
+    """Resolve one independently verified UNKNOWN without retrying the call.
+
+    The discarded proposal is never recycled as new work. Conservatively
+    record the manually confirmed USD-cent charge, including 0 only when
+    independently verified, and make remaining queued work resumable only
+    after *all* uncertain/inflight claims are gone.
+    """
+    if explicitly_checked is not True:
+        raise ExistingJobError("independent provider outcome and cost check required")
+    if type(actual_cents) is not int or not 0 <= actual_cents <= 100_000_000:
+        raise ExistingJobError("invalid verified cost")
+    if type(ad_id) is not str or _AD.fullmatch(ad_id) is None:
+        raise ExistingJobError("invalid ad id")
+    with closing(store._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        job = _job(conn, job_id)
+        stamp = _now()
+        changed = conn.execute(
+            "UPDATE portfolio_existing_job_items SET phase='rejected', "
+            "actual_cents=?,reserved_cents=0,claim_token=NULL, "
+            "error_code='manually_settled',updated_at=? "
+            "WHERE job_id=? AND ad_id=? COLLATE BINARY AND phase='unknown' "
+            "AND proposal_json IS NULL",
+            (actual_cents, stamp, job_id, ad_id),
+        )
+        if changed.rowcount != 1:
+            raise ExistingJobError("no unknown proposal-free claim to settle")
+        unsettled = conn.execute(
+            "SELECT COUNT(*) FROM portfolio_existing_job_items "
+            "WHERE job_id=? AND phase IN ('unknown','inflight')",
+            (job_id,),
+        ).fetchone()[0]
+        if not unsettled and job["state"] == "needs_attention":
+            conn.execute(
+                "UPDATE portfolio_existing_jobs SET state='paused',updated_at=? "
+                "WHERE job_id=? AND state='needs_attention'",
+                (stamp, job_id),
+            )
+        return _progress(conn, job_id)
+
 def process_one(store: SnapshotStore, job_id: str, generator: Callable[[dict[str,object],str],tuple[dict[str,str],int]]) -> dict[str,object]:
     claim=claim_next(store,job_id)
     if claim is None: return {"claimed":False,"job_id":job_id}
