@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.13 – Windows 11
+# Kleinanzeiger v0.1.14 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -146,9 +146,13 @@ selbst im originalen Kleinanzeigen-Dialog.
 
 Im Dashboard **KI-Stapelaufträge** öffnen. Bis zu 5.000 lokale CSV-/XLSX-Entwürfe zu einem Auftrag sammeln, Originale und Vorschläge prüfen, einzeln freigeben und nur lokal übernehmen. Optional können nach eigener Modell-, Datenübertragungs- und Budgetbestätigung bis zu zehn KI-Aufrufe nacheinander ausgeführt werden; weitere Aufrufe lassen sich stoppen. Es werden keine Anzeigen automatisch massenhaft veröffentlicht oder gelöscht. Providerkosten sind nur konservativ geschätzt und nicht garantiert.
 
+## Frühere Programmversion wiederherstellen
+
+Ab **v0.1.14** erscheint unter **Weitere Aktionen** die Schaltfläche **Vorherige Programmversion verwenden …**, sobald eine gültige frühere Programmumgebung vorhanden ist. Anwendung vorher beenden, die gewünschte Version auswählen, die Bestätigung lesen und den Rückwechsel ausdrücklich freigeben. Kleinanzeiger prüft die ältere Umgebung und deren lesende Kompatibilität mit der vorhandenen Datenbank vor und nach der Aktivierung; bei einem Fehlversuch wird die zuletzt aktive Programmumgebung wiederhergestellt. Der Wechsel berührt weder die Anzeigendatenbank noch Chrome-Profile oder bestehende Sicherungen. Die bisher aktive Programmversion bleibt ihrerseits als Rückfallmöglichkeit erhalten. **Dies ist kein Zurücksetzen von Daten oder unbekannten Plattformvorgängen.** Nach dem Rückwechsel startet **Kleinanzeiger starten** die gewählte Version; nur **Installieren / aktualisieren** führt erneut ein Update aus.
+
 ## Bestehende Daten und Updates
 
-**Ab v0.1.13** wird eine neue Python-Programmumgebung vollständig getrennt aufgebaut und vor dem Wechsel geprüft. Die bisherige Version bleibt bis zum erfolgreichen Aktivieren erhalten; eine vor oder während der Aktivierung fehlschlagende Aktualisierung wird auf die bisherige Umgebung zurückgestellt. Die vorherige Programmumgebung bleibt danach als eindeutig benannter Ordner `.venv-rollback-*` im lokalen Kleinanzeiger-Verzeichnis verfügbar. Diese Ordner enthalten Programmdateien, nicht die Anzeigendatenbank. Datenbank, Sicherungen und Chrome-Profil werden weder beim Pakettest noch beim Versionswechsel überschrieben. Es gibt noch keine automatische Bedienfunktion für den späteren bewussten Wechsel auf eine ältere Version; dafür ist gezielte technische Unterstützung erforderlich.
+**Ab v0.1.13** wird eine neue Python-Programmumgebung vollständig getrennt aufgebaut und vor dem Wechsel geprüft. Die bisherige Version bleibt bis zum erfolgreichen Aktivieren erhalten; eine vor oder während der Aktivierung fehlschlagende Aktualisierung wird auf die bisherige Umgebung zurückgestellt. Die vorherige Programmumgebung bleibt danach als eindeutig benannter Ordner `.venv-rollback-*` im lokalen Kleinanzeiger-Verzeichnis verfügbar. Diese Ordner enthalten Programmdateien, nicht die Anzeigendatenbank. Datenbank, Sicherungen und Chrome-Profil werden weder beim Pakettest noch beim Versionswechsel überschrieben. Ab v0.1.14 ist die Auswahl einer geprüften früheren Programmversion direkt unter **Weitere Aktionen** verfügbar.
 
 Die stabil installierten Programmdateien liegen unter
 %LOCALAPPDATA%\Kleinanzeiger\App, die Datenbank unter

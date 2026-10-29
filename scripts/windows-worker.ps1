@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Install','OnlineUpdate','Backup','Restore','ImportMail','Classify','ImportProducts','ExportProducts')][string]$Action = 'Install',
+  [ValidateSet('Install','OnlineUpdate','Backup','Restore','Rollback','ImportMail','Classify','ImportProducts','ExportProducts')][string]$Action = 'Install',
   [string]$PackageDirectory = $PSScriptRoot,
   [string]$BackupName = '',
   [switch]$SelfTest,
@@ -123,6 +123,86 @@ function Install-Package([string]$folder) {
   }
   Publish-AppFiles $folder
   Write-Output ('INSTALL_OK ' + $installed)
+}
+
+function Invoke-ProgramRollback([string]$rollbackName) {
+  Assert-KleinanzeigerStopped
+  if ($rollbackName -cnotmatch '^\.venv-rollback-\d{8}-\d{6}-\d{3}-[0-9a-f]{32}$') {
+    throw 'Bitte eine gespeicherte vorherige Programmversion auswaehlen.'
+  }
+  $current = Join-Path $state '.venv'
+  $candidate = Join-Path $state $rollbackName
+  if (!(Test-Path -LiteralPath $current -PathType Container) -or
+      !(Test-Path -LiteralPath $candidate -PathType Container)) {
+    throw 'Aktuelle oder gesicherte Programmversion nicht gefunden.'
+  }
+  foreach ($folder in @($current,$candidate)) {
+    $entry = Get-Item -LiteralPath $folder -Force
+    if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      throw 'Verknuepfte Programmverzeichnisse werden nicht aktiviert.'
+    }
+  }
+  $oldVersion = Get-InstalledVersion
+  $candidatePython = Join-Path $candidate 'Scripts\python.exe'
+  if (!$oldVersion -or !(Test-Path -LiteralPath $candidatePython -PathType Leaf)) {
+    throw 'Aktuelle oder vorherige Programmversion nicht startbar.'
+  }
+  try {
+    $previous = @(& $candidatePython -c "import importlib.metadata as m; print(m.version('kleinanzeiger'))" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $previous.Count -ne 1 -or
+        [string]$previous[0] -notmatch '^\d+\.\d+\.\d+$') {
+      throw 'Version nicht validiert.'
+    }
+    & $candidatePython -m mark_api.launcher --help | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Starttest fehlgeschlagen.' }
+  } catch {
+    throw 'Gesicherte Programmversion ist nicht einsetzbar. Aktuelle Version bleibt erhalten.'
+  }
+  # An older application must prove it can read the current SQLite schema
+  # without upgrading, rewriting, or erasing any customer data.
+  if (Test-Path -LiteralPath $db -PathType Leaf) {
+    $env:KLEINANZEIGER_ROLLBACK_DB_CHECK = $db
+    try {
+      $checkCode = "import os,sqlite3; from urllib.parse import quote; from mark_api.storage import SnapshotStore; p=os.environ['KLEINANZEIGER_ROLLBACK_DB_CHECK']; c=sqlite3.connect('file:'+quote(p,safe='/')+'?mode=ro',uri=True); c.row_factory=sqlite3.Row; SnapshotStore._validate_store_schema(c); c.close()"
+      & $candidatePython -c $checkCode 2>$null | Out-Null
+      if ($LASTEXITCODE -ne 0) {
+        throw 'Alte Programmversion kann die bestehende Datenbank nicht lesen.'
+      }
+    } finally {
+      Remove-Item Env:KLEINANZEIGER_ROLLBACK_DB_CHECK -ErrorAction SilentlyContinue
+    }
+  }
+  Assert-KleinanzeigerStopped
+  $id = [guid]::NewGuid().ToString('N')
+  $savedName = '.venv-rollback-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + $id
+  $savedPath = Join-Path $state $savedName
+  $currentMoved = $false
+  $candidateMoved = $false
+  try {
+    Rename-Item -LiteralPath $current -NewName $savedName -ErrorAction Stop
+    $currentMoved = $true
+    Rename-Item -LiteralPath $candidate -NewName '.venv' -ErrorAction Stop
+    $candidateMoved = $true
+    if ((Get-InstalledVersion) -ne [string]$previous[0]) {
+      throw 'Aktivierte Programmversion weicht von der Auswahl ab.'
+    }
+    & $venvPython -m mark_api.launcher --help | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Aktivierte Programmversion ist nicht startbar.' }
+  } catch {
+    $cause = $_.Exception.Message
+    try {
+      if ($candidateMoved) {
+        Rename-Item -LiteralPath $current -NewName ('.venv-rejected-' + $id) -ErrorAction Stop
+      }
+      if ($currentMoved) {
+        Rename-Item -LiteralPath $savedPath -NewName '.venv' -ErrorAction Stop
+      }
+    } catch {
+      throw "Rueckwechsel unklar ($cause). Programmordner erhalten, Diagnose pruefen."
+    }
+    throw "Rueckwechsel nicht aktiviert ($cause). Bisherige Programmversion wiederhergestellt."
+  }
+  Write-Output ("ROLLBACK_OK " + [string]$previous[0] + " (bisher: " + $oldVersion + ")")
 }
 
 function Download-VerifiedRelease {
@@ -286,10 +366,10 @@ function Invoke-PortfolioWorker([string]$mode) {
 
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
-  $names = @(Get-ReleaseAssetNames '0.1.13')
-  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.13-Windows.zip' -or
-      $names[1] -ne 'Kleinanzeiger-v0.1.13-Windows.sha256' -or
-      $names[2] -ne 'Kleinanzeiger-v0.1.13-Release-Manifest.json') {
+  $names = @(Get-ReleaseAssetNames '0.1.14')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.14-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.14-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.14-Release-Manifest.json') {
     throw 'Release-Dateinamen sind nicht eindeutig.'
   }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
@@ -304,6 +384,7 @@ switch ($Action) {
   'Classify' { Update-CustomerLabels }
   'ImportProducts' { Invoke-PortfolioWorker 'import' }
   'ExportProducts' { Invoke-PortfolioWorker 'export' }
+  'Rollback' { Invoke-ProgramRollback $BackupName }
   'Restore' {
     Assert-KleinanzeigerStopped
     foreach ($suffix in @('','-wal','-shm','-journal')) {
