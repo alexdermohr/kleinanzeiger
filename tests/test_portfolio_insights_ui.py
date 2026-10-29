@@ -120,6 +120,43 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(await oldFilterLoad,false);
   assert.equal(byId("inventory-diff-body").children.length,0);
   assert.equal(run("inventoryDiffCursor"),null);
+  // Autopilot: local read-only attention queue; never infer live inbox/sales.
+  fetchImpl=async path=>{
+    assert.match(path,/^\/api\/portfolio\/autopilot-attention\?/);
+    if (path.includes("offset=0")) return success({
+      items:[{kind:"ai_uncertain",priority:0,ad_id:"10001",
+              reference:"a".repeat(32),evidence:"unknown"},
+             {kind:"eml_unreviewed",priority:1,ad_id:"<img onerror=bad()>",
+              reference:"chat_10001",evidence:"17"}],
+      offset:0,has_more:true,next_offset:50,total:51,
+      counts:{ai_uncertain:1,eml_unreviewed:1},platform_writes:0,
+      provider_requests:0,platform_messages_read:false,
+      automatic_execution_authorized:false
+    });
+    assert.match(path,/offset=50/);
+    return success({
+      items:[{kind:"manual_overdue",priority:2,ad_id:"10002",
+              reference:"10002",evidence:"2026-10-25"}],
+      offset:50,has_more:false,next_offset:null,total:51,
+      counts:{ai_uncertain:1,eml_unreviewed:1},platform_writes:0,
+      provider_requests:0,platform_messages_read:false,
+      automatic_execution_authorized:false
+    });
+  };
+  assert.equal(await byId("autopilot-load").listeners.click(),true);
+  assert.equal(byId("autopilot-body").children.length,2);
+  assert.match(byId("autopilot-body").children[1].children[1].textContent,/<img onerror=bad\(\)>/);
+  assert.match(byId("autopilot-status").textContent,/51 lokale Prüfpunkte/);
+  assert.equal(byId("autopilot-next").disabled,false);
+  assert.equal(await byId("autopilot-next").listeners.click(),true);
+  assert.equal(byId("autopilot-next").disabled,true);
+  assert.equal(byId("autopilot-body").children.length,1);
+  assert.match(byId("autopilot-status").textContent,/Seite 2/);
+  fetchImpl=async()=>({ok:false,status:503});
+  assert.equal(await run("loadAutopilotAttention()"),false);
+  assert.equal(byId("autopilot-body").children.length,0);
+  assert.equal(run("autopilotNextOffset"),null);
+  assert.equal(byId("autopilot-next").disabled,true);
   assert.ok(sent.every(call=>call.path.startsWith("/api/portfolio/")));
   assert.ok(sent.every(call=>!call.path.includes("/api/write")));
   console.log("LOCAL_INSIGHTS_IDENTITY_EPOCH_NO_AUTOWRITE_PASS");

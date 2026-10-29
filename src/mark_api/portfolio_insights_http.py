@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from urllib.parse import parse_qs
 
+from .portfolio_autopilot import attention_page
 from .portfolio_inventory_diff import product_inventory_diff_page
 from .portfolio_price_rules import (
     delete_price_rule, price_rule_detail, price_suggestions_page, set_price_rule,
@@ -13,7 +14,7 @@ from .storage import SnapshotStore
 
 READ_PATHS = frozenset((
     "/api/portfolio/inventory-diff", "/api/portfolio/price-rules",
-    "/api/portfolio/price-rules/detail",
+    "/api/portfolio/price-rules/detail", "/api/portfolio/autopilot-attention",
 ))
 PRICE_MUTATE_PATH = "/api/portfolio/price-rules/mutate"
 
@@ -38,6 +39,18 @@ def _options(query: str, allowed: set[str]) -> dict[str, str]:
 def read_insight(store: SnapshotStore, path: str, query: str) -> dict:
     if path not in READ_PATHS:
         raise InsightRequestError("unsupported insight")
+    if path == "/api/portfolio/autopilot-attention":
+        options = _options(query, {"offset", "limit"})
+        raw_offset = options.get("offset", "0")
+        raw_limit = options.get("limit", "50")
+        if (not raw_offset.isascii() or not raw_offset.isdecimal()
+                or len(raw_offset) > 6 or not raw_limit.isascii()
+                or not raw_limit.isdecimal() or len(raw_limit) > 3):
+            raise InsightRequestError("invalid attention page")
+        offset, limit = int(raw_offset), int(raw_limit)
+        if not 0 <= offset <= 100_000 or not 1 <= limit <= 50:
+            raise InsightRequestError("invalid attention bounds")
+        return attention_page(store, offset=offset, limit=limit)
     if path.endswith("/detail"):
         options = _options(query, {"sku"})
         if set(options) != {"sku"}:
