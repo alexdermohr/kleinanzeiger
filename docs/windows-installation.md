@@ -1,4 +1,4 @@
-# Kleinanzeiger v0.1.17 – Windows 11
+# Kleinanzeiger v0.1.18 – Windows 11
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -68,8 +68,8 @@ Bildschirmen daneben; auf schmalen Fenstern stehen sie untereinander.
 Für größere Bestände zeigt **Meine Anzeigen** nur 50 Anzeigen pro Seite.
 Über **Suche nach Titel oder Anzeigen-ID** und **Status** kann der
 lokale Bestand gefiltert werden. **Weiter / Zurück** blättert seitenweise.
-Die Auswahlkästchen lassen sich über Seiten hinweg sammeln. Im
-**Ab v0.1.17** wählen **Sichtbare auswählen (max. 50)**
+Die Auswahlkästchen lassen sich über Seiten hinweg sammeln.
+**Seit v0.1.17** wählen **Sichtbare auswählen (max. 50)**
 und **Sichtbare abwählen** ausschließlich die bereits geladenen Anzeigen
 dieser Katalogseite; eine Auswahl von anderen Seiten bleibt erhalten.
 Die beiden Schaltflächen lösen weder eine Plattformaktion noch einen
@@ -92,6 +92,11 @@ Einzelne Anzeigen werden weiterhin über **Bearbeiten** verwaltet.
 Über **Mit Kleinanzeigen abgleichen** werden eigene Anzeigen direkt aus der
 angemeldeten Browser-Sitzung neu gelesen. **Ansicht neu laden** aktualisiert
 hingegen ausschließlich die lokal gespeicherte Darstellung.
+Ab v0.1.18 zeigt ein fehlgeschlagener Kontoabgleich nach Möglichkeit den
+konkreten sicheren Grund (z. B. Anmeldung, Browser ausgelastet, Verbindung
+oder ungeklärte frühere Synchronisierung) und passende Schritte. Anmeldung
+immer im separat von Kleinanzeiger geöffneten Chrome prüfen, nicht nur im
+gewöhnlichen privaten Browser. Keine Browserprofile oder Anzeigen löschen.
 
 ## Bei Verbindungsproblemen lokal weiterarbeiten
 
