@@ -1,7 +1,9 @@
 # Kleinanzeiger – KI-Stapelaufträge (P2)
 
-**Stand: 26. Oktober 2026 – Entwicklungsbranch, noch kein ausgeliefertes
-Kundenrelease.** Grundlage sind die lokalen CSV-/XLSX-Entwürfe aus P1.
+**Stand: 29. Oktober 2026.** Lokale Entwurfsaufträge und die getrennten
+KI-Aufträge für bestätigte veröffentlichte Eigenanzeigen sind im Windows-Paket
+v0.1.18 enthalten. Erweiterungen dieses Arbeitszweigs erfordern nach dem Merge
+eine weitere versionierte Ausgabe und sind noch nicht in v0.1.18.
 Der Rechner fotolabor bleibt unverändert.
 
 ## Vorhandene Funktionen
@@ -37,7 +39,7 @@ Der Rechner fotolabor bleibt unverändert.
   Generationstoken und die konkrete Zustimmung. Im getrennten
   A6-Owner/Frontend-Modus sind die lokalen Zusatz-Writes deaktiviert.
 
-## Anleitung – noch nicht im offiziellen Kundenrelease enthalten
+## Anleitung – KI für lokale Artikelentwürfe
 
 1. Im Windows-Kontrollfenster über **Artikel importieren** eine CSV-
    oder XLSX-Datei prüfen, sichern und lokal übernehmen.
@@ -84,12 +86,11 @@ kleinanzeiger-ki-auftraege --db "C:\Pfad\anzeigen.sqlite" settle-unknown JOB_ID 
 Der geprüfte Kostenwert darf nicht geraten werden. Das verwirft
 einen unsicheren Vorschlag und erzeugt keine weitere KI-Anfrage.
 
-## Offen vor Kundenfreigabe
+## Verbleibende Abnahme und Grenzen
 
-- Zuerst P1 PR #219 integrieren und v0.1.7 regulär ausliefern.
-- P2 über Quell-, Wheel- und native Windows-3.12/3.13-CI sowie
-  PowerShell-5.1-Abnahme prüfen, Review abschließen, Version und
-  HTML-Kundenhandbuch aktualisieren, unveränderliches Release erstellen.
+- Für neue Erweiterungen erneut Quell-, Wheel-, native Windows-3.12/3.13-
+  und Installerprüfungen abschließen und ein neues unveränderliches Windows-
+  Release veröffentlichen. Bereits veröffentlichte Versionen bleiben erhalten.
 - Eine unabhängige Anbieter-Rechnungsabstimmung und **harte** bestätigte
   Kostenobergrenzen fehlen; derzeit existieren nur Quoten,
   konservative Usage-Schätzungen und bestätigungspflichtige Aufrufe.
@@ -165,3 +166,33 @@ vor Speicherung begrenzt; Modellantworten werden strikt als Objekt mit genau
 `title` und `description` akzeptiert. Die native Abnahme auf dem tatsächlichen
 Kunden-Windows-PC bleibt zusätzlich zu den automatisierten Browserlogik- und
 HTTP-Tests erforderlich.
+
+## Unterbrochene bestehende Anzeigen-KI-Aufträge nach Neustart klären
+
+**Zusätzliche Funktion dieses Entwicklungszweigs (noch nicht Bestandteil des
+veröffentlichten v0.1.18-Installationspakets):** Im Dashboard unter
+**KI-Stapelaufträge → Bestehende Eigenanzeigen mit KI prüfen** erscheint bei
+inflight oder unknown ein einklappbarer Bereich
+**Unterbrochene oder unklare KI-Anfrage klären**.
+
+- Erst nach beendetem KI-Aufruf bzw. Programmneustart
+  **Unterbrochene Anfrage als unklar sichern** wählen. Der reservierte
+  Kostenbetrag und eingefrorene Quellnachweis bleiben bestehen.
+  Es findet **kein** zweiter Provider-Aufruf statt.
+- Das tatsächliche Ergebnis und eine mögliche Berechnung unabhängig im
+  KI-Anbieterkonto prüfen; die lokale Anwendung kann eine fremde Rechnung nicht
+  verifizieren. Betroffene Anzeige der aktuellen Auftragsseite auswählen,
+  unabhängig geprüfte US-Cent eintragen und die Prüfung bestätigen.
+  0 Cent nur eingeben, wenn kostenfrei unabhängig nachgewiesen.
+- **Unklaren Vorgang endgültig klären** verwirft die unsichere Antwort
+  ausschließlich lokal, ersetzt die Reservierung durch den manuell geprüften
+  Betrag und vermerkt manually_settled. Der alte möglicherweise berechnete
+  KI-Aufruf wird **nie** erneut ausgeführt. Jeder Claim ist höchstens
+  einmal klärbar.
+- Sind alle unklaren oder laufenden Claims geklärt, wechselt ein angehaltener
+  Auftrag in paused und kann mit **Fortsetzen** erneut freigegeben werden.
+  Jeder neue kostenpflichtige Aufruf braucht eine erneute ausdrückliche
+  Zustimmung. Plattformwrites bleiben unverändert null.
+- Eine noch tatsächlich laufende Provider-Anfrage sperrt die lokale
+  Abrechnungsklärung (HTTP 409). Auch ein Neustart ist keine Garantie,
+  dass dem Anbieter keine Kosten entstanden sind.
