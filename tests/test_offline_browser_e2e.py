@@ -36,6 +36,92 @@ def _chrome():
     return None
 
 
+
+def _stop_browser(process):
+    """End only the isolated test Chrome process group."""
+    if process is None or process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _wait_for_cdp_page(profile, process, opener, *, timeout_seconds=25):
+    """A port file can precede HTTP readiness; neither event proves the other."""
+    port_file = profile / "DevToolsActivePort"
+    until = time.monotonic() + timeout_seconds
+    last_error = "port file not created"
+    while time.monotonic() < until:
+        if process.poll() is not None:
+            return None, f"Chrome exited with code {process.returncode}"
+        if port_file.is_file():
+            try:
+                port = int(port_file.read_text(encoding="ascii").splitlines()[0])
+                if not 1 <= port <= 65535:
+                    raise ValueError("invalid DevTools port")
+                with opener.open(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
+                    pages = json.load(response)
+                for page in pages:
+                    if (page.get("type") == "page" and page.get("url") == "about:blank"
+                            and page.get("webSocketDebuggerUrl")):
+                        return page, None
+                last_error = "Chrome has no ready about:blank page target"
+            except (OSError, ValueError, LookupError, TypeError) as error:
+                last_error = type(error).__name__
+        time.sleep(0.1)
+    return None, last_error
+
+
+class ChromeCdpReadinessTests(unittest.TestCase):
+    def test_port_file_is_not_http_readiness_and_transient_timeout_retries(self):
+        from io import BytesIO
+
+        class Running:
+            returncode = None
+            def poll(self):
+                return None
+
+        class DelayedEndpoint:
+            calls = 0
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise TimeoutError("not ready")
+                return BytesIO(json.dumps([{
+                    "type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://localhost/test",
+                }]).encode("utf-8"))
+
+        with TemporaryDirectory() as directory:
+            profile = Path(directory)
+            (profile / "DevToolsActivePort").write_text("9223\n", encoding="ascii")
+            endpoint = DelayedEndpoint()
+            page, error = _wait_for_cdp_page(profile, Running(), endpoint, timeout_seconds=1)
+            self.assertIsNone(error)
+            self.assertEqual(page["type"], "page")
+            self.assertEqual(endpoint.calls, 2)
+
+    def test_exited_browser_is_not_mistaken_for_success(self):
+        class Exited:
+            returncode = 22
+            def poll(self):
+                return 22
+
+        with TemporaryDirectory() as directory:
+            page, error = _wait_for_cdp_page(Path(directory), Exited(), None, timeout_seconds=1)
+        self.assertIsNone(page)
+        self.assertIn("22", error)
+
+
 @unittest.skipUnless(_chrome() and shutil.which("node"), "Chrome and Node required for real browser acceptance")
 class OfflineBrowserAcceptanceTests(unittest.TestCase):
     def test_cached_work_price_rule_diff_and_explicit_reconnection_through_real_browser(self):
@@ -78,32 +164,37 @@ class OfflineBrowserAcceptanceTests(unittest.TestCase):
             )
             thread = Thread(target=runtime.serve_forever, daemon=True)
             thread.start()
-            profile = root / "isolated-browser"
             log = (root / "chrome.log").open("wb")
             process = None
             try:
-                flags = [
-                    _chrome(), "--headless=new", "--no-first-run", "--no-default-browser-check",
-                    "--disable-background-networking", "--disable-sync", "--disable-component-update",
-                    "--disable-default-apps", "--disable-extensions", "--metrics-recording-only",
-                    "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
-                    "--user-data-dir=" + str(profile),
-                    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
-                    "about:blank",
-                ]
-                process = subprocess.Popen(flags, stdout=log, stderr=log,
-                    start_new_session=os.name != "nt",
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
-                port_file = profile / "DevToolsActivePort"
-                until = time.monotonic() + 25
-                while not port_file.exists() and time.monotonic() < until and process.poll() is None:
-                    time.sleep(0.1)
-                self.assertTrue(port_file.exists(), "isolated headless Chrome did not start")
-                port = int(port_file.read_text().splitlines()[0])
                 opener = build_opener(ProxyHandler({}))
-                with opener.open(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
-                    pages = json.load(response)
-                page = next(item for item in pages if item.get("type") == "page" and item.get("url") == "about:blank")
+                page = None
+                failures = []
+                # A busy CI host can exit Chrome before binding DevTools or
+                # expose DevToolsActivePort before /json/list actually responds.
+                # Retry only the browser bootstrap, never the product writes.
+                for launch_attempt in range(2):
+                    profile = root / f"isolated-browser-{launch_attempt}"
+                    flags = [
+                        _chrome(), "--headless=new", "--no-first-run", "--no-default-browser-check",
+                        "--disable-background-networking", "--disable-sync", "--disable-component-update",
+                        "--disable-default-apps", "--disable-extensions", "--metrics-recording-only",
+                        "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
+                        "--user-data-dir=" + str(profile),
+                        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
+                        "about:blank",
+                    ]
+                    process = subprocess.Popen(
+                        flags, stdout=log, stderr=log,
+                        start_new_session=os.name != "nt",
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+                    )
+                    page, error = _wait_for_cdp_page(profile, process, opener)
+                    if page is not None:
+                        break
+                    failures.append(error)
+                    _stop_browser(process)
+                self.assertIsNotNone(page, f"isolated Chrome DevTools never became ready: {failures}")
                 harness = r'''
 const assert = require("node:assert/strict");
 const ws = new WebSocket(process.argv[1]);
@@ -178,17 +269,7 @@ const eventually=async expression=>{
                 self.assertEqual(detail["rule"]["suggested_price_eur"], 40)
                 self.assertEqual(detail["rule"]["platform_writes"], 0)
             finally:
-                if process is not None and process.poll() is None:
-                    if os.name == "nt":
-                        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-                    else:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
+                _stop_browser(process)
                 log.close()
                 runtime.close()
                 thread.join(5)
