@@ -1,4 +1,6 @@
-# Kleinanzeiger v0.1.20 – Windows 11
+# Kleinanzeiger v0.1.21 – Windows 11
+
+**Stand v0.1.21:** Der A6-StorageOwner-IPC und die Eigenanzeigen-Lese-CLI wurden synthetisch auf bis zu 12.000 Datensätze erweitert. Der Windows-Katalog unterstützt weiterhin bis zu 10.000 bestätigte eigene Anzeigen; die KI-Prüfung bestehender Eigenanzeigen umfasst seit dieser Version ebenfalls bis zu 10.000 pro Auftrag (lokale Entwürfe bleiben auf 5.000 begrenzt). Der echte Konto-/Chrome-Abgleich auf Marks Kunden-PC ist noch separat zu prüfen. Das Update verändert keine vorhandenen Anzeigen, Backups oder Chrome-Profile.
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -164,7 +166,7 @@ selbst im originalen Kleinanzeigen-Dialog.
 
 ## Bestehende Eigenanzeigen mit KI prüfen
 
-Im Dashboard **Bestehende Eigenanzeigen mit KI prüfen** öffnen. Bestätigte eigene veröffentlichte Anzeigen entweder aus der Katalogauswahl oder über **Alle passenden** wählen; ein Auftrag umfasst höchstens 5.000 Anzeigen. Die erfassten Originaldaten, Quellen und Anzeigen-IDs bleiben an den Auftrag gebunden.
+Im Dashboard **Bestehende Eigenanzeigen mit KI prüfen** öffnen. Bestätigte eigene veröffentlichte Anzeigen entweder aus der Katalogauswahl oder über **Alle passenden** wählen; ein Auftrag umfasst seit v0.1.21 höchstens 10.000 Anzeigen. Die erfassten Originaldaten, Quellen und Anzeigen-IDs bleiben an den Auftrag gebunden.
 
 Vor dem ersten kostenpflichtigen Vorschlag das USD-Gesamtbudget und die externe Datenübertragung ausdrücklich bestätigen. **Nächster Vorschlag** verarbeitet eine Anzeige, die Stapelverarbeitung höchstens zehn nacheinander. Der Stapel lässt sich stoppen und später fortsetzen. Bei **UNKNOWN**, Kommunikationsfehlern oder unklarem Providerergebnis nicht blind wiederholen; mögliche Kosten zuerst klären. Jeden Original-/Vorschlagsvergleich anzeigenweise prüfen und den Vorschlag lokal **freigeben** oder **ablehnen**. Es erfolgt keine automatische Plattform-Veröffentlichung und keine sonstige Plattformänderung. Alle Kostenwerte sind konservative Schätzungen, keine garantierte Providerabrechnung.
 
