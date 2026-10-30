@@ -67,7 +67,7 @@ function Save-Backup {
   New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
   $name = 'Kleinanzeiger-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.sqlite'
   $dest = Join-Path $backupRoot $name
-  & $venvPython -m mark_api.backup_cli --db $db --backup $dest
+  & $venvPython -m kleinanzeiger backup --db $db --backup $dest
   if ($LASTEXITCODE -ne 0) { throw 'Sicherung fehlgeschlagen. Update abgebrochen.' }
   if (!(Test-Path -LiteralPath $dest -PathType Leaf) -or
       !(Test-Path -LiteralPath ($dest + '.manifest.json') -PathType Leaf)) {
@@ -153,7 +153,7 @@ function Invoke-ProgramRollback([string]$rollbackName) {
         [string]$previous[0] -notmatch '^\d+\.\d+\.\d+$') {
       throw 'Version nicht validiert.'
     }
-    & $candidatePython -m mark_api.launcher --help | Out-Null
+    & $candidatePython -m kleinanzeiger launch --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Starttest fehlgeschlagen.' }
   } catch {
     throw 'Gesicherte Programmversion ist nicht einsetzbar. Aktuelle Version bleibt erhalten.'
@@ -186,7 +186,7 @@ function Invoke-ProgramRollback([string]$rollbackName) {
     if ((Get-InstalledVersion) -ne [string]$previous[0]) {
       throw 'Aktivierte Programmversion weicht von der Auswahl ab.'
     }
-    & $venvPython -m mark_api.launcher --help | Out-Null
+    & $venvPython -m kleinanzeiger launch --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Aktivierte Programmversion ist nicht startbar.' }
   } catch {
     $cause = $_.Exception.Message
@@ -300,7 +300,7 @@ function Import-CustomerMail {
     $verified += $file.FullName
   }
   Save-Backup
-  & $venvPython -m mark_api.email_import_cli --db $db @verified
+  & $venvPython -m kleinanzeiger import-mail --db $db @verified
   if ($LASTEXITCODE -ne 0) { throw 'E-Mail-Import fehlgeschlagen; vorhandene Daten bleiben erhalten.' }
   Write-Output 'MAIL_IMPORT_OK'
 }
@@ -323,7 +323,7 @@ function Update-CustomerLabels {
   # immediately after the command. No user labels enter command arguments.
   $env:KLEINANZEIGER_LABEL_PAYLOAD = $encoded
   try {
-    & $venvPython -m mark_api.windows_customer_choices --db $db --apply-labels
+    & $venvPython -m kleinanzeiger windows-choices --db $db --apply-labels
     if ($LASTEXITCODE -ne 0) { throw 'Vergleichslabels konnten nicht gespeichert werden.' }
     Write-Output 'LABELS_OK'
   } finally {
@@ -356,7 +356,7 @@ function Invoke-PortfolioWorker([string]$mode) {
   if ($encoded.Length -gt 16384) { throw 'Importpfad ist zu lang.' }
   $env:KLEINANZEIGER_IMPORT_REQUEST = $encoded
   try {
-    & $venvPython -m mark_api.portfolio_import_cli --db $db --mode $mode
+    & $venvPython -m kleinanzeiger import-articles --db $db --mode $mode
     if ($LASTEXITCODE -ne 0) { throw 'Artikelaktion fehlgeschlagen; Details pruefen.' }
     Write-Output $(if($mode -eq 'import'){'PRODUCT_IMPORT_OK'}else{'PRODUCT_EXPORT_OK'})
   } finally {
@@ -401,7 +401,7 @@ switch ($Action) {
         !(Test-Path -LiteralPath ($source + '.manifest.json') -PathType Leaf)) {
       throw 'Sicherung oder Manifest fehlt.'
     }
-    & $venvPython -m mark_api.windows_backup --backup $source --db $db
+    & $venvPython -m kleinanzeiger windows-restore --backup $source --db $db
     if ($LASTEXITCODE -ne 0) { throw 'Wiederherstellung abgewiesen.' }
     Write-Output 'RESTORE_OK'
   }
