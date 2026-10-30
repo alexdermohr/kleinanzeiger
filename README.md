@@ -242,4 +242,4 @@ Die Entwicklung und technische Abnahme sind unabhängig von einer allgemeinen ex
 
 Die erforderlichen CI- und Sicherheitsprüfungen gelten stets nur für den **konkret geprüften Commit**. Tatsächlicher GitHub-Branchschutz und Berechtigungen werden nicht umgangen. Zusätzliche unabhängige Review-/Captain-Freigaben sind nicht Teil des aktuellen Auftrags. Offene technische Sicherheitsbefunde werden nicht durch einen pauschalen Plattformhinweis ersetzt.
 
-**Normative Anforderungen:** [Produktspezifikation](docs/product-spec.md), [Entscheidungen D-028 und D-029](docs/DECISIONS.md). Spezialisierte Hintergründe: [Generierung](docs/generation.md), [Synchronisation](docs/periodic-sync.md).
+**Normative Anforderungen:** [Produktspezifikation](docs/product-spec.md), [Entscheidungen D-028 bis D-030](docs/DECISIONS.md), [Kundenauftrag und Verantwortung beim Plattformbetrieb](docs/kundenauftrag-plattformbetrieb.md). Spezialisierte Hintergründe: [Generierung](docs/generation.md), [Synchronisation](docs/periodic-sync.md).
