@@ -130,7 +130,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("[IO.FileAttributes]::ReparsePoint", action)
         self.assertIn("Rename-Item -LiteralPath $current", action)
         self.assertIn("Rename-Item -LiteralPath $savedPath", action)
-        self.assertIn("kleinanzeiger launch --help", action)
+        self.assertIn("mark_api.launcher --help", action)
         self.assertIn("ROLLBACK_OK", action)
         self.assertNotIn("Remove-Item -LiteralPath", action)
         self.assertIn("mode=ro", action)
