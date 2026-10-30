@@ -40,18 +40,28 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
         # continue to resolve the old import/CLI spelling during migration.
         self.assertEqual(entrypoints["mark-api-launch"], "mark_api.launcher:main")
 
-    def test_windows_uses_product_commands_except_backward_compatibility(self):
-        # Pre-upgrade backups and old rollback venvs cannot import the new
-        # public package. Their internal, shipped legacy modules must remain.
+    def test_windows_runtime_modules_remain_backward_compatible(self):
+        # Existing and rolled-back customer wheels may predate the new public
+        # namespace. Keep runtime calls on the stable import ABI while all
+        # visible UI, error messages and new console scripts say Kleinanzeiger.
         import re
 
         compatibility = {
             "windows-backup.ps1": ["-m mark_api.backup_cli"],
             "windows-restore.ps1": ["-m mark_api.windows_backup"],
+            "windows-center.ps1": [
+                "-m mark_api.portfolio_import_cli",
+                "-m mark_api.windows_customer_choices",
+                "-m mark_api.launcher",
+            ],
+            "windows-start.ps1": ["-m mark_api.launcher"],
             "windows-worker.ps1": [
                 "-m mark_api.backup_cli",
                 "-m mark_api.launcher",
                 "-m mark_api.launcher",
+                "-m mark_api.email_import_cli",
+                "-m mark_api.windows_customer_choices",
+                "-m mark_api.portfolio_import_cli",
                 "-m mark_api.windows_backup",
             ],
         }
