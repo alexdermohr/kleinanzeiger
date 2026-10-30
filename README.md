@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-**Ausgabe v0.1.21:** Die attestierte Eigenanzeigen-Lese-CLI und der A6-StorageOwner-IPC verarbeiten in synthetischen Tests bis zu 12.000 Datensätze ohne die bisherige 2.048er-Grenze. Der Windows-Katalog bleibt für 10.000 eigene Anzeigen ausgelegt; echte Chrome-/Kontenabnahme und Plattformberechtigung sind weiterhin getrennte Nachweise. v0.1.20 enthält bereits das KI-UNKNOWN-Recovery und den Offline-Wiederabgleich. Neu in v0.1.21 ist zusätzlich die KI-Prüfung von bis zu 10.000 bestätigten Eigenanzeigen je Auftrag, ohne automatische Plattformänderungen.
+**Ausgabe v0.1.22:** Neu sind der kostenlose lokale Autopilot-Tagesplan, einzeln kostenfreigegebene KI-Stapel mit bis zu 100 Aufrufen für bestätigte Eigenanzeigen sowie der vollständige getrennte KI-Kostenbericht. Der Autopilot-Tagesplan für priorisierte Arbeit an KI-UNKNOWN, EML-Eingängen, Vorschlägen und manuell gesetzten Wiedervorlagen. Er liest bis zu 10.000 lokale Aufgaben in 50er-Seiten, ohne Anbieter- oder Plattformaktion. Bereits seit v0.1.21: Die attestierte Eigenanzeigen-Lese-CLI und der A6-StorageOwner-IPC verarbeiten in synthetischen Tests bis zu 12.000 Datensätze ohne die bisherige 2.048er-Grenze. Der Windows-Katalog bleibt für 10.000 eigene Anzeigen ausgelegt; echte Chrome-/Kontenabnahme und Plattformberechtigung sind weiterhin getrennte Nachweise. v0.1.20 enthält bereits das KI-UNKNOWN-Recovery und den Offline-Wiederabgleich. Neu in v0.1.21 ist zusätzlich die KI-Prüfung von bis zu 10.000 bestätigten Eigenanzeigen je Auftrag, ohne automatische Plattformänderungen.
 
 > **Verbindlicher Fortsetzungsstand vom 29.10.2026:** [Gesamtaudit und priorisierte Fertigstellungs-TODOs (Issue #240)](https://github.com/alexdermohr/kleinanzeiger/issues/240) · [vollständiger Fortsetzungsauftrag für den nächsten Entwicklungsthread](docs/fortsetzungsauftrag-gesamt-audit-2026-10-28.md). Seit v0.1.20 bleibt nach einem initial fehlgeschlagenen Browserread das Offline-Dashboard bestehen und zeigt beim ausdrücklichen manuellen Wiederverbinden die tatsächliche sichere Klassifikation statt einer pauschalen Fehlermeldung. Die gezielten Online-Diagnosen sind seit v0.1.19 verfügbar; v0.1.18 ergänzte gebundene KI-Prüfaufträge für bis zu 5.000 bestätigte eigene veröffentlichte Anzeigen mit Budget, höchstens zehn Generierungen je bestätigtem Stapel sowie lokaler Vorschau und Freigabe ohne Plattform-Write. v0.1.17 ergänzte die einfache Auswahl und Abwahl aller bis zu 50 sichtbaren Anzeigen einer Katalogseite, ohne automatische Plattformaktionen. Release-Status und Prüfbelege stehen in Issue #240; eine vollständige Abnahme am echten Kunden-PC und Konto fehlt weiterhin.
 
@@ -29,8 +29,9 @@ eigene veröffentlichte Anzeigen aus der aktuellen Katalogauswahl oder als
 gesamte passende Auswahl in einen Auftrag übernommen, seit v0.1.21 höchstens 10.000. Für jede
 Anzeige bleiben ID, Quelle und Originaltitel/-beschreibung an den Auftrag
 gebunden. Vor der Generierung müssen Datenübertragung und ein USD-Kostenbudget
-ausdrücklich bestätigt werden; verarbeitet werden höchstens zehn Vorschläge je
-Stapel. Ein Stapel kann gestoppt und später fortgesetzt werden. Bei
+ausdrücklich bestätigt werden; seit v0.1.22 sind bis zu 100 sequenzielle
+Provider-Aufrufe je ausdrücklich bestätigtem Eigenanzeigen-Stapel möglich.
+Budget, das globale Sitzungslimit und die UNKNOWN-Sperre werden pro Aufruf erneut geprüft. Ein Stapel kann gestoppt und später fortgesetzt werden. Bei
 **UNKNOWN** oder unklarem Providerergebnis erfolgt keine blinde Wiederholung.
 Jeder Original-/Vorschlagsvergleich wird einzeln lokal freigegeben oder
 abgelehnt. Die Funktion schreibt weder automatisch auf die Plattform noch

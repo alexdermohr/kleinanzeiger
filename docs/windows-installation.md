@@ -1,6 +1,6 @@
-# Kleinanzeiger v0.1.21 – Windows 11
+# Kleinanzeiger v0.1.22 – Windows 11
 
-**Stand v0.1.21:** Der A6-StorageOwner-IPC und die Eigenanzeigen-Lese-CLI wurden synthetisch auf bis zu 12.000 Datensätze erweitert. Der Windows-Katalog unterstützt weiterhin bis zu 10.000 bestätigte eigene Anzeigen; die KI-Prüfung bestehender Eigenanzeigen umfasst seit dieser Version ebenfalls bis zu 10.000 pro Auftrag (lokale Entwürfe bleiben auf 5.000 begrenzt). Der echte Konto-/Chrome-Abgleich auf Marks Kunden-PC ist noch separat zu prüfen. Das Update verändert keine vorhandenen Anzeigen, Backups oder Chrome-Profile.
+**Stand v0.1.22:** Der A6-StorageOwner-IPC und die Eigenanzeigen-Lese-CLI wurden synthetisch auf bis zu 12.000 Datensätze erweitert. Der Windows-Katalog unterstützt weiterhin bis zu 10.000 bestätigte eigene Anzeigen; die KI-Prüfung bestehender Eigenanzeigen umfasst seit dieser Version ebenfalls bis zu 10.000 pro Auftrag (lokale Entwürfe bleiben auf 5.000 begrenzt). Der echte Konto-/Chrome-Abgleich auf Marks Kunden-PC ist noch separat zu prüfen. Das Update verändert keine vorhandenen Anzeigen, Backups oder Chrome-Profile.
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -164,11 +164,17 @@ keine Nachrichten.** Die Nachricht und der Antwortentwurf werden in dieser
 Ansicht nicht dauerhaft gespeichert. Der Nutzer versendet den kopierten Text
 selbst im originalen Kleinanzeigen-Dialog.
 
+## Kostenloser Autopilot-Tagesplan (ab v0.1.22)
+
+Im Dashboard unter **Bestandsänderungen → Priorisierter Tagesplan (lokal und kostenlos)** auf **Aufgaben prüfen** klicken. Die Anwendung zeigt zuerst unklare/laufende KI-Kostenansprüche, anschließend neue lokal importierte EML-Hinweise, überfällige selbst gesetzte Wiedervorlagen, ungeprüfte lokale KI-Vorschläge sowie manuelle Termine der nächsten sieben Tage. Bis zu 50 Aufgaben je Seite, auch bei 10.000 gespeicherten Einträgen. Eine Anzeige kann mehrere Prüfpunkte haben.
+
+**Nur lokale Hinweise:** Keine kostenpflichtigen KI-Aufrufe, keine Plattform-Liveinbox, kein automatischer Versand, keine Preis- oder Statusänderung. Die ursprünglichen KI-UNKNOWN-Kosten müssen weiterhin im Anbieter-Konto unabhängig geprüft und im bestehenden Arbeitsbereich ausdrücklich geklärt werden; die Tagesliste startet sie nie erneut. Eine Plattformberechtigung oder ein bestätigter aktueller Eigentumsstatus wird daraus nicht abgeleitet.
+
 ## Bestehende Eigenanzeigen mit KI prüfen
 
 Im Dashboard **Bestehende Eigenanzeigen mit KI prüfen** öffnen. Bestätigte eigene veröffentlichte Anzeigen entweder aus der Katalogauswahl oder über **Alle passenden** wählen; ein Auftrag umfasst seit v0.1.21 höchstens 10.000 Anzeigen. Die erfassten Originaldaten, Quellen und Anzeigen-IDs bleiben an den Auftrag gebunden.
 
-Vor dem ersten kostenpflichtigen Vorschlag das USD-Gesamtbudget und die externe Datenübertragung ausdrücklich bestätigen. **Nächster Vorschlag** verarbeitet eine Anzeige, die Stapelverarbeitung höchstens zehn nacheinander. Der Stapel lässt sich stoppen und später fortsetzen. Bei **UNKNOWN**, Kommunikationsfehlern oder unklarem Providerergebnis nicht blind wiederholen; mögliche Kosten zuerst klären. Jeden Original-/Vorschlagsvergleich anzeigenweise prüfen und den Vorschlag lokal **freigeben** oder **ablehnen**. Es erfolgt keine automatische Plattform-Veröffentlichung und keine sonstige Plattformänderung. Alle Kostenwerte sind konservative Schätzungen, keine garantierte Providerabrechnung.
+Vor dem ersten kostenpflichtigen Vorschlag das USD-Gesamtbudget und die externe Datenübertragung ausdrücklich bestätigen. **Nächster Vorschlag** verarbeitet eine Anzeige, die seit v0.1.22 kostenbestätigte Eigenanzeigen-Stapelverarbeitung bis zu 100 Anfragen nacheinander (vorbehaltlich Budget und Sitzungslimit). Der Stapel lässt sich stoppen und später fortsetzen. Bei **UNKNOWN**, Kommunikationsfehlern oder unklarem Providerergebnis nicht blind wiederholen; mögliche Kosten zuerst klären. Jeden Original-/Vorschlagsvergleich anzeigenweise prüfen und den Vorschlag lokal **freigeben** oder **ablehnen**. Es erfolgt keine automatische Plattform-Veröffentlichung und keine sonstige Plattformänderung. Der lokale Kostenbericht in **Controlling** berücksichtigt Entwurfs- und Bestandsanzeigen-KI-Aufträge getrennt, zeigt nachgeprüfte UNKNOWN-Kosten separat von Token-Schätzungen und offenen Reservierungen und ist keine bestätigte Anbieterrechnung.
 
 Die bisherigen KI-Stapelaufträge für lokale CSV-/XLSX-Entwürfe bleiben separat verfügbar: bis zu 5.000 lokale Entwürfe sammeln, Vorschläge prüfen, einzeln freigeben und ausschließlich lokal übernehmen.
 
