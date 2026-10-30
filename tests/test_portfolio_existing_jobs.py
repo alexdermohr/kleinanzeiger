@@ -167,6 +167,22 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         self.assertEqual(details(self.store,jid)["actual_cents"],11)
         self.assertEqual(details(self.store,jid)["counts"]["rejected"],1)
         self.assertEqual(details(self.store,jid)["platform_writes"],0)
+        # A checked UNKNOWN is deliberately proposal-free; a user may not
+        # later turn that discarded call into an accepted AI suggestion.
+        with self.assertRaisesRegex(ExistingJobError, "no provider proposal"):
+            review_items(self.store,jid,["10501"],approve=True)
+        with self.assertRaisesRegex(ExistingJobError, "no provider proposal"):
+            review_items(self.store,jid,["10501","10502"],approve=True)
+        after=details(self.store,jid)
+        self.assertEqual(after["actual_cents"],11)
+        self.assertEqual(after["counts"]["rejected"],1)
+        self.assertEqual(after["counts"]["proposed"],1)
+        self.assertEqual(after["platform_writes"],0)
+        # Existing genuine proposals remain individually reviewable.
+        approved=review_items(self.store,jid,["10502"],approve=True)
+        self.assertEqual(approved["counts"]["approved"],1)
+        self.assertEqual(approved["counts"]["rejected"],1)
+        self.assertEqual(approved["actual_cents"],11)
 
     def test_existing_unknown_requires_manual_settlement_even_without_restart(self):
         self.add("10503")
