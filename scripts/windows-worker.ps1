@@ -67,7 +67,9 @@ function Save-Backup {
   New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
   $name = 'Kleinanzeiger-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.sqlite'
   $dest = Join-Path $backupRoot $name
-  & $venvPython -m kleinanzeiger backup --db $db --backup $dest
+  # Save-Backup runs against the ALREADY installed package before updating.
+  # Use the stable internal compatibility module present in previous releases.
+  & $venvPython -m mark_api.backup_cli --db $db --backup $dest
   if ($LASTEXITCODE -ne 0) { throw 'Sicherung fehlgeschlagen. Update abgebrochen.' }
   if (!(Test-Path -LiteralPath $dest -PathType Leaf) -or
       !(Test-Path -LiteralPath ($dest + '.manifest.json') -PathType Leaf)) {
@@ -153,7 +155,8 @@ function Invoke-ProgramRollback([string]$rollbackName) {
         [string]$previous[0] -notmatch '^\d+\.\d+\.\d+$') {
       throw 'Version nicht validiert.'
     }
-    & $candidatePython -m kleinanzeiger launch --help | Out-Null
+    # Rollback targets can predate the new Kleinanzeiger namespace.
+    & $candidatePython -m mark_api.launcher --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Starttest fehlgeschlagen.' }
   } catch {
     throw 'Gesicherte Programmversion ist nicht einsetzbar. Aktuelle Version bleibt erhalten.'
@@ -186,7 +189,7 @@ function Invoke-ProgramRollback([string]$rollbackName) {
     if ((Get-InstalledVersion) -ne [string]$previous[0]) {
       throw 'Aktivierte Programmversion weicht von der Auswahl ab.'
     }
-    & $venvPython -m kleinanzeiger launch --help | Out-Null
+    & $venvPython -m mark_api.launcher --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Aktivierte Programmversion ist nicht startbar.' }
   } catch {
     $cause = $_.Exception.Message
