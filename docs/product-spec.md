@@ -6,7 +6,9 @@ Status: **Gesamtprodukt noch nicht abgenommen.** Die frühere Beobachtung eines 
 
 Quelle: `docs/requirements-source-2026-09-23.md`
 
-## Verbindlicher Liefer- und Arbeitsmodus (D-028/D-029)
+## Verbindlicher Liefer- und Arbeitsmodus (D-028/D-029/D-030)
+
+**Kundenentscheidung vom 30.10.2026:** [Verantwortung des Kunden für den realen Plattformbetrieb](kundenauftrag-plattformbetrieb.md). Die allgemeine externe Plattformfreigabe ist keine vorgelagerte Voraussetzung für Entwicklung, technische Tests oder Paketveröffentlichung. Die tatsächlichen Plattformbedingungen und Kontorechte sind dem späteren Einsatz des Kunden als Betreiber zugeordnet. Kontobezogene technische Zugangsvoraussetzungen und Schutzmechanismen werden dadurch nicht außer Kraft gesetzt.
 
 **Produktidentität:** **Kleinanzeiger**, kanonisches Repository `alexdermohr/kleinanzeiger`, Distributionsname `kleinanzeiger`, Bedienstart `kleinanzeiger`. Die internen Python-Module `mark_api` und bisherige CLI-Aliase werden zur Kompatibilität erhalten.
 
