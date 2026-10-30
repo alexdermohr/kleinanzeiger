@@ -84,7 +84,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("github.com/alexdermohr/kleinanzeiger/releases/download", worker)
         self.assertIn("Assert-KleinanzeigerStopped", worker)
         self.assertLess(worker.index("Save-Backup\n"), worker.index("& (Join-Path $folder 'windows-install.ps1')"))
-        self.assertIn("mark_api.backup_cli", worker)
+        self.assertIn("-m kleinanzeiger backup", worker)
         self.assertIn(".manifest.json", worker)
         self.assertIn("Install-Package", worker)
         self.assertIn("Publish-AppFiles", worker)
