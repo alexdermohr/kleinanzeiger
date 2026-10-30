@@ -8,7 +8,8 @@
 
 - **Repository:** https://github.com/alexdermohr/kleinanzeiger
 - **Python:** ab 3.12; CI-Zielmatrix Python 3.12 und 3.13
-- **Distribution:** `kleinanzeiger`; bestehende interne Module `mark_api` und `mark-api-*`-Kommandos bleiben kompatibel
+- **Produkt-/Kommandoidentität:** `kleinanzeiger`; neue öffentliche Starts verwenden `kleinanzeiger-*` oder `python -m kleinanzeiger launch`.
+- **Technische Rückwärtskompatibilität:** Das Python-Importpaket `mark_api` und ältere `mark-api-*`-CLI-Aliase bleiben für bestehende Integrationen erhalten, sind aber **keine aktuellen Kunden-Startwege**. Persistierte SQLite-/Protokollidentitäten werden nicht kosmetisch umbenannt.
 - **Technischer Lieferstatus:** Implementiert, getestet, integriert, veröffentlicht und am Kunden-PC abgenommen sind getrennte Stufen. Erforderliche CI, Branchschutz und reale Berechtigungen bleiben verbindlich. Der Auftraggeber hat unabhängige Reviews ausdrücklich abbedungen; es besteht keine zusätzliche Review-Warteschleife.
 
 ## KI-Portfolio-Ausbau für hunderte bis tausende Anzeigen
