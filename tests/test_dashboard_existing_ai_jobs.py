@@ -265,6 +265,49 @@ class ExistingAiDashboardTests(unittest.TestCase):
             payload,generation=True)[0],429)
         self.assertEqual(len(calls),20)
 
+    def test_100_synthetic_provider_calls_are_capped_before_the_101st(self):
+        # No real provider: the session cap counts each accepted synthetic call.
+        for index in range(100):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id=f"batch-{index:03d}", observed_at=datetime.now(timezone.utc),
+                source="private-web-owner-inventory", lifecycle_state=LifecycleState.ACTIVE,
+                title=f"Original {index}", description="Nur belegte Fakten"))
+        calls=[]
+        class Responses:
+            def create(_self, **_kwargs):
+                calls.append(1)
+                return SimpleNamespace(status="completed",
+                    output_text=json.dumps({"title":"Neu","description":"Nur belegte Fakten"}),
+                    usage=SimpleNamespace(input_tokens=10,output_tokens=10))
+        generator=SimpleNamespace(_provider=lambda:SimpleNamespace(responses=Responses()))
+        self.start_server(DashboardGenerationAccess(
+            ui_token="g"*32, generator_factory=lambda:generator, max_requests=100))
+        payload={"mode":"all","ad_ids":[],"instruction":"Nur belegte Fakten",
+                 "budget_cents":10_000,"estimate_cents":20,"request_key":"5"*64}
+        code,job=self.request("POST","/api/portfolio/existing-ai/create",payload)
+        self.assertEqual(code,200)
+        self.assertEqual(job["total"],101)
+        jid=job["job_id"]
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/state",
+            {"job_id":jid,"action":"start"})[0],200)
+        generation={"job_id":jid,"acknowledge_provider_cost":True}
+        for _ in range(100):
+            code,response=self.request("POST","/api/portfolio/existing-ai/generate-next",
+                                       generation,generation=True)
+            self.assertEqual(code,200,response)
+            self.assertEqual(response["claimed"],True)
+            self.assertEqual(response["progress"]["platform_writes"],0)
+        self.assertEqual(len(calls),100)
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/generate-next",
+            generation,generation=True)[0],429)
+        self.assertEqual(len(calls),100)
+        code,progress=self.request("GET",
+            "/api/portfolio/existing-ai/detail?job_id="+jid)
+        self.assertEqual(code,200)
+        self.assertEqual(progress["counts"]["proposed"],100)
+        self.assertEqual(progress["counts"]["queued"],1)
+        self.assertEqual(progress["platform_writes"],0)
+
     def test_storage_failures_are_sanitized_503_for_reads_create_and_review(self):
         self.start_server()
         with patch("mark_api.dashboard.list_existing_jobs",
@@ -314,6 +357,108 @@ setTimeout(()=>{const call=calls.find(x=>x.path==="/api/portfolio/existing-ai/cr
         result=subprocess.run([shutil.which("node") or "node","-e",harness],
             input=_DASHBOARD_JS,text=True,encoding="utf-8",capture_output=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stderr)
+
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js needed for dashboard interaction")
+    def test_node_100_call_batch_budget_doubleclick_stop_and_unknown(self):
+        harness=r"""
+const vm=require("node:vm"),fs=require("node:fs"),assert=require("node:assert/strict");
+class E {
+ constructor(id=""){this.id=id;this.value="";this.checked=false;this.hidden=false;
+  this.disabled=false;this.children=[];this.listeners={};this.textContent="";this.open=false;}
+ addEventListener(n,f){(this.listeners[n]??=[]).push(f)}
+ append(...x){this.children.push(...x)}
+ replaceChildren(...x){this.children=[...x]}
+ querySelectorAll(){return []}
+ focus(){}
+ scrollIntoView(){}
+ click(){for(const f of this.listeners.click??[])f({target:this})}
+}
+const elements=new Map(),by=id=>{if(!elements.has(id))elements.set(id,new E(id));return elements.get(id)};
+const id="a".repeat(32);
+let calls=0,mode="normal",release=null;
+const confirms=[];
+const state={job_id:id,state:"running",platform_writes:0,total:100,
+  budget_cents:140,estimate_cents:20,actual_cents:0,reserved_cents:0,
+  counts:{queued:100,proposed:0,unknown:0,inflight:0},items:[],has_more:false,next_after:null};
+const response=data=>({ok:true,status:200,json:async()=>data,text:async()=>JSON.stringify(data)});
+const context={
+ document:{getElementById:by,createElement:()=>new E(),querySelectorAll:()=>[]},
+ console,URLSearchParams,Uint8Array,Blob,TextEncoder,setTimeout,clearTimeout,
+ fetch:async(path,options={})=>{
+  if(path.includes("/existing-ai/detail?"))return response({...state});
+  if(path.includes("/existing-ai/jobs?"))return response({jobs:[{job_id:id,created_at:"2026-10-29T18:00:00",total:100,state:"running"}],has_more:false});
+  if(path==="/api/portfolio/existing-ai/generate-next"){
+   calls++;
+   if(mode==="hold")await new Promise(resolve=>{release=resolve});
+   if(mode==="unknown")return {ok:false,status:502,json:async()=>({error:"provider_outcome_unknown"})};
+   return response({claimed:true,ad_id:"ad-1",platform_writes:0});
+  }
+  return response({});
+ },
+ window:{location:{hash:"",pathname:"/",search:"",origin:"http://127.0.0.1"},
+  history:{replaceState(){}},sessionStorage:{getItem(){return null},setItem(){}},
+  confirm:message=>{confirms.push(message);return true},
+  crypto:{getRandomValues:a=>a.fill(7)}},
+ globalThis:null,navigator:{},crypto:{getRandomValues:a=>a.fill(7)}
+};
+context.globalThis=context;vm.createContext(context);
+const source=fs.readFileSync(0,"utf8").replace(/consumeWriteToken\(\);\s*load\(\);\s*$/," ");
+new vm.Script(source);vm.runInContext(source,context);
+vm.runInContext('jobsAvailable=true;localWorkAvailable=true;writeUiAvailable=true;writeToken="t".repeat(32);generationUiAvailable=true;generationToken="g".repeat(32);existingAiActiveId="a".repeat(32);existingAiDisplayedId=existingAiActiveId',context);
+by("existing-ai-batch-count").value="100";by("existing-ai-consent").checked=true;
+(async()=>{
+ // The persisted USD budget, NOT the editable text fields, permits only seven.
+ by("existing-ai-budget").value="999999";
+ await vm.runInContext("generateExistingAiBatch()",context);
+ assert.equal(calls,7);
+ assert.match(confirms[0],/Bis zu 7 einzelne KI-Anfragen/);
+ assert.match(confirms[0],/1\.40 USD Budgetreservierungen/);
+ assert.equal(by("existing-ai-consent").checked,false);
+ assert.equal(vm.runInContext("existingAiBatchBusy",context),false);
+ assert.equal(by("existing-ai-stop").disabled,true);
+ // Two immediate clicks can never create two competing sequential pipelines.
+ calls=0;state.budget_cents=100000;mode="hold";by("existing-ai-consent").checked=true;
+ const first=vm.runInContext("generateExistingAiBatch()",context);
+ const second=vm.runInContext("generateExistingAiBatch()",context);
+ await second;
+ await new Promise(resolve=>setTimeout(resolve,0));
+ assert.equal(calls,1);
+ assert.equal(vm.runInContext("existingAiBatchBusy",context),true);
+ assert.equal(by("existing-ai-batch").disabled,true);
+ by("existing-ai-stop").click();
+ assert.ok(release);
+ release();
+ await first;
+ assert.equal(calls,1);
+ assert.equal(vm.runInContext("existingAiBatchBusy",context),false);
+ assert.match(by("existing-ai-feedback").textContent,/gestoppt/);
+ // Over-limit input must not reach confirmation or any provider endpoint.
+ calls=0;mode="normal";by("existing-ai-consent").checked=true;
+ by("existing-ai-batch-count").value="101";
+ const confirmations=confirms.length;
+ await vm.runInContext("generateExistingAiBatch()",context);
+ assert.equal(calls,0);
+ assert.equal(confirms.length,confirmations);
+ assert.match(by("existing-ai-feedback").textContent,/1 bis 100/);
+ // A transport-UNKNOWN stops the batch after exactly one attempted request.
+ calls=0;mode="unknown";by("existing-ai-consent").checked=true;
+ by("existing-ai-batch-count").value="100";
+ await vm.runInContext("generateExistingAiBatch()",context);
+ assert.equal(calls,1);
+ assert.match(by("existing-ai-feedback").textContent,/nicht blind wiederholen/);
+ assert.equal(vm.runInContext("existingAiBatchBusy",context),false);
+ assert.equal(by("existing-ai-stop").disabled,true);
+ console.log("100-call batch: budget, doubleclick, stop, invalid input, UNKNOWN PASS");
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        result=subprocess.run(
+            [shutil.which("node") or "node", "-e", harness],
+            input=_DASHBOARD_JS, text=True, encoding="utf-8",
+            capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 
 if __name__ == "__main__": unittest.main()
