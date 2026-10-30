@@ -117,7 +117,7 @@ try {
   Write-Host 'Installiere die neue Version getrennt von der vorhandenen Installation ...'
   & $stagePython -m pip install ($wheel + '[private-web,generation]')
   if ($LASTEXITCODE -ne 0) { throw 'Die neue Paketinstallation ist fehlgeschlagen. Die bisherige Version bleibt erhalten.' }
-  & $stagePython -m mark_api.launcher --help | Out-Null
+  & $stagePython -m kleinanzeiger launch --help | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Die neue Version hat die Startpruefung nicht bestanden. Die bisherige Version bleibt erhalten.' }
   & $stagePython -c "import importlib.metadata as m; assert m.version('kleinanzeiger') == '0.1.22'"
   if ($LASTEXITCODE -ne 0) { throw 'Die neue Version stimmt nicht mit dem geprueften Paket ueberein.' }
@@ -147,7 +147,7 @@ try {
     $newMoved = $true
     # Verify the environment a second time at its final, relocated path.
     if (!(Test-Python $installedPython)) { throw 'Neue Python-Umgebung ist nach dem Wechsel nicht startbar.' }
-    & $installedPython -m mark_api.launcher --help | Out-Null
+    & $installedPython -m kleinanzeiger launch --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Neue Version ist nach dem Wechsel nicht startbar.' }
     & $installedPython -c "import importlib.metadata as m; assert m.version('kleinanzeiger') == '0.1.22'"
     if ($LASTEXITCODE -ne 0) { throw 'Neue Paketversion ist nach dem Wechsel ungueltig.' }

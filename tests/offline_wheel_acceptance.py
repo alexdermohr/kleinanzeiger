@@ -184,7 +184,7 @@ def _offline_server(
                     pending = bytearray(rest)
                     line = raw.decode("utf-8", errors="strict").strip()
                     match = re.fullmatch(
-                        r"Mark offline dashboard: http://127\.0\.0\.1:([0-9]+)/",
+                        r"Kleinanzeiger offline dashboard: http://127\.0\.0\.1:([0-9]+)/",
                         line,
                     )
                     if match:

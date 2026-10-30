@@ -17,7 +17,7 @@ from .storage import SnapshotStore
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run Mark with local files and a read-only loopback dashboard. "
+            "Run Kleinanzeiger with local files and a read-only loopback dashboard. "
             "Never connect to Kleinanzeigen, CDP, or a platform Write API."
         )
     )
@@ -66,7 +66,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Enable separately consented text/image drafts using an external "
-            "provider; requires mark-api[generation] and OPENAI_API_KEY."
+            "provider; requires kleinanzeiger[generation] and OPENAI_API_KEY."
         ),
     )
     return parser
@@ -88,9 +88,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from openai import OpenAI as _GenerationSdkClient
         except Exception:
-            parser.error("--enable-generation requires installed mark-api[generation]")
+            parser.error("--enable-generation requires installed kleinanzeiger[generation]")
         if not callable(_GenerationSdkClient):
-            parser.error("--enable-generation requires installed mark-api[generation]")
+            parser.error("--enable-generation requires installed kleinanzeiger[generation]")
         generation_access = DashboardGenerationAccess(ui_token=secrets.token_urlsafe(32))
 
     contract = AnalyticsContract(
@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         "#generation_token=" + quote(generation_access.ui_token, safe="")
         if generation_access is not None else ""
     )
-    print(f"Mark offline dashboard: http://{host}:{port}/{token_fragment}", flush=True)
+    print(f"Kleinanzeiger offline dashboard: http://{host}:{port}/{token_fragment}", flush=True)
     print("Platform sync and writes: disabled (local files only).", flush=True)
     if generation_access is not None:
         print("Draft generation: opt-in, separate consent and possible provider costs per request.", flush=True)

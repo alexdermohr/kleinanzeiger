@@ -67,6 +67,8 @@ function Save-Backup {
   New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
   $name = 'Kleinanzeiger-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.sqlite'
   $dest = Join-Path $backupRoot $name
+  # Save-Backup runs against the ALREADY installed package before updating.
+  # Use the stable internal compatibility module present in previous releases.
   & $venvPython -m mark_api.backup_cli --db $db --backup $dest
   if ($LASTEXITCODE -ne 0) { throw 'Sicherung fehlgeschlagen. Update abgebrochen.' }
   if (!(Test-Path -LiteralPath $dest -PathType Leaf) -or
@@ -153,6 +155,7 @@ function Invoke-ProgramRollback([string]$rollbackName) {
         [string]$previous[0] -notmatch '^\d+\.\d+\.\d+$') {
       throw 'Version nicht validiert.'
     }
+    # Rollback targets can predate the new Kleinanzeiger namespace.
     & $candidatePython -m mark_api.launcher --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Starttest fehlgeschlagen.' }
   } catch {
@@ -401,7 +404,8 @@ switch ($Action) {
         !(Test-Path -LiteralPath ($source + '.manifest.json') -PathType Leaf)) {
       throw 'Sicherung oder Manifest fehlt.'
     }
-    & $venvPython -m mark_api.windows_backup --backup $source --db $db
+      # Restore can run against an older installed venv; keep its stable module path.
+  & $venvPython -m mark_api.windows_backup --backup $source --db $db
     if ($LASTEXITCODE -ne 0) { throw 'Wiederherstellung abgewiesen.' }
     Write-Output 'RESTORE_OK'
   }

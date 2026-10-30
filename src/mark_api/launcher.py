@@ -982,7 +982,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     if container_draft_denied():
-        print("mark-api: unattested container draft cannot run Python entrypoints",
+        print("Kleinanzeiger: unattested container draft cannot run Python entrypoints",
               file=sys.stderr)
         return 2
     args = _parser().parse_args(argv)
@@ -1005,7 +1005,7 @@ def main(argv: list[str] | None = None) -> int:
         or (args.witness_owner_uid is not None
             and args.witness_owner_uid == os.geteuid())
     ):
-        print("mark-api-launch: invalid independent witness configuration", file=sys.stderr)
+        print("Kleinanzeiger: invalid independent witness configuration", file=sys.stderr)
         return 2
     frontend_settings = (
         args.frontend_socket, args.frontend_uid, args.frontend_gid,
@@ -1019,7 +1019,7 @@ def main(argv: list[str] | None = None) -> int:
         or args.frontend_uid in (0, os.geteuid(), args.witness_owner_uid)
         or args.frontend_gid in (0, os.getegid())
     ):
-        print("mark-api-launch: independent frontend configuration invalid",
+        print("Kleinanzeiger: independent frontend configuration invalid",
               file=sys.stderr)
         return 2
     if args.frontend_socket is not None:
@@ -1029,7 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
         ports = (args.cdp_port, args.dashboard_port, args.write_port, 8875)
         if any(type(port) is not int or not 1 <= port <= 65535 for port in ports) \
                 or len(set(ports)) != len(ports):
-            print("mark-api-launch: invalid independent frontend ports",
+            print("Kleinanzeiger: invalid independent frontend ports",
                   file=sys.stderr)
             return 2
     if args.frontend_socket is not None:
@@ -1042,11 +1042,11 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError:
             pass
         except OSError:
-            print("mark-api-launch: trusted dashboard socket unavailable",
+            print("Kleinanzeiger: trusted dashboard socket unavailable",
                   file=sys.stderr)
             return 2
         else:
-            print("mark-api-launch: trusted dashboard socket unavailable",
+            print("Kleinanzeiger: trusted dashboard socket unavailable",
                   file=sys.stderr)
             return 2
     contract = AnalyticsContract(
@@ -1102,7 +1102,7 @@ def main(argv: list[str] | None = None) -> int:
                         expected_owner_uid=args.witness_owner_uid,
                     )
                 except (FenceWitnessError, OSError):
-                    error = "mark-api-launch: independent recovery witness unavailable"
+                    error = "Kleinanzeiger: independent recovery witness unavailable"
             if error is None and not startup_cancelled.is_set():
                 builder_entered = True
                 try:
@@ -1128,13 +1128,13 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                     )
                 except (ProductLauncherError, PrivateWebRuntimeDependencyError) as exc:
-                    error = f"mark-api-launch: {exc}"
+                    error = f"Kleinanzeiger: {exc}"
                 except (TypeError, ValueError):
-                    error = "mark-api-launch: invalid startup configuration"
+                    error = "Kleinanzeiger: invalid startup configuration"
                 except Exception:
-                    error = "mark-api-launch: product startup failed"
+                    error = "Kleinanzeiger: product startup failed"
             elif error is None:
-                error = "mark-api-launch: startup interrupted"
+                error = "Kleinanzeiger: startup interrupted"
 
             if local_launcher is not None and args.frontend_socket is not None and not startup_cancelled.is_set():
                 try:
@@ -1152,7 +1152,7 @@ def main(argv: list[str] | None = None) -> int:
         except BaseException:
             # A partial startup has unknown provenance; no exception grants
             # authority to retry writes, release leases or close IPC early.
-            error = "mark-api-launch: product startup failed"
+            error = "Kleinanzeiger: product startup failed"
         finally:
             with startup_guard:
                 abandoned = startup_abandoned
@@ -1215,7 +1215,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             startup_worker.start()
         except RuntimeError:
-            print("mark-api-launch: owner startup worker unavailable", file=sys.stderr)
+            print("Kleinanzeiger: owner startup worker unavailable", file=sys.stderr)
             return 2
 
         while not startup_complete.is_set():
@@ -1226,7 +1226,7 @@ def main(argv: list[str] | None = None) -> int:
                         if not startup_complete.is_set():
                             startup_abandoned = True
                             print(
-                                "mark-api-launch: owner startup deadline exceeded; "
+                                "Kleinanzeiger: owner startup deadline exceeded; "
                                 "retain recovery fences",
                                 file=sys.stderr,
                             )
@@ -1254,10 +1254,10 @@ def main(argv: list[str] | None = None) -> int:
             # Use the bounded owner cleanup; never take the early return.
             frontend_failed = True
         if launcher is None:
-            print("mark-api-launch: owner startup incomplete", file=sys.stderr)
+            print("Kleinanzeiger: owner startup incomplete", file=sys.stderr)
             return 2
         if frontend_failed:
-            print("mark-api-launch: trusted dashboard transport unavailable",
+            print("Kleinanzeiger: trusted dashboard transport unavailable",
                   file=sys.stderr)
 
         exit_code = 2 if frontend_failed else 0
@@ -1304,7 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
             pass
         except Exception:
             print(
-                "mark-api-launch: dashboard server stopped unexpectedly",
+                "Kleinanzeiger: dashboard server stopped unexpectedly",
                 file=sys.stderr,
             )
             exit_code = 2
@@ -1332,7 +1332,7 @@ def main(argv: list[str] | None = None) -> int:
                             relay_drained = False
                         if not relay_drained:
                             print(
-                                "mark-api-launch: frontend transport drain failed",
+                                "Kleinanzeiger: frontend transport drain failed",
                                 file=sys.stderr,
                             )
                             stop_code = 2
@@ -1367,12 +1367,12 @@ def main(argv: list[str] | None = None) -> int:
                         settle_thread.join(_SHUTDOWN_MEDIA_RECONCILE_SECONDS)
                         if settle_thread.is_alive() or not reconciled:
                             print(
-                                "mark-api-launch: media submit reconciliation required",
+                                "Kleinanzeiger: media submit reconciliation required",
                                 file=sys.stderr,
                             )
                             stop_code = 2
                     except ProductLauncherError as exc:
-                        print(f"mark-api-launch: {exc}", file=sys.stderr)
+                        print(f"Kleinanzeiger: {exc}", file=sys.stderr)
                         stop_code = 2
                 except BaseException:
                     # Unexpected shutdown failures must never allow a clean
@@ -1405,7 +1405,7 @@ def main(argv: list[str] | None = None) -> int:
                 worker.start()
             except (RuntimeError, OSError):
                 print(
-                    "mark-api-launch: owner shutdown worker unavailable; "
+                    "Kleinanzeiger: owner shutdown worker unavailable; "
                     "retain recovery fences",
                     file=sys.stderr,
                 )
@@ -1420,7 +1420,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if worker.is_alive() or not outcomes:
                     print(
-                        "mark-api-launch: owner shutdown deadline exceeded; "
+                        "Kleinanzeiger: owner shutdown deadline exceeded; "
                         "retain recovery fences",
                         file=sys.stderr,
                     )
