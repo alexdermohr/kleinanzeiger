@@ -159,8 +159,8 @@ oder verändert allein eine Anzeige.</p>
 <ol>
 <li>Im Dashboard <strong>Bestehende Eigenanzeigen mit KI prüfen</strong> öffnen und bestätigte eigene veröffentlichte Anzeigen aus der Katalogauswahl oder über <strong>Alle passenden</strong> wählen. Seit v0.1.21 werden maximal 10.000 Anzeigen mit ID, Quelle und Originaltitel/-beschreibung an den Auftrag gebunden.</li>
 <li>Verbesserungsanweisung und USD-Gesamtbudget prüfen. Datenübertragung und mögliche Providerkosten ausdrücklich bestätigen; ohne diese Zustimmung wird keine KI-Anfrage gesendet.</li>
-<li><strong>Nächster Vorschlag</strong> verarbeitet eine Anzeige, die Stapelverarbeitung höchstens zehn nacheinander. Ein Auftrag lässt sich stoppen und später fortsetzen. Bei <strong>UNKNOWN</strong>, Kommunikationsfehler oder unklarem Ergebnis werden keine Folgeanfragen blind wiederholt.</li>
-<li>Für jede Anzeige Original und Vorschlag vollständig vergleichen und lokal <strong>freigeben</strong> oder <strong>ablehnen</strong>. Weder die Freigabe noch die Ablehnung veröffentlicht oder verändert automatisch eine Plattformanzeige.</li>
+<li><strong>Nächster Vorschlag</strong> verarbeitet eine Anzeige, die ausdrücklich kostenfreigegebene Stapelverarbeitung seit v0.1.22 bis zu 100 nacheinander (innerhalb von Budget und Sitzungslimit). Ein Auftrag lässt sich stoppen und später fortsetzen. Bei <strong>UNKNOWN</strong>, Kommunikationsfehler oder unklarem Ergebnis werden keine Folgeanfragen blind wiederholt.</li>
+<li>Für jede Anzeige Original und tatsächlich gespeicherten KI-Vorschlag vollständig vergleichen und lokal <strong>freigeben</strong> oder <strong>ablehnen</strong>. Ein manuell geklärter UNKNOWN-Vorgang ohne Vorschlag darf nicht freigegeben werden. Weder die Freigabe noch die Ablehnung veröffentlicht oder verändert automatisch eine Plattformanzeige.</li>
 </ol>
 <p class="note">Budget und Einzelkosten sind Schätzwerte und keine garantierte Providerabrechnung. Die gebundenen Originaldaten verhindern, dass ein Vorschlag stillschweigend auf einen anderen oder zwischenzeitlich veränderten Anzeigenstand angewendet wird.</p>
 <h2 id="verkauf">11. Verkäufe, Reservierungen und Lager (lokal)</h2>
@@ -175,7 +175,7 @@ oder verändert allein eine Anzeige.</p>
 <ol>
 <li>Im Dashboard <strong>Controlling</strong> öffnen, <strong>7, 30 oder 90 Tage</strong> auswählen und <strong>Bericht berechnen</strong> anklicken.</li>
 <li>Unter <strong>Tageskennzahl (lokale EML)</strong> zwischen <strong>Eingegangene Nachrichten</strong> und <strong>Unterschiedliche Gespräche je Tag</strong> wechseln. Tagesliste und <strong>Tageszahlen als CSV</strong> folgen der Auswahl; ein Gespräch kann auf mehreren Kalendertagen auftreten.</li>
-<li>Manuelle Verkaufs-/Reservierungsbestände, bekannte Erlöse und Kosten sowie geschätzte KI-Ausgaben getrennt lesen. <strong>Tageszahlen als CSV</strong> exportiert nur die Tagesanzahlen.</li>
+<li>Manuelle Verkaufs-/Reservierungsbestände, bekannte Erlöse und Kosten sowie KI-Aufwände aus lokalen Entwürfen und bestätigten Eigenanzeigen getrennt lesen. Nachgeprüfte UNKNOWN-Kosten werden separat von den Token-Schätzungen und noch reservierten Beträgen angezeigt; dies ist keine verifizierte Providerrechnung. <strong>Tageszahlen als CSV</strong> exportiert nur die Tagesanzahlen.</li>
 </ol>
 <p class="note">Die <strong>Zahl tatsächlich unterschiedlicher Käufer</strong> ist aus EML-Daten nicht zuverlässig bekannt; Gespräche dürfen weder als Käufer noch als vollständige Plattformstatistik ausgegeben werden. Der Zeitfilter betrifft importierte Nachrichten, nicht die zeitliche Zuordnung manueller Verkäufe. Unbekannte Kosten sind kein Gewinn von null. KI-Ausgaben in USD sind Schätzungen, Erlöse in EUR werden nicht ohne Kurs umgerechnet. Es gibt noch keine verlässlich belegte Postfach-Vollstatistik, keine bestätigte Plattform-Preisoptimierung und keinen Kausalitätsnachweis.</p>
 <h2 id="vorlagen">13. Wiederverwendbare KI-Arbeitsvorlagen und Prüfhinweise</h2>
@@ -187,5 +187,5 @@ oder verändert allein eine Anzeige.</p>
 <p>Die Vorlage startet keinen Auftrag. Prüfhinweise führen keine Plattformaktionen und keine kostenpflichtige KI-Verarbeitung aus. Wiederkehrende autonome Arbeitsregeln sind noch nicht enthalten.</p>
 <h2>14. Grenzen der aktuellen Ausgabe</h2>
 <p><strong>Noch nicht enthalten:</strong> Kontogebundene vollständige Nachrichtenkonversationen und ein kontrollierter Nachrichtenversand, automatische Plattform-Stapeländerungen/-veröffentlichungen, wiederkehrende KI-Autopilot-Regeln, eine unabhängig geprüfte Provider-Abrechnung sowie eine Freigabe auf Ihrem tatsächlichen Windows-Kunden-PC. Diese Funktionen dürfen nicht mit vorhandenen lokalen Notizen, KI-Vorschlägen oder simulierten Tests verwechselt werden.</p>
-<footer>Kleinanzeiger v0.1.22 – Kundenunterlagen. Stand: 29. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.22 – Kundenunterlagen. Stand: 30. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>
