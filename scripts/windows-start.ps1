@@ -44,7 +44,7 @@ if (Test-Path -LiteralPath $keyFile -PathType Leaf) {
   }
 }
 try {
-  & $python -m mark_api.launcher --db $db --cdp-port 9222 @extra
+  & $python -m kleinanzeiger launch --db $db --cdp-port 9222 @extra
   if ($LASTEXITCODE -ne 0) { throw 'Produktstart fehlgeschlagen. Chrome/CDP/Login und KI-Konfiguration pruefen.' }
 } finally {
   Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
