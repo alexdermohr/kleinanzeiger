@@ -466,7 +466,7 @@ class GenerationHttpTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 2)
             self.assertFalse(missing.exists())
             builder.assert_not_called()
-            self.assertIn("mark-api[generation]", error.getvalue())
+            self.assertIn("kleinanzeiger[generation]", error.getvalue())
             self.assertNotIn("synthetic-only", error.getvalue())
 
     def test_access_rejects_unsafe_token_and_budget(self):
