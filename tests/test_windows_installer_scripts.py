@@ -41,6 +41,16 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("if ($mayDisposeStage", script)
         self.assertIn("m.version('kleinanzeiger') == '0.1.22'", script)
 
+    def test_release_notes_match_ai_100_and_checked_unknown_contract(self):
+        workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
+        notes = workflow.split("<<\'EOF\'", 1)[1].split("\\n          EOF", 1)[0]
+        self.assertIn("Bis zu 10.000 verifizierte eigene veröffentlichte Anzeigen", notes)
+        self.assertIn("bis zu 100 einzelne KI-Anfragen", notes)
+        self.assertIn("bis zu zehn sequenzielle KI-Anfragen für lokale Entwurfsaufträge", notes)
+        self.assertIn("manuell geprüfte UNKNOWN-Beträge", notes)
+        self.assertIn("wiederkehrende autonome Autopilot-Regeln", notes)
+        self.assertNotIn("Massenpreisänderungen, Autopilot,", notes)
+
     def test_no_powershell_home_reserved_variable_write(self):
         for filename in ("windows-install.ps1", "windows-chrome.ps1"):
             code = (SCRIPTS / filename).read_text(encoding="utf-8")
