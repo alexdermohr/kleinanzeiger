@@ -83,8 +83,11 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("Release-Manifest.json", worker)
         self.assertIn("github.com/alexdermohr/kleinanzeiger/releases/download", worker)
         self.assertIn("Assert-KleinanzeigerStopped", worker)
+        # Backups and rollbacks must still run against pre-migration wheels.
+        self.assertIn("$candidatePython -m mark_api.launcher --help", worker)
+        self.assertIn("$venvPython -m mark_api.launcher --help", worker)
         self.assertLess(worker.index("Save-Backup\n"), worker.index("& (Join-Path $folder 'windows-install.ps1')"))
-        self.assertIn("-m kleinanzeiger backup", worker)
+        self.assertIn("-m mark_api.backup_cli", worker)
         self.assertIn(".manifest.json", worker)
         self.assertIn("Install-Package", worker)
         self.assertIn("Publish-AppFiles", worker)
