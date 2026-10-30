@@ -10,7 +10,9 @@ Quelle: `docs/requirements-source-2026-09-23.md`
 
 **Kundenentscheidung vom 30.10.2026:** [Verantwortung des Kunden für den realen Plattformbetrieb](kundenauftrag-plattformbetrieb.md). Die allgemeine externe Plattformfreigabe ist keine vorgelagerte Voraussetzung für Entwicklung, technische Tests oder Paketveröffentlichung. Die tatsächlichen Plattformbedingungen und Kontorechte sind dem späteren Einsatz des Kunden als Betreiber zugeordnet. Kontobezogene technische Zugangsvoraussetzungen und Schutzmechanismen werden dadurch nicht außer Kraft gesetzt.
 
-**Produktidentität:** **Kleinanzeiger**, kanonisches Repository `alexdermohr/kleinanzeiger`, Distributionsname `kleinanzeiger`, Bedienstart `kleinanzeiger`. Die internen Python-Module `mark_api` und bisherige CLI-Aliase werden zur Kompatibilität erhalten.
+**Produktidentität:** **Kleinanzeiger**, kanonisches Repository `alexdermohr/kleinanzeiger`, Distributionsname `kleinanzeiger`, Bedienstart `kleinanzeiger`.
+
+**Aktuelle CLI-/Modulidentität:** Windows und neue Installationen starten über `kleinanzeiger` oder `python -m kleinanzeiger launch`, offline über `python -m kleinanzeiger offline`. Sichtbare Startmeldungen und Fehler benennen ausschließlich Kleinanzeiger. Das ursprüngliche Importpaket `mark_api` und ältere CLI-Aliase bleiben als kompatible Implementierungsgrenze bestehen; persistente Protokollidentitäten und SQLite-Schemata dürfen nicht aus optischen Gründen geändert werden. Die internen Python-Module `mark_api` und bisherige CLI-Aliase werden zur Kompatibilität erhalten.
 
 **Kundenerfolg ist der Maßstab:** Kleinanzeiger wird als **installierbares Gesamtprodukt mit vollständigen Write-Funktionen** geliefert. Das umfasst Create/Publish, Medien-/Bildvorbereitung und Media-Create, Titel-/Beschreibungspflege, Pause, Reaktivierung, Delete sowie Bestandssynchronisation, Analytics, Prompt-basierte Text-/Bildgenerierung und sichere Datenwiederherstellung. Ein Offline-Dashboard oder nur isoliert getestete Adapter erfüllen diesen Vertrag nicht.
 
