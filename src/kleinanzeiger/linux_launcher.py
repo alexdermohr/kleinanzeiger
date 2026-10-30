@@ -30,6 +30,7 @@ _DB = _ROOT / "data" / "portfolio.sqlite3"
 # Do not rename, purge, import cookies from or otherwise alter chrome-profile.
 _PROFILE = _ROOT / "chrome-profile-v2"
 _OLD_PROFILE = _ROOT / "chrome-profile"
+_PREFERRED_PROFILE_FILE = _HOME / ".local" / "state" / "kleinanzeiger" / "chrome-profile-choice"
 
 
 def _free_port() -> int:
@@ -104,16 +105,72 @@ def _existing_chrome_port(profile: Path) -> int | None:
         return 0
 
 
-def _choose_persistent_chrome_profile() -> Path:
-    """Preserve the same Chrome account sessions across application restarts.
+def _saved_chrome_profile() -> Path | None:
+    """Read only an app-owned profile *name*, never browser cookies."""
+    path = _PREFERRED_PROFILE_FILE
+    try:
+        if path.is_symlink() or path.parent.is_symlink() or not path.is_file():
+            return None
+        if path.stat().st_size > 32:
+            return None
+        value = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return {"old": _OLD_PROFILE, "v2": _PROFILE}.get(value)
 
-    A running owned CDP browser wins. When both are closed, retain the existing
-    legacy Chrome directory rather than silently switching to a blank profile.
-    Never touch, copy, delete or rename browser cookies or profile content.
+
+def _remember_chrome_profile(profile: Path) -> None:
+    """Persist selection only after Chrome CDP proved usable.
+
+    Never block a working account launch if the tiny local preference cannot
+    be written. Chrome profiles and their authentication files stay untouched.
     """
-    for candidate in (_OLD_PROFILE, _PROFILE):
+    name = "old" if profile == _OLD_PROFILE else "v2" if profile == _PROFILE else None
+    if name is None:
+        return
+    path = _PREFERRED_PROFILE_FILE
+    stage = None
+    try:
+        if path.parent.is_symlink():
+            return
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        stage = path.with_name(path.name + "." + secrets.token_hex(8) + ".tmp")
+        with stage.open("x", encoding="ascii") as target:
+            target.write(name + "\n")
+        stage.chmod(0o600)
+        os.replace(stage, path)
+    except OSError:
+        if stage is not None:
+            try:
+                stage.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _choose_persistent_chrome_profile() -> Path:
+    """Keep the same login across Chrome restarts and after a profile switch.
+
+    A live, exact same-user CDP session always wins. Next prefer the explicit
+    last successful selection. Without this marker, a previously used v2
+    profile wins over the older directory, preserving pre-upgrade v2 logins.
+    No browser cookie database is read or copied.
+    """
+    saved = _saved_chrome_profile()
+    candidates = tuple(dict.fromkeys(
+        candidate for candidate in (saved, _OLD_PROFILE, _PROFILE)
+        if candidate is not None
+    ))
+    for candidate in candidates:
         if not candidate.is_symlink() and _existing_chrome_port(candidate) not in (None, 0):
             return candidate
+    if saved is not None and saved.is_dir() and not saved.is_symlink():
+        return saved
+    if (
+        _PROFILE.is_dir() and not _PROFILE.is_symlink()
+        and (_PROFILE / "Local State").is_file()
+        and (_PROFILE / "Default" / "Preferences").is_file()
+    ):
+        return _PROFILE
     if _OLD_PROFILE.is_dir() and not _OLD_PROFILE.is_symlink():
         return _OLD_PROFILE
     return _PROFILE
@@ -277,6 +334,7 @@ def main() -> int:
         browser_profile = _choose_persistent_chrome_profile()
         try:
             cdp_port = _start_chrome(browser_profile)
+            _remember_chrome_profile(browser_profile)
         except RuntimeError as exc:
             parser.error(str(exc))
         argv = [sys.executable, "-m", "kleinanzeiger", "launch",

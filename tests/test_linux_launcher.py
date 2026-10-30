@@ -104,6 +104,7 @@ class LinuxLauncherTests(unittest.TestCase):
             with (
                 patch.object(mod, "_OLD_PROFILE", old),
                 patch.object(mod, "_PROFILE", new),
+                patch.object(mod, "_PREFERRED_PROFILE_FILE", root / "choice"),
                 patch.object(mod, "_existing_chrome_port", return_value=None),
             ):
                 self.assertEqual(mod._choose_persistent_chrome_profile(), old)
@@ -120,6 +121,7 @@ class LinuxLauncherTests(unittest.TestCase):
             with (
                 patch.object(mod, "_OLD_PROFILE", old),
                 patch.object(mod, "_PROFILE", new),
+                patch.object(mod, "_PREFERRED_PROFILE_FILE", root / "choice"),
                 patch.object(
                     mod, "_existing_chrome_port",
                     side_effect=lambda profile: 52991 if profile == new else None,
@@ -135,11 +137,58 @@ class LinuxLauncherTests(unittest.TestCase):
             with (
                 patch.object(mod, "_OLD_PROFILE", old),
                 patch.object(mod, "_PROFILE", new),
+                patch.object(mod, "_PREFERRED_PROFILE_FILE", root / "choice"),
                 patch.object(mod, "_existing_chrome_port", return_value=None),
             ):
                 self.assertEqual(mod._choose_persistent_chrome_profile(), new)
                 self.assertFalse(old.exists())
                 self.assertFalse(new.exists())
+
+    def test_preexisting_v2_login_remains_selected_after_restart(self):
+        mod = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old, newer = root / "chrome-profile", root / "chrome-profile-v2"
+            old.mkdir()
+            (newer / "Default").mkdir(parents=True)
+            (newer / "Local State").write_text("synthetic state")
+            (newer / "Default" / "Preferences").write_text("synthetic preferences")
+            (newer / "Default" / "Cookies").write_bytes(b"synthetic old login")
+            marker = root / "choice"
+            with (
+                patch.object(mod, "_OLD_PROFILE", old),
+                patch.object(mod, "_PROFILE", newer),
+                patch.object(mod, "_PREFERRED_PROFILE_FILE", marker),
+                patch.object(mod, "_existing_chrome_port", return_value=None),
+            ):
+                self.assertEqual(mod._choose_persistent_chrome_profile(), newer)
+                mod._remember_chrome_profile(newer)
+                self.assertEqual(marker.read_text(encoding="ascii"), "v2\n")
+                self.assertEqual(mod._choose_persistent_chrome_profile(), newer)
+            self.assertEqual((newer / "Default" / "Cookies").read_bytes(),
+                             b"synthetic old login")
+            self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+
+    def test_saved_old_profile_wins_when_both_profiles_have_data(self):
+        mod = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old, newer = root / "chrome-profile", root / "chrome-profile-v2"
+            old.mkdir()
+            (newer / "Default").mkdir(parents=True)
+            (newer / "Local State").write_text("synthetic")
+            (newer / "Default" / "Preferences").write_text("synthetic")
+            marker = root / "choice"
+            marker.write_text("old\n", encoding="ascii")
+            with (
+                patch.object(mod, "_OLD_PROFILE", old),
+                patch.object(mod, "_PROFILE", newer),
+                patch.object(mod, "_PREFERRED_PROFILE_FILE", marker),
+                patch.object(mod, "_existing_chrome_port", return_value=None),
+            ):
+                self.assertEqual(mod._choose_persistent_chrome_profile(), old)
+                marker.write_text("../unrelated\n", encoding="ascii")
+                self.assertEqual(mod._choose_persistent_chrome_profile(), newer)
 
     def test_dashboard_url_passes_only_local_matching_port_and_token(self):
         mod = _load()
@@ -247,7 +296,9 @@ class LinuxLauncherTests(unittest.TestCase):
         self.assertEqual(metadata["project"]["scripts"]["kleinanzeiger-linux"],
                          "kleinanzeiger.linux_launcher:main")
         code = SRC.read_text(encoding="utf-8")
-        self.assertNotIn("unlink(", code)
+        self.assertNotIn("_PROFILE.unlink(", code)
+        self.assertNotIn("_OLD_PROFILE.unlink(", code)
+        self.assertIn("stage.unlink(missing_ok=True)", code)
         self.assertNotIn("shutil.rmtree", code)
 
 
