@@ -75,6 +75,7 @@ class LinuxLauncherTests(unittest.TestCase):
             app.poll.return_value = 0
             with (
                 patch.object(mod, "version", return_value="0.1.23"),
+                patch.object(mod, "_PREFERRED_PROFILE_FILE", root / "profile-choice"),
                 patch.object(mod, "_existing_chrome_port",
                              side_effect=lambda p: 50365 if p==mod._OLD_PROFILE else None),
                 patch.object(mod, "_start_chrome", return_value=50365) as browser,
@@ -84,6 +85,7 @@ class LinuxLauncherTests(unittest.TestCase):
                 patch("sys.argv", ["kleinanzeiger-linux", "konto"]),
             ):
                 self.assertEqual(mod.main(), 0)
+            self.assertEqual((root / "profile-choice").read_text(encoding="ascii"), "old\n")
             browser.assert_called_once_with(mod._OLD_PROFILE)
             self.assertEqual(dashboard.call_args.kwargs["browser_profile"], mod._OLD_PROFILE)
             self.assertEqual(dashboard.call_args.kwargs["cdp_port"],50365)
