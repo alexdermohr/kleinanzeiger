@@ -1,7 +1,7 @@
 # Kleinanzeiger – Kundenauftrag und Verantwortlichkeit beim Plattformbetrieb
 
-**Entscheidungsstand:** 30. Oktober 2026  
-**Geltungsbereich:** Produktentwicklung, technische Prüfung und späterer Betrieb durch den Kunden  
+**Entscheidungsstand:** 30. Oktober 2026
+**Geltungsbereich:** Produktentwicklung, technische Prüfung und späterer Betrieb durch den Kunden
 **Bezug:** `docs/DECISIONS.md`, insbesondere D-028 und D-029, sowie `docs/product-spec.md`
 
 ## 1. Verbindlicher Entwicklungsauftrag
