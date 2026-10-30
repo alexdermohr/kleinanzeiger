@@ -278,7 +278,7 @@ function Invoke-PortfolioPreview([string]$selectedFile) {
     [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $payload -Compress)))
   $env:KLEINANZEIGER_IMPORT_REQUEST = $encoded
   try {
-    $raw = @(& $python -m kleinanzeiger import-articles --db $db --mode preview 2>$null) -join ''
+    $raw = @(& $python -m mark_api.portfolio_import_cli --db $db --mode preview 2>$null) -join ''
     if ($LASTEXITCODE -ne 0 -or !$raw) {
       throw 'Importvorschau konnte nicht erstellt werden.'
     }
@@ -383,7 +383,7 @@ function Show-CustomerLabels {
   if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
     throw 'Kleinanzeiger ist noch nicht eingerichtet.'
   }
-  $raw = & $python -m kleinanzeiger windows-choices --db $db 2>$null
+  $raw = & $python -m mark_api.windows_customer_choices --db $db 2>$null
   if ($LASTEXITCODE -ne 0) { throw 'Gespeicherte Anzeigen konnten nicht gelesen werden.' }
   $choices = @(($raw | ConvertFrom-Json).ads | Where-Object { $null -ne $_ })
   if ($choices.Count -eq 0) {
@@ -544,7 +544,7 @@ function Start-Product {
   $info = [System.Diagnostics.ProcessStartInfo]::new()
   $info.UseShellExecute = $false
   $info.FileName = $python
-  $info.Arguments = '-m kleinanzeiger launch --db "' + $db + '" --cdp-port 9222 --timeout-seconds 12 --stop-on-stdin'
+  $info.Arguments = '-m mark_api.launcher --db "' + $db + '" --cdp-port 9222 --timeout-seconds 12 --stop-on-stdin'
   if (!(Test-Path -LiteralPath $db -PathType Leaf)) { $info.Arguments += ' --init-db' }
   if (Test-Path -LiteralPath $keyFile -PathType Leaf) {
     try {
