@@ -7,6 +7,9 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
+from unittest.mock import patch
+import contextlib
+import io
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +59,26 @@ class LinuxLauncherTests(unittest.TestCase):
             lock = directory / "SingletonLock"
             lock.symlink_to("foreign-host-123")
             self.assertEqual(mod._existing_chrome_port(directory), 0)
+
+    def test_symlinked_data_directory_blocks_start_without_writes(self):
+        mod = _load()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "root"
+            root.mkdir()
+            external = Path(temp) / "external"
+            external.mkdir()
+            (root / "data").symlink_to(external, target_is_directory=True)
+            mod._ROOT = root
+            mod._DB = root / "data" / "portfolio.sqlite3"
+            with (
+                patch.object(mod, "version", return_value="0.1.22"),
+                patch("sys.argv", ["kleinanzeiger-linux", "offline"]),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    mod.main()
+            self.assertEqual(caught.exception.code, 2)
+            self.assertFalse(list(external.iterdir()), "no data outside app root")
 
     def test_public_linux_launcher_is_packaged(self):
         import tomllib
