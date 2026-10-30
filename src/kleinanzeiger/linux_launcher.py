@@ -180,7 +180,8 @@ def main() -> int:
     if opts.check:
         print("Kleinanzeiger", installed, "bereit")
         return 0
-    if _DB.is_symlink() or _ROOT.is_symlink() or (_DB.exists() and not _DB.is_file()):
+    if (_ROOT.is_symlink() or _DB.parent.is_symlink() or _DB.is_symlink()
+            or (_DB.exists() and not _DB.is_file())):
         parser.error("Ungültiger oder verknüpfter Datenbankpfad.")
     _DB.parent.mkdir(parents=True, exist_ok=True)
     port = _free_port()
