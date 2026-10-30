@@ -404,7 +404,8 @@ switch ($Action) {
         !(Test-Path -LiteralPath ($source + '.manifest.json') -PathType Leaf)) {
       throw 'Sicherung oder Manifest fehlt.'
     }
-    & $venvPython -m kleinanzeiger windows-restore --backup $source --db $db
+      # Restore can run against an older installed venv; keep its stable module path.
+  & $venvPython -m mark_api.windows_backup --backup $source --db $db
     if ($LASTEXITCODE -ne 0) { throw 'Wiederherstellung abgewiesen.' }
     Write-Output 'RESTORE_OK'
   }
