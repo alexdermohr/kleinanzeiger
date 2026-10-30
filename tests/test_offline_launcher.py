@@ -193,7 +193,7 @@ class OfflineLauncherTests(unittest.TestCase):
                 worker.join(timeout=6)
             self.assertFalse(worker.is_alive())
             self.assertEqual(captured.get("exit_code"), 0)
-            self.assertIn(f"Mark offline dashboard: http://127.0.0.1:{port}/", output.getvalue())
+            self.assertIn(f"Kleinanzeiger offline dashboard: http://127.0.0.1:{port}/", output.getvalue())
 
     def test_module_import_does_not_load_platform_drivers(self):
         repo = Path(__file__).resolve().parents[1]
@@ -241,7 +241,7 @@ class OfflineLauncherTests(unittest.TestCase):
             self.assertEqual(exc.exception.code, 2)
             self.assertFalse(db.exists())
             factory.assert_not_called()
-            self.assertIn("mark-api[generation]", error.getvalue())
+            self.assertIn("kleinanzeiger[generation]", error.getvalue())
             self.assertNotIn("never-log-this", error.getvalue())
 
     def test_generation_opt_in_reuses_offline_dashboard_without_write_authority(self):
