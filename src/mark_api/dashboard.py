@@ -6885,7 +6885,7 @@ def _handler_factory(
     session_token = write_proxy.ui_token if write_proxy is not None else local_session_token
 
     class DashboardHandler(BaseHTTPRequestHandler):
-        server_version = "mark-api-readonly/0.1"
+        server_version = "kleinanzeiger-readonly/0.1"
         sys_version = ""
 
         def parse_request(self) -> bool:
@@ -8748,7 +8748,7 @@ def create_server(
 
 def main(argv: list[str] | None = None) -> int:
     if container_draft_denied():
-        print("mark-api: unattested container draft cannot run Python entrypoints",
+        print("Kleinanzeiger: unattested container draft cannot run Python entrypoints",
               file=sys.stderr)
         return 2
     parser = argparse.ArgumentParser(
@@ -8810,7 +8810,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from openai import OpenAI as _GenerationSdkClient
         except Exception:
-            parser.error("--enable-generation requires installed mark-api[generation]")
+            parser.error("--enable-generation requires installed kleinanzeiger[generation]")
         if not callable(_GenerationSdkClient):
             parser.error("--enable-generation requires a functional OpenAI SDK")
 
