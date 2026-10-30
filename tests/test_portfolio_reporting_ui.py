@@ -53,5 +53,42 @@ assert.equal(saved,null);
             text=True, encoding="utf-8",capture_output=True,timeout=30)
         self.assertEqual(proc.returncode,0,proc.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node runtime needed")
+    def test_cost_summary_separates_checked_unknown_and_rejects_inconsistent_totals(self):
+        script=r"""
+const vm=require("node:vm"),fs=require("node:fs"),assert=require("node:assert/strict");
+const input=fs.readFileSync(0,"utf8");
+new vm.Script(input);
+const start=input.indexOf("function portfolioAiCostText(cost) {");
+const end=input.indexOf("async function loadPortfolioReport()",start);
+assert.ok(start>0 && end>start);
+const code=input.slice(start,end);
+function render(cost) {
+  return vm.runInNewContext(code+";portfolioAiCostText(input)",{input:cost});
+}
+const row={usd_cent_estimate:120,usd_cent_checked_unknown:8,
+  usd_cent_known_total:128,usd_cent_reserved:25,
+  unknown_outcomes:1,inflight_outcomes:0,invoice_verified:false};
+const label=render(row);
+for (const expected of ["1.20 USD", "0.08 USD", "1.28 USD", "0.25 USD",
+                        "UNKNOWN manuell geprüft", "keine bestätigte Anbieterrechnung"]) {
+  assert.ok(label.includes(expected),label);
+}
+assert.ok(render(null).includes("Noch keine lokalen KI-Auftragskosten"));
+for (const invalid of [
+  {...row,usd_cent_known_total:120},
+  {...row,usd_cent_checked_unknown:-1},
+  {...row,usd_cent_reserved:"25"},
+  {...row,invoice_verified:true},
+  {...row,usd_cent_known_total:undefined}
+]) {
+  assert.throws(()=>render(invalid),/Ungültiger KI-Kostenbericht/);
+}
+"""
+        proc=subprocess.run([shutil.which("node") or "node","-e",script],
+            input=_DASHBOARD_JS,text=True,encoding="utf-8",
+            capture_output=True,timeout=30)
+        self.assertEqual(proc.returncode,0,proc.stderr)
+
 if __name__=="__main__":
     unittest.main()

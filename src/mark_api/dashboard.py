@@ -702,7 +702,7 @@ _DASHBOARD_HTML = """<!doctype html>
         <div id="existing-ai-provider" hidden>
           <label><input id="existing-ai-consent" type="checkbox"> Ich bestätige für den nächsten Aufruf Modellübertragung und mögliche Providerkosten.</label>
           <button id="existing-ai-next-call" type="button">Nächsten KI-Vorschlag kostenpflichtig erzeugen</button>
-          <label>Stapelgröße (max. 10)<input id="existing-ai-batch-count" type="number" min="1" max="10" value="10"></label>
+          <label>Stapelgröße (1–100)<input id="existing-ai-batch-count" type="number" min="1" max="100" value="10"></label>
           <button id="existing-ai-batch" type="button">Bestätigten Stapel starten</button>
           <button id="existing-ai-stop" type="button" disabled>Nach laufendem Aufruf stoppen</button>
         </div>
@@ -1396,6 +1396,7 @@ let existingAiSelected = new Set();
 let existingAiPending = null;
 let existingAiBusy = false;
 let existingAiBatchStop = false;
+let existingAiBatchBusy = false;
 let existingAiJobsPage = 0;
 let existingAiJobsHasMore = false;
 let salesAvailable = false;
@@ -5704,7 +5705,7 @@ async function loadExistingAiDetails(reset=false) {
   finally { existingAiBusy=false; }
 }
 async function createExistingAiJob() {
-  if (existingAiBusy) return;
+  if (existingAiBusy||existingAiBatchBusy) return;
   try {
     const all=byId("existing-ai-all").checked;
     const ids=all?[]:Array.from(catalogSelectedIds).sort();
@@ -5721,12 +5722,12 @@ async function createExistingAiJob() {
   } catch (error) { byId("existing-ai-feedback").textContent=error.message; }
 }
 async function existingAiState(action) {
-  if (!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId) return;
+  if (existingAiBatchBusy||!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId) return;
   try { await existingAiPost("state",{job_id:existingAiActiveId,action}); await loadExistingAiJobs(); }
   catch (error) { byId("existing-ai-feedback").textContent=error.message; }
 }
 async function recoverExistingAiInterrupted() {
-  if (existingAiBusy||!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId)
+  if (existingAiBatchBusy||existingAiBusy||!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId)
     return;
   if (!window.confirm(
       "Nur nach beendetem Aufruf/Neustart: Unterbrochene Anfragen als UNKNOWN sichern? "+
@@ -5742,7 +5743,7 @@ async function recoverExistingAiInterrupted() {
   } catch (error) { byId("existing-ai-feedback").textContent=error.message; }
 }
 async function settleExistingAiUnknown() {
-  if (existingAiBusy||!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId)
+  if (existingAiBatchBusy||existingAiBusy||!existingAiActiveId||existingAiDisplayedId!==existingAiActiveId)
     return;
   const id=existingAiActiveId,adId=byId("existing-ai-unknown-ad").value;
   const raw=byId("existing-ai-checked-cents").value.trim();
@@ -5767,7 +5768,7 @@ async function settleExistingAiUnknown() {
   } catch (error) { byId("existing-ai-feedback").textContent=error.message; }
 }
 async function reviewExistingAi(approve) {
-  if (!existingAiSelected.size||existingAiDisplayedId!==existingAiActiveId) {
+  if (existingAiBatchBusy||!existingAiSelected.size||existingAiDisplayedId!==existingAiActiveId) {
     byId("existing-ai-feedback").textContent="Zuerst Vorschläge auf der aktuellen Seite auswählen.";return;
   }
   try { await existingAiPost("review",{job_id:existingAiActiveId,
@@ -5785,22 +5786,86 @@ async function callExistingAiOnce(confirmCost=true) {
   return result;
 }
 async function generateExistingAiNext() {
+  if (existingAiBatchBusy) return;
   try {
     if (!window.confirm("Genau eine möglicherweise kostenpflichtige KI-Anfrage ausführen?")) return;
     await callExistingAiOnce(true);byId("existing-ai-consent").checked=false;await loadExistingAiJobs();
   } catch (error) { byId("existing-ai-feedback").textContent=error.message; }
 }
 async function generateExistingAiBatch() {
-  const raw=byId("existing-ai-batch-count").value;
-  if (!/^(?:[1-9]|10)$/.test(raw)||!byId("existing-ai-consent").checked) {
-    byId("existing-ai-feedback").textContent="1 bis 10 Aufrufe wählen und Kosten bestätigen.";return;
+  if (existingAiBatchBusy||existingAiBusy) return;
+  const raw=byId("existing-ai-batch-count").value.trim(),count=Number(raw);
+  if (!/^(?:[1-9]|[1-9][0-9]|100)$/.test(raw)
+      ||!Number.isSafeInteger(count)||!byId("existing-ai-consent").checked) {
+    byId("existing-ai-feedback").textContent="1 bis 100 Aufrufe wählen und Kosten bestätigen.";return;
   }
-  if (!window.confirm("Bis zu "+raw+" einzelne kostenpflichtige Aufrufe nacheinander ausführen?")) return;
-  byId("existing-ai-consent").checked=false;existingAiBatchStop=false;
-  byId("existing-ai-stop").disabled=false;
-  try { for (let i=0;i<Number(raw)&&!existingAiBatchStop;i++) await callExistingAiOnce(false); }
-  catch (error) { byId("existing-ai-feedback").textContent=error.message; }
-  finally { byId("existing-ai-stop").disabled=true;await loadExistingAiJobs(); }
+  const id=existingAiActiveId;
+  if (!generationUiReady()||!id||existingAiDisplayedId!==id) {
+    byId("existing-ai-feedback").textContent="Den gestarteten KI-Auftrag zuerst laden.";return;
+  }
+  existingAiBatchBusy=true;existingAiBatchStop=false;
+  const controlIds=["existing-ai-batch","existing-ai-next-call","existing-ai-create",
+    "existing-ai-refresh","existing-ai-choice","existing-ai-start","existing-ai-pause",
+    "existing-ai-resume","existing-ai-approve","existing-ai-reject",
+    "existing-ai-jobs-prev","existing-ai-jobs-next","existing-ai-prev",
+    "existing-ai-next","existing-ai-recover","existing-ai-settle-unknown"];
+  const controlStates=controlIds.map(name=>[byId(name),byId(name).disabled]);
+  for (const [element] of controlStates) element.disabled=true;
+  let attempted=0,finalMessage="";
+  try {
+    // Fetch the PERSISTED job budget; editable form values are not authority.
+    // The provider-side reservation and session cap still revalidate every call.
+    const data=await _jobGet("/api/portfolio/existing-ai/detail?"+
+      new URLSearchParams({job_id:id,limit:"1"}).toString());
+    const pending=data.counts||{};
+    const amounts=[data.budget_cents,data.actual_cents,data.reserved_cents,data.estimate_cents];
+    if (data.job_id!==id||data.state!=="running"||data.platform_writes!==0
+        ||!amounts.every(Number.isSafeInteger)||data.estimate_cents<=0
+        ||!Number.isSafeInteger(pending.queued)
+        ||(pending.unknown||0)>0||(pending.inflight||0)>0) {
+      throw new Error("Auftragsstand unklar. Vor einem KI-Stapel erneut prüfen.");
+    }
+    const remaining=data.budget_cents-data.actual_cents-data.reserved_cents;
+    const allowed=Math.min(count,pending.queued,Math.floor(remaining/data.estimate_cents));
+    if (allowed<1) throw new Error("Kein freies KI-Budget oder keine offenen Anzeigen.");
+    const reservation=(allowed*data.estimate_cents/100).toFixed(2);
+    if (!window.confirm("Bis zu "+allowed+" einzelne KI-Anfragen für diesen Auftrag "+
+        "nacheinander starten? Dafür werden maximal "+reservation+
+        " USD Budgetreservierungen benötigt. Tatsächliche Providerkosten können "+
+        "abweichen. Jeder unklare Vorgang stoppt den Stapel; niemals automatisch wiederholen.")) return;
+    byId("existing-ai-consent").checked=false;
+    byId("existing-ai-stop").disabled=false;
+    for (let i=0;i<allowed&&!existingAiBatchStop;i++) {
+      if (id!==existingAiActiveId||id!==existingAiDisplayedId)
+        throw new Error("Auftragsauswahl geändert; Stapel beendet.");
+      await callExistingAiOnce(false);
+      attempted++;
+      byId("existing-ai-feedback").textContent=attempted+" von bis zu "+allowed+
+        " KI-Vorschlägen bestätigt; keine Plattformänderung.";
+    }
+    finalMessage=attempted+" KI-Vorschläge bestätigt"+
+      (existingAiBatchStop?"; nach laufender Anfrage gestoppt.":".");
+  } catch (error) { finalMessage=error.message; }
+  finally {
+    byId("existing-ai-consent").checked=false;
+    byId("existing-ai-stop").disabled=true;
+    let refreshed=false;
+    try {
+      if (attempted||finalMessage) refreshed=await loadExistingAiJobs();
+    } finally {
+      existingAiBatchBusy=false;
+      // A refreshed job may now be UNKNOWN and enable manual settlement.
+      // Preserve freshly calculated recovery/pagination states instead of
+      // restoring their pre-batch disabled values.
+      const refreshedIds=new Set(["existing-ai-recover","existing-ai-settle-unknown",
+        "existing-ai-jobs-prev","existing-ai-jobs-next","existing-ai-prev",
+        "existing-ai-next"]);
+      for (const [element,wasDisabled] of controlStates) {
+        if (!refreshed||!refreshedIds.has(element.id)) element.disabled=wasDisabled;
+      }
+      if (finalMessage) byId("existing-ai-feedback").textContent=finalMessage;
+    }
+  }
 }
 byId("existing-ai-create").addEventListener("click",createExistingAiJob);
 byId("existing-ai-refresh").addEventListener("click",loadExistingAiJobs);
@@ -6188,6 +6253,24 @@ function renderPortfolioReportDaily() {
     body.append(row);
   }
 }
+function portfolioAiCostText(cost) {
+  if (cost===null)
+    return "Noch keine lokalen KI-Auftragskosten erfasst; kein Rechnungsabgleich.";
+  const fields=["usd_cent_estimate","usd_cent_checked_unknown","usd_cent_known_total",
+    "usd_cent_reserved","unknown_outcomes","inflight_outcomes"];
+  if (!cost || fields.some(key=>!Number.isSafeInteger(cost[key])||cost[key]<0)
+      || !Number.isSafeInteger(cost.usd_cent_estimate+cost.usd_cent_checked_unknown)
+      || cost.usd_cent_known_total!==cost.usd_cent_estimate+cost.usd_cent_checked_unknown
+      || cost.invoice_verified!==false) {
+    throw new Error("Ungültiger KI-Kostenbericht");
+  }
+  return "KI-Kosten (alle Zeiten; keine bestätigte Anbieterrechnung): "+
+    (cost.usd_cent_estimate/100).toFixed(2)+" USD aus dokumentierten KI-Aufrufen geschätzt; "+
+    (cost.usd_cent_checked_unknown/100).toFixed(2)+" USD aus UNKNOWN manuell geprüft; "+
+    (cost.usd_cent_known_total/100).toFixed(2)+" USD bekannte Gesamtkosten; "+
+    (cost.usd_cent_reserved/100).toFixed(2)+" USD für ungeklärte Anfragen reserviert; "+
+    cost.unknown_outcomes+" unklare und "+cost.inflight_outcomes+" laufende Anfragen.";
+}
 async function loadPortfolioReport() {
   if (!reportingAvailable || !localUiReady()) return false;
   const selected=byId("report-days").value;
@@ -6223,12 +6306,7 @@ async function loadPortfolioReport() {
       " Verkäufe mit bekannten Kosten; bei "+sale.unknown_cost_count+
       " weiteren Verkäufen fehlen Kosten.";
     const cost=data.ai_usage_estimate_all_time;
-    byId("report-ai-summary").textContent=cost?
-      "KI-Schätzung (alle Zeiten, nicht abgerechnet): "+
-      (cost.usd_cent_estimate/100).toFixed(2)+" USD nach bestätigten Tokens; "+
-      (cost.usd_cent_reserved/100).toFixed(2)+" USD reserviert; "+
-      cost.unknown_outcomes+" unklare Ergebnisse." :
-      "Noch keine lokalen KI-Auftragskosten erfasst; kein Rechnungsabgleich.";
+    byId("report-ai-summary").textContent=portfolioAiCostText(cost);
     renderPortfolioReportDaily();
     byId("report-download").disabled=false;
     byId("report-feedback").textContent=

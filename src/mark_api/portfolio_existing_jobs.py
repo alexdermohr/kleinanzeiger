@@ -389,8 +389,20 @@ def review_items(store: SnapshotStore, job_id: str, ad_ids: list[str], *, approv
         conn.execute("BEGIN IMMEDIATE"); job=_job(conn,job_id)
         if job["state"] in ("cancelled","needs_attention"): raise ExistingJobError("blocked")
         for ad_id in ad_ids:
-            row=conn.execute("SELECT phase,source_sha256 FROM portfolio_existing_job_items WHERE job_id=? AND ad_id=?",(job_id,ad_id)).fetchone()
-            if row is None or row[0] not in ("proposed","approved","rejected"): raise ExistingJobError("unreviewable")
+            row=conn.execute(
+                "SELECT phase,source_sha256,proposal_json,error_code "
+                "FROM portfolio_existing_job_items WHERE job_id=? AND ad_id=?",
+                (job_id,ad_id),
+            ).fetchone()
+            if row is None or row["phase"] not in ("proposed","approved","rejected"):
+                raise ExistingJobError("unreviewable")
+            # A manually settled UNKNOWN is a discarded provider attempt,
+            # not a generated proposal. Its checked expense survives, but
+            # neither a stale dashboard selection nor local replay can turn
+            # a proposal-free row into an approved suggestion.
+            if approve and (row["proposal_json"] is None
+                            or row["error_code"] == "manually_settled"):
+                raise ExistingJobError("no provider proposal to approve")
             if approve and _digest(_latest_owned(conn, ad_id)) != row["source_sha256"]:
                 raise ExistingJobError("original changed since suggestion")
         conn.executemany("UPDATE portfolio_existing_job_items SET phase=?,updated_at=? WHERE job_id=? AND ad_id=?",(("approved" if approve else "rejected",_now(),job_id,x) for x in ad_ids))

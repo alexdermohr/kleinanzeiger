@@ -10,6 +10,13 @@ import unittest
 from mark_api.dashboard import DashboardWriteProxy,create_server,_DASHBOARD_HTML,_DASHBOARD_JS
 from mark_api.domain import AdSnapshot,LifecycleState
 from mark_api.storage import SnapshotStore
+from mark_api.portfolio_existing_jobs import (
+    create_job as create_existing_job,
+    change_state as change_existing_job_state,
+    claim_next as claim_existing,
+    mark_unknown as mark_existing_unknown,
+    settle_unknown as settle_existing_unknown,
+)
 
 
 class ReportingHttpTests(unittest.TestCase):
@@ -68,6 +75,51 @@ class ReportingHttpTests(unittest.TestCase):
         ):
             with self.subTest(path=bad):
                 self.assertEqual(self.read(bad)[0],400)
+
+    def test_published_ad_verified_unknown_cost_is_separate_in_local_http_report(self):
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="123456789", title="Belegter Titel", description="Belegte Fakten",
+            lifecycle_state=LifecycleState.ACTIVE,
+            observed_at=datetime(2026,10,29,10,tzinfo=timezone.utc),
+            source="kleinanzeigen-management",
+        ))
+        jid = create_existing_job(
+            self.store, ["123456789"], instruction="Nur belegte Informationen",
+            request_key="d"*64, budget_cents=100, estimate_cents=20,
+        )["job_id"]
+        change_existing_job_state(self.store, jid, "start")
+        pending = claim_existing(self.store, jid)
+        mark_existing_unknown(self.store, jid, "123456789",
+                              pending["claim_token"])
+        self.assertEqual(self.read("/api/portfolio/report?days=7",token=False)[0],403)
+        code, unverified = self.read("/api/portfolio/report?days=7")
+        self.assertEqual(code,200)
+        ai = unverified["ai_usage_estimate_all_time"]
+        self.assertEqual(ai["usd_cent_reserved"],20)
+        self.assertEqual(ai["unknown_outcomes"],1)
+        self.assertEqual(ai["usd_cent_known_total"],0)
+        settle_existing_unknown(self.store, jid, "123456789",
+                                actual_cents=7, explicitly_checked=True)
+        code, settled = self.read("/api/portfolio/report?days=7")
+        self.assertEqual(code,200)
+        cost=settled["ai_usage_estimate_all_time"]
+        self.assertEqual(cost["usd_cent_estimate"],0)
+        self.assertEqual(cost["usd_cent_checked_unknown"],7)
+        self.assertEqual(cost["usd_cent_known_total"],7)
+        self.assertEqual(cost["usd_cent_reserved"],0)
+        self.assertEqual(cost["unknown_outcomes"],0)
+        self.assertFalse(cost["invoice_verified"])
+        self.assertEqual(cost["source_breakdown"][
+            "published_owned_ad_jobs"]["checked"],7)
+        self.assertIsNone(cost["source_breakdown"]["local_draft_jobs"])
+        self.assertEqual(settled["platform_writes"],0)
+        # The imported account facts and uncertain provider requests are never
+        # cleared or retried by the reporting HTTP handler.
+        with self.store._connect() as conn:
+            self.assertEqual(conn.execute(
+                "SELECT phase FROM portfolio_existing_job_items WHERE job_id=?",
+                (jid,),
+            ).fetchone()["phase"],"rejected")
 
     def test_absent_write_session_denies_report(self):
         other=create_server(self.store,port=0)
