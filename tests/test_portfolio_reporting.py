@@ -21,7 +21,6 @@ from mark_api.portfolio_existing_jobs import (
     mark_unknown as mark_existing_unknown,
     process_one as process_existing,
     settle_unknown as settle_existing_unknown,
-    review_items as review_existing_items,
     _schema as existing_jobs_schema,
 )
 from mark_api.portfolio_drafts import _DDL
@@ -138,11 +137,15 @@ class PortfolioReportingTests(unittest.TestCase):
         self.assertFalse(unresolved["invoice_verified"])
         settle_existing_unknown(self.store, first, "10001",
                                 actual_cents=8, explicitly_checked=True)
-        # The existing local review API can transition an already settled,
-        # proposal-free rejected item to approved. That approval never
-        # rewrites history or constitutes platform publication. Accounting
-        # must preserve checked charge and never fail with HTTP 503.
-        review_existing_items(self.store, first, ["10001"], approve=True)
+        # Older releases could approve a settled UNKNOWN without a proposal.
+        # Represent that legacy state directly rather than bypassing the new
+        # review guard, which rightly rejects proposal-free approval.
+        with self.store._connect() as conn:
+            conn.execute(
+                "UPDATE portfolio_existing_job_items SET phase='approved' "
+                "WHERE job_id=? AND ad_id=?",
+                (first, "10001"),
+            )
         second = create_existing_job(
             self.store, ["10002"], instruction="Tatsachen pruefen",
             request_key="2"*64, budget_cents=80, estimate_cents=20,

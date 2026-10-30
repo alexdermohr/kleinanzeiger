@@ -5849,11 +5849,20 @@ async function generateExistingAiBatch() {
   finally {
     byId("existing-ai-consent").checked=false;
     byId("existing-ai-stop").disabled=true;
+    let refreshed=false;
     try {
-      if (attempted||finalMessage) await loadExistingAiJobs();
+      if (attempted||finalMessage) refreshed=await loadExistingAiJobs();
     } finally {
       existingAiBatchBusy=false;
-      for (const [element,wasDisabled] of controlStates) element.disabled=wasDisabled;
+      // A refreshed job may now be UNKNOWN and enable manual settlement.
+      // Preserve freshly calculated recovery/pagination states instead of
+      // restoring their pre-batch disabled values.
+      const refreshedIds=new Set(["existing-ai-recover","existing-ai-settle-unknown",
+        "existing-ai-jobs-prev","existing-ai-jobs-next","existing-ai-prev",
+        "existing-ai-next"]);
+      for (const [element,wasDisabled] of controlStates) {
+        if (!refreshed||!refreshedIds.has(element.id)) element.disabled=wasDisabled;
+      }
       if (finalMessage) byId("existing-ai-feedback").textContent=finalMessage;
     }
   }
@@ -6244,6 +6253,24 @@ function renderPortfolioReportDaily() {
     body.append(row);
   }
 }
+function portfolioAiCostText(cost) {
+  if (cost===null)
+    return "Noch keine lokalen KI-Auftragskosten erfasst; kein Rechnungsabgleich.";
+  const fields=["usd_cent_estimate","usd_cent_checked_unknown","usd_cent_known_total",
+    "usd_cent_reserved","unknown_outcomes","inflight_outcomes"];
+  if (!cost || fields.some(key=>!Number.isSafeInteger(cost[key])||cost[key]<0)
+      || !Number.isSafeInteger(cost.usd_cent_estimate+cost.usd_cent_checked_unknown)
+      || cost.usd_cent_known_total!==cost.usd_cent_estimate+cost.usd_cent_checked_unknown
+      || cost.invoice_verified!==false) {
+    throw new Error("Ungültiger KI-Kostenbericht");
+  }
+  return "KI-Kosten (alle Zeiten; keine bestätigte Anbieterrechnung): "+
+    (cost.usd_cent_estimate/100).toFixed(2)+" USD aus dokumentierten KI-Aufrufen geschätzt; "+
+    (cost.usd_cent_checked_unknown/100).toFixed(2)+" USD aus UNKNOWN manuell geprüft; "+
+    (cost.usd_cent_known_total/100).toFixed(2)+" USD bekannte Gesamtkosten; "+
+    (cost.usd_cent_reserved/100).toFixed(2)+" USD für ungeklärte Anfragen reserviert; "+
+    cost.unknown_outcomes+" unklare und "+cost.inflight_outcomes+" laufende Anfragen.";
+}
 async function loadPortfolioReport() {
   if (!reportingAvailable || !localUiReady()) return false;
   const selected=byId("report-days").value;
@@ -6279,12 +6306,7 @@ async function loadPortfolioReport() {
       " Verkäufe mit bekannten Kosten; bei "+sale.unknown_cost_count+
       " weiteren Verkäufen fehlen Kosten.";
     const cost=data.ai_usage_estimate_all_time;
-    byId("report-ai-summary").textContent=cost?
-      "KI-Schätzung (alle Zeiten, nicht abgerechnet): "+
-      (cost.usd_cent_estimate/100).toFixed(2)+" USD nach bestätigten Tokens; "+
-      (cost.usd_cent_reserved/100).toFixed(2)+" USD reserviert; "+
-      cost.unknown_outcomes+" unklare Ergebnisse." :
-      "Noch keine lokalen KI-Auftragskosten erfasst; kein Rechnungsabgleich.";
+    byId("report-ai-summary").textContent=portfolioAiCostText(cost);
     renderPortfolioReportDaily();
     byId("report-download").disabled=false;
     byId("report-feedback").textContent=

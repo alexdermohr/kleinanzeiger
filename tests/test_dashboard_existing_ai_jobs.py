@@ -391,7 +391,10 @@ const context={
   if(path==="/api/portfolio/existing-ai/generate-next"){
    calls++;
    if(mode==="hold")await new Promise(resolve=>{release=resolve});
-   if(mode==="unknown")return {ok:false,status:502,json:async()=>({error:"provider_outcome_unknown"})};
+   if(mode==="unknown"){
+    state.state="needs_attention";state.counts.queued--;state.counts.unknown=1;
+    return {ok:false,status:502,json:async()=>({error:"provider_outcome_unknown"})};
+   }
    return response({claimed:true,ad_id:"ad-1",platform_writes:0});
   }
   return response({});
@@ -444,11 +447,20 @@ by("existing-ai-batch-count").value="100";by("existing-ai-consent").checked=true
  // A transport-UNKNOWN stops the batch after exactly one attempted request.
  calls=0;mode="unknown";by("existing-ai-consent").checked=true;
  by("existing-ai-batch-count").value="100";
+ by("existing-ai-settle-unknown").disabled=true;
+ by("existing-ai-jobs-next").disabled=false;
+ by("existing-ai-next").disabled=false;
  await vm.runInContext("generateExistingAiBatch()",context);
  assert.equal(calls,1);
  assert.match(by("existing-ai-feedback").textContent,/nicht blind wiederholen/);
  assert.equal(vm.runInContext("existingAiBatchBusy",context),false);
  assert.equal(by("existing-ai-stop").disabled,true);
+ assert.equal(by("existing-ai-settle-unknown").disabled,false,
+   "fresh UNKNOWN result must enable manual cost settlement");
+ assert.equal(by("existing-ai-jobs-next").disabled,true,
+   "refresh pagination state must not revert to stale enable");
+ assert.equal(by("existing-ai-next").disabled,true,
+   "refresh detail pagination state must not revert");
  console.log("100-call batch: budget, doubleclick, stop, invalid input, UNKNOWN PASS");
 })().catch(error=>{console.error(error);process.exitCode=1});
 """

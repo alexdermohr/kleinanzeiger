@@ -23,10 +23,10 @@ Die bisherigen Felder in `ai_usage_estimate_all_time` bleiben erhalten:
 
 Ergänzt:
 - `usd_cent_checked_unknown`: bei `error_code='manually_settled'`
-  unabhängig und ausdrücklich nachgeprüfte USD-Cent-Kosten. Der persistente
-  Status kann nach einem weiteren **lokalen** Review von \`rejected\` zu
-  \`approved\` wechseln, ohne dass ein neuer Vorschlag oder Plattformwrite
-  entsteht. Die bereits geprüften Kosten bleiben trotzdem ausweisbar.
+  unabhängig und ausdrücklich nachgeprüfte USD-Cent-Kosten. Historisch konnte ein solcher Vorgang trotz fehlenden KI-Vorschlags lokal
+  von rejected zu approved wechseln. Neue lokale Freigaben ohne gespeicherten
+  KI-Vorschlag sind gesperrt; bereits unabhängig geprüfte Kosten bleiben
+  auch für solche Altbestände ausweisbar.
 - `usd_cent_known_total`: Token-Schätzung plus nachgeprüfte UNKNOWN-Beträge,
   **ohne** reservierte, noch unklare Gebühren.
 - `source_breakdown.local_draft_jobs` und
@@ -47,13 +47,12 @@ Beträge, fremde SQLite-Typen oder widersprüchliche
 `manually_settled`-Zustände werden als Datenbankfehler abgewiesen;
 der Dashboard-HTTP-Handler sendet dann 503 statt falsche Erfolgssummen.
 
-Das bereits vorhandene Dashboard zeigt
-`usd_cent_estimate` als Token-basierten Betrag. Die manuell geklärten
-Gebühren stehen zusätzlich getrennt in der lokalen Bericht-JSON-Antwort;
-die **sichtbare Ergänzung dieser Zeile** gehört in einen separaten
-UI-Slice, weil die Dashboarddatei gleichzeitig durch den aktiven
-100er-KI-Stapel-Writer bearbeitet wird. Bis dahin dürfen die
-`usd_cent_checked_unknown` nicht mit `usd_cent_estimate` verwechselt werden.
+Das Dashboard zeigt sowohl die geschätzten Aufrufkosten als auch die
+separat manuell geprüften UNKNOWN-Kosten, ihre bekannte Gesamtsumme und
+die weiterhin reservierten Beträge. Die Quell-Aufschlüsselung für
+Entwurfs- und Bestandsanzeigen bleibt zusätzlich in der lokalen
+JSON-Berichtantwort abrufbar. Keine dieser Zahlen ist eine
+verifizierte vollständige Providerrechnung.
 
 Vertrag: weder Plattform-Read noch Plattform-Write, keine KI-Provideranfrage
 und kein Rücksetzen oder Neuversuchen eines UNKNOWN-Claims. Keine
