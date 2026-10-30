@@ -303,7 +303,7 @@ function Import-CustomerMail {
     $verified += $file.FullName
   }
   Save-Backup
-  & $venvPython -m kleinanzeiger import-mail --db $db @verified
+  & $venvPython -m mark_api.email_import_cli --db $db @verified
   if ($LASTEXITCODE -ne 0) { throw 'E-Mail-Import fehlgeschlagen; vorhandene Daten bleiben erhalten.' }
   Write-Output 'MAIL_IMPORT_OK'
 }
@@ -326,7 +326,7 @@ function Update-CustomerLabels {
   # immediately after the command. No user labels enter command arguments.
   $env:KLEINANZEIGER_LABEL_PAYLOAD = $encoded
   try {
-    & $venvPython -m kleinanzeiger windows-choices --db $db --apply-labels
+    & $venvPython -m mark_api.windows_customer_choices --db $db --apply-labels
     if ($LASTEXITCODE -ne 0) { throw 'Vergleichslabels konnten nicht gespeichert werden.' }
     Write-Output 'LABELS_OK'
   } finally {
@@ -359,7 +359,7 @@ function Invoke-PortfolioWorker([string]$mode) {
   if ($encoded.Length -gt 16384) { throw 'Importpfad ist zu lang.' }
   $env:KLEINANZEIGER_IMPORT_REQUEST = $encoded
   try {
-    & $venvPython -m kleinanzeiger import-articles --db $db --mode $mode
+    & $venvPython -m mark_api.portfolio_import_cli --db $db --mode $mode
     if ($LASTEXITCODE -ne 0) { throw 'Artikelaktion fehlgeschlagen; Details pruefen.' }
     Write-Output $(if($mode -eq 'import'){'PRODUCT_IMPORT_OK'}else{'PRODUCT_EXPORT_OK'})
   } finally {
