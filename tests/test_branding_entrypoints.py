@@ -47,10 +47,12 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
 
         compatibility = {
             "windows-backup.ps1": ["-m mark_api.backup_cli"],
+            "windows-restore.ps1": ["-m mark_api.windows_backup"],
             "windows-worker.ps1": [
                 "-m mark_api.backup_cli",
                 "-m mark_api.launcher",
                 "-m mark_api.launcher",
+                "-m mark_api.windows_backup",
             ],
         }
         for path in sorted(WINDOWS.glob("windows-*.ps1")):
