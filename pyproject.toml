@@ -15,6 +15,7 @@ generation = ["openai>=2.11,<3"]
 
 [project.scripts]
 kleinanzeiger = "kleinanzeiger.cli:launcher"
+kleinanzeiger-linux = "kleinanzeiger.linux_launcher:main"
 kleinanzeiger-dashboard = "kleinanzeiger.cli:dashboard"
 kleinanzeiger-protected-frontend = "kleinanzeiger.cli:protected_frontend"
 kleinanzeiger-protected-owner = "kleinanzeiger.cli:protected_owner"
