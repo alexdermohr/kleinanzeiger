@@ -21,6 +21,6 @@ $source = Join-Path $backups $name
 if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Backup fehlt.' }
 $confirmation = Read-Host 'Verifizierte Sicherung in neue Anzeigen-Datenbank einspielen? Mit JA bestaetigen'
 if ($confirmation -cne 'JA') { throw 'Abgebrochen ohne Aenderung.' }
-& $python -m mark_api.windows_backup --backup $source --db $db
+& $python -m kleinanzeiger windows-restore --backup $source --db $db
 if ($LASTEXITCODE -ne 0) { throw 'Wiederherstellung abgewiesen. Bestehende Dateien wurden nicht ueberschrieben.' }
 Write-Host 'Wiederherstellung in neue Datenbank erfolgreich.'
