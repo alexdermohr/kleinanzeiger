@@ -86,6 +86,8 @@ class WindowsHubContractTests(unittest.TestCase):
         # Backups and rollbacks must still run against pre-migration wheels.
         self.assertIn("$candidatePython -m mark_api.launcher --help", worker)
         self.assertIn("$venvPython -m mark_api.launcher --help", worker)
+        self.assertIn("-m mark_api.windows_backup", worker)
+        self.assertIn("-m mark_api.windows_backup", (SCRIPTS / "windows-restore.ps1").read_text(encoding="utf-8"))
         self.assertLess(worker.index("Save-Backup\n"), worker.index("& (Join-Path $folder 'windows-install.ps1')"))
         self.assertIn("-m mark_api.backup_cli", worker)
         self.assertIn(".manifest.json", worker)
