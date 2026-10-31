@@ -135,5 +135,88 @@ assert.equal(cards.children[0].children[1].children.filter(c=>c.tag==="button").
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js needed for browser-JS behavior")
+    def test_catalog_filters_survive_reload_without_persisting_selection_or_tokens(self) -> None:
+        harness = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const saved = new Map();
+const storage = {
+  getItem(key) {return saved.has(key) ? saved.get(key) : null;},
+  setItem(key, value) {saved.set(key, value);},
+};
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) elements.set(id,{
+    value:"",textContent:"",hidden:false,disabled:false,
+    addEventListener(){},replaceChildren(){},append(){},
+  });
+  return elements.get(id);
+}
+const document = {
+  getElementById:element,
+  createElement:()=>({append(){},replaceChildren(){},addEventListener(){}}),
+  querySelectorAll:()=>[],
+};
+const window={localStorage:storage,addEventListener(){}};
+const js=fs.readFileSync(0,"utf8").replace(/\r\n/g,"\n");
+const stop=js.indexOf("\nconsumeWriteToken();\nload();");
+assert.ok(stop>0);
+const ctx={window,document,URL,URLSearchParams,Date,console};
+vm.createContext(ctx);
+vm.runInContext(js.slice(0,stop),ctx);
+const key="kleinanzeiger-catalog-filters-v1";
+vm.runInContext('catalogFilters={search:"Tisch",status:"active"}; persistCatalogFilters()',ctx);
+assert.equal(saved.has(key),true);
+saved.set(key,JSON.stringify({search:"Tisch",status:"paused"}));
+vm.runInContext('catalogSelectedIds.add("777"); catalogFilters={search:"",status:"all"}; restoreCatalogFilters()',ctx);
+assert.equal(element("catalog-search").value,"Tisch");
+assert.equal(element("catalog-status").value,"paused");
+assert.equal(vm.runInContext("catalogFilters.search",ctx),"Tisch");
+assert.equal(vm.runInContext("catalogSelectedIds.size",ctx),1);
+assert.equal(saved.size,1);
+saved.set(key,JSON.stringify({search:"x",status:"forged"}));
+vm.runInContext('restoreCatalogFilters()',ctx);
+assert.equal(element("catalog-status").value,"paused");
+saved.set(key,JSON.stringify({search:"x".repeat(121),status:"active"}));
+vm.runInContext('restoreCatalogFilters()',ctx);
+assert.equal(element("catalog-search").value,"Tisch");
+saved.set(key,"{corrupt}");
+vm.runInContext('restoreCatalogFilters()',ctx);
+assert.equal(element("catalog-status").value,"paused");
+storage.getItem=()=>{throw new Error("storage blocked");};
+vm.runInContext('restoreCatalogFilters(); persistCatalogFilters()',ctx);
+assert.equal(element("catalog-status").value,"paused");
+assert.equal(saved.size,1);
+assert.equal(vm.runInContext("writeToken",ctx),null);
+// Successful searches persist only their confirmed filter snapshot.
+storage.getItem=(key)=>saved.has(key) ? saved.get(key) : null;
+vm.runInContext("loadCatalogPage = async () => true;",ctx);
+element("catalog-search").value="Kamera";
+element("catalog-status").value="active";
+Promise.resolve(vm.runInContext("searchCatalog()",ctx)).then(async (success)=>{
+  assert.equal(success,true);
+  assert.equal(JSON.parse(saved.get(key)).search,"Kamera");
+  assert.equal(JSON.parse(saved.get(key)).status,"active");
+  // A failed search must not save a stale requested view or leave its
+  // visible controls different from the still displayed successful page.
+  vm.runInContext("loadCatalogPage = async () => false;",ctx);
+  element("catalog-search").value="Fehlversuch";
+  element("catalog-status").value="unknown";
+  const failed=await vm.runInContext("searchCatalog()",ctx);
+  assert.equal(failed,false);
+  assert.equal(element("catalog-search").value,"Kamera");
+  assert.equal(element("catalog-status").value,"active");
+  assert.equal(JSON.parse(saved.get(key)).search,"Kamera");
+}).catch((error)=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run(
+            [shutil.which("node") or "node", "-e", harness],
+            input=_DASHBOARD_JS, text=True, encoding="utf-8",
+            capture_output=True, timeout=20, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1345,6 +1345,40 @@ let catalogNextAfter = null;
 let catalogLoading = false;
 let catalogGeneration = 0;
 let catalogFilters = {search: "", status: "all"};
+// Store only the two local view preferences. Never persist selected ad IDs,
+// observed ownership, write tokens, generation tokens, or pending operations.
+const CATALOG_FILTER_STORAGE_KEY = "kleinanzeiger-catalog-filters-v1";
+const CATALOG_STATUS_VALUES = new Set([
+  "all", "active", "paused", "pending", "absent", "unknown",
+]);
+function restoreCatalogFilters() {
+  try {
+    const raw = window.localStorage?.getItem(CATALOG_FILTER_STORAGE_KEY);
+    if (typeof raw !== "string" || raw.length > 512) return;
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)
+        || Object.keys(saved).length !== 2
+        || !Object.prototype.hasOwnProperty.call(saved, "search")
+        || !Object.prototype.hasOwnProperty.call(saved, "status")
+        || typeof saved.search !== "string" || saved.search.length > 120
+        || saved.search !== saved.search.trim()
+        || !CATALOG_STATUS_VALUES.has(saved.status)) return;
+    catalogFilters = {search: saved.search, status: saved.status};
+    byId("catalog-search").value = saved.search;
+    byId("catalog-status").value = saved.status;
+  } catch (_error) {
+    // Browser policy may disable storage; searching must still work.
+  }
+}
+function persistCatalogFilters() {
+  try {
+    window.localStorage?.setItem(
+      CATALOG_FILTER_STORAGE_KEY, JSON.stringify(catalogFilters),
+    );
+  } catch (_error) {
+    // Preference storage is optional, not a readiness prerequisite.
+  }
+}
 let followupBusy = false;
 let followupActiveId = "";
 let followupRevision = 0;
@@ -2412,11 +2446,16 @@ async function changeCatalogPage({index, cursors, filters, reset = false}) {
   const request = loadCatalogPage({reset});
   const generation = catalogGeneration;
   const success = await request;
-  if (!success && generation === catalogGeneration) {
+  if (success && generation === catalogGeneration) {
+    persistCatalogFilters();
+  } else if (!success && generation === catalogGeneration) {
     catalogPageIndex = previous.index;
     catalogCursors = previous.cursors;
     catalogNextAfter = previous.nextAfter;
     catalogFilters = previous.filters;
+    // Rollback the visible controls as well as the underlying cursor/filter.
+    byId("catalog-search").value = previous.filters.search;
+    byId("catalog-status").value = previous.filters.status;
     renderCatalogNavigation();
   }
   return success;
@@ -6524,6 +6563,7 @@ byId("generation-apply-text").addEventListener("click", applyGenerationTextToCre
 byId("generation-apply-existing").addEventListener("click", applyGenerationTextToExisting);
 byId("manage-ai-improve").addEventListener("click", prepareExistingAdGeneration);
 byId("generation-apply-image").addEventListener("click", applyGenerationImageToCreate);
+restoreCatalogFilters();
 consumeWriteToken();
 load();
 """
