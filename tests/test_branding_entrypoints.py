@@ -44,6 +44,9 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
         # Existing and rolled-back customer wheels may predate the new public
         # namespace. Keep runtime calls on the stable import ABI while all
         # visible UI, error messages and new console scripts say Kleinanzeiger.
+        # The manual-start script keeps the legacy offline module directly.
+        # The GUI's stable compatibility wrapper instead calls that module's
+        # main(), preserving private STOP/EOF control after old-wheel rollback.
         import re
 
         compatibility = {
@@ -54,7 +57,9 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
                 "-m mark_api.windows_customer_choices",
                 "-m mark_api.launcher",
             ],
-            "windows-start.ps1": ["-m mark_api.launcher"],
+            "windows-start.ps1": [
+                "-m mark_api.launcher", "-m mark_api.offline_launcher",
+            ],
             "windows-worker.ps1": [
                 "-m mark_api.backup_cli",
                 "-m mark_api.launcher",
@@ -70,6 +75,13 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
             with self.subTest(script=path.name):
                 actual = re.findall(r"-m mark_api\.[A-Za-z0-9_]+", text)
                 self.assertCountEqual(actual, compatibility.get(path.name, []))
+        center = (WINDOWS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        wrapper = (WINDOWS / "windows-offline-compat.py").read_text(encoding="utf-8")
+        self.assertIn("windows-offline-compat.py", center)
+        self.assertIn("from mark_api import offline_launcher", wrapper)
+        self.assertIn("offline_launcher.main()", wrapper)
+        self.assertIn("server.shutdown()", wrapper)
+        self.assertNotIn("-m mark_api.offline_launcher", center)
 
     def test_product_namespace_help_in_clean_subprocess(self):
         env = os.environ.copy()
