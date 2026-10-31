@@ -533,6 +533,9 @@ function Start-Product {
   try {
     $chrome = Open-Kleinanzeigen
     Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 12
+    if (!(Test-KleinanzeigerChromeOwnedDevTools -Port 9222 -ProfileDirectory $profile -ChromeExecutable $chrome)) {
+      throw 'Die Browsersteuerung gehört nicht zum Kleinanzeiger-Profil.'
+    }
     $browserReady = $true
   } catch {
     # A browser failure is not a login failure and must not hide local work.
@@ -544,7 +547,12 @@ function Start-Product {
   $info = [System.Diagnostics.ProcessStartInfo]::new()
   $info.UseShellExecute = $false
   $info.FileName = $python
-  $info.Arguments = '-m mark_api.launcher --db "' + $db + '" --cdp-port 9222 --timeout-seconds 12 --stop-on-stdin'
+  if ($browserReady) {
+    $info.Arguments = '-m mark_api.launcher --db "' + $db + '" --cdp-port 9222 --timeout-seconds 12 --stop-on-stdin'
+  } else {
+    # A foreign CDP listener may be healthy: never hand its port to the launcher.
+    $info.Arguments = '-m mark_api.offline_launcher --db "' + $db + '" --stop-on-stdin'
+  }
   if (!(Test-Path -LiteralPath $db -PathType Leaf)) { $info.Arguments += ' --init-db' }
   if (Test-Path -LiteralPath $keyFile -PathType Leaf) {
     try {
@@ -588,7 +596,8 @@ function Stop-Product {
 function Handle-Line([string]$line,[bool]$isError) {
   if (!$line) { return }
   # Never persist or display capability fragments, prompt bodies or keys.
-  if ($line -match 'Kleinanzeiger dashboard:\s+(http://127\.0\.0\.1:\d+/\#[^\s]+)') {
+  if ($line -match 'Kleinanzeiger dashboard:\s+(http://127\.0\.0\.1:\d+/\#[^\s]+)' -or
+      $line -match 'Kleinanzeiger offline dashboard:\s+(http://127\.0\.0\.1:\d+/(?:\#[^\s]+)?)') {
     if (!$script:openedDashboard) {
       $script:openedDashboard = $true
       try {
@@ -601,7 +610,11 @@ function Handle-Line([string]$line,[bool]$isError) {
           # Local work only; no platform browser automation in this fallback.
           Start-Process -FilePath $dashboardAddress
         }
-        Set-Status 'Kleinanzeiger ist geöffnet. Anzeigen können jetzt verwaltet werden.'
+        if ($line -like 'Kleinanzeiger offline dashboard:*') {
+          Set-Status 'Lokaler Arbeitsmodus. Gespeicherte Daten können veraltet sein; Plattformänderungen sind gesperrt.'
+        } else {
+          Set-Status 'Kleinanzeiger ist geöffnet. Anzeigen können jetzt verwaltet werden.'
+        }
       } catch { Set-Status 'Dashboard konnte nicht geöffnet werden.' $true }
     }
     return

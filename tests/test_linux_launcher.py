@@ -74,7 +74,7 @@ class LinuxLauncherTests(unittest.TestCase):
             app.wait.return_value = 0
             app.poll.return_value = 0
             with (
-                patch.object(mod, "version", return_value="0.1.23"),
+                patch.object(mod, "version", return_value="0.1.24"),
                 patch.object(mod, "_PREFERRED_PROFILE_FILE", root / "profile-choice"),
                 patch.object(mod, "_existing_chrome_port",
                              side_effect=lambda p: 50365 if p==mod._OLD_PROFILE else None),
@@ -232,7 +232,7 @@ class LinuxLauncherTests(unittest.TestCase):
             mod._ROOT = root
             mod._DB = root / "data" / "portfolio.sqlite3"
             with (
-                patch.object(mod, "version", return_value="0.1.23"),
+                patch.object(mod, "version", return_value="0.1.24"),
                 patch("sys.argv", ["kleinanzeiger-linux", "offline"]),
                 contextlib.redirect_stderr(io.StringIO()),
             ):

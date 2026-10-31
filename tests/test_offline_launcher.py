@@ -59,6 +59,46 @@ class OfflineLauncherTests(unittest.TestCase):
         path.write_bytes(notification(sender=sender))
         return path
 
+    def test_private_parent_stop_closes_offline_dashboard_without_platform_runtime(self):
+        class StoppableServer:
+            server_address = ("127.0.0.1", 17000)
+
+            def __init__(self):
+                self.event = threading.Event()
+                self.served = 0
+                self.closed = 0
+                self.shutdown_count = 0
+
+            def serve_forever(self):
+                self.served += 1
+                if not self.event.wait(timeout=5):
+                    raise AssertionError("Private stdin STOP failed to release offline server")
+
+            def shutdown(self):
+                self.shutdown_count += 1
+                self.event.set()
+
+            def server_close(self):
+                self.closed += 1
+
+        for lines in ("ignored\\nSTOP\\n", "unexpected\\n"):
+            with self.subTest(lines=lines), tempfile.TemporaryDirectory() as tmp:
+                db = Path(tmp) / "customer.sqlite"
+                server = StoppableServer()
+                output = io.StringIO()
+                with (
+                    patch.object(offline, "create_server", return_value=server),
+                    patch.object(offline.sys, "stdin", io.StringIO(lines.replace("\\n", "\n"))),
+                    redirect_stdout(output),
+                ):
+                    status = offline.main(["--db", str(db), "--init-db",
+                                           "--port", "0", "--stop-on-stdin"])
+                self.assertEqual(status, 0)
+                self.assertEqual((server.served, server.closed, server.shutdown_count),
+                                 (1, 1, 1))
+                self.assertIn("Platform sync and writes: disabled", output.getvalue())
+                self.assertNotIn("Kleinanzeiger write API", output.getvalue())
+
     def test_missing_database_fails_without_creation_or_server(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "missing.sqlite"

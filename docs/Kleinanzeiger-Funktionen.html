@@ -14,13 +14,14 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.23</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.24</p>
 <h1>Funktionsübersicht</h1>
 <p>Die folgende Übersicht unterscheidet Bedienoberfläche, unterstützte Funktion und praktische Grenzen.</p>
 <table><tr><th>Bereich</th><th>Funktion</th><th>Wo bedienen?</th></tr>
 <tr><td>Installation</td><td>Python/Chrome bereitstellen, Wheel installieren und Update prüfen</td><td>Kleinanzeiger-Fenster → Einrichten / aktualisieren</td></tr>
 <tr><td>Programmversion zurückwechseln (v0.1.14)</td><td>Vorherige geprüfte Programmumgebung nach expliziter Auswahl aktivieren; aktive Version vorher für einen erneuten Wechsel sichern. Anzeigen, Datenbank, Recovery und Chrome-Profil bleiben unverändert.</td><td>Kleinanzeiger-Fenster → Weitere Aktionen → Vorherige Programmversion verwenden</td></tr>
 <tr><td>Konto</td><td>Eigenes Kleinanzeigen-Konto im getrennten Chrome-Profil anmelden</td><td>Kleinanzeiger-Fenster → Konto öffnen</td></tr>
+<tr><td>Chrome-Profilbindung (v0.1.24)</td><td>Konto-CDP-Port nur mit nachgewiesener Chrome-Prozess-ID, richtiger Chrome-EXE und eigenem dauerhaftem Profil nutzen. Bei Fremdbelegung nur lokalen Lesemodus öffnen; Anmeldungen und privates Chrome bleiben erhalten.</td><td>Kleinanzeiger-Fenster → Starten; bei Browserfehler automatisch lokal</td></tr>
 <tr><td>Anzeigen</td><td>Eigene Anzeigen lesen, Karten auswählen, Titel/Beschreibung ändern, pausieren, aktivieren, löschen</td><td>Dashboard → Meine Anzeigen / Anzeige bearbeiten</td></tr>
 <tr><td>Fokussierte Bedienung (UX)</td><td>Fünf Dashboard-Hauptbereiche, weitere Funktionen einklappbar; im Windows-Kontrollfenster kompakte Hauptaktionen und erweiterte Werkzeuge über Weitere Aktionen; Fehlerdetails nur im Fehlerfall</td><td>Kleinanzeiger-Fenster / Dashboard → Weitere Bereiche</td></tr>
 <tr><td>Priorisierter lokaler KI-Tagesplan (v0.1.22)</td><td>Ohne Anbieter- oder Plattformaufruf nach konkreten lokalen Belegen: unklare KI-/Budgetfälle, neue importierte EML-Hinweise, überfällige manuelle Wiedervorlagen, geprüfte/ungeprüfte lokale KI-Vorschläge und anstehende Termine. Bis zu 10.000 Einträge mit 50 je Seite. Kein selbstständiger Nachrichtenversand, keine externen KI-Kosten, keine Plattformaktion und keine erfundene Live-Inbox.</td><td>Dashboard → Bestandsänderungen → Priorisierter Tagesplan</td></tr>
@@ -33,6 +34,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <tr><td>Synchronisation (seit v0.1.19 mit gezielter Fehlerhilfe)</td><td>Echten Besitzerbestand neu einlesen oder nur lokale Ansicht laden. Ein fehlgeschlagener manueller Abgleich nennt einen zutreffenden sicheren Grund und eine konkrete Lösung für Browser/Chrome, Anmeldung, Netzwerk, laufenden Abgleich, Recovery oder lokalen Speicher; keine Behauptung eines gelösten Chrome-Transports und kein automatischer Retry.</td><td>Dashboard → Mit Kleinanzeigen abgleichen / Ansicht neu laden</td></tr>
 <tr><td>Lokaler Arbeitsmodus (v0.1.20 Reconnect)</td><td>Bei initialem Browser-/Inventar-Lesefehler mit gesundem gespeicherten Bestand bleibt das Offline-Dashboard bestehen. Der ausdrückliche manuelle Wiederverbindungsversuch zeigt die tatsächliche sichere Klassifikation statt einer pauschalen Fehlermeldung. Kein Blind-Retry, kein Löschen oder Überschreiben bestehender Daten und keine Plattformwrites ohne neue Sitzung.</td><td>Normaler Start; Dashboard → Mit Kleinanzeigen abgleichen</td></tr>
 <tr><td>Bestandsänderungen (G4)</td><td>Letzte zwei bestätigte Kontoabgleiche mit Quelle und Zeitpunkt vergleichen. Ab v0.1.15 Auswahl von Änderungstyp (neu, geändert, pausiert, unklar, unverändert, ohne Vergleich, unbestätigt): serverseitig global über den Eigenbestand bis 10.000 Anzeigen; 50 passende Treffer je Seite mit filtergebundenem Epoch-/Cursor-Schutz. Keine erfundene Gesamtzahl passender Anzeigen und kein Verkaufs- oder Löschbeweis aus Abwesenheit.</td><td>Dashboard → Weitere Bereiche → Bestandsänderungen</td></tr>
+<tr><td>Schneller Bestandsfilter (v0.1.24)</td><td>Bei Filterwechsel während laufender Inventar-Abfrage automatisch nur die zuletzt gewählte Ansicht neu laden; alte Ergebnisse verwerfen, ohne Plattform-Schreibaktion.</td><td>Dashboard → Bestandsänderungen → Änderungstyp</td></tr>
 <tr><td>Lokale Preisregeln (G5)</td><td>Importierten Artikel mit echtem lokalen Ausgangspreis laden; Mindestpreis, Schritt, Wartezeit und Vorschau; revisionsgesichertes Speichern/Entfernen. Keine automatische Änderung des Artikels oder einer Plattformanzeige.</td><td>Artikelentwürfe → Preisregel; Weitere Bereiche → Preisregeln</td></tr>
 <tr><td>Auswertungen</td><td>Aufrufe, Merker, Antworten, Reaktionen und Quellenzeiten; Gruppen- und Anzeigenrankings, CSV-Export</td><td>Dashboard → Auswertungen und Rankings</td></tr>
 <tr><td>E-Mail</td><td>Eigene lokal gespeicherte <code>.eml</code>-Benachrichtigungen importieren und Reaktionen zuordnen</td><td>Kleinanzeiger-Fenster → E-Mails importieren, bei beendetem Produkt</td></tr>
@@ -78,5 +80,5 @@ auslösen (Windows-Sitzung maximal 100 versuchte Anfragen); Stop und UNKNOWN
 beenden automatische Folgeaufrufe. OpenAI-Preise werden nur konservativ geschätzt,
 nicht als garantierte Abrechnung dargestellt. <strong>Nicht enthalten:</strong> Plattform-
 Massenveröffentlichung, automatisches Bulk-Löschen oder ungeprüfte Kontoänderungen.</p>
-<footer>Kleinanzeiger v0.1.23 – Kundenunterlagen. Stand: 30. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.24 – Kundenunterlagen. Stand: 31. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>

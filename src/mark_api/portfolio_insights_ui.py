@@ -66,6 +66,7 @@ let inventoryDiffCursor = null;
 let inventoryDiffEpoch = null;
 let inventoryDiffFilterSerial = 0;
 let inventoryDiffBusy = false;
+let inventoryDiffReloadPending = false;
 let priceRuleCursor = null;
 let priceRuleTarget = null;
 let priceRuleBusy = false;
@@ -149,6 +150,10 @@ async function loadInventoryDiff(next = false) {
     inventoryDiffBusy = false;
     byId("inventory-diff-load").disabled = !localUiReady();
     byId("inventory-diff-next").disabled = !inventoryDiffCursor || !localUiReady();
+    if (inventoryDiffReloadPending) {
+      inventoryDiffReloadPending = false;
+      if (jobsAvailable && localUiReady()) void loadInventoryDiff();
+    }
   }
 }
 
@@ -371,7 +376,8 @@ if (inventoryFilter) inventoryFilter.addEventListener("change", () => {
   byId("inventory-diff-body").replaceChildren();
   byId("inventory-diff-next").disabled = true;
   if (!inventoryDiffBusy) return loadInventoryDiff();
-  byId("inventory-diff-status").textContent = "Filter gewechselt. Den Vergleich danach erneut laden.";
+  inventoryDiffReloadPending = true;
+  byId("inventory-diff-status").textContent = "Filter gewechselt. Lade den neuen Vergleich …";
   return false;
 });
 for (const id of ["price-rule-min", "price-rule-step", "price-rule-wait"]) {

@@ -110,15 +110,30 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(byId("inventory-diff-body").children.length,1);
   assert.equal(byId("inventory-diff-body").children[0].children[0].textContent,"00030");
   assert.match(byId("inventory-diff-status").textContent,/global gefiltert/);
-  // Late replies from an earlier selection must not repaint a changed filter.
-  let finishFiltered;
-  fetchImpl=()=>new Promise(resolve=>{finishFiltered=resolve;});
+  // Changing a filter while a read is in flight automatically loads the new
+  // selection. Neither an old response nor a second manual click is acceptable.
+  let finishFiltered, filteredRequests=0;
+  fetchImpl=path=>{
+    filteredRequests+=1;
+    if (filteredRequests===1) return new Promise(resolve=>{finishFiltered=resolve;});
+    assert.match(path,/state=newly_observed/);
+    return success({items:[{ad_id:"00031",state:"newly_observed",reason:"Neuer Eintrag",
+      previous:{title:"Alt",state:"active"},current:null}],
+      state:"ready",state_filter:"newly_observed",epoch:"d".repeat(64),
+      has_more:false,next_after:null,total:null,confirmed_at:"now",source:"owner"});
+  };
   const oldFilterLoad=run("loadInventoryDiff()");
   byId("inventory-diff-filter").value="unclear";
   assert.equal(byId("inventory-diff-filter").listeners.change(),false);
-  finishFiltered(success({items:[],state_filter:"changed",epoch:"c".repeat(64),has_more:false}));
+  byId("inventory-diff-filter").value="newly_observed";
+  assert.equal(byId("inventory-diff-filter").listeners.change(),false);
+  finishFiltered(success({items:[{ad_id:"STALE"}],state_filter:"changed",
+    epoch:"c".repeat(64),has_more:false,next_after:null}));
   assert.equal(await oldFilterLoad,false);
-  assert.equal(byId("inventory-diff-body").children.length,0);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(filteredRequests,2);
+  assert.equal(byId("inventory-diff-body").children.length,1);
+  assert.equal(byId("inventory-diff-body").children[0].children[0].textContent,"00031");
   assert.equal(run("inventoryDiffCursor"),null);
   // Autopilot: local read-only attention queue; never infer live inbox/sales.
   fetchImpl=async path=>{
