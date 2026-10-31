@@ -78,7 +78,11 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("Test-KleinanzeigerChromeOwnedDevTools -Port 9222", start)
         center = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("Test-KleinanzeigerChromeOwnedDevTools -Port 9222", center)
-        self.assertIn("-m mark_api.offline_launcher", center)
+        self.assertIn("windows-offline-compat.py", center)
+        self.assertNotIn("-m mark_api.offline_launcher", center)
+        stable_helper = (SCRIPTS / "windows-offline-compat.py").read_text(encoding="utf-8")
+        self.assertIn("from mark_api import offline_launcher", stable_helper)
+        self.assertIn("offline_launcher.main()", stable_helper)
         self.assertIn("$cdpOwnerVerified", start)
         self.assertIn("-m mark_api.offline_launcher", start)
         self.assertLess(
