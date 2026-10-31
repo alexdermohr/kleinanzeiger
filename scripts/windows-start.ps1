@@ -6,6 +6,7 @@ $db = Join-Path $state 'anzeigen.sqlite'
 if (!(Test-Path -LiteralPath $python -PathType Leaf)) { throw 'Zuerst Installieren.cmd ausfuehren.' }
 . (Join-Path $base 'windows-chrome.ps1')
 $chrome = Find-KleinanzeigerChrome -StateDirectory $state
+$cdpOwnerVerified = $false
 if ($chrome) {
   try {
     $profile = Join-Path $state 'ChromeProfile'
@@ -15,6 +16,10 @@ if ($chrome) {
     Write-Host 'Im isolierten Chrome-Fenster anmelden; bei Verbindungsproblemen ist lokales Arbeiten moeglich.'
     Read-Host 'Nach dem Login oder fuer lokales Arbeiten ENTER druecken'
     Wait-KleinanzeigerChromeDevTools -Port 9222 -TimeoutSeconds 12
+    if (!(Test-KleinanzeigerChromeOwnedDevTools -Port 9222 -ProfileDirectory $profile -ChromeExecutable $chrome)) {
+      throw 'Browsersteuerung gehoert nicht zum Kleinanzeiger-Profil. Lokale Arbeit bleibt moeglich.'
+    }
+    $cdpOwnerVerified = $true
   } catch {
     Write-Warning 'Browserverbindung nicht bereit. Der lokale Arbeitsbereich wird geprueft.'
   }
@@ -44,7 +49,12 @@ if (Test-Path -LiteralPath $keyFile -PathType Leaf) {
   }
 }
 try {
-  & $python -m mark_api.launcher --db $db --cdp-port 9222 @extra
+  if ($cdpOwnerVerified) {
+    & $python -m mark_api.launcher --db $db --cdp-port 9222 @extra
+  } else {
+    Write-Host 'Starte gespeicherten Bestand offline. Keine Konto- oder Plattformaktion.'
+    & $python -m mark_api.offline_launcher --db $db @extra
+  }
   if ($LASTEXITCODE -ne 0) { throw 'Produktstart fehlgeschlagen. Chrome/CDP/Login und KI-Konfiguration pruefen.' }
 } finally {
   Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue

@@ -1,6 +1,8 @@
-# Kleinanzeiger v0.1.22 – Windows 11
+# Kleinanzeiger v0.1.24 – Windows 11
 
-**Stand v0.1.22:** Der A6-StorageOwner-IPC und die Eigenanzeigen-Lese-CLI wurden synthetisch auf bis zu 12.000 Datensätze erweitert. Der Windows-Katalog unterstützt weiterhin bis zu 10.000 bestätigte eigene Anzeigen; die KI-Prüfung bestehender Eigenanzeigen umfasst seit dieser Version ebenfalls bis zu 10.000 pro Auftrag (lokale Entwürfe bleiben auf 5.000 begrenzt). Der echte Konto-/Chrome-Abgleich auf Marks Kunden-PC ist noch separat zu prüfen. Das Update verändert keine vorhandenen Anzeigen, Backups oder Chrome-Profile.
+**Stand v0.1.24:** Sichtbare Startkommandos und Fehler heißen Kleinanzeiger. Das Update unterstützt frühere installierte Versionen bei Backup, Restore, Rollback und Programmstart ohne erneute Einrichtung der Daten. Die bisherigen Kontodaten und Chrome-Profile bleiben beim Update unverändert. **Bereits in v0.1.22:** Der A6-StorageOwner-IPC und die Eigenanzeigen-Lese-CLI wurden synthetisch auf bis zu 12.000 Datensätze erweitert. Der Windows-Katalog unterstützt weiterhin bis zu 10.000 bestätigte eigene Anzeigen; die KI-Prüfung bestehender Eigenanzeigen umfasst seit dieser Version ebenfalls bis zu 10.000 pro Auftrag (lokale Entwürfe bleiben auf 5.000 begrenzt). Der echte Konto-/Chrome-Abgleich auf Marks Kunden-PC ist noch separat zu prüfen. Das Update verändert keine vorhandenen Anzeigen, Backups oder Chrome-Profile.
+
+**Verbessert in v0.1.24:** Kleinanzeiger verifiziert vor dem Kontozugriff, dass Chrome-Port 9222 wirklich zu seinem eigenen dauerhaften Browserprofil gehört. Falls ein anderer Prozess den Port belegt oder Chrome nicht zuverlässig erkannt wird, startet ausschließlich die lokale Bestandsansicht ohne Plattformzugriffe. Kleinanzeigen- und Google-Anmeldungen im eigenen Profil bleiben gespeichert; das normale persönliche Chrome wird nicht verändert. Nach Klärung des Browserfensters Kleinanzeiger neu starten. Im Dashboard lädt der Bestandsvergleich nach schnellen Filterwechseln automatisch die zuletzt gewählte Ansicht.
 
 ## Einmal entpacken, dann nur noch Kleinanzeiger öffnen
 
@@ -18,6 +20,9 @@
 
 Keine Konsoleingaben, manuelles Python, Docker, WSL, Ubuntu oder Kopieren
 technischer Dashboard-URLs erforderlich.
+
+**Anmeldung bleibt gespeichert:** Kleinanzeiger verwendet ein dauerhaftes eigenes Chrome-Profil unter dem Kleinanzeiger-Appordner. Es wird weder beim Programmstart noch beim Beenden gelöscht. Wer sich in diesem Chrome bei Kleinanzeigen und gegebenenfalls beim Google-Konto anmeldet, muss dies nicht bei jedem Kleinanzeiger-Start wiederholen, solange die jeweilige Sitzung gültig bleibt. Das normale persönliche Google-Chrome-Profil wird nicht geändert; dessen Google-Login wird nicht automatisch in das separate Produktprofil übernommen.
+
 
 ## Alles an einem Ort
 
