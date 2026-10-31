@@ -50,7 +50,7 @@ function Get-VerifiedPackage([string]$folder) {
   if (!(Test-Path -LiteralPath $wheel -PathType Leaf)) { throw 'Wheel fehlt.' }
   $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actual -ne $matched.Groups['digest'].Value.ToLowerInvariant()) { throw 'Wheel-Pruefsumme ungueltig.' }
-  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1',
+  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-offline-compat.py',
        'Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html',
        'windows-install.ps1','windows-start.ps1','windows-chrome.ps1',
        'windows-ki-einrichten.ps1','windows-backup.ps1','windows-restore.ps1')) {
@@ -81,7 +81,7 @@ function Save-Backup {
 function Publish-AppFiles([string]$folder) {
   New-Item -ItemType Directory -Path $appRoot -Force | Out-Null
   $files = @(Get-ChildItem -LiteralPath $folder -File | Where-Object {
-    $_.Extension -in @('.ps1','.cmd','.whl','.txt','.md','.html')
+    $_.Extension -in @('.ps1','.cmd','.whl','.txt','.md','.html','.py')
   })
   foreach ($file in $files) {
     if ([IO.Path]::GetFullPath($file.DirectoryName).TrimEnd('\') -ieq

@@ -551,7 +551,14 @@ function Start-Product {
     $info.Arguments = '-m mark_api.launcher --db "' + $db + '" --cdp-port 9222 --timeout-seconds 12 --stop-on-stdin'
   } else {
     # A foreign CDP listener may be healthy: never hand its port to the launcher.
-    $info.Arguments = '-m mark_api.offline_launcher --db "' + $db + '" --stop-on-stdin'
+    # This script survives .venv rollback. The legacy offline_launcher did not
+    # accept --stop-on-stdin; the stable wrapper supplies private STOP/EOF
+    # control for both current and supported older offline wheels.
+    $offlineCompat = Join-Path $base 'windows-offline-compat.py'
+    if (!(Test-Path -LiteralPath $offlineCompat -PathType Leaf)) {
+      throw 'Lokaler Starthelfer fehlt. Bitte Kleinanzeiger reparieren.'
+    }
+    $info.Arguments = '"' + $offlineCompat + '" --db "' + $db + '"'
   }
   if (!(Test-Path -LiteralPath $db -PathType Leaf)) { $info.Arguments += ' --init-db' }
   if (Test-Path -LiteralPath $keyFile -PathType Leaf) {

@@ -35,6 +35,8 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertNotIn("Copy-Item scripts\\Installieren.cmd", workflow)
         self.assertIn("windows-center.ps1", workflow)
         self.assertIn("windows-worker.ps1", workflow)
+        self.assertIn("scripts\\windows-offline-compat.py", workflow)
+        self.assertIn("windows-offline-compat.py", gui)
         self.assertIn("test_windows_hub.py", workflow)
 
     def test_windows_powershell_51_displays_unicode_labels(self) -> None:
@@ -78,6 +80,8 @@ class WindowsHubContractTests(unittest.TestCase):
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-VerifiedPackage", worker)
+        self.assertIn("'windows-offline-compat.py'", worker)
+        self.assertIn("'.html','.py'", worker)
         self.assertIn("Get-FileHash", worker)
         self.assertIn("Windows.sha256", worker)
         self.assertIn("Release-Manifest.json", worker)
