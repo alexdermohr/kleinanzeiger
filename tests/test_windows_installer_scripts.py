@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import subprocess
 import re
 import unittest
 
@@ -66,6 +68,71 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("127.0.0.1", start)
         self.assertIn("ChromeProfile", start)
         self.assertIn("Kleinanzeiger.cmd", (ROOT / "docs/windows-installation.md").read_text(encoding="utf-8"))
+
+    def test_start_refuses_unowned_chrome_cdp_and_keeps_offline_fallback(self):
+        chrome = (SCRIPTS / "windows-chrome.ps1").read_text(encoding="utf-8")
+        start = (SCRIPTS / "windows-start.ps1").read_text(encoding="utf-8")
+        self.assertIn("function Test-KleinanzeigerChromeOwnedDevTools(", chrome)
+        self.assertIn("Get-NetTCPConnection", chrome)
+        self.assertIn("Get-CimInstance", chrome)
+        self.assertIn("Test-KleinanzeigerChromeOwnedDevTools -Port 9222", start)
+        center = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Test-KleinanzeigerChromeOwnedDevTools -Port 9222", center)
+        self.assertIn("-m mark_api.offline_launcher", center)
+        self.assertIn("$cdpOwnerVerified", start)
+        self.assertIn("-m mark_api.offline_launcher", start)
+        self.assertLess(
+            start.index("Test-KleinanzeigerChromeOwnedDevTools -Port 9222"),
+            start.index("$cdpOwnerVerified = $true"),
+        )
+        self.assertIn("ChromeProfile", start)
+        self.assertNotIn("Remove-Item -LiteralPath $profile", start)
+
+    @unittest.skipUnless(os.name == "nt", "Requires real Windows PowerShell 5.1")
+    def test_windows_chrome_listener_pid_executable_profile_are_bound(self):
+        path = str(SCRIPTS / "windows-chrome.ps1").replace("'", "''")
+        probe = r"""
+. '__CHROME_SCRIPT__'
+function Test-KleinanzeigerChromeDevTools { param([int]$Port) return $true }
+$script:FakeOwnerPid = 779
+$script:FakeProcessPid = 779
+$script:ExpectedChrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+$script:FakeChrome = $script:ExpectedChrome
+$script:FakeProfile = 'C:\Users\Mark\AppData\Local\Kleinanzeiger\ChromeProfile'
+$script:FakeCommand = '"' + $script:FakeChrome + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="' + $script:FakeProfile + '" https://www.kleinanzeigen.de/'
+function Get-NetTCPConnection {
+  [CmdletBinding()]
+  param([int]$LocalPort, [string]$State)
+  return [pscustomobject]@{LocalAddress='127.0.0.1';OwningProcess=$script:FakeOwnerPid}
+}
+function Get-CimInstance {
+  [CmdletBinding()]
+  param([string]$ClassName, [string]$Filter)
+  return [pscustomobject]@{ProcessId=$script:FakeProcessPid;Name='chrome.exe';ExecutablePath=$script:FakeChrome;CommandLine=$script:FakeCommand}
+}
+function IsOwned { return Test-KleinanzeigerChromeOwnedDevTools -Port 9222 -ProfileDirectory $script:FakeProfile -ChromeExecutable $script:ExpectedChrome }
+if (!(IsOwned)) { throw 'correct profile listener must be accepted' }
+$script:FakeOwnerPid=780
+if (IsOwned) { throw 'a different listener PID cannot authorize the old browser' }
+$script:FakeOwnerPid=779
+$script:FakeCommand = $script:FakeCommand.Replace('ChromeProfile', 'ChromeProfileOther')
+if (IsOwned) { throw 'profile-prefix spoofing must be rejected' }
+$script:FakeCommand = $script:FakeCommand.Replace('ChromeProfileOther', 'ChromeProfile')
+$script:FakeCommand = $script:FakeCommand.Replace('--remote-debugging-port=9222', '--remote-debugging-port=9223')
+if (IsOwned) { throw 'wrong debugging port must be rejected' }
+$script:FakeCommand = $script:FakeCommand.Replace('--remote-debugging-port=9223', '--remote-debugging-port=9222')
+$script:FakeChrome = 'C:\Other\chrome.exe'
+if (IsOwned) { throw 'different executable must be rejected' }
+Write-Output 'OWNED_CDP_PID_PROFILE_GUARD_PASS'
+"""
+        probe = probe.replace("__CHROME_SCRIPT__", path)
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", probe],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OWNED_CDP_PID_PROFILE_GUARD_PASS", result.stdout)
 
     def test_user_bound_optional_key_does_not_trigger_unapproved_generation(self):
         configure = (SCRIPTS / "windows-ki-einrichten.ps1").read_text(encoding="utf-8")

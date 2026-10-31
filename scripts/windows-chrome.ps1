@@ -84,6 +84,49 @@ function Test-KleinanzeigerChromeDevTools([int]$Port = 9222) {
   }
 }
 
+# A Chrome /json/version response alone cannot establish which account owns
+# port 9222: another browser may already be listening there. Bind the actual
+# loopback TCP listener PID to our executable, profile and debugging arguments.
+# A failed ownership probe means local-only mode, never another account's CDP.
+function Test-KleinanzeigerChromeOwnedDevTools(
+    [int]$Port = 9222, [string]$ProfileDirectory,
+    [string]$ChromeExecutable) {
+  if ($Port -lt 1 -or $Port -gt 65535 -or
+      [string]::IsNullOrWhiteSpace($ProfileDirectory) -or
+      [string]::IsNullOrWhiteSpace($ChromeExecutable)) { return $false }
+  if (!(Test-KleinanzeigerChromeDevTools -Port $Port)) { return $false }
+  try {
+    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop |
+        Where-Object { $_.LocalAddress -eq '127.0.0.1' })
+    if ($listeners.Count -ne 1) { return $false }
+    $listenerPid = [int]$listeners[0].OwningProcess
+    if ($listenerPid -le 0) { return $false }
+    $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction Stop)
+    if ($processes.Count -ne 1) { return $false }
+    $browser = $processes[0]
+    if ([int]$browser.ProcessId -ne $listenerPid -or
+        [string]$browser.Name -ine 'chrome.exe') { return $false }
+    $expectedExe = [IO.Path]::GetFullPath($ChromeExecutable)
+    $observedExe = [IO.Path]::GetFullPath([string]$browser.ExecutablePath)
+    if (![string]::Equals($expectedExe, $observedExe, [StringComparison]::OrdinalIgnoreCase)) {
+      return $false
+    }
+    $expectedProfile = [IO.Path]::GetFullPath($ProfileDirectory).TrimEnd([char]92)
+    $profileLiteral = [regex]::Escape($expectedProfile)
+    $profileArg = '(?i)(?:^|\s)--user-data-dir=(?:"' + $profileLiteral + '"|' + $profileLiteral + ')(?=\s|$)'
+    $portArg = '(?i)(?:^|\s)--remote-debugging-port=' + $Port + '(?=\s|$)'
+    $commandLine = [string]$browser.CommandLine
+    if ([regex]::Matches($commandLine, '(?i)(?:^|\s)--user-data-dir=').Count -ne 1 -or
+        [regex]::Matches($commandLine, '(?i)(?:^|\s)--remote-debugging-port=').Count -ne 1) {
+      return $false
+    }
+    return ([regex]::IsMatch($commandLine, $profileArg) -and
+            [regex]::IsMatch($commandLine, $portArg))
+  } catch {
+    return $false
+  }
+}
+
 function Wait-KleinanzeigerChromeDevTools(
     [int]$Port = 9222, [int]$TimeoutSeconds = 12,
     [scriptblock]$Probe = $null) {
