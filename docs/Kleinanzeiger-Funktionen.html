@@ -14,12 +14,13 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.24</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.25</p>
 <h1>Funktionsübersicht</h1>
 <p>Die folgende Übersicht unterscheidet Bedienoberfläche, unterstützte Funktion und praktische Grenzen.</p>
 <table><tr><th>Bereich</th><th>Funktion</th><th>Wo bedienen?</th></tr>
 <tr><td>Installation</td><td>Python/Chrome bereitstellen, Wheel installieren und Update prüfen</td><td>Kleinanzeiger-Fenster → Einrichten / aktualisieren</td></tr>
 <tr><td>Programmversion zurückwechseln (v0.1.14)</td><td>Vorherige geprüfte Programmumgebung nach expliziter Auswahl aktivieren; aktive Version vorher für einen erneuten Wechsel sichern. Anzeigen, Datenbank, Recovery und Chrome-Profil bleiben unverändert.</td><td>Kleinanzeiger-Fenster → Weitere Aktionen → Vorherige Programmversion verwenden</td></tr>
+<tr><td>Offline-Start nach Programm-Rückwechsel (v0.1.25)</td><td>Nach Rückkehr zu einer älteren geprüften Version startet das weiterhin installierte Kontrollfenster deren lokalen Offline-Arbeitsbereich. Der kompatible Starthelfer nutzt das tatsächliche Python-Backend und beendet es geordnet per privatem STOP-/EOF-Kanal. Keine Änderung an Anzeigen, Datenbank, Backups oder Chrome-Sitzungen.</td><td>Kleinanzeiger-Fenster → Weitere Aktionen → Vorherige Programmversion verwenden; danach Starten</td></tr>
 <tr><td>Konto</td><td>Eigenes Kleinanzeigen-Konto im getrennten Chrome-Profil anmelden</td><td>Kleinanzeiger-Fenster → Konto öffnen</td></tr>
 <tr><td>Chrome-Profilbindung (v0.1.24)</td><td>Konto-CDP-Port nur mit nachgewiesener Chrome-Prozess-ID, richtiger Chrome-EXE und eigenem dauerhaftem Profil nutzen. Bei Fremdbelegung nur lokalen Lesemodus öffnen; Anmeldungen und privates Chrome bleiben erhalten.</td><td>Kleinanzeiger-Fenster → Starten; bei Browserfehler automatisch lokal</td></tr>
 <tr><td>Anzeigen</td><td>Eigene Anzeigen lesen, Karten auswählen, Titel/Beschreibung ändern, pausieren, aktivieren, löschen</td><td>Dashboard → Meine Anzeigen / Anzeige bearbeiten</td></tr>
@@ -80,5 +81,5 @@ auslösen (Windows-Sitzung maximal 100 versuchte Anfragen); Stop und UNKNOWN
 beenden automatische Folgeaufrufe. OpenAI-Preise werden nur konservativ geschätzt,
 nicht als garantierte Abrechnung dargestellt. <strong>Nicht enthalten:</strong> Plattform-
 Massenveröffentlichung, automatisches Bulk-Löschen oder ungeprüfte Kontoänderungen.</p>
-<footer>Kleinanzeiger v0.1.24 – Kundenunterlagen. Stand: 31. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.25 – Kundenunterlagen. Stand: 31. Oktober 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>
