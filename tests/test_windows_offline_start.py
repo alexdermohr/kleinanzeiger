@@ -29,15 +29,18 @@ if (!$definition) { throw 'Real Start-Product function missing' }
 # process launcher, file writer or real browser is run in this fixture.
 Invoke-Expression $definition.Extent.Text
 $python = 'C:\fixture\python.exe'; $db = 'C:\fixture\customer.sqlite'; $keyFile = 'C:\fixture\missing-key'
+$profile = 'C:\fixture\ChromeProfile'
+$base = 'C:\fixture'; $script:compatExists = $true
 $statusLabel = [PSCustomObject]@{}
 $statusLabel | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
 $script:active = $false; $script:pythonExists = $true
 $script:dbExists = $true; $script:started = @(); $script:messages = @()
-$script:failOpen = $false; $script:failReady = $true
+$script:failOpen = $false; $script:failReady = $true; $script:failOwned = $false
 function Test-ActiveProduct { return $script:active }
 function Test-Path([string]$LiteralPath,[string]$PathType) {
   if ($LiteralPath -eq $python) { return $script:pythonExists }
   if ($LiteralPath -eq $db) { return $script:dbExists }
+  if ($LiteralPath -eq (Join-Path $base 'windows-offline-compat.py')) { return $script:compatExists }
   return $false
 }
 function Set-Status([string]$Message,[bool]$ErrorState=$false) { $script:messages += $Message }
@@ -45,6 +48,10 @@ function Open-Kleinanzeigen { if ($script:failOpen) { throw 'synthetic chrome ab
 function Wait-KleinanzeigerChromeDevTools([int]$Port,[int]$TimeoutSeconds) {
   if ($Port -ne 9222 -or $TimeoutSeconds -ne 12) { throw 'readiness bounds changed' }
   if ($script:failReady) { throw 'synthetic browser transport unavailable' }
+}
+function Test-KleinanzeigerChromeOwnedDevTools([int]$Port,[string]$ProfileDirectory,[string]$ChromeExecutable) {
+  if ($Port -ne 9222 -or $ProfileDirectory -ne $profile -or $ChromeExecutable -ne 'fixture-chrome') { throw 'ownership probe was misbound' }
+  return !$script:failOwned
 }
 function Start-PipedProcess([Diagnostics.ProcessStartInfo]$info,[string]$kind) {
   $script:started += [PSCustomObject]@{Arguments=$info.Arguments;Kind=$kind;Input=$info.RedirectStandardInput}
@@ -57,23 +64,31 @@ foreach ($openFailure in @($false,$true)) {
   $script:failOpen = $openFailure; $script:messages = @()
   Start-Product
   $call = $script:started[-1]
-  if ($call.Kind -ne 'product' -or !$call.Input -or $call.Arguments -notmatch '--stop-on-stdin') { throw 'product path not reached' }
+  if ($call.Kind -ne 'product' -or !$call.Input -or $call.Arguments -match '--stop-on-stdin') { throw 'old offline parser must not receive new stop flag' }
+  if ($call.Arguments -notmatch 'windows-offline-compat.py' -or $call.Arguments -match '--cdp-port') { throw 'browser failure passed an untrusted CDP port' }
   if ($call.Arguments -match '--init-db|--enable-generation') { throw 'existing state or absent AI key bypassed' }
   if (($script:messages -join ' ') -notmatch 'lokalen Arbeitsbereich') { throw 'local mode not explained' }
   if (($script:messages -join ' ') -match 'anmelden|Login') { throw 'browser failure mislabeled as login failure' }
 }
 $script:failOpen=$false; $script:failReady=$false
 Start-Product
-if ($script:started.Count -ne 3) { throw 'online or offline path did not reach product' }
+if ($script:started.Count -ne 3 -or $script:started[-1].Arguments -notmatch 'mark_api.launcher.*--cdp-port 9222.*--stop-on-stdin') { throw 'verified app-owned Chrome was not used' }
+$script:failOwned = $true
+Start-Product
+if ($script:started.Count -ne 4 -or $script:started[-1].Arguments -notmatch 'windows-offline-compat.py' -or $script:started[-1].Arguments -match '--cdp-port') { throw 'foreign listener must force no-CDP offline mode' }
 $script:dbExists=$false
 Start-Product
 if ($script:started[-1].Arguments -notmatch '--init-db') { throw 'explicit first installation no longer initializes' }
+$script:compatExists=$false; $denied=$false
+try { Start-Product } catch { $denied=$true }
+if (!$denied -or $script:started.Count -ne 5) { throw 'missing stable rollback helper was ignored' }
+$script:compatExists=$true
 $script:active=$true; $denied=$false
 try { Start-Product } catch { $denied=$true }
-if (!$denied -or $script:started.Count -ne 4) { throw 'active product guard bypassed' }
+if (!$denied -or $script:started.Count -ne 5) { throw 'active product guard bypassed' }
 $script:active=$false; $script:pythonExists=$false; $denied=$false
 try { Start-Product } catch { $denied=$true }
-if (!$denied -or $script:started.Count -ne 4) { throw 'missing installation guard bypassed' }
+if (!$denied -or $script:started.Count -ne 5) { throw 'missing installation guard bypassed' }
 Write-Output 'WINDOWS_OFFLINE_START_NO_RESET_PASS'
 '''
         with tempfile.TemporaryDirectory(prefix="kleinanzeiger-start-test-") as directory:

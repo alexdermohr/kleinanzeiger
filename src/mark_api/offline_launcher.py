@@ -4,6 +4,8 @@ import argparse
 import os
 import secrets
 import sqlite3
+import sys
+from threading import Thread
 from pathlib import Path
 from urllib.parse import quote
 
@@ -12,6 +14,18 @@ from .dashboard import DashboardGenerationAccess, create_server
 from .email_import import import_kleinanzeigen_email_files
 from .local_catalog_import import import_local_catalog_files
 from .storage import SnapshotStore
+
+
+def _watch_local_stop_stdin(stream: object, server: object) -> None:
+    """Only a private owning Windows control pipe can request a clean shutdown."""
+    try:
+        for line in stream:
+            if line.strip() == "STOP":
+                break
+    except (OSError, ValueError):
+        pass
+    # EOF is an abandoned parent control pipe, not a reason to leave an orphan.
+    server.shutdown()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -68,6 +82,10 @@ def _parser() -> argparse.ArgumentParser:
             "Enable separately consented text/image drafts using an external "
             "provider; requires kleinanzeiger[generation] and OPENAI_API_KEY."
         ),
+    )
+    parser.add_argument(
+        "--stop-on-stdin", action="store_true",
+        help="Allow the owning Windows control process to close this read-only dashboard cleanly.",
     )
     return parser
 
@@ -167,6 +185,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{import_report.duplicate_events} duplicate(s).",
             flush=True,
         )
+    if args.stop_on_stdin:
+        try:
+            Thread(target=_watch_local_stop_stdin, args=(sys.stdin, server),
+                   daemon=True, name="kleinanzeiger-offline-parent-stop").start()
+        except RuntimeError:
+            server.server_close()
+            parser.error("local offline stop control unavailable")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

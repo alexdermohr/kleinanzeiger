@@ -1,4 +1,4 @@
-param(
+﻿param(
   [ValidateSet('Install','OnlineUpdate','Backup','Restore','Rollback','ImportMail','Classify','ImportProducts','ExportProducts')][string]$Action = 'Install',
   [string]$PackageDirectory = $PSScriptRoot,
   [string]$BackupName = '',
@@ -50,7 +50,7 @@ function Get-VerifiedPackage([string]$folder) {
   if (!(Test-Path -LiteralPath $wheel -PathType Leaf)) { throw 'Wheel fehlt.' }
   $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actual -ne $matched.Groups['digest'].Value.ToLowerInvariant()) { throw 'Wheel-Pruefsumme ungueltig.' }
-  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1',
+  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-offline-compat.py',
        'Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html',
        'windows-install.ps1','windows-start.ps1','windows-chrome.ps1',
        'windows-ki-einrichten.ps1','windows-backup.ps1','windows-restore.ps1')) {
@@ -81,7 +81,7 @@ function Save-Backup {
 function Publish-AppFiles([string]$folder) {
   New-Item -ItemType Directory -Path $appRoot -Force | Out-Null
   $files = @(Get-ChildItem -LiteralPath $folder -File | Where-Object {
-    $_.Extension -in @('.ps1','.cmd','.whl','.txt','.md','.html')
+    $_.Extension -in @('.ps1','.cmd','.whl','.txt','.md','.html','.py')
   })
   foreach ($file in $files) {
     if ([IO.Path]::GetFullPath($file.DirectoryName).TrimEnd('\') -ieq
@@ -369,10 +369,10 @@ function Invoke-PortfolioWorker([string]$mode) {
 
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
-  $names = @(Get-ReleaseAssetNames '0.1.22')
-  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.22-Windows.zip' -or
-      $names[1] -ne 'Kleinanzeiger-v0.1.22-Windows.sha256' -or
-      $names[2] -ne 'Kleinanzeiger-v0.1.22-Release-Manifest.json') {
+  $names = @(Get-ReleaseAssetNames '0.1.24')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.24-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.24-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.24-Release-Manifest.json') {
     throw 'Release-Dateinamen sind nicht eindeutig.'
   }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {

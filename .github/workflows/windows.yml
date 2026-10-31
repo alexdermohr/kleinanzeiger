@@ -87,6 +87,7 @@ jobs:
               "test_portfolio_insights_ui.py",
               "test_offline_browser_e2e.py",
               "test_windows_offline_start.py",
+              "test_windows_offline_compat.py",
               "test_portfolio_templates.py",
               "test_portfolio_templates_http.py",
               "test_portfolio_templates_ui.py",
@@ -134,13 +135,13 @@ jobs:
           $wheel = @(Get-ChildItem -Path dist -Filter 'kleinanzeiger-*.whl')
           if ($wheel.Count -ne 1) { throw 'Expected exactly one Wheel' }
           Copy-Item $wheel[0].FullName $staging
-          Copy-Item scripts\Kleinanzeiger.cmd, scripts\windows-center.ps1, scripts\windows-worker.ps1, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1, scripts\windows-chrome.ps1, scripts\windows-ki-einrichten.ps1 $staging
+          Copy-Item scripts\Kleinanzeiger.cmd, scripts\windows-center.ps1, scripts\windows-worker.ps1, scripts\windows-offline-compat.py, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1, scripts\windows-chrome.ps1, scripts\windows-ki-einrichten.ps1 $staging
           Copy-Item docs\windows-installation.md (Join-Path $staging 'Windows-Installation.md')
           Copy-Item docs\Kleinanzeiger-Handbuch.html, docs\Kleinanzeiger-Funktionen.html $staging
           $digest = (Get-FileHash $wheel[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           "$digest  $($wheel[0].Name)" | Set-Content -Path (Join-Path $staging 'SHA256SUMS.txt') -Encoding ascii
-          Compress-Archive -Path "$staging\*" -DestinationPath 'Kleinanzeiger-v0.1.22-Windows.zip'
-          $zipHash = (Get-FileHash 'Kleinanzeiger-v0.1.22-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Compress-Archive -Path "$staging\*" -DestinationPath 'Kleinanzeiger-v0.1.24-Windows.zip'
+          $zipHash = (Get-FileHash 'Kleinanzeiger-v0.1.24-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Output "Windows Wheel SHA256 $digest"
           Write-Output "Windows customer ZIP SHA256 $zipHash"
       - name: Verify customer install script against packaged and hashed wheel
@@ -156,12 +157,12 @@ jobs:
           if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
             throw 'Customer installation did not produce the venv Python executable'
           }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.22'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.24'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Exercise the real Windows PowerShell 5.1 native-argument path after install.
-          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-center.ps1') -SelfTest -ExpectedInstalledVersion '0.1.22'
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-center.ps1') -SelfTest -ExpectedInstalledVersion '0.1.24'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -SelfTest -ExpectedInstalledVersion '0.1.22'
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -SelfTest -ExpectedInstalledVersion '0.1.24'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify Windows upgrade rollback and non-destructive failed staging
         if: matrix.python-version == '3.12'
@@ -175,16 +176,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $saved = @(Get-ChildItem -LiteralPath $state -Directory -Filter '.venv-rollback-*')
           if ($saved.Count -lt 1) { throw 'No previous Windows environment was retained' }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.22'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.24'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Valid local checksum but invalid Wheel: installation must fail before activation.
           $broken = Join-Path $env:RUNNER_TEMP ('kleinanzeiger-broken-' + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $broken -Force | Out-Null
           Copy-Item (Join-Path $staging 'windows-install.ps1') $broken
-          $badWheel = Join-Path $broken 'kleinanzeiger-0.1.22-py3-none-any.whl'
+          $badWheel = Join-Path $broken 'kleinanzeiger-0.1.24-py3-none-any.whl'
           [IO.File]::WriteAllText($badWheel, 'invalid wheel archive')
           $sha = (Get-FileHash -LiteralPath $badWheel -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha  kleinanzeiger-0.1.22-py3-none-any.whl" | Set-Content -Path (Join-Path $broken 'SHA256SUMS.txt') -Encoding ascii
+          "$sha  kleinanzeiger-0.1.24-py3-none-any.whl" | Set-Content -Path (Join-Path $broken 'SHA256SUMS.txt') -Encoding ascii
           $before = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash
           $failed = $false
           try { & (Join-Path $broken 'windows-install.ps1') | Out-Null } catch { $failed = $true }
@@ -192,7 +193,7 @@ jobs:
           if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $before) {
             throw 'Existing interpreter changed during failed staged install'
           }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.22'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.24'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Native Windows manual rollback and untrusted path rejection
         if: matrix.python-version == '3.12'
@@ -213,7 +214,7 @@ jobs:
           }
           $retained = @(Get-ChildItem -LiteralPath $state -Directory -Filter '.venv-rollback-*')
           if ($retained.Count -lt 1) { throw 'Previously active environment was not retained' }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.22'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.24'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $fingerprint = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash
           $rejected = $false
@@ -231,12 +232,12 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kleinanzeiger-windows-${{ github.sha }}
-          path: Kleinanzeiger-v0.1.22-Windows.zip
+          path: Kleinanzeiger-v0.1.24-Windows.zip
           if-no-files-found: error
           retention-days: 30
 
   publish-windows-release:
-    name: publish-windows-v0.1.22
+    name: publish-windows-v0.1.24
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: native-windows
     runs-on: ubuntu-latest
@@ -251,44 +252,49 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF_NAME" = 'main'
-          release_tag='v0.1.22'
+          release_tag='v0.1.24'
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo 'v0.1.22 already published; leaving unchanged'
+            echo 'v0.1.24 already published; leaving unchanged'
             exit 0
           fi
           if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" >/dev/null 2>&1; then
-            echo 'v0.1.22 tag exists without a release; refusing to replace'
+            echo 'v0.1.24 tag exists without a release; refusing to replace'
             exit 1
           fi
-          stage="$RUNNER_TEMP/kleinanzeiger-release-v0.1.22"
+          stage="$RUNNER_TEMP/kleinanzeiger-release-v0.1.24"
           mkdir -p "$stage" "$stage/unpacked"
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "kleinanzeiger-windows-$GITHUB_SHA" --dir "$stage"
-          zip="$stage/Kleinanzeiger-v0.1.22-Windows.zip"
+          zip="$stage/Kleinanzeiger-v0.1.24-Windows.zip"
           test -s "$zip"
           unzip -t "$zip"
           unzip -q "$zip" -d "$stage/unpacked"
           (cd "$stage/unpacked" && sha256sum -c SHA256SUMS.txt)
-          test -s "$stage/unpacked/kleinanzeiger-0.1.22-py3-none-any.whl"
+          test -s "$stage/unpacked/kleinanzeiger-0.1.24-py3-none-any.whl"
           test -s "$stage/unpacked/Windows-Installation.md"
           test -s "$stage/unpacked/Kleinanzeiger-Handbuch.html"
           test -s "$stage/unpacked/Kleinanzeiger-Funktionen.html"
           test -s "$stage/unpacked/Kleinanzeiger.cmd"
           test -s "$stage/unpacked/windows-center.ps1"
           test -s "$stage/unpacked/windows-worker.ps1"
+          test -s "$stage/unpacked/windows-offline-compat.py"
           zip_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
-          printf '%s  %s\n' "$zip_sha" "Kleinanzeiger-v0.1.22-Windows.zip" > "$stage/Kleinanzeiger-v0.1.22-Windows.sha256"
-          wheel="$stage/unpacked/kleinanzeiger-0.1.22-py3-none-any.whl"
+          printf '%s  %s\n' "$zip_sha" "Kleinanzeiger-v0.1.24-Windows.zip" > "$stage/Kleinanzeiger-v0.1.24-Windows.sha256"
+          wheel="$stage/unpacked/kleinanzeiger-0.1.24-py3-none-any.whl"
           wheel_sha="$(sha256sum "$wheel" | cut -d' ' -f1)"
           zip_bytes="$(stat -c%s "$zip")"
           wheel_bytes="$(stat -c%s "$wheel")"
-          printf '{"version":"0.1.22","tag":"%s","source_commit":"%s","workflow_run_id":"%s","windows_zip":{"filename":"Kleinanzeiger-v0.1.22-Windows.zip","bytes":%s,"sha256":"%s"},"wheel":{"filename":"kleinanzeiger-0.1.22-py3-none-any.whl","bytes":%s,"sha256":"%s"}}\n' \
-            "$release_tag" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$zip_bytes" "$zip_sha" "$wheel_bytes" "$wheel_sha" > "$stage/Kleinanzeiger-v0.1.22-Release-Manifest.json"
-          jq -e '.version == "0.1.22" and (.source_commit | length == 40)' "$stage/Kleinanzeiger-v0.1.22-Release-Manifest.json" >/dev/null
-          cat > "$stage/Kleinanzeiger-v0.1.22-Release-Notes.md" <<'EOF'
-          # Kleinanzeiger v0.1.22 – Windows
-          - **Neu in v0.1.22 (KI-Arbeitsliste):** Unter Bestandsänderungen den einklappbaren lokalen Autopilot-Tagesplan öffnen: unklare/laufende KI-Kostenansprüche, neue importierte E-Mail-Gespräche, überfällige manuelle Wiedervorlagen, ungeprüfte KI-Vorschläge und anstehende eigene Wiedervorlagen in beweisgebundener Priorität. 10.000er-Pagination und bis zu 50 Punkte je Seite; keine kostenpflichtige KI-Anfrage, kein Posteingang/Versand auf der Plattform und keine automatische Plattformänderung. Der ältere Arbeitsvorlagen-Aufmerksamkeits-Endpunkt bleibt kompatibel.
+          printf '{"version":"0.1.24","tag":"%s","source_commit":"%s","workflow_run_id":"%s","windows_zip":{"filename":"Kleinanzeiger-v0.1.24-Windows.zip","bytes":%s,"sha256":"%s"},"wheel":{"filename":"kleinanzeiger-0.1.24-py3-none-any.whl","bytes":%s,"sha256":"%s"}}\n' \
+            "$release_tag" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$zip_bytes" "$zip_sha" "$wheel_bytes" "$wheel_sha" > "$stage/Kleinanzeiger-v0.1.24-Release-Manifest.json"
+          jq -e '.version == "0.1.24" and (.source_commit | length == 40)' "$stage/Kleinanzeiger-v0.1.24-Release-Manifest.json" >/dev/null
+          cat > "$stage/Kleinanzeiger-v0.1.24-Release-Notes.md" <<'EOF'
+          # Kleinanzeiger v0.1.24 – Windows
+          - **Neu in v0.1.24 (Windows-Start):** Der Chrome-Debugging-Port wird vor dem Konto-Zugriff an die tatsächliche Chrome-Prozess-ID, die ausgewählte Chrome-EXE und das genau richtige dauerhaft gespeicherte Kleinanzeiger-Profil gebunden. Ist Port 9222 durch ein fremdes Chrome belegt oder der Nachweis unklar, öffnet die zentrale Oberfläche ausschließlich den lokalen, plattformfreien Lesemodus. Keine fremden Konto-Cookies lesen, keine Chrome-Profile oder Google-Anmeldungen löschen.
+          - **Neu in v0.1.24 (Bestandsänderungen):** Auch wenn Mark während eines laufenden Abgleichs den Anzeigentyp mehrfach wechselt, wird die zuletzt gewählte Filteransicht danach automatisch neu geladen. Veraltete Abfrageergebnisse erscheinen nicht; kein zusätzlicher Klick und keine Plattform-Schreibaktion.
+          - **Bereits in v0.1.23:** Neuer öffentlicher Python-Namensraum Kleinanzeiger und einheitliche Kleinanzeiger-Befehle und Fehlermeldungen. Installations-, Backup- und Rollbackwege bleiben kompatibel mit bereits ausgelieferten Windows-Umgebungen, auch wenn diese den neuen Modulnamen noch nicht kennen.
+          - **NixOS/KDE:** Neuer Linux-Startweg mit separatem eigenen Chrome-Profil und direkter Dashboard-Öffnung per Chrome DevTools, um einen zusätzlichen Chrome-Start über xdg-open zu vermeiden. Das alte Profil und persönliche Daten bleiben unverändert. Die reale Kundenkonto-Abnahme bleibt separat.
+          - **Bereits in v0.1.22 (KI-Arbeitsliste):** Unter Bestandsänderungen den einklappbaren lokalen Autopilot-Tagesplan öffnen: unklare/laufende KI-Kostenansprüche, neue importierte E-Mail-Gespräche, überfällige manuelle Wiedervorlagen, ungeprüfte KI-Vorschläge und anstehende eigene Wiedervorlagen in beweisgebundener Priorität. 10.000er-Pagination und bis zu 50 Punkte je Seite; keine kostenpflichtige KI-Anfrage, kein Posteingang/Versand auf der Plattform und keine automatische Plattformänderung. Der ältere Arbeitsvorlagen-Aufmerksamkeits-Endpunkt bleibt kompatibel.
           - **Bereits in v0.1.21 (P5):** A6-StorageOwner-IPC und gebundene Eigenanzeigen-Lese-CLI statt der bisherigen 2.048er-Grenze bis zu 12.000 synthetische Datensätze geprüft; 5.000/10.000/12.000 einschließlich unvollständiger oder ungültiger Paginations- und Rollback-Fälle. Der Windows-Katalog bleibt auf bis zu 10.000 bestätigte eigene Anzeigen ausgelegt; eine reale Live-Kontoabnahme ist nicht erfolgt.
-          - **Neu in v0.1.22 (KI-Portfolio):** Bis zu 10.000 verifizierte eigene veröffentlichte Anzeigen je persistentem KI-Prüfauftrag. Je ausdrücklich bestätigtem Stapel sind bis zu 100 einzelne KI-Anfragen nacheinander möglich, begrenzt durch das bestehende Gesamtbudget und die Sitzungsobergrenze. Bei UNKNOWN stoppt der Stapel; nie automatisch wiederholen. Keine Plattformänderung.
+          - **Bereits in v0.1.22 (KI-Portfolio):** Bis zu 10.000 verifizierte eigene veröffentlichte Anzeigen je persistentem KI-Prüfauftrag. Je ausdrücklich bestätigtem Stapel sind bis zu 100 einzelne KI-Anfragen nacheinander möglich, begrenzt durch das bestehende Gesamtbudget und die Sitzungsobergrenze. Bei UNKNOWN stoppt der Stapel; nie automatisch wiederholen. Keine Plattformänderung.
           - **Bereits seit v0.1.20 (KI):** Bei unklaren KI-Stapelresultaten UNKNOWN dauerhaft isolieren, Kosten nach externer Prüfung einmalig manuell abrechnen und nur unbeanspruchte Anzeigen nach erneuter ausdrücklicher Freigabe fortsetzen; niemals still einen kostenpflichtigen Provideraufruf wiederholen.
           - **Bereits in v0.1.20:** Nach einem initial fehlgeschlagenen Browserread bleibt das Offline-Dashboard bestehen. Beim einmaligen manuellen Wiederverbinden zeigt es die tatsächliche sichere Klassifikation für Anmeldung, Chrome/Netzwerk, laufenden Abgleich, Recovery oder lokalen Speicher statt einer pauschalen Fehlermeldung. Keine Blind-Retries, keine Datenüberschreibung und keine wiedererlangten Plattformwrites ohne neue Sitzung.
           - **Bereits in v0.1.19:** Beim manuellen Online-Abgleich nennt die Oberfläche gezielte sichere Diagnosen und konkrete Lösungen; dies behauptet keinen auf einem realen Kunden-PC gelösten Chrome-Transport.
@@ -347,14 +353,14 @@ jobs:
           während der synthetischen technischen Abnahme ausgelöst.
           EOF
           gh release create "$release_tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title 'Kleinanzeiger v0.1.22 – Windows' \
-            --notes-file "$stage/Kleinanzeiger-v0.1.22-Release-Notes.md" \
+            --title 'Kleinanzeiger v0.1.24 – Windows' \
+            --notes-file "$stage/Kleinanzeiger-v0.1.24-Release-Notes.md" \
             "$zip" \
-            "$stage/Kleinanzeiger-v0.1.22-Windows.sha256" \
-            "$stage/Kleinanzeiger-v0.1.22-Release-Manifest.json" \
-            "$stage/Kleinanzeiger-v0.1.22-Release-Notes.md" \
+            "$stage/Kleinanzeiger-v0.1.24-Windows.sha256" \
+            "$stage/Kleinanzeiger-v0.1.24-Release-Manifest.json" \
+            "$stage/Kleinanzeiger-v0.1.24-Release-Notes.md" \
             "$stage/unpacked/Windows-Installation.md" \
             "$stage/unpacked/Kleinanzeiger-Handbuch.html" \
             "$stage/unpacked/Kleinanzeiger-Funktionen.html" \
             "$stage/unpacked/SHA256SUMS.txt" \
-            "$stage/unpacked/kleinanzeiger-0.1.22-py3-none-any.whl"
+            "$stage/unpacked/kleinanzeiger-0.1.24-py3-none-any.whl"
