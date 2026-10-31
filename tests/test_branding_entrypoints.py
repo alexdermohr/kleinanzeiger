@@ -44,6 +44,8 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
         # Existing and rolled-back customer wheels may predate the new public
         # namespace. Keep runtime calls on the stable import ABI while all
         # visible UI, error messages and new console scripts say Kleinanzeiger.
+        # The explicit offline module is likewise a stable pre-branding CLI;
+        # both Windows entrypoints select it when CDP ownership is unknown.
         import re
 
         compatibility = {
@@ -53,8 +55,11 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
                 "-m mark_api.portfolio_import_cli",
                 "-m mark_api.windows_customer_choices",
                 "-m mark_api.launcher",
+                "-m mark_api.offline_launcher",
             ],
-            "windows-start.ps1": ["-m mark_api.launcher"],
+            "windows-start.ps1": [
+                "-m mark_api.launcher", "-m mark_api.offline_launcher",
+            ],
             "windows-worker.ps1": [
                 "-m mark_api.backup_cli",
                 "-m mark_api.launcher",
