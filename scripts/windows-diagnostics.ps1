@@ -49,7 +49,17 @@ function Get-PackageStatus {
   }
 }
 
+function Get-PortStatus {
+  param([int[]]$ListenerPorts)
+  if ($ListenerPorts -contains 8765) { return 'belegt' }
+  return 'frei'
+}
+
 if ($SelfTest) {
+  # No matching port is a healthy 'frei', not an API failure.
+  if ((Get-PortStatus -ListenerPorts @()) -cne 'frei') { throw 'Portstatus-Selbsttest fehlgeschlagen' }
+  if ((Get-PortStatus -ListenerPorts @(443, 8766)) -cne 'frei') { throw 'Portstatus-Selbsttest fehlgeschlagen' }
+  if ((Get-PortStatus -ListenerPorts @(443, 8765)) -cne 'belegt') { throw 'Portstatus-Selbsttest fehlgeschlagen' }
   $actual = @(Format-Diagnostic -PythonPresent $true -DatabasePresent $false -PackageStatus 'ok' -PortStatus 'frei')
   $expected = @(
     'Kleinanzeiger-Diagnose (nur lesend)',
@@ -81,10 +91,15 @@ if ($env:LOCALAPPDATA) {
 $packageStatus = Get-PackageStatus -PackageDirectory $PSScriptRoot
 $portStatus = 'unbekannt'
 try {
-  $listener = @(Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction Stop)
-  $portStatus = if ($listener.Count -gt 0) { 'belegt' } else { 'frei' }
+  # The filtered Get-NetTCPConnection cmdlet throws on an empty match.
+  # Enumerate read-only TCP listeners instead: an empty set means 'frei'.
+  $listenerPorts = @(
+    [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+      ForEach-Object { $_.Port }
+  )
+  $portStatus = Get-PortStatus -ListenerPorts $listenerPorts
 } catch {
-  # No listener permission, unavailable cmdlet or no matching listener.
+  # Genuine network enumeration errors remain unknown, never 'frei'.
   $portStatus = 'unbekannt'
 }
 Format-Diagnostic -PythonPresent $pythonPresent -DatabasePresent $dbPresent -PackageStatus $packageStatus -PortStatus $portStatus
