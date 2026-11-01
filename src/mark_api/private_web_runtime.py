@@ -1276,6 +1276,71 @@ class PrivateWebWriteApiRuntime:
         finally:
             self._operation_lock.release()
 
+    def refresh_owned_ad_content(self, ad_id: str) -> None:
+        """Refresh exactly one locally known owner listing from its authenticated editor.
+
+        This is a read-only browser navigation followed by a single SQLite
+        observation append, not a Write API operation or a platform mutation.
+        It shares the native Write operation lock and refuses outstanding
+        recovery/unknown actions before touching the browser.
+        """
+        import re
+        from .portfolio_sales import OWN_INVENTORY_SOURCES
+
+        if type(ad_id) is not str or re.fullmatch(r"[0-9]{1,32}", ad_id) is None:
+            raise ValueError("invalid owner ad id")
+        if not self._operation_lock.acquire(blocking=False):
+            raise OwnerInventorySyncFailure("busy")
+        try:
+            if self._stopping or self._closed:
+                raise OwnerInventorySyncFailure("browser_unavailable")
+            if self._fence_witness is not None:
+                raise OwnerInventorySyncFailure("recovery_required")
+            if (self._media_runtime is not None
+                    and self._media_runtime.reconciliation_required):
+                raise OwnerInventorySyncFailure("recovery_required")
+            try:
+                if (self._store.dashboard_pending_writes()
+                        or self._store.sync_recovery_status().get("unresolved_count") != 0):
+                    raise OwnerInventorySyncFailure("recovery_required")
+                prior = self._store.latest_ad_snapshot(ad_id)
+            except OwnerInventorySyncFailure:
+                raise
+            except Exception:
+                raise OwnerInventorySyncFailure("storage_unavailable") from None
+            if (prior is None or prior.source not in OWN_INVENTORY_SOURCES
+                    or prior.lifecycle_state not in (LifecycleState.ACTIVE, LifecycleState.PAUSED)):
+                raise OwnerInventorySyncFailure("read_failed")
+            if getattr(self._content_runtime, "_cdp_session", None) is None:
+                raise OwnerInventorySyncFailure("browser_unavailable")
+            try:
+                result = self._content_runtime.content_reader_for(ad_id).read_ads()
+            except Exception:
+                raise OwnerInventorySyncFailure("connection_unavailable") from None
+            if not isinstance(result, ReadResult) or not result.is_success:
+                kind = ("login_required" if isinstance(result, ReadResult)
+                        and result.status is ReadStatus.UNAUTHENTICATED
+                        else "connection_unavailable")
+                raise OwnerInventorySyncFailure(kind)
+            matches = [
+                ad for ad in (result.value or ())
+                if isinstance(ad, AdSnapshot) and ad.ad_id == ad_id
+            ]
+            if (len(matches) != 1 or type(matches[0].title) is not str
+                    or type(matches[0].description) is not str
+                    or matches[0].lifecycle_state not in (
+                        LifecycleState.ACTIVE, LifecycleState.PAUSED)
+                    or not matches[0].source.endswith("+private-web")
+                    or matches[0].observed_at < prior.observed_at):
+                raise OwnerInventorySyncFailure("read_failed")
+            verified = replace(matches[0], source="private-web-owner-inventory")
+            try:
+                self._store.append_ad_snapshot(verified)
+            except Exception:
+                raise OwnerInventorySyncFailure("storage_unavailable") from None
+        finally:
+            self._operation_lock.release()
+
     @property
     def media_reconciliation_required(self) -> bool:
         runtime = self._media_runtime
