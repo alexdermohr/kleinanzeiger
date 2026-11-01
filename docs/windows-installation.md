@@ -159,6 +159,31 @@ Plattformereignis. Weder der lokale Artikelpreis noch eine Plattformanzeige wird
 geändert. Gespeicherte Regeln lassen sich laden, ändern und entfernen. Nach einer
 unklaren Speicherantwort zuerst neu laden, nicht blind wiederholen.
 
+## Optional: echte Kleinanzeigen-Chats über externe Konto-API
+
+Nach eigenständiger Einrichtung eines kostenpflichtigen Kontozugangs bei
+**Kleinanzeigen Agent** (unabhängiger Beta-Dienst, nicht offiziell von
+kleinanzeigen.de) im Windows-Kontrollfenster unter **Weitere Aktionen →
+Nachrichten verwalten** einen persönlichen Konto-API-Schlüssel geschützt mit
+Windows-DPAPI hinterlegen. Der optionale Zugang kostet laut Anbieter
+9,90 EUR netto pro Monat zuzüglich Credits. Kontoanmeldung und Buchung geschehen
+nicht durch Kleinanzeiger; die Nutzung kann Kontoeinschränkungen mit sich bringen.
+
+**Verbindung prüfen** benötigt keine Credits. Chats laden, einen Chat öffnen
+(kann ihn als gelesen markieren) und eine Antwort senden werden erst nach
+bewusstem Klick ausgeführt. Antworten kosten beim Anbieter gegebenenfalls
+Credits und erfordern eine ausdrückliche Einzelfreigabe. Ein unbestätigter
+Versand wird dauerhaft als unbekannt behandelt und nicht automatisch erneut
+gesendet. Nachrichten und Käuferdaten werden nicht im separaten Versandjournal
+gespeichert. Ein lokaler Anzeigenbestand ist kein Beweis aktueller Eigentümerschaft;
+vor der Antwort das aktuelle Konto und den Gesprächspartner selbst prüfen.
+
+Die tatsächliche Funktion auf Marks angemeldetem Windows-Kunden-PC bleibt
+bis zum verbundenen Konto-API-Zugang separat abzunehmen. Das bestehende
+**Interessenten-&-Antworten-Formular** ist weiterhin ein lokaler EML- und
+KI-Entwurfsarbeitsbereich ohne eigenen Plattform-Versand. Eine unbeaufsichtigte
+KI-Nachrichtenautomatik wird nicht aktiviert.
+
 ## Interessenten und Antwortentwürfe
 
 Unter **Meine Anzeigen** eine eigene Anzeige suchen und **Antwort vorbereiten**

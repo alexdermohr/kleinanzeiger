@@ -80,6 +80,8 @@ class WindowsHubContractTests(unittest.TestCase):
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-VerifiedPackage", worker)
+        self.assertIn("'windows-messages.ps1'", worker)
+        self.assertIn("windows-messages.ps1", (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig"))
         self.assertIn("'windows-offline-compat.py'", worker)
         self.assertIn("'.html','.py'", worker)
         self.assertIn("Get-FileHash", worker)

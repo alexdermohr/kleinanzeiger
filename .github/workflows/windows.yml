@@ -113,7 +113,7 @@ jobs:
       - name: Parse customer PowerShell scripts
         shell: pwsh
         run: |
-          foreach ($script in @('windows-install.ps1', 'windows-start.ps1', 'windows-chrome.ps1', 'windows-ki-einrichten.ps1', 'windows-center.ps1', 'windows-worker.ps1')) {
+          foreach ($script in @('windows-install.ps1', 'windows-start.ps1', 'windows-chrome.ps1', 'windows-ki-einrichten.ps1', 'windows-center.ps1', 'windows-worker.ps1', 'windows-messages.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path (Join-Path scripts $script)).Path, [ref]$tokens, [ref]$errors) | Out-Null
@@ -135,7 +135,7 @@ jobs:
           $wheel = @(Get-ChildItem -Path dist -Filter 'kleinanzeiger-*.whl')
           if ($wheel.Count -ne 1) { throw 'Expected exactly one Wheel' }
           Copy-Item $wheel[0].FullName $staging
-          Copy-Item scripts\Kleinanzeiger.cmd, scripts\windows-center.ps1, scripts\windows-worker.ps1, scripts\windows-offline-compat.py, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1, scripts\windows-chrome.ps1, scripts\windows-ki-einrichten.ps1 $staging
+          Copy-Item scripts\Kleinanzeiger.cmd, scripts\windows-center.ps1, scripts\windows-worker.ps1, scripts\windows-messages.ps1, scripts\windows-offline-compat.py, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1, scripts\windows-chrome.ps1, scripts\windows-ki-einrichten.ps1 $staging
           Copy-Item docs\windows-installation.md (Join-Path $staging 'Windows-Installation.md')
           Copy-Item docs\Kleinanzeiger-Handbuch.html, docs\Kleinanzeiger-Funktionen.html $staging
           $digest = (Get-FileHash $wheel[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -163,6 +163,9 @@ jobs:
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-center.ps1') -SelfTest -ExpectedInstalledVersion '0.1.27'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -SelfTest -ExpectedInstalledVersion '0.1.27'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Prove the optional inbox module works from the actually installed Wheel; no provider call.
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-messages.ps1') -SelfTest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify Windows upgrade rollback and non-destructive failed staging
         if: matrix.python-version == '3.12'
@@ -276,6 +279,7 @@ jobs:
           test -s "$stage/unpacked/Kleinanzeiger.cmd"
           test -s "$stage/unpacked/windows-center.ps1"
           test -s "$stage/unpacked/windows-worker.ps1"
+          test -s "$stage/unpacked/windows-messages.ps1"
           test -s "$stage/unpacked/windows-offline-compat.py"
           zip_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
           printf '%s  %s\n' "$zip_sha" "Kleinanzeiger-v0.1.27-Windows.zip" > "$stage/Kleinanzeiger-v0.1.27-Windows.sha256"

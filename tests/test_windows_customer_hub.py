@@ -124,6 +124,9 @@ class CustomerHubTests(unittest.TestCase):
         self.assertIn("test_windows_customer_hub.py", workflow)
         self.assertIn("Kleinanzeiger-Handbuch.html", workflow)
         self.assertIn("Kleinanzeiger-Funktionen.html", workflow)
+        self.assertIn("windows-messages.ps1", workflow)
+        self.assertIn("Show-MessageApiDialog", hub)
+        self.assertIn("Nachrichten verwalten", hub)
         self.assertIn("'0.1.27'", workflow)
         self.assertIn("0.1.27", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(

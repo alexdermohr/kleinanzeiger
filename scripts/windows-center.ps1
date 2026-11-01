@@ -25,6 +25,7 @@ $db = Join-Path $state 'anzeigen.sqlite'
 $python = Join-Path $state '.venv\Scripts\python.exe'
 $profile = Join-Path $state 'ChromeProfile'
 $keyFile = Join-Path $state 'openai-key.dpapi'
+$messageKeyFile = Join-Path $state 'klaz-api-key.dpapi'
 $worker = Join-Path $base 'windows-worker.ps1'
 . (Join-Path $base 'windows-chrome.ps1')
 
@@ -119,7 +120,9 @@ $mail = Add-Button 'E-Mails importieren' 28 390 282 43
 $labels = Add-Button 'Anzeigen vergleichen' 330 390 282 43
 $productsExport = Add-Button 'Entwürfe exportieren' 28 449 282 43
 $restore = Add-Button 'Sicherung wiederherstellen …' 330 449 282 43
-$rollback = Add-Button 'Vorherige Programmversion verwenden …' 28 508 584 43
+$messages = Add-Button 'Nachrichten verwalten' 28 508 282 43
+$rollback = Add-Button 'Vorherige Programmversion verwenden …' 330 508 282 43
+$rollback.AutoEllipsis = $true
 $statusLabel = Add-Label 'Bereit.' 28 397 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
 $detailsLink.Text = 'Fehlerdetails anzeigen'
@@ -134,7 +137,7 @@ $detailsLink.Add_Click({
 $script:advancedExpanded = $false
 function Set-AdvancedLayout([bool]$expanded) {
   $script:advancedExpanded = $expanded
-  foreach ($control in @($mail,$labels,$productsExport,$restore,$rollback)) {
+  foreach ($control in @($mail,$labels,$productsExport,$restore,$messages,$rollback)) {
     $control.Visible = $expanded
   }
   $advanced.Text = $(if($expanded){'Weniger anzeigen'}else{'Weitere Aktionen'})
@@ -181,6 +184,7 @@ function Refresh-Controls {
   $advanced.Enabled = !$busy
   $backup.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $ai.Enabled = !$busy
+  $messages.Enabled = !$busy -and (Test-Path -LiteralPath $db) -and (Test-Path -LiteralPath $python -PathType Leaf)
   $mail.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $labels.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $products.Enabled = !$busy -and (Test-Path -LiteralPath $db)
@@ -254,7 +258,32 @@ function Show-KiDialog {
 }
 
 
-function Open-CustomerHelp([string]$fileName) {
+function Show-MessageApiDialog {
+  $dialog = [System.Windows.Forms.Form]::new()
+  $dialog.Text = 'Nachrichten-Zugang einrichten'
+  $dialog.ClientSize = [Drawing.Size]::new(510,250)
+  $dialog.FormBorderStyle = 'FixedDialog'
+  $dialog.StartPosition = 'CenterParent'
+  $dialog.Font = $font
+  $note = [Windows.Forms.Label]::new()
+  $note.Text = 'Optionaler unabhängiger Anbieter Kleinanzeigen Agent: Zugang kostenpflichtig (9,90 EUR netto/Monat + Credits). Nicht offiziell von kleinanzeigen.de. Alle Chat-Abfragen und jeder Versand benötigen einen Klick. Erst beim Anbieter selbst einen Konto-API-Zugang aktivieren; danach hier den API-Schlüssel eingeben.'
+  $note.SetBounds(20,12,467,122)
+  $dialog.Controls.Add($note)
+  $entry = [Windows.Forms.TextBox]::new()
+  $entry.SetBounds(20,140,467,28)
+  $entry.UseSystemPasswordChar = $true
+  $dialog.Controls.Add($entry)
+  $save = [Windows.Forms.Button]::new()
+  $save.Text = 'Zugang speichern'
+  $save.SetBounds(20,185,200,38)
+  $dialog.Controls.Add($save)
+  $remove = [Windows.Forms.Button]::new()
+  $remove.Text = 'Zugang entfernen'
+  $remove.SetBounds(235,185,252,38)
+  $remove.Enabled = Test-Path -LiteralPath $messageKeyFile
+  $dialog.Controls.Add($remove)
+  $save.Add_Click({
+    if ($entry.Text -notmatch '^klaz_live_[A-Za-z0-9_-]{8,200}
   if ($fileName -notin @('Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html')) {
     throw 'Unbekannte Hilfe-Datei.'
   }
@@ -749,6 +778,26 @@ $update.Add_Click({
   } catch { Set-Status $_.Exception.Message $true }
 })
 $backup.Add_Click({ try { Start-Worker 'Backup' } catch { Set-Status $_.Exception.Message $true } })
+$messages.Add_Click({
+  try {
+    if (!(Test-Path -LiteralPath $python -PathType Leaf) -or
+        !(Test-Path -LiteralPath $db -PathType Leaf)) {
+      Set-Status 'Zuerst Kleinanzeiger einrichten und eigene Anzeigen abgleichen.' $true
+      return
+    }
+    if (!(Test-Path -LiteralPath $messageKeyFile -PathType Leaf)) {
+      Show-MessageApiDialog
+      if (!(Test-Path -LiteralPath $messageKeyFile -PathType Leaf)) { return }
+    }
+    $startScript = Join-Path $base 'windows-messages.ps1'
+    if (!(Test-Path -LiteralPath $startScript -PathType Leaf)) {
+      throw 'Nachrichtenfunktion fehlt im installierten Paket. Bitte aktualisieren.'
+    }
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile',
+      '-ExecutionPolicy','Bypass','-File',('"' + $startScript + '"')) | Out-Null
+    Set-Status 'Nachrichtenfenster gestartet. Chatliste und Versand erfordern jeweils einen Klick.'
+  } catch { Set-Status $_.Exception.Message $true }
+})
 $mail.Add_Click({ try { Show-CustomerMailPicker } catch { Set-Status $_.Exception.Message $true } })
 $labels.Add_Click({ try { Show-CustomerLabels } catch { Set-Status $_.Exception.Message $true } })
 $products.Add_Click({ try { Show-ProductImport } catch { Set-Status $_.Exception.Message $true } })
@@ -909,7 +958,7 @@ if ($SelfTest) {
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
     throw 'Die installierte Version wurde vom Kontrollfenster nicht erkannt.'
   }
-  foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1')) {
+  foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1','windows-messages.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $base $file))) { throw "Fehlendes Skript: $file" }
   }
   foreach ($file in @('Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html')) {
@@ -935,7 +984,7 @@ if ($SelfTest) {
   Set-AdvancedLayout $false
   if ($form.Controls.Count -lt 12 -or $primary.Text -ne 'Kleinanzeiger starten' -or
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $restore -or
-      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $rollback -or $null -eq $help -or $null -eq $features) {
+      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $messages -or $null -eq $rollback -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
   }
   $timer.Dispose()
@@ -945,4 +994,178 @@ if ($SelfTest) {
 }
 $timer.Start()
 try { [Windows.Forms.Application]::Run($form) }
-finally { $timer.Stop();$timer.Dispose();$form.Dispose() }
+finally { $timer.Stop();$timer.Dispose();$form.Dispose() }) {
+      [Windows.Forms.MessageBox]::Show('Bitte einen gültigen Konto-API-Schlüssel eingeben.','Kleinanzeiger') | Out-Null
+      return
+    }
+    $secret = ConvertTo-SecureString $entry.Text -AsPlainText -Force
+    $entry.Clear()
+    New-Item -ItemType Directory -Path $state -Force | Out-Null
+    $temporary = $messageKeyFile + '.new'
+    try {
+      ConvertFrom-SecureString $secret | Set-Content -LiteralPath $temporary -Encoding Ascii -NoNewline
+      Move-Item -LiteralPath $temporary -Destination $messageKeyFile -Force
+      $dialog.DialogResult = [Windows.Forms.DialogResult]::OK
+      $dialog.Close()
+    } catch {
+      [Windows.Forms.MessageBox]::Show('Nachrichten-Zugang konnte nicht gespeichert werden.','Kleinanzeiger') | Out-Null
+    } finally {
+      Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+      $secret.Dispose()
+    }
+  })
+  $remove.Add_Click({
+    if ([Windows.Forms.MessageBox]::Show('Nachrichten-Zugang lokal entfernen?', 'Kleinanzeiger',
+        [Windows.Forms.MessageBoxButtons]::YesNo) -eq [Windows.Forms.DialogResult]::Yes) {
+      Remove-Item -LiteralPath $messageKeyFile -Force
+      $dialog.DialogResult = [Windows.Forms.DialogResult]::OK
+      $dialog.Close()
+    }
+  })
+  $dialog.ShowDialog($form) | Out-Null
+  $dialog.Dispose()
+  if (Test-Path -LiteralPath $messageKeyFile) {
+    Set-Status 'Nachrichten-Zugang lokal geschützt gespeichert. Noch keine Chats geladen oder versendet.'
+  }
+}
+
+function Open-CustomerHelp([string]$fileName) {
+  if ($fileName -notin @('Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html')) {
+    throw 'Unbekannte Hilfe-Datei.'
+  }
+  $helpFile = Join-Path $base $fileName
+  if (!(Test-Path -LiteralPath $helpFile -PathType Leaf)) {
+    $helpFile = Join-Path (Join-Path $base '..\docs') $fileName
+  }
+  if (!(Test-Path -LiteralPath $helpFile -PathType Leaf)) {
+    throw 'Hilfe-Datei fehlt. Bitte das vollstaendige Kundenpaket verwenden.'
+  }
+  Start-Process -FilePath $helpFile
+}
+
+
+function Invoke-PortfolioPreview([string]$selectedFile) {
+  if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw 'Kleinanzeiger ist nicht eingerichtet.'
+  }
+  $payload = @{path=$selectedFile}
+  $encoded = [Convert]::ToBase64String(
+    [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $payload -Compress)))
+  $env:KLEINANZEIGER_IMPORT_REQUEST = $encoded
+  try {
+    $raw = @(& $python -m mark_api.portfolio_import_cli --db $db --mode preview 2>$null) -join ''
+    if ($LASTEXITCODE -ne 0 -or !$raw) {
+      throw 'Importvorschau konnte nicht erstellt werden.'
+    }
+    return ConvertFrom-Json -InputObject $raw
+  } finally {
+    Remove-Item Env:KLEINANZEIGER_IMPORT_REQUEST -ErrorAction SilentlyContinue
+  }
+}
+
+function Show-ProductImport {
+  if (Test-ActiveProduct) {
+    Set-Status 'Vor dem Artikelimport Kleinanzeiger bitte beenden.' $true
+    return
+  }
+  $picker = [Windows.Forms.OpenFileDialog]::new()
+  $picker.Title = 'Artikel aus CSV oder Excel auswaehlen'
+  $picker.Filter = 'CSV- und Excel-Dateien (*.csv;*.xlsx)|*.csv;*.xlsx'
+  $picker.Multiselect = $false
+  try {
+    if ($picker.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK) { return }
+    $path = $picker.FileName
+    $preview = Invoke-PortfolioPreview $path
+    if ([string]$preview.status -ne 'preview') {
+      $issue = @($preview.issues)[0]
+      $place = $(if($issue -and $null -ne $issue.row){"Zeile $($issue.row)"}else{'Datei'})
+      [Windows.Forms.MessageBox]::Show(
+        "Import nicht moeglich: $place, $($issue.field) – $($issue.message)",
+        'Kleinanzeiger') | Out-Null
+      return
+    }
+    if (!$preview.can_import) {
+      [Windows.Forms.MessageBox]::Show(
+        "$($preview.conflict) Artikelnummern haben abweichende bereits gespeicherte Inhalte. Bitte Importdatei pruefen.",
+        'Kleinanzeiger') | Out-Null
+      return
+    }
+    $sample = (@($preview.samples) | Select-Object -First 4 |
+      ForEach-Object { $_.sku + ': ' + $_.title }) -join [Environment]::NewLine
+    $question = "Datei: $($preview.filename)" + [Environment]::NewLine +
+      "Artikel: $($preview.total), neu: $($preview.new), unveraendert: $($preview.unchanged)" +
+      [Environment]::NewLine + [Environment]::NewLine + $sample +
+      [Environment]::NewLine + [Environment]::NewLine +
+      "Lokal als unveroeffentlichte Entwuerfe importieren? Zuvor wird eine Sicherung erstellt."
+    if ([Windows.Forms.MessageBox]::Show(
+      $question,'Kleinanzeiger – Importvorschau',
+      [Windows.Forms.MessageBoxButtons]::YesNo) -ne
+      [Windows.Forms.DialogResult]::Yes) { return }
+    Start-Worker 'ImportProducts' $false '' @{path=$path;sha256=[string]$preview.sha256}
+  } finally { $picker.Dispose() }
+}
+
+function Show-ProductExport {
+  if (Test-ActiveProduct) {
+    Set-Status 'Vor dem Export Kleinanzeiger bitte beenden.' $true
+    return
+  }
+  $picker = [Windows.Forms.SaveFileDialog]::new()
+  $picker.Title = 'Artikelentwuerfe als CSV exportieren'
+  $picker.Filter = 'CSV-Datei (*.csv)|*.csv'
+  $picker.DefaultExt = 'csv'
+  $picker.AddExtension = $true
+  $picker.OverwritePrompt = $false
+  try {
+    if ($picker.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK) { return }
+    if (Test-Path -LiteralPath $picker.FileName) {
+      Set-Status 'Exportziel ist bereits vorhanden. Bitte neuen Dateinamen waehlen.' $true
+      return
+    }
+    Start-Worker 'ExportProducts' $false '' @{path=$picker.FileName}
+  } finally { $picker.Dispose() }
+}
+
+function Show-CustomerMailPicker {
+  if (Test-ActiveProduct) {
+    Set-Status 'Zum E-Mail-Import Kleinanzeiger zuerst beenden.' $true
+    return
+  }
+  $picker = [System.Windows.Forms.OpenFileDialog]::new()
+  $picker.Title = 'Kleinanzeigen-Benachrichtigungen auswaehlen'
+  $picker.Filter = 'Gespeicherte E-Mails (*.eml)|*.eml'
+  $picker.Multiselect = $true
+  try {
+    if ($picker.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK) { return }
+    $selected = @($picker.FileNames)
+    if ($selected.Count -lt 1 -or $selected.Count -gt 100) {
+      Set-Status 'Bitte hoechstens 100 gespeicherte E-Mails waehlen.' $true
+      return
+    }
+    if ([Windows.Forms.MessageBox]::Show(
+      "$($selected.Count) lokale E-Mail-Datei(en) in die Auswertung importieren?",
+      'Kleinanzeiger', [Windows.Forms.MessageBoxButtons]::YesNo) -ne
+      [Windows.Forms.DialogResult]::Yes) { return }
+    Start-Worker 'ImportMail' $false '' @{paths=$selected}
+  } finally { $picker.Dispose() }
+}
+
+function Show-CustomerLabels {
+  if (Test-ActiveProduct) {
+    Set-Status 'Zum Bearbeiten der Vergleichslabels Kleinanzeiger zuerst beenden.' $true
+    return
+  }
+  if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw 'Kleinanzeiger ist noch nicht eingerichtet.'
+  }
+  $raw = & $python -m mark_api.windows_customer_choices --db $db 2>$null
+  if ($LASTEXITCODE -ne 0) { throw 'Gespeicherte Anzeigen konnten nicht gelesen werden.' }
+  $choices = @(($raw | ConvertFrom-Json).ads | Where-Object { $null -ne $_ })
+  if ($choices.Count -eq 0) {
+    Set-Status 'Zuerst Anzeigen abgleichen oder E-Mails importieren.'
+    return
+  }
+  $dialog = [Windows.Forms.Form]::new()
+  $dialog.Text = 'Vergleichslabels'
+  $dialog.ClientSize = [Drawing.Size]::new(570,388)
+  $dialog.StartPosition = 'CenterParent'
