@@ -5687,6 +5687,37 @@ async function loadExistingAiJobs() {
     return true;
   } catch (error) { byId("existing-ai-feedback").textContent=error.message; return false; }
 }
+async function copyApprovedExistingAi(item, jobId) {
+  const proposal=item?.proposal;
+  if (item?.phase!=="approved" ||
+      typeof proposal?.title!=="string" || !proposal.title.trim() ||
+      typeof proposal?.description!=="string" || !proposal.description.trim() ||
+      existingAiBusy || existingAiBatchBusy ||
+      existingAiActiveId!==jobId || existingAiDisplayedId!==jobId) {
+    byId("existing-ai-feedback").textContent=
+      "Nur aktuell lokal freigegebene Vorschläge lassen sich kopieren. Bitte Auftrag neu laden.";
+    return false;
+  }
+  if (typeof navigator==="undefined" ||
+      typeof navigator.clipboard?.writeText!=="function") {
+    byId("existing-ai-feedback").textContent=
+      "Zwischenablage nicht verfügbar. Vorschlag bei Bedarf manuell markieren.";
+    return false;
+  }
+  try {
+    // Intentional manual handoff: no ad ID, source metadata, credentials or platform action.
+    await navigator.clipboard.writeText(
+      "Titel:\\n"+proposal.title+"\\n\\nBeschreibung:\\n"+proposal.description);
+    byId("existing-ai-feedback").textContent=
+      "Freigegebenen Vorschlag kopiert. Auf Kleinanzeigen wurde nichts geändert.";
+    return true;
+  } catch {
+    byId("existing-ai-feedback").textContent=
+      "Kopieren fehlgeschlagen. Vorschlag bei Bedarf manuell markieren.";
+    return false;
+  }
+}
+
 async function loadExistingAiDetails(reset=false) {
   if (!existingAiActiveId||existingAiBusy) return false;
   if (reset) { existingAiPageIndex=0; existingAiCursors=[""]; existingAiSelected.clear(); }
@@ -5729,6 +5760,15 @@ async function loadExistingAiDetails(reset=false) {
       const original=document.createElement("pre");original.textContent="Original\\n"+(item.original?.description||"");
       const proposal=document.createElement("pre");proposal.textContent="Vorschlag\\n"+(item.proposal?.description||"—");
       details.append(summary,original,proposal);diff.append(details);row.append(diff);
+      if (item.phase==="approved" &&
+          typeof item.proposal?.title==="string" && item.proposal.title.trim() &&
+          typeof item.proposal?.description==="string" && item.proposal.description.trim()) {
+        const copy=document.createElement("button");
+        copy.type="button";
+        copy.textContent="Freigegebenen Vorschlag kopieren";
+        copy.addEventListener("click",()=>{void copyApprovedExistingAi(item,job.job_id);});
+        diff.append(copy);
+      }
       const phase=document.createElement("td");phase.textContent=item.phase;row.append(phase);body.append(row);
       if (item.phase==="unknown") {
         const option=document.createElement("option");

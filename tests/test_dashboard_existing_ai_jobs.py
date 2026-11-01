@@ -473,4 +473,93 @@ by("existing-ai-batch-count").value="100";by("existing-ai-consent").checked=true
 
 
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js needed for dashboard interaction")
+    def test_node_approved_existing_ai_clipboard_only_manual_handoff(self):
+        harness=r"""
+const vm=require("node:vm"), fs=require("node:fs"), assert=require("node:assert/strict");
+class E {
+  constructor(id="") {
+    this.id=id; this.value=""; this.checked=false; this.hidden=false;
+    this.disabled=false; this.children=[]; this.listeners={}; this.textContent="";
+  }
+  addEventListener(name,fn) {(this.listeners[name]??=[]).push(fn)}
+  append(...children) {this.children.push(...children)}
+  replaceChildren(...children) {this.children=[...children]}
+  click() {for(const fn of this.listeners.click??[])fn({target:this})}
+  focus() {} scrollIntoView() {} querySelectorAll() {return []}
+}
+const elements=new Map(), by=id=>{
+  if(!elements.has(id))elements.set(id,new E(id));
+  return elements.get(id);
+};
+const document={getElementById:by,createElement:()=>new E(),querySelectorAll:()=>[]};
+const jobId="a".repeat(32), copied=[], requests=[];
+const ad=(phase,id,proposal)=>({
+  ad_id:id,phase,source_sha256:"sensitive-source-sha",
+  original:{title:"ORIGINAL_SECRET",description:"OWNER_TOKEN_SHOULD_NOT_COPY"},
+  proposal:proposal??{title:"Verbesserter Titel",description:"Belegte Details."}
+});
+const job={
+  job_id:jobId,state:"review",total:5,platform_writes:0,
+  budget_cents:200,estimate_cents:20,actual_cents:0,reserved_cents:0,
+  counts:{approved:2,proposed:1,rejected:1,unknown:1,queued:0,inflight:0},
+  has_more:false,next_after:null,
+  items:[ad("approved","ad-4711"),ad("proposed","ad-4712"),
+    ad("rejected","ad-4713"),ad("unknown","ad-4714"),
+    ad("approved","ad-4715",{title:" ",description:"Belegte Details."})]
+};
+const navigator={clipboard:{writeText:async value=>{copied.push(value)}}};
+const response={ok:true,status:200,json:async()=>job,text:async()=>JSON.stringify(job)};
+const context={document,navigator,console,URLSearchParams,Uint8Array,Blob,TextEncoder,
+  setTimeout,clearTimeout,
+  fetch:async path=>{requests.push(path);return response},
+  window:{location:{hash:"",pathname:"/",search:"",origin:"http://127.0.0.1"},
+    history:{replaceState(){}},sessionStorage:{getItem(){return null},setItem(){}},
+    confirm:()=>true,crypto:{getRandomValues:a=>a.fill(7)}},
+  globalThis:null,crypto:{getRandomValues:a=>a.fill(7)}};
+context.globalThis=context;vm.createContext(context);
+const source=fs.readFileSync(0,"utf8").replace(/consumeWriteToken\(\);\s*load\(\);\s*$/," ");
+new vm.Script(source);vm.runInContext(source,context);
+vm.runInContext('existingAiActiveId="a".repeat(32)',context);
+const findCopy=row=>row.children[2].children.find(
+  child=>child.textContent==="Freigegebenen Vorschlag kopieren");
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+  assert.equal(await vm.runInContext("loadExistingAiDetails()",context),true);
+  const rows=by("existing-ai-items").children;
+  assert.equal(rows.length,5);
+  assert.ok(findCopy(rows[0]),"approved suggestion must be copyable");
+  for(const idx of [1,2,3,4])assert.equal(findCopy(rows[idx]),undefined);
+  assert.equal(requests.length,1,"only one read to populate the table");
+  findCopy(rows[0]).click();await settle();
+  assert.deepEqual(copied,["Titel:\nVerbesserter Titel\n\nBeschreibung:\nBelegte Details."]);
+  assert.equal(copied[0].includes("ad-4711"),false);
+  assert.equal(copied[0].includes("OWNER_TOKEN"),false);
+  assert.match(by("existing-ai-feedback").textContent,/kopiert/i);
+  assert.equal(requests.length,1,"clipboard action must never call platform API");
+  navigator.clipboard=null;
+  findCopy(rows[0]).click();await settle();
+  assert.match(by("existing-ai-feedback").textContent,/nicht verfügbar/);
+  assert.equal(copied.length,1);
+  navigator.clipboard={writeText:async()=>{throw new Error("SECRET_PRIVATE_TOKEN")}};
+  findCopy(rows[0]).click();await settle();
+  assert.match(by("existing-ai-feedback").textContent,/fehlgeschlagen/);
+  assert.equal(by("existing-ai-feedback").textContent.includes("SECRET_PRIVATE_TOKEN"),false);
+  assert.equal(copied.length,1);
+  navigator.clipboard={writeText:async value=>{copied.push(value)}};
+  vm.runInContext('existingAiActiveId="b".repeat(32)',context);
+  findCopy(rows[0]).click();await settle();
+  assert.match(by("existing-ai-feedback").textContent,/neu laden/);
+  assert.equal(copied.length,1);
+  assert.equal(requests.length,1);
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        result=subprocess.run(
+            [shutil.which("node") or "node", "-e", harness],
+            input=_DASHBOARD_JS,text=True,encoding="utf-8",
+            capture_output=True,timeout=25,
+        )
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+
 if __name__ == "__main__": unittest.main()
