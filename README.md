@@ -1,6 +1,8 @@
 # Kleinanzeiger
 
-**Ausgabe v0.1.26:** Nach einer erfolgreichen Suche bleiben Suchtext und Statusfilter des lokalen Anzeigenkatalogs im Browserprofil für den nächsten Dashboard-Start erhalten. Fehlgeschlagene Suchen werden sichtbar zurückgenommen. Weder Kontoanmeldungen noch ausgewählte Anzeigen, Freigaben oder Plattformaktionen werden gespeichert oder ausgelöst.
+**Ausgabe v0.1.27:** Lokal freigegebene KI-Titel und -Beschreibungen bestehender eigener Anzeigen lassen sich im KI-Auftrag über einen eigenen Knopf manuell kopieren. Für offene, abgelehnte, unklare oder unvollständige Vorschläge gibt es keinen Kopierknopf. Die Zwischenablage überträgt keine zusätzliche Anzeigen-ID, Ursprungsmetadaten oder Tokens; es werden weder Plattformänderungen noch neue KI-Aufrufe ausgelöst. Browser ohne Zwischenablageberechtigung zeigen einen Fehler statt eines Scheinerfolgs.
+
+**Bereits in v0.1.26:** Nach einer erfolgreichen Suche bleiben Suchtext und Statusfilter des lokalen Anzeigenkatalogs im Browserprofil für den nächsten Dashboard-Start erhalten. Fehlgeschlagene Suchen werden sichtbar zurückgenommen. Weder Kontoanmeldungen noch ausgewählte Anzeigen, Freigaben oder Plattformaktionen werden gespeichert oder ausgelöst.
 
 **Bereits in v0.1.25:** Nach einem Programm-Rückwechsel auf eine unterstützte ältere Version startet das weiterhin installierte Windows-Kontrollfenster auch bei nicht kontrollierbarem Chrome den lokalen Offline-Arbeitsbereich. Der mitgelieferte Kompatibilitätshelfer verwendet den tatsächlich wiederhergestellten Python-Offline-Launcher und beendet ihn über die private STOP-/EOF-Steuerung geordnet. Die bisherigen Anzeigen, Sicherungen und Chrome-/Google-Anmeldungen bleiben unverändert.
 
