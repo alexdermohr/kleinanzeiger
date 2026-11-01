@@ -15,7 +15,7 @@ SCRIPTS = ROOT / "scripts"
 class WindowsInstallerContractTests(unittest.TestCase):
     def test_installer_verifies_pinned_wheel_before_network_or_setup(self):
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
-        self.assertIn("kleinanzeiger-0.1.30-py3-none-any.whl", script)
+        self.assertIn("kleinanzeiger-0.1.31-py3-none-any.whl", script)
         self.assertIn("$wheelName = [IO.Path]::GetFileName($wheel)", script)
         self.assertIn("[regex]::Escape($wheelName)", script)
         self.assertEqual(script.count("function Test-Python("), 1)
@@ -41,7 +41,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertLess(script.index("& $stagePython -m pip install"), script.index("Rename-Item -LiteralPath $venv"))
         self.assertIn("Rename-Item -LiteralPath $rollback", script)
         self.assertIn("if ($mayDisposeStage", script)
-        self.assertIn("m.version('kleinanzeiger') == '0.1.30'", script)
+        self.assertIn("m.version('kleinanzeiger') == '0.1.31'", script)
 
     def test_release_notes_match_ai_100_and_checked_unknown_contract(self):
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
@@ -149,15 +149,33 @@ Write-Output 'OWNED_CDP_PID_PROFILE_GUARD_PASS'
         self.assertIn("Remove-Item Env:OPENAI_API_KEY", start)
         self.assertIn("windows-center.ps1", (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8"))
 
+    def test_read_only_diagnostic_ship_contract(self):
+        worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
+        diagnostic = (SCRIPTS / "windows-diagnostics.ps1").read_text(encoding="utf-8")
+        command = (SCRIPTS / "Kleinanzeiger-Diagnose.cmd").read_text(encoding="utf-8")
+        for filename in ("windows-diagnostics.ps1", "Kleinanzeiger-Diagnose.cmd"):
+            self.assertTrue((SCRIPTS / filename).is_file())
+            self.assertIn(filename, worker)
+            self.assertIn(filename, workflow)
+        self.assertIn("WINDOWS_DIAGNOSTICS_SELFTEST_PASS", diagnostic)
+        self.assertEqual(diagnostic.count("function Get-PackageStatus {"), 1)
+        self.assertEqual(diagnostic.count("if ($SelfTest) {"), 1)
+        self.assertIn("powershell.exe", command)
+        self.assertIn("Get-FileHash", diagnostic)
+        self.assertNotIn("Invoke-WebRequest", diagnostic)
+        self.assertNotIn("Invoke-RestMethod", diagnostic)
+
     def test_release_copy_manifest_and_version_are_consistent(self):
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.1.30"', metadata)
-        self.assertIn("Kleinanzeiger-v0.1.30-Windows.zip", workflow)
+        self.assertIn('version = "0.1.31"', metadata)
+        self.assertIn("Kleinanzeiger-v0.1.31-Windows.zip", workflow)
         for filename in (
             "Kleinanzeiger.cmd",
             "windows-install.ps1", "windows-center.ps1", "windows-worker.ps1", "windows-start.ps1", "windows-chrome.ps1",
             "windows-ki-einrichten.ps1",
+            "windows-diagnostics.ps1", "Kleinanzeiger-Diagnose.cmd",
         ):
             self.assertTrue((SCRIPTS / filename).is_file(), filename)
             self.assertIn(filename, workflow)

@@ -53,7 +53,7 @@ function Get-VerifiedPackage([string]$folder) {
   foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-messages.ps1','windows-offline-compat.py',
        'Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html',
        'windows-install.ps1','windows-start.ps1','windows-chrome.ps1',
-       'windows-ki-einrichten.ps1','windows-backup.ps1','windows-restore.ps1')) {
+       'windows-ki-einrichten.ps1','windows-backup.ps1','windows-restore.ps1','windows-diagnostics.ps1','Kleinanzeiger-Diagnose.cmd')) {
     if (!(Test-Path -LiteralPath (Join-Path $folder $name) -PathType Leaf)) {
       throw "Unvollstaendiges Windows-Paket: $name"
     }
@@ -369,10 +369,10 @@ function Invoke-PortfolioWorker([string]$mode) {
 
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
-  $names = @(Get-ReleaseAssetNames '0.1.30')
-  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.30-Windows.zip' -or
-      $names[1] -ne 'Kleinanzeiger-v0.1.30-Windows.sha256' -or
-      $names[2] -ne 'Kleinanzeiger-v0.1.30-Release-Manifest.json') {
+  $names = @(Get-ReleaseAssetNames '0.1.31')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.31-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.31-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.31-Release-Manifest.json') {
     throw 'Release-Dateinamen sind nicht eindeutig.'
   }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
