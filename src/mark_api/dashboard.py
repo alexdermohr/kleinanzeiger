@@ -564,6 +564,8 @@ _DASHBOARD_HTML = """<!doctype html>
             Beschreibung
             <textarea id="manage-description" data-write-control></textarea>
           </label>
+          <button id="manage-original-refresh" type="button" hidden disabled>Originalbeschreibung aus Kleinanzeigen laden</button>
+          <p id="manage-original-status" class="note" role="status" aria-live="polite"></p>
           <button id="manage-ai-improve" type="button" hidden disabled>KI-Textvorschlag für diese Anzeige vorbereiten</button>
           <div class="write-actions">
             <button id="manage-save" class="primary-button" data-write-control type="button">Änderungen speichern</button>
@@ -1315,6 +1317,7 @@ const pendingAckOnly = new Map();
 let writeUiAvailable = false;
 let localWorkAvailable = false;
 let manualSyncAvailable = false;
+let ownerContentAvailable = false;
 let syncInFlight = false;
 let writeToken = null;
 let generationToken = null;
@@ -1459,6 +1462,7 @@ let workTemplateSelectionGeneration = 0;
 let workTemplateLoadGeneration = 0;
 let workTemplateSelectionRequiresRecheck = false;
 let managedAdBaseline = null;
+let originalContentBusy = false;
 
 function consumeWriteToken() {
   const hashParams = new URLSearchParams(window.location.hash.slice(1));
@@ -1858,6 +1862,17 @@ function clearManagedSelection() {
   byId("manage-description").value = "";
   byId("manage-state").textContent = "—";
   highlightManagedCard("");
+  byId("manage-original-status").textContent = "";
+  renderOriginalContentAvailability();
+}
+
+function renderOriginalContentAvailability() {
+  const control = byId("manage-original-refresh");
+  const missing = managedAdBaseline !== null && !managedAdBaseline.descriptionKnown;
+  control.hidden = !missing || !ownerContentAvailable || !writeUiReady();
+  control.disabled = originalContentBusy || !ownerContentAvailable || !writeUiReady()
+    || pendingRecoveryBlocked || pendingWrites.size > 0
+    || !managedAdBaseline || !missing;
 }
 
 function populateManageForm(ad) {
@@ -1878,7 +1893,64 @@ function populateManageForm(ad) {
     && (typeof VERIFIED_EXISTING_AD_SOURCES === "undefined"
         || VERIFIED_EXISTING_AD_SOURCES.has(ad.source)));
   highlightManagedCard(ad.ad_id);
+  renderOriginalContentAvailability();
   byId("manage-form").scrollIntoView({behavior: "smooth", block: "nearest"});
+}
+
+async function loadOriginalOwnedContent() {
+  const selected = managedAdBaseline;
+  const status = byId("manage-original-status");
+  if (!writeUiReady() || !ownerContentAvailable || originalContentBusy || !selected ||
+      selected.descriptionKnown || pendingRecoveryBlocked || pendingWrites.size > 0) return;
+  const adId = selected.adId;
+  if (byId("manage-ad-id").value !== adId ||
+      byId("manage-title").value !== (selected.title ?? "") ||
+      byId("manage-description").value !== "") {
+    status.textContent = "Bearbeitete Felder nicht überschrieben. Anzeige neu auswählen.";
+    return;
+  }
+  originalContentBusy = true;
+  renderOriginalContentAvailability();
+  status.textContent = "Lese den Originaltext der eigenen Anzeige …";
+  try {
+    const response = await fetch("/api/dashboard/owner-content", {
+      method: "POST",
+      cache: "no-store",
+      headers: {"Origin": window.location.origin,
+        "X-Mark-Dashboard-Write": "1", "X-Mark-Dashboard-Token": writeToken,
+        "Content-Type": "application/json"},
+      body: JSON.stringify({ad_id: adId}),
+    });
+    const result = await response.json();
+    if (!response.ok || result.status !== "success") {
+      throw new Error("Originalbeschreibung nicht bestätigt. Konto und Chrome prüfen.");
+    }
+    const ad = result.ad;
+    if (!ad || ad.ad_id !== adId || ad.present !== true ||
+        !VERIFIED_EXISTING_AD_SOURCES.has(ad.source) ||
+        typeof ad.title !== "string" || typeof ad.description !== "string" ||
+        typeof ad.observed_at !== "string" ||
+        !["active","paused"].includes(ad.lifecycle_state)) {
+      throw new Error("Unvollständiger Eigentümernachweis. Keine Übernahme.");
+    }
+    if (managedAdBaseline !== selected ||
+        byId("manage-ad-id").value !== adId ||
+        byId("manage-title").value !== (selected.title ?? "") ||
+        byId("manage-description").value !== "" ||
+        pendingRecoveryBlocked || pendingWrites.size > 0) {
+      throw new Error("Auswahl oder Bearbeitungsfelder geändert. Keine Übernahme.");
+    }
+    latestAdsById.set(adId, ad);
+    populateManageForm(ad);
+    status.textContent = "Originaltitel und Beschreibung aus dem eigenen Konto geprüft. "
+      + "Jetzt kann der Text bearbeitet oder als Grundlage für KI-Vorschläge benutzt werden.";
+    renderGenerationAvailability();
+  } catch (error) {
+    status.textContent = error.message + " Vorhandene Texte bleiben unverändert.";
+  } finally {
+    originalContentBusy = false;
+    renderOriginalContentAvailability();
+  }
 }
 
 function rebaseManagedBaseline(adId, payload) {
@@ -4678,6 +4750,7 @@ async function load() {
       offlineNotice.textContent = "Lokaler Lesemodus: Der gespeicherte Bestand kann veraltet sein. Diese Sitzung erlaubt keine lokalen oder Plattformänderungen. Für einen erneuten Kontoabgleich Kleinanzeiger neu starten.";
     }
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
+    ownerContentAvailable = dashboardConfig.owner_content_available === true;
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
     jobsAvailable = false;
     renderJobsAvailability();
@@ -6565,6 +6638,7 @@ byId("manage-ad-select").addEventListener("change", () => {
     clearManagedSelection();
   }
 });
+byId("manage-original-refresh").addEventListener("click", loadOriginalOwnedContent);
 byId("manage-save").addEventListener("click", saveManagedAd);
 byId("manage-pause").addEventListener(
   "click",
@@ -6967,6 +7041,7 @@ def _handler_factory(
     *,
     public_origin_port: int | None = None,
     sync_once: Callable[[], int] | None = None,
+    original_read_once: Callable[[str], None] | None = None,
     local_session_token: str | None = None,
     offline_mode: bool = False,
 ):
@@ -7515,6 +7590,7 @@ def _handler_factory(
                             if generation_access is not None else {}
                         ),
                         **({"manual_sync_available": True} if sync_once is not None else {}),
+                        **({"owner_content_available": True} if original_read_once is not None else {}),
                     },
                 )
                 return
@@ -8313,6 +8389,49 @@ def _handler_factory(
             self._send_json(200, {"status": "success", "current_ads": count})
 
 
+        def _manual_owned_content(self) -> None:
+            target = urlsplit(self.path)
+            if (original_read_once is None or write_proxy is None
+                    or target.path != "/api/dashboard/owner-content"
+                    or target.query or target.fragment):
+                self._send_json(404, {"error": "not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {"error": "write_session_required"})
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {"error": "content_read_has_no_write_key"})
+                return
+            try:
+                body, _ = self._read_proxy_body("local_json")
+                requested = strict_json_object(body)
+                if (set(requested) != {"ad_id"}
+                        or type(requested["ad_id"]) is not str
+                        or re.fullmatch(r"[0-9]{1,32}", requested["ad_id"]) is None):
+                    raise ValueError("invalid target")
+                ad_id = requested["ad_id"]
+            except (ValueError, UnicodeError, TypeError):
+                self._send_json(400, {"error": "invalid_owner_content_request"})
+                return
+            try:
+                original_read_once(ad_id)
+                refreshed = query.catalog_ad(ad_id)
+                if (not isinstance(refreshed, dict)
+                        or refreshed.get("present") is not True
+                        or refreshed.get("source") != "private-web-owner-inventory"
+                        or type(refreshed.get("title")) is not str
+                        or type(refreshed.get("description")) is not str):
+                    raise ValueError("unconfirmed owner details")
+            except Exception as exc:
+                from .private_web_runtime import OwnerInventorySyncFailure
+                if isinstance(exc, OwnerInventorySyncFailure):
+                    code = 409 if exc.kind in ("busy", "recovery_required") else 503
+                    self._send_json(code, {"error": "owner_content_" + exc.kind})
+                else:
+                    self._send_json(503, {"error": "owner_content_unavailable"})
+                return
+            self._send_json(200, {"status": "success", "ad": refreshed})
+
         def _portfolio_job_command(self) -> None:
             # Same-origin, per-session token. Local drafts only: no provider
             # calls and no forwarding to the platform Write API.
@@ -8741,6 +8860,9 @@ def _handler_factory(
             if urlsplit(self.path).path == "/api/dashboard/sync":
                 self._manual_sync()
                 return
+            if urlsplit(self.path).path == "/api/dashboard/owner-content":
+                self._manual_owned_content()
+                return
             if urlsplit(self.path).path == "/api/dashboard/generate":
                 self._generate_draft()
                 return
@@ -8781,6 +8903,7 @@ def create_server(
     generation_access: DashboardGenerationAccess | None = None,
     public_origin_port: int | None = None,
     sync_once: Callable[[], int] | None = None,
+    original_read_once: Callable[[str], None] | None = None,
     local_session_token: str | None = None,
     offline_mode: bool = False,
 ) -> LoopbackDashboardServer:
@@ -8815,6 +8938,11 @@ def create_server(
         not callable(sync_once) or (write_proxy is None and local_session_token is None)
     ):
         raise ValueError("manual sync requires an authenticated local session")
+    if original_read_once is not None and (
+        not callable(original_read_once) or write_proxy is None
+        or type(store) is not SnapshotStore or offline_mode
+    ):
+        raise ValueError("owner content reader requires native authenticated online Write session")
     if write_proxy is not None and (
         isinstance(store, StorageOwnerClient) or write_proxy.owner_reconciliation_enabled
     ):
@@ -8831,6 +8959,7 @@ def create_server(
             store, query, analytics, write_proxy, generation_access,
             public_origin_port=public_origin_port,
             sync_once=sync_once,
+            original_read_once=original_read_once,
             local_session_token=local_session_token,
             offline_mode=offline_mode,
         ),

@@ -719,6 +719,9 @@ def _build_online_product_launcher(
             manual_sync = getattr(write_runtime, "sync_owner_inventory", None)
             if callable(manual_sync):
                 dashboard_options["sync_once"] = manual_sync
+            read_original = getattr(write_runtime, "refresh_owned_ad_content", None)
+            if callable(read_original):
+                dashboard_options["original_read_once"] = read_original
         if public_origin_port is not None:
             dashboard_options["public_origin_port"] = public_origin_port
         server = dashboard_factory(store, **dashboard_options)
