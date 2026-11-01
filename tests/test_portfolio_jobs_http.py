@@ -208,6 +208,11 @@ class PortfolioJobsHttpTests(unittest.TestCase):
                                      token="bad")[0],403)
         self.assertEqual(self.request("POST","/api/portfolio/jobs/create",{},
                                      content_type="text/plain")[0],400)
+        # Windows must receive the HTTP 400 even when the rejected POST
+        # carries enough unread bytes to trigger a TCP abort on close.
+        self.assertEqual(self.request("POST","/api/portfolio/jobs/create",
+                                     raw=b"{}"+b" "*65536,
+                                     content_type="text/plain")[0],400)
         self.assertEqual(self.request("POST","/api/portfolio/jobs/create",{},
                                      raw=b'{"mode":"all","mode":"all"}')[0],400)
         self.assertEqual(self.request("POST","/api/portfolio/jobs/create?unsafe=1",{})[0],404)
