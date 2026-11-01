@@ -116,35 +116,52 @@ async function loadInventoryDiff(next = false) {
     if (filterSerial !== inventoryDiffFilterSerial ||
         (byId("inventory-diff-filter").value || "all") !== filter) return false;
     if (!page || !Array.isArray(page.items) || typeof page.epoch !== "string" ||
-        (page.state_filter && page.state_filter !== filter)) throw new Error("Ungültige Vergleichsdaten.");
-    inventoryDiffCursor = page.has_more ? page.next_after : null;
-    inventoryDiffEpoch = page.epoch;
+        !/^[a-f0-9]{64}$/.test(page.epoch) || typeof page.has_more !== "boolean" ||
+        (page.has_more && (typeof page.next_after !== "string" || !/^[0-9]{1,32}$/.test(page.next_after))) ||
+        (next && page.epoch !== inventoryDiffEpoch) ||
+        !["ready", "unverified"].includes(page.state) ||
+        (page.total !== null && (!Number.isInteger(page.total) || page.total < 0)) ||
+        typeof page.source !== "string" || (page.state === "ready" && typeof page.confirmed_at !== "string") ||
+        (page.state_filter !== undefined && page.state_filter !== filter)) throw new Error("Ungültige Vergleichsdaten.");
     const body = byId("inventory-diff-body");
-    body.replaceChildren();
+    const rows = [];
     const states = {newly_observed: "Neu beobachtet", changed: "Geändert", paused: "Pausiert",
                     unchanged: "Unverändert", no_baseline: "Erster Abgleich", unclear: "Unklar", unverified: "Nicht aktuell bestätigt"};
     for (const item of page.items) {
+      if (!item || typeof item.ad_id !== "string" || !/^[0-9]{1,32}$/.test(item.ad_id) ||
+          !Object.hasOwn(states, item.state) || typeof item.reason !== "string" ||
+          ![item.previous, item.current].every(snapshot => snapshot === null ||
+            (snapshot && typeof snapshot === "object" && typeof snapshot.state === "string" &&
+             (snapshot.title === null || typeof snapshot.title === "string"))) ||
+          (item.current && (typeof item.current.source !== "string" || typeof item.current.observed_at !== "string"))) {
+        throw new Error("Ungültige Vergleichsdaten.");
+      }
       const row = document.createElement("tr");
       insightCell(row, item.ad_id);
-      const label = item.current && item.current.state === "absent" ? "Nicht mehr im Bestand" : (states[item.state] || "Unklar");
+      const label = item.current && item.current.state === "absent" ? "Nicht sichtbar (kein Verkaufs- oder Löschbeleg)" : states[item.state];
       insightCell(row, label + ": " + item.reason);
       insightCell(row, item.previous ? [item.previous.title || "", item.previous.state].join(" · ") : "—");
       insightCell(row, item.current ? [item.current.title || "", item.current.state].join(" · ") : "Nicht bestätigt");
       insightCell(row, item.current ? item.current.source + " · " + item.current.observed_at : "—");
-      body.appendChild(row);
+      rows.push(row);
     }
     const summary = page.total === null
       ? page.items.length + " passende Anzeigen auf dieser Seite (global gefiltert)."
       : page.items.length + " von " + page.total + " Anzeigen.";
-    status.textContent = page.state === "ready"
+    const message = page.state === "ready"
       ? summary + " Aktuell: " + page.confirmed_at + " (" + page.source + "). Vorher: " + (page.previous_confirmed_at || "noch kein Vergleich") + "."
       : "Kein aktueller, vollständiger Vergleich bestätigt. Letzter erfolgreicher Abgleich: " + (page.last_confirmed_at || "noch keiner") + ". Fehlende Daten sind kein Löschbeleg.";
+    body.replaceChildren(...rows);
+    inventoryDiffCursor = page.has_more ? page.next_after : null;
+    inventoryDiffEpoch = page.epoch;
+    status.textContent = message;
     return true;
   } catch (error) {
     inventoryDiffCursor = null;
     inventoryDiffEpoch = null;
-    byId("inventory-diff-body").replaceChildren();
-    status.textContent = error.message;
+    status.textContent = error.message + (byId("inventory-diff-body").children.length
+      ? " Vorhandene Daten sind möglicherweise veraltet. Bitte neu laden."
+      : " Kein aktueller Vergleich geladen. Bitte neu laden.");
     return false;
   } finally {
     inventoryDiffBusy = false;
