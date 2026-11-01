@@ -450,6 +450,11 @@ _SCRIPT = r"""'use strict';
     by('list-chats').disabled=busy;
     by('next-chats').disabled=busy || by('next-chats').dataset.hasMore!=='true';
     by('send').disabled=busy || !opened || !by('reply').value.trim();
+    by('template').disabled=busy || !opened;
+    by('reply').disabled=busy;
+    for(const button of by('chats').querySelectorAll('button')){
+      button.disabled=busy || button.dataset.ownAd!=='true';
+    }
   };
   async function request(path,method,body){
     if(!session)throw new Error('Sitzung fehlt. Nachrichtenfenster erneut starten.');
@@ -469,6 +474,7 @@ _SCRIPT = r"""'use strict';
     const node=document.createElement(tag);node.textContent=value;parent.append(node);return node;
   }
   by('status-check').addEventListener('click',async()=>{
+    if(busy)return;
     idle(false);
     try {let v=await request('/api/status');
       by('connection').textContent='Verbindungsstatus: '+v.status+
@@ -479,6 +485,7 @@ _SCRIPT = r"""'use strict';
     finally{idle(true)}
   });
   async function listChats(next){
+    if(busy)return;
     idle(false);clearConversation();
     if(!next)page=0;
     try {
@@ -492,8 +499,9 @@ _SCRIPT = r"""'use strict';
           ' · '+(item.preview||'Keine Vorschau'));
         const button=document.createElement('button');
         button.type='button';button.textContent='Chat öffnen (10 Credits, ggf. gelesen)';
-        button.disabled=item.local_own_ad!==true;
-        if(button.disabled)addText(li,'small','Keine lokal bestätigte eigene Anzeige; Antworten hier gesperrt.');
+        button.dataset.ownAd=item.local_own_ad===true?'true':'false';
+        button.disabled=busy || button.dataset.ownAd!=='true';
+        if(button.dataset.ownAd!=='true')addText(li,'small','Keine lokal bestätigte eigene Anzeige; Antworten hier gesperrt.');
         button.addEventListener('click',()=>openChat(item));li.append(button);by('chats').append(li);
       }
       by('next-chats').dataset.hasMore=data.has_more?'true':'false';
@@ -503,8 +511,9 @@ _SCRIPT = r"""'use strict';
     finally{idle(true)}
   }
   by('list-chats').addEventListener('click',()=>listChats(false));
-  by('next-chats').addEventListener('click',()=>{page++;listChats(true)});
+  by('next-chats').addEventListener('click',()=>{if(busy)return;page++;listChats(true)});
   async function openChat(item){
+    if(busy || item.local_own_ad!==true)return;
     if(!window.confirm('Diesen Chat öffnen? 10 Credits; er kann auf Kleinanzeigen als gelesen markiert werden.'))return;
     idle(false);clearConversation();
     try{
@@ -523,7 +532,7 @@ _SCRIPT = r"""'use strict';
     finally{idle(true)}
   }
   by('template').addEventListener('click',()=>{
-    if(!selected || !opened)return;
+    if(busy || !selected || !opened)return;
     by('reply').value='Guten Tag,\n\nvielen Dank für Ihre Anfrage. '+
       '[Bitte die Antwort anhand der tatsächlichen Fakten ergänzen.]\n\nFreundliche Grüße';
     idle(!busy);
@@ -531,6 +540,7 @@ _SCRIPT = r"""'use strict';
   by('reply').addEventListener('input',()=>idle(!busy));
   by('send').addEventListener('click',async()=>{
     if(!selected || !opened || busy)return;
+    const target=selected; // Freeze confirmed chat identity across both awaits.
     const message=by('reply').value;
     if(!message.trim() || message.length>4000){status('Antworttext fehlt oder ist zu lang.');return}
     if(!window.confirm('Genau diese Nachricht kostenpflichtig SENDEN? 25 Credits. '+
@@ -539,10 +549,10 @@ _SCRIPT = r"""'use strict';
     idle(false);
     try{
       const p=await request('/api/prepare','POST',{
-        conversation_id:selected.conversation_id,ad_id:selected.ad_id,message});
+        conversation_id:target.conversation_id,ad_id:target.ad_id,message});
       const sent=await request('/api/send','POST',{
-        request_id:p.request_id,conversation_id:selected.conversation_id,
-        ad_id:selected.ad_id,message,confirmed:true});
+        request_id:p.request_id,conversation_id:target.conversation_id,
+        ad_id:target.ad_id,message,confirmed:true});
       if(sent.state!=='sent'||sent.sent!==true)throw Error('Versandausgang unbekannt');
       status('Nachricht von der Plattform angenommen (nicht als zugestellt nachgewiesen). '+
         'Request-ID: '+sent.request_id+'. Kein weiterer Versand.');

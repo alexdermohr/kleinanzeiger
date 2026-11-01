@@ -337,3 +337,72 @@ class InboxServerTests(unittest.TestCase):
         self.assertEqual(self.call("POST","/api/prepare",{
             "conversation_id":"a:b","ad_id":"4711","message":"x"*17000})[0],400)
         self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),2)
+
+class AccountInboxBrowserRaceTests(unittest.TestCase):
+    def test_switching_chat_during_prepare_never_changes_send_target(self):
+        import subprocess
+        from mark_api.platform_messages import _SCRIPT
+        harness = r"""
+const assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
+const js=fs.readFileSync(0,'utf8');
+function el(id=''){return {id,dataset:{},disabled:false,children:[],handlers:{},value:'',textContent:'',
+ addEventListener(n,f){this.handlers[n]=f},
+ append(x){this.children.push(x)},replaceChildren(...x){this.children=[...x]},
+ querySelectorAll(t){return this.children.flatMap(c=>[...(c.id===t?[c]:[]),...c.querySelectorAll(t)])},
+ click(){if(!this.disabled)return this.handlers.click?.()}}}
+const names=['status','status-check','list-chats','next-chats','send','template','reply','chats','conversation','connection'];
+const dom=Object.fromEntries(names.map(n=>[n,el(n)]));let release=null,requests=[];
+const response=x=>({ok:true,json:async()=>x});
+const chats=[
+ {conversation_id:'a',ad_id:'4711',local_own_ad:true,unread:false},
+ {conversation_id:'b',ad_id:'4722',local_own_ad:true,unread:false},
+ {conversation_id:'other',ad_id:'9999',local_own_ad:false,unread:false}];
+async function fetch(url,opts){
+ const body=opts?.body?JSON.parse(opts.body):null;requests.push({url,body});
+ if(url.startsWith('/api/conversations'))return response({page:0,has_more:false,conversations:chats});
+ if(url==='/api/status')return response({status:'connected',provider:'synthetic'});
+ if(url==='/api/open')return response({messages:[{direction:'received',text:'Frage'}]});
+ if(url==='/api/prepare')return await new Promise(ok=>{release=()=>ok(response({request_id:'e0000000-0000-4000-8000-000000000001'}))});
+ if(url==='/api/send')return response({state:'sent',sent:true,request_id:body.request_id});
+ throw Error(url);
+}
+vm.runInNewContext(js,{document:{getElementById:n=>dom[n],createElement:n=>el(n)},
+ location:{hash:'#token='+'t'.repeat(40),pathname:'/'},window:{confirm:()=>true},
+ sessionStorage:{getItem:()=>null,setItem:()=>{}},history:{replaceState:()=>{}},fetch,console},{timeout:1500});
+const pump=async()=>{for(let i=0;i<5;i++)await Promise.resolve()};
+(async()=>{
+ await dom['list-chats'].handlers.click();await pump();
+ const buttons=dom.chats.querySelectorAll('button');
+ assert.equal(buttons.length,3);
+ assert.deepEqual(buttons.map(x=>x.disabled),[false,false,true]);
+ await buttons[0].handlers.click();await pump();
+ dom.reply.value='Antwort nur an A.';dom.reply.handlers.input();
+ assert.equal(dom.send.disabled,false);
+ const send=dom.send.handlers.click();await pump();assert.equal(typeof release,'function');
+ assert.deepEqual(buttons.map(x=>x.disabled),[true,true,true]);
+ assert.equal(dom.reply.disabled,true);assert.equal(dom.template.disabled,true);
+ await buttons[1].handlers.click();await dom['list-chats'].handlers.click();
+ await dom['status-check'].handlers.click();dom.template.handlers.click();
+ assert.equal(requests.filter(x=>x.url==='/api/open').length,1);
+ assert.equal(requests.filter(x=>x.url.startsWith('/api/conversations')).length,1);
+ assert.equal(dom.reply.value,'Antwort nur an A.');
+ release();await send;await pump();
+ const prepared=requests.filter(x=>x.url==='/api/prepare');
+ const delivered=requests.filter(x=>x.url==='/api/send');
+ assert.equal(prepared.length,1);assert.equal(delivered.length,1);
+ for(const req of [...prepared,...delivered]) {
+   assert.equal(req.body.conversation_id,'a');assert.equal(req.body.ad_id,'4711');
+   assert.equal(req.body.message,'Antwort nur an A.');
+ }
+ assert.deepEqual(buttons.map(x=>x.disabled),[false,false,true]);
+ await buttons[1].handlers.click();await pump();
+ assert.equal(requests.filter(x=>x.url==='/api/open').length,2);
+ console.log('ACCOUNT_CHAT_SWITCH_SEND_RACE_PASS');
+})().catch(e=>{console.error(e.stack||String(e));process.exitCode=1});
+"""
+        result = subprocess.run(
+            ["node", "-e", harness], input=_SCRIPT, capture_output=True,
+            text=True, encoding="utf-8", timeout=35, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ACCOUNT_CHAT_SWITCH_SEND_RACE_PASS", result.stdout)
