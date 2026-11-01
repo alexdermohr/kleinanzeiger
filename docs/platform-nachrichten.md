@@ -4,11 +4,11 @@ Kleinanzeiger kann die Chats eines **eigenen, verbundenen Kleinanzeigen-Kontos**
 
 **Diese Funktion ist standardmäßig ausgeschaltet.** Sie erfordert einen selbst eingerichteten Konto-API-Zugang unter https://kleinanzeigen-agent.de/konto-api und die Anmeldung des eigenen Kleinanzeigen-Kontos dort. Preis laut veröffentlichter Anbieterdokumentation: **9,90 € netto/Monat zuzüglich Credits** (und Steuern). Typische Aktionen: Verbindungsstatus kostenlos, Chatliste 5 Credits, Gespräch öffnen 10 Credits (kann das Gespräch als gelesen markieren), Nachricht senden 25 Credits. Angebote und Konditionen können sich ändern; vor der Buchung aktuelle Anbieterangaben prüfen. Kleinanzeiger erwirbt selbst keine Abos und kauft keine Credits.
 
-## Einrichtung unter Windows
+## Einrichtung unter Windows – ab v0.1.28
 
 1. Kleinanzeiger regulär installieren und bereits eigene Anzeigen in die bestehende lokale Datenbank einlesen. Kein Konto-API-Zugang wird dadurch erzeugt.
 2. Den optionalen Drittanbieterzugang eigenständig einrichten, das Konto dort verbinden und den persönlichen `klaz_live_...`-Schlüssel dort erzeugen. Den Schlüssel **nicht** in eine ChatGPT-Unterhaltung, einen Issue-Text oder einen Git-Commit einfügen.
-3. Im zentralen Windows-Kontrollfenster **Weitere Aktionen → Nachrichten verwalten** wählen. Erstmals **Nachrichten-Zugang einrichten** öffnen, den Schlüssel in das maskierte Feld eingeben und für das aktuelle Windows-Konto per DPAPI lokal speichern.
+3. Im zentralen Windows-Kontrollfenster **Weitere Aktionen → Nachrichten verwalten** wählen. Beim ersten Start öffnet sich ein separates PowerShell-Fenster; dort den persönlichen Konto-API-Schlüssel bei **API-Schluessel verdeckt eingeben** eingeben. Die Eingabe wird verdeckt angezeigt und mit Windows-DPAPI ausschließlich im Benutzerprofil des aktuellen Windows-Kontos gespeichert. Es gibt keinen zusätzlichen Nachrichten-Zugang-Dialog im Hauptfenster.
 4. Das Nachrichtenfenster starten. Es wird ausschließlich an `127.0.0.1:8773` gebunden; Browser- und KI-Konto-Schlüssel, normale Chrome-Sitzungen und bestehende Backups werden nicht kopiert.
 5. **Verbindung prüfen** führt auf ausdrücklichen Klick eine kostenlose Statusprüfung durch. **Chats laden**, **Chat öffnen** und **Nachricht senden** sind separate manuelle Aktionen, für die zusätzliche Credits anfallen können.
 6. Nur Chats, deren Anzeigen-ID einer lokal zuvor bestätigten eigenen Anzeige zugeordnet werden kann, dürfen im Fenster geöffnet und beantwortet werden. **Ein alter lokaler Anzeigenschnappschuss garantiert nicht, dass die Anzeige heute noch dir gehört.** Vor einem Versand deshalb anhand der tatsächlich aktuellen Kontositzung, Originalanzeige und Gesprächspartner selbst prüfen.
