@@ -271,7 +271,7 @@ class InboxServerTests(unittest.TestCase):
         headers={"X-Kleinanzeiger-Session":self.token if auth else "wrong"}
         if origin is not None:headers["Origin"]=origin
         if body is not None:headers["Content-Type"]="application/json"
-        conn.request(method,path,json.dumps(body).encode() if body is not None else None,headers)
+        conn.request(method,path,json.dumps(body,ensure_ascii=False).encode() if body is not None else None,headers)
         resp=conn.getresponse()
         status,payload=resp.status,resp.read()
         conn.close()
@@ -311,3 +311,29 @@ class InboxServerTests(unittest.TestCase):
         self.assertEqual(self.call("POST","/api/send",{**packet,"confirmed":True})[0],409)
         self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),1)
         self.assertEqual(self.call("GET","/api/outbox?request_id="+intent["request_id"])[1]["state"],"sent")
+    def test_full_utf8_reply_and_send_metadata_are_accepted(self):
+        # Codex P2: an 8 KiB cap admitted the preparation of 2700 CJK
+        # characters but rejected the same message on /api/send because
+        # request_id and confirmed enlarge its UTF-8 JSON envelope.
+        self.assertEqual(self.call("GET","/api/conversations?page=0&size=25")[0],200)
+        self.assertEqual(self.call("POST","/api/open",{
+            "conversation_id":"a:b","ad_id":"4711","confirm_mark_read":True})[0],200)
+        for message in ("語"*2700, "🌟"*4000):
+            with self.subTest(utf8_bytes=len(message.encode("utf-8"))):
+                prepared_status, prepared=self.call("POST","/api/prepare",{
+                    "conversation_id":"a:b","ad_id":"4711","message":message})
+                self.assertEqual(prepared_status,200)
+                send={"conversation_id":"a:b","ad_id":"4711",
+                      "request_id":prepared["request_id"],"message":message,"confirmed":True}
+                encoded=json.dumps(send,ensure_ascii=False).encode("utf-8")
+                self.assertGreater(len(encoded),8192)
+                self.assertLessEqual(len(encoded),16384)
+                send_status,result=self.call("POST","/api/send",send)
+                self.assertEqual(send_status,200)
+                self.assertTrue(result["sent"])
+                self.assertEqual(result["state"],"sent")
+                self.assertEqual(self.journal.state(prepared["request_id"])["state"],"sent")
+        self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),2)
+        self.assertEqual(self.call("POST","/api/prepare",{
+            "conversation_id":"a:b","ad_id":"4711","message":"x"*17000})[0],400)
+        self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),2)

@@ -28,6 +28,9 @@ from .storage import SnapshotStore
 
 BASE = "https://api.kleinanzeigen-agent.de/api/v2/kleinanzeigen/account"
 MAX_RESPONSE = 512 * 1024
+# Full 4,000-character Unicode message plus send-request UUID and metadata.
+# Browser JSON.stringify emits raw UTF-8; 16 KiB covers 4-byte scalars.
+MAX_MESSAGE_BODY_BYTES = 16_384
 _CONV = re.compile(r"[a-zA-Z0-9:_-]{1,128}\Z")
 _AD = re.compile(r"[0-9]{1,32}\Z")
 _KEY = re.compile(r"klaz_live_[A-Za-z0-9_-]{8,200}\Z")
@@ -696,7 +699,7 @@ def create_inbox_server(
             if not raw_length.isascii() or not raw_length.isdecimal() or len(raw_length) > 5:
                 raise MessagingError("invalid_body_length")
             length = int(raw_length)
-            if length < 2 or length > 8192:
+            if length < 2 or length > MAX_MESSAGE_BODY_BYTES:
                 raise MessagingError("invalid_body_length")
             raw = self.rfile.read(length)
             try: value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
