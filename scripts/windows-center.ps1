@@ -119,7 +119,9 @@ $mail = Add-Button 'E-Mails importieren' 28 390 282 43
 $labels = Add-Button 'Anzeigen vergleichen' 330 390 282 43
 $productsExport = Add-Button 'Entwürfe exportieren' 28 449 282 43
 $restore = Add-Button 'Sicherung wiederherstellen …' 330 449 282 43
-$rollback = Add-Button 'Vorherige Programmversion verwenden …' 28 508 584 43
+$messages = Add-Button 'Nachrichten verwalten' 28 508 282 43
+$rollback = Add-Button 'Vorherige Programmversion verwenden …' 330 508 282 43
+$rollback.AutoEllipsis = $true
 $statusLabel = Add-Label 'Bereit.' 28 397 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
 $detailsLink.Text = 'Fehlerdetails anzeigen'
@@ -134,7 +136,7 @@ $detailsLink.Add_Click({
 $script:advancedExpanded = $false
 function Set-AdvancedLayout([bool]$expanded) {
   $script:advancedExpanded = $expanded
-  foreach ($control in @($mail,$labels,$productsExport,$restore,$rollback)) {
+  foreach ($control in @($mail,$labels,$productsExport,$restore,$messages,$rollback)) {
     $control.Visible = $expanded
   }
   $advanced.Text = $(if($expanded){'Weniger anzeigen'}else{'Weitere Aktionen'})
@@ -181,6 +183,7 @@ function Refresh-Controls {
   $advanced.Enabled = !$busy
   $backup.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $ai.Enabled = !$busy
+  $messages.Enabled = !$busy -and (Test-Path -LiteralPath $db) -and (Test-Path -LiteralPath $python -PathType Leaf)
   $mail.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $labels.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $products.Enabled = !$busy -and (Test-Path -LiteralPath $db)
@@ -749,6 +752,22 @@ $update.Add_Click({
   } catch { Set-Status $_.Exception.Message $true }
 })
 $backup.Add_Click({ try { Start-Worker 'Backup' } catch { Set-Status $_.Exception.Message $true } })
+$messages.Add_Click({
+  try {
+    if (!(Test-Path -LiteralPath $python -PathType Leaf) -or
+        !(Test-Path -LiteralPath $db -PathType Leaf)) {
+      Set-Status 'Zuerst Kleinanzeiger einrichten und eigene Anzeigen abgleichen.' $true
+      return
+    }
+    $startScript = Join-Path $base 'windows-messages.ps1'
+    if (!(Test-Path -LiteralPath $startScript -PathType Leaf)) {
+      throw 'Nachrichtenfunktion fehlt im installierten Paket. Bitte aktualisieren.'
+    }
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile',
+      '-ExecutionPolicy','Bypass','-File',('"' + $startScript + '"')) | Out-Null
+    Set-Status 'Nachrichtenfenster gestartet. Jeder kostenpflichtige Aufruf braucht einen Klick.'
+  } catch { Set-Status $_.Exception.Message $true }
+})
 $mail.Add_Click({ try { Show-CustomerMailPicker } catch { Set-Status $_.Exception.Message $true } })
 $labels.Add_Click({ try { Show-CustomerLabels } catch { Set-Status $_.Exception.Message $true } })
 $products.Add_Click({ try { Show-ProductImport } catch { Set-Status $_.Exception.Message $true } })
@@ -909,7 +928,7 @@ if ($SelfTest) {
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
     throw 'Die installierte Version wurde vom Kontrollfenster nicht erkannt.'
   }
-  foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1')) {
+  foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1','windows-messages.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $base $file))) { throw "Fehlendes Skript: $file" }
   }
   foreach ($file in @('Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html')) {
@@ -935,7 +954,7 @@ if ($SelfTest) {
   Set-AdvancedLayout $false
   if ($form.Controls.Count -lt 12 -or $primary.Text -ne 'Kleinanzeiger starten' -or
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $restore -or
-      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $rollback -or $null -eq $help -or $null -eq $features) {
+      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $messages -or $null -eq $rollback -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
   }
   $timer.Dispose()

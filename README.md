@@ -223,6 +223,31 @@ Im aktuellen Entwicklungsbranch kann eine bestehende eigene Anzeige aus **Meine 
 
 Im Dashboard unter **Controlling** werden für 7, 30 oder 90 Tage ausschließlich lokal importierte EML-Daten ausgewertet. Unter **Tageskennzahl** lassen sich *eingegangene Nachrichten* oder *unterschiedliche Gespräche je Kalendertag* auswählen; die Tabelle und der CSV-Export folgen der Auswahl. Ein Gespräch kann an mehreren Tagen auftreten, wird im gesamten gewählten Zeitraum aber nur einmal gezählt. Die Zahl tatsächlich unterschiedlicher Käufer bleibt aus den vorhandenen EML-Daten **unbekannt**. Es wird kein echtes Plattformpostfach gelesen und keine Nachricht versendet.
 
+## Optionales Konto-Postfach über externe Beta-API
+
+Zusätzlich zur lokalen EML-/KI-Antwortverwaltung kann Kleinanzeiger über
+eine separat vom Kunden eingerichtete, kostenpflichtige Konto-API des
+**unabhängigen Anbieters Kleinanzeigen Agent** verbundene Chats lesen und
+eine manuell kontrollierte einzelne Antwort senden. Anbieterzugang und
+Kontoanmeldung erfolgen eigenständig; die API ist nicht offiziell von
+kleinanzeigen.de. Der Zusatzdienst kostet laut Anbieterdokumentation
+9,90 EUR netto/Monat plus Credits je Chatabfrage und Versand.
+
+**Windows:** Kleinanzeiger-Fenster → Weitere Aktionen → Nachrichten verwalten;
+dort den persönlichen `klaz_live_...`-Schlüssel im maskierten Feld per
+Windows-DPAPI speichern. Status, Chatseite, Chat öffnen und Versand erfordern
+jeweils bewusstes Anklicken; Chat öffnen kann als gelesen markieren. Vor einer
+Antwort den eigenen aktuellen Anzeigenstand und den Inhalt prüfen. Der
+Versand ist nur mit ausdrücklicher Einzelfreigabe zulässig; nach einem
+unbekannten Ergebnis gibt es keinen automatischen Retry. Das getrennte
+Versandjournal enthält Auftrags- und Text-Hash, keine Nachrichtentexte.
+**Keine unbeaufsichtigte KI-Massenkommunikation** und keine echten Konto-
+oder Kunden-PC-Tests ohne verbundenen Zugang.
+
+Anleitung: [Optionale Plattform-Nachrichten](docs/platform-nachrichten.md).
+Der bisherige Dashboard-Bereich `Interessenten & Antworten` und die lokale
+EML-Auswertung bleiben unverändert, ohne selbst Plattformchats zu senden.
+
 ## Interessenten und KI-Antwortentwürfe ohne automatischen Versand
 
 In **Meine Anzeigen** führt **Antwort vorbereiten** in das zentrale Formular **Interessenten & Antworten** mit bereits ausgewählter eigener Anzeigen-ID. Eine erhaltene Anfrage wird dort manuell eingegeben, ohne private Kontaktdaten oder Zahlungsinformationen. Ein neutraler Textbaustein funktioniert ohne KI und ohne Kosten. Optional erzeugt der vorhandene KI-Anbieter nach **erneuter Einzelfreigabe von Modellkosten und Textübertragung** einen bearbeitbaren Antwortentwurf. Vor dem KI-Aufruf wird die eigene Anzeige über die exakte lokale ID nochmals geprüft; Quota, Provider-Einzelnutzung, Fehlersperre und keine automatischen Retries gelten unverändert. Der Antworttext wird **nicht an Kleinanzeigen versendet**, sondern nur zur eigenständigen Prüfung und Übernahme kopiert. Es gibt **keinen vollständigen Plattform-Postfachabruf oder automatischen Nachrichtenversand**.

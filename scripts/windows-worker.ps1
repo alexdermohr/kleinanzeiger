@@ -50,7 +50,7 @@ function Get-VerifiedPackage([string]$folder) {
   if (!(Test-Path -LiteralPath $wheel -PathType Leaf)) { throw 'Wheel fehlt.' }
   $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actual -ne $matched.Groups['digest'].Value.ToLowerInvariant()) { throw 'Wheel-Pruefsumme ungueltig.' }
-  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-offline-compat.py',
+  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-messages.ps1','windows-offline-compat.py',
        'Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html',
        'windows-install.ps1','windows-start.ps1','windows-chrome.ps1',
        'windows-ki-einrichten.ps1','windows-backup.ps1','windows-restore.ps1')) {
