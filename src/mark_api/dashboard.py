@@ -8329,8 +8329,6 @@ def _handler_factory(
                 self._send_json(400, {"error": "request_key_must_be_in_json"})
                 return
             try:
-                if self.headers.get("Content-Type","").split(";",1)[0].strip().lower()!="application/json":
-                    raise ValueError("invalid content type")
                 size=self._content_length(max_bytes=512*1024)
                 if size<1:
                     raise ValueError("empty job command")
@@ -8342,6 +8340,10 @@ def _handler_factory(
                     self.connection.settimeout(previous_timeout)
                 if len(raw)!=size:
                     raise ValueError("truncated job command")
+                # Consume a bounded body before rejecting its Content-Type.
+                # Unread bytes can abort the HTTP 400 response on Windows.
+                if self.headers.get("Content-Type","").split(";",1)[0].strip().lower()!="application/json":
+                    raise ValueError("invalid content type")
                 payload=strict_json_object(raw)
                 if target.path.endswith("/generate-next"):
                     if generation_access is None:
