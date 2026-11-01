@@ -85,18 +85,66 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(await run("mutatePriceRule('set')"),false);
   assert.equal(sent.length,before);
   assert.match(byId("price-rule-status").textContent,/nicht blind wiederholen/);
-  // Inventory pages remain pinned; a drift error discards the stale comparison.
-  fetchImpl=async()=>success({items:[{ad_id:"10001",state:"changed",reason:"Text",
+  // A failed first load must never be presented as a fresh comparison.
+  const inventoryStart=sent.length;
+  fetchImpl=async()=>({ok:false,status:503});
+  assert.equal(await run("loadInventoryDiff()"),false);
+  assert.equal(byId("inventory-diff-body").children.length,0);
+  assert.match(byId("inventory-diff-status").textContent,/Kein aktueller Vergleich geladen.*neu laden/);
+  assert.equal(byId("inventory-diff-load").disabled,false);
+  // Inventory pages remain pinned; failed reads preserve the source evidence.
+  const inventoryPage={items:[{ad_id:"10001",state:"changed",reason:"Text",
     previous:{title:"Alt",state:"active"},current:{title:"<img onerror=bad()>",state:"active",source:"owner",observed_at:"now"}}],
-    state:"ready",epoch:"a".repeat(64),has_more:true,next_after:"10001",total:2,confirmed_at:"now",source:"owner"});
+    state:"ready",epoch:"a".repeat(64),has_more:true,next_after:"10001",total:2,confirmed_at:"now",source:"owner"};
+  fetchImpl=async()=>success(inventoryPage);
   assert.equal(await run("loadInventoryDiff()"),true);
   const row=byId("inventory-diff-body").children[0];
   assert.match(row.children[3].textContent,/<img onerror=bad\(\)>/);
   fetchImpl=async(path)=>{ assert.match(path,/after=10001/);assert.match(path,/epoch=a{64}/);return {ok:false,status:409};};
   assert.equal(await run("loadInventoryDiff(true)"),false);
-  assert.equal(byId("inventory-diff-body").children.length,0);
+  assert.equal(byId("inventory-diff-body").children.length,1);
+  assert.equal(byId("inventory-diff-body").children[0],row);
+  assert.match(byId("inventory-diff-status").textContent,/möglicherweise veraltet.*neu laden/);
   assert.equal(byId("inventory-diff-next").disabled,true);
   assert.equal(run("inventoryDiffCursor"),null);
+  assert.equal(run("inventoryDiffEpoch"),null);
+  // Reload failures, JSON failures, and a bad later row must be atomic too.
+  const failures=[
+    ()=>({ok:false,status:503}),
+    ()=>{throw Error("offline");},
+    ()=>({ok:true,json:async()=>{throw SyntaxError("bad JSON");}}),
+    ()=>success({...inventoryPage,items:[inventoryPage.items[0],null]}),
+    ()=>success({...inventoryPage,items:[inventoryPage.items[0],{...inventoryPage.items[0],current:{}}]}),
+    ()=>success({...inventoryPage,has_more:true,next_after:{bad:true}}),
+    ()=>success({...inventoryPage,epoch:"invalid"}),
+    ()=>success({...inventoryPage,has_more:"yes"}),
+  ];
+  for (const [index,failure] of failures.entries()) {
+    fetchImpl=async()=>success(inventoryPage);
+    assert.equal(await run("loadInventoryDiff()"),true);
+    const preserved=byId("inventory-diff-body").children[0];
+    fetchImpl=async()=>failure();
+    assert.equal(await run(index===0 ? "loadInventoryDiff(true)" : "loadInventoryDiff()"),false);
+    assert.equal(byId("inventory-diff-body").children.length,1);
+    assert.equal(byId("inventory-diff-body").children[0],preserved);
+    assert.equal(run("inventoryDiffCursor"),null);
+    assert.equal(run("inventoryDiffEpoch"),null);
+    assert.equal(byId("inventory-diff-next").disabled,true);
+    assert.equal(byId("inventory-diff-load").disabled,false);
+    assert.equal(byId("inventory-diff-filter").disabled,false);
+    assert.match(byId("inventory-diff-status").textContent,/möglicherweise veraltet.*neu laden/);
+    assert.doesNotMatch(byId("inventory-diff-status").textContent,/verkauft|gelöscht|Nicht mehr im Bestand/i);
+    const requestCount=sent.length;
+    assert.equal(await run("loadInventoryDiff(true)"),false);
+    assert.equal(sent.length,requestCount);
+  }
+  assert.ok(sent.slice(inventoryStart).every(call=>
+    call.path.startsWith("/api/portfolio/inventory-diff?") && !call.options.method && !call.options.body));
+  // An absent observation is not evidence of sale or deletion.
+  fetchImpl=async()=>success({...inventoryPage,items:[{...inventoryPage.items[0],state:"unclear",
+    current:{...inventoryPage.items[0].current,state:"absent"}}]});
+  assert.equal(await run("loadInventoryDiff()"),true);
+  assert.match(byId("inventory-diff-body").children[0].children[1].textContent,/kein Verkaufs- oder Löschbeleg/);
   // A filter operates across all ad IDs, not just the first displayed page.
   byId("inventory-diff-filter").value="changed";
   fetchImpl=async(path)=>{
