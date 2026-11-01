@@ -37,6 +37,9 @@ _MANAGEMENT_PATH = "/m-meine-anzeigen.html"
 _MANAGEMENT_MAX_PAGES = 256
 _POST_SUBMIT_PATH = _MANAGEMENT_PATH
 _MAX_TARGET_BYTES = 64 * 1024
+# Chrome /json/list includes dozens of iframe targets and exceeds 64 KiB.
+# Keep the larger discovery cap separate from input/expression limits.
+_MAX_DISCOVERY_BYTES = 1024 * 1024
 _CDP_CANCEL_RECV_POLL_SECONDS = 0.25
 # A failed WebSocket close is an UNKNOWN target-release outcome, never a
 # reason to admit the next browser client. Keep the kernel claim and socket
@@ -523,14 +526,14 @@ class _LoopbackCdpClient:
                 geturl = getattr(response, "geturl", None)
                 if not callable(geturl) or geturl() != discovery_url:
                     raise ValueError("target discovery escaped loopback binding")
-                payload = response.read(_MAX_TARGET_BYTES + 1)
+                payload = response.read(_MAX_DISCOVERY_BYTES + 1)
             # An injected discovery reader may have called close(). Do not
             # begin a TCP connect or WebSocket handshake on an unowned target.
             with self._lifecycle_lock:
                 self._assert_live_target_reservation()
                 if self._closing or self._close_unknown:
                     raise PrivateWebCdpWriteNotAttemptedError("target_unowned")
-            if len(payload) > _MAX_TARGET_BYTES:
+            if len(payload) > _MAX_DISCOVERY_BYTES:
                 raise ValueError("target list too large")
             targets = json.loads(payload.decode("utf-8"))
             pages = [
