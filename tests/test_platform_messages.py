@@ -351,7 +351,7 @@ function el(id=''){return {id,dataset:{},disabled:false,children:[],handlers:{},
  querySelectorAll(t){return this.children.flatMap(c=>[...(c.id===t?[c]:[]),...c.querySelectorAll(t)])},
  click(){if(!this.disabled)return this.handlers.click?.()}}}
 const names=['status','status-check','list-chats','next-chats','send','template','reply','chats','conversation','connection'];
-const dom=Object.fromEntries(names.map(n=>[n,el(n)]));let release=null,requests=[];
+const dom=Object.fromEntries(names.map(n=>[n,el(n)]));let release=null,requests=[],confirmTexts=[];
 const response=x=>({ok:true,json:async()=>x});
 const chats=[
  {conversation_id:'a',ad_id:'4711',local_own_ad:true,unread:false},
@@ -367,7 +367,7 @@ async function fetch(url,opts){
  throw Error(url);
 }
 vm.runInNewContext(js,{document:{getElementById:n=>dom[n],createElement:n=>el(n)},
- location:{hash:'#token='+'t'.repeat(40),pathname:'/'},window:{confirm:()=>true},
+ location:{hash:'#token='+'t'.repeat(40),pathname:'/'},window:{confirm:(text)=>{confirmTexts.push(text);return true}},
  sessionStorage:{getItem:()=>null,setItem:()=>{}},history:{replaceState:()=>{}},fetch,console},{timeout:1500});
 const pump=async()=>{for(let i=0;i<5;i++)await Promise.resolve()};
 (async()=>{
@@ -376,23 +376,26 @@ const pump=async()=>{for(let i=0;i<5;i++)await Promise.resolve()};
  assert.equal(buttons.length,3);
  assert.deepEqual(buttons.map(x=>x.disabled),[false,false,true]);
  await buttons[0].handlers.click();await pump();
- dom.reply.value='Antwort nur an A.';dom.reply.handlers.input();
+ const fullMessage='Antwort nur an A. '+'X'.repeat(3200)+'ENDE-KONTROLLTEXT';
+ dom.reply.value=fullMessage;dom.reply.handlers.input();
  assert.equal(dom.send.disabled,false);
  const send=dom.send.handlers.click();await pump();assert.equal(typeof release,'function');
+ assert.ok(confirmTexts.at(-1).includes(fullMessage),'confirm must expose complete text');
+ assert.ok(confirmTexts.at(-1).includes('ENDE-KONTROLLTEXT'),'confirm must show actual final characters');
  assert.deepEqual(buttons.map(x=>x.disabled),[true,true,true]);
  assert.equal(dom.reply.disabled,true);assert.equal(dom.template.disabled,true);
  await buttons[1].handlers.click();await dom['list-chats'].handlers.click();
  await dom['status-check'].handlers.click();dom.template.handlers.click();
  assert.equal(requests.filter(x=>x.url==='/api/open').length,1);
  assert.equal(requests.filter(x=>x.url.startsWith('/api/conversations')).length,1);
- assert.equal(dom.reply.value,'Antwort nur an A.');
+ assert.equal(dom.reply.value,fullMessage);
  release();await send;await pump();
  const prepared=requests.filter(x=>x.url==='/api/prepare');
  const delivered=requests.filter(x=>x.url==='/api/send');
  assert.equal(prepared.length,1);assert.equal(delivered.length,1);
  for(const req of [...prepared,...delivered]) {
    assert.equal(req.body.conversation_id,'a');assert.equal(req.body.ad_id,'4711');
-   assert.equal(req.body.message,'Antwort nur an A.');
+   assert.equal(req.body.message,fullMessage);
  }
  assert.deepEqual(buttons.map(x=>x.disabled),[false,false,true]);
  await buttons[1].handlers.click();await pump();
@@ -406,3 +409,38 @@ const pump=async()=>{for(let i=0;i<5;i++)await Promise.resolve()};
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ACCOUNT_CHAT_SWITCH_SEND_RACE_PASS", result.stdout)
+
+class AccountInboxManualLaunchTests(unittest.TestCase):
+    def test_no_browser_false_launch_and_deliberate_print_url_reveal_valid_local_token(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch, MagicMock
+        import re
+        from mark_api.platform_messages import main
+        with TemporaryDirectory() as folder:
+            db = Path(folder) / "existing.sqlite"
+            SnapshotStore(db, create_if_missing=True)
+            fake_server = MagicMock()
+            fake_server.server_address = ("127.0.0.1", 8773)
+            cases = (
+                (["--no-browser"], False, True, 0),
+                ([], False, True, 1),
+                ([], True, False, 1),
+                (["--print-url"], True, True, 1),
+            )
+            for flags, opened, visible, expected_opens in cases:
+                with self.subTest(flags=flags, browser_opened=opened), \
+                     patch("mark_api.platform_messages.create_inbox_server", return_value=fake_server), \
+                     patch("webbrowser.open", return_value=opened) as browser_open, \
+                     redirect_stdout(StringIO()) as output:
+                    result = main(["--db", str(db), *flags])
+                    self.assertEqual(result, 0)
+                    text = output.getvalue()
+                    self.assertEqual(browser_open.call_count, expected_opens)
+                    self.assertIn("Nachrichtenfenster lokal", text)
+                    match = re.search(r"http://127\.0\.0\.1:8773/#token=([A-Za-z0-9_-]+)", text)
+                    self.assertEqual(match is not None, visible)
+                    if match:
+                        self.assertGreaterEqual(len(match.group(1)), 32)
+                        self.assertNotIn("TOKEN_NOT_AVAILABLE", text)
+                    self.assertEqual(fake_server.serve_forever.call_count > 0, True)

@@ -545,7 +545,7 @@ _SCRIPT = r"""'use strict';
     if(!message.trim() || message.length>4000){status('Antworttext fehlt oder ist zu lang.');return}
     if(!window.confirm('Genau diese Nachricht kostenpflichtig SENDEN? 25 Credits. '+
         'Der Versand an den Gesprächspartner ist eine echte Plattformaktion.\n\n'+
-        message.slice(0,550)))return;
+        message))return;
     idle(false);
     try{
       const p=await request('/api/prepare','POST',{
@@ -776,7 +776,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8773)
     parser.add_argument("--enable-account-api", action="store_true",
                         help="Use the optional paid external account provider when KLAZ_API_KEY is set")
-    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Do not open browser; print session URL to the local terminal")
+    parser.add_argument("--print-url", action="store_true",
+                        help="Print local bearer session URL even if browser starts")
     args = parser.parse_args(argv)
     if not args.db.is_file():
         parser.error("Existing owner SQLite database required; it will never be created")
@@ -790,8 +793,18 @@ def main(argv: list[str] | None = None) -> int:
         SnapshotStore(args.db), Outbox(journal), client=client,
         session_token=session, port=args.port)
     location = f"http://127.0.0.1:{server.server_address[1]}/#token={session}"
+
+    opened = False
     if not args.no_browser:
-        webbrowser.open(location)
+        try:
+            opened = bool(webbrowser.open(location))
+        except Exception:
+            # The user can still open the private URL manually.
+            opened = False
+    if args.no_browser or args.print_url or not opened:
+        print("Manuellen Browser-Link nur auf diesem PC verwenden; "
+              "nicht in Chats, Tickets oder Logs teilen:", flush=True)
+        print(location, flush=True)
     print(f"Kleinanzeiger Nachrichtenfenster lokal auf 127.0.0.1:{server.server_address[1]} bereit.", flush=True)
     try:
         server.serve_forever(poll_interval=0.1)
