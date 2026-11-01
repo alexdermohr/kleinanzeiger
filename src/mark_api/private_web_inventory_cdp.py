@@ -12,6 +12,7 @@ import math
 import re
 import secrets
 import signal
+import sys
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -131,6 +132,16 @@ def _cancellable_transport_entry(stop_requested: Callable[[], bool] | None):
         return
     if not callable(stop_requested):
         raise TypeError("stop_requested must be callable")
+    if sys.platform == "win32":
+        # Windows has no pthread_sigmask. Only the fixed GET-only inventory
+        # expression uses this guard; recheck the stop event immediately
+        # before the nonblocking CDP send and during the bounded reply wait.
+        # Unlike a platform write, an interrupted read cannot require a
+        # signal-atomic side-effect fence.
+        if stop_requested():
+            raise PrivateWebCdpReadCancelled("inventory transport cancelled")
+        yield
+        return
     if current_thread() is not main_thread() or not callable(getattr(signal, "pthread_sigmask", None)):
         raise PrivateWebCdpReadSetupError("signal-safe transport unavailable")
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
