@@ -52,6 +52,7 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
         compatibility = {
             "windows-backup.ps1": ["-m mark_api.backup_cli"],
             "windows-restore.ps1": ["-m mark_api.windows_backup"],
+            "windows-messages.ps1": ["-m mark_api.platform_messages"],
             "windows-center.ps1": [
                 "-m mark_api.portfolio_import_cli",
                 "-m mark_api.windows_customer_choices",

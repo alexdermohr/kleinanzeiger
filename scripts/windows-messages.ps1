@@ -20,7 +20,27 @@ if (!(Test-Path -LiteralPath $python -PathType Leaf) -or
   throw 'Kleinanzeiger zuerst regulär einrichten und eigene Anzeigen abgleichen.'
 }
 if (!(Test-Path -LiteralPath $keyFile -PathType Leaf)) {
-  throw 'Konto-API noch nicht eingerichtet. Im Kleinanzeiger-Fenster Nachrichten-Zugang einrichten.'
+  Write-Host 'Optionaler kostenpflichtiger Drittanbieterzugang von Kleinanzeigen Agent.'
+  Write-Host 'Den API-Schluessel vorher im eigenen Anbieter-Konto erstellen.'
+  $newSecret = Read-Host 'API-Schluessel verdeckt eingeben' -AsSecureString
+  if ($null -eq $newSecret) { throw 'Keine Eingabe.' }
+  $credentialNew = [PSCredential]::new('kleinanzeigen-agent', $newSecret)
+  $tmp = $keyFile + '.new'
+  try {
+    $probe = $credentialNew.GetNetworkCredential().Password
+    if ($probe -notmatch '^klaz_live_[A-Za-z0-9_-]{8,200}$') {
+      throw 'Ungueltiger Konto-API-Schluessel.'
+    }
+    $probe = $null
+    ConvertFrom-SecureString $newSecret | Set-Content -LiteralPath $tmp -Encoding Ascii -NoNewline
+    Move-Item -LiteralPath $tmp -Destination $keyFile -Force
+    Write-Host 'Zugang mit Windows-DPAPI gespeichert. Noch keine Chatabfrage oder Nachricht gesendet.'
+  } finally {
+    $probe = $null
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    $credentialNew = $null
+    $newSecret.Dispose()
+  }
 }
 
 # DPAPI: the secret remains in the current user's Windows credential context.
