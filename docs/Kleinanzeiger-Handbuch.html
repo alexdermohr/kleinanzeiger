@@ -14,7 +14,8 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 @media(max-width:650px){body{padding:8px}main{padding:21px 16px}table{font-size:.85rem}}
 @media print{body{background:white;padding:0}main{box-shadow:none;padding:0}nav{display:none}h2{break-after:avoid}}
 </style></head><body><main>
-<p class="muted">Windows 11 · Ausgabe v0.1.29</p>
+<p class="muted">Windows 11 · Ausgabe v0.1.30</p>
+<p class="note"><strong>Neu in v0.1.30:</strong> Der Inventarvergleich bewahrt nach fehlgeschlagenen Lesezugriffen den zuletzt geladenen Vergleich und kennzeichnet ihn als veraltet; erneutes Laden ist möglich (PR #300). Nach Offline-Start und erfolgreichem manuellem Abgleich bestätigt die Oberfläche die aktualisierte lokale Anzeige. Plattformänderungen bleiben bis zum kontrollierten Neustart mit erneut bestätigtem Eigenbestand gesperrt.</p>
 <h1>Kleinanzeiger – Benutzerhandbuch</h1>
 <p>Kleinanzeiger verwaltet Ihre eigenen Anzeigen, zeigt Kennzahlen, unterstützt Entwürfe mit KI und sichert lokale Daten. Alle häufigen Aufgaben starten über das Fenster <strong>Kleinanzeiger</strong>.</p>
 <nav><a href="#install">Installation</a><a href="#anzeigen">Anzeigen</a><a href="#email">E-Mails</a><a href="#labels">Vergleiche</a><a href="#ki">KI</a><a href="#stapel">Stapelaufträge</a><a href="#verkauf">Verkäufe & Lager</a><a href="#controlling">Controlling</a><a href="#vorlagen">Vorlagen</a><a href="#daten">Datensicherung</a><a href="#hilfe">Probleme</a></nav>
@@ -22,7 +23,7 @@ a{color:#146b84}footer{margin-top:2rem;font-size:.85rem;color:#536a75}
 <p class="note"><strong>Ab v0.1.14:</strong> Unter <strong>Weitere Aktionen → Vorherige Programmversion verwenden …</strong> nach beendetem Kleinanzeiger eine erhaltene frühere Programmversion auswählen und ausdrücklich bestätigen. Die ausgewählte Programmumgebung und ihre lesende Datenbankkompatibilität werden vor der Aktivierung geprüft; der Start nach dem Wechsel wird ebenfalls geprüft. Bei Fehlern wird die zuvor aktive Version wiederhergestellt; Anzeigen, Datenbank, Chrome-Profil und Backups bleiben unberührt. Dieser Knopf ist kein Zurücksetzen der Daten. <strong>Kleinanzeiger starten</strong> verwendet anschließend die bewusst ausgewählte Version; die Schaltfläche <strong>Installieren / aktualisieren</strong> führt bei Bedarf wieder ein Update aus.</p>
 <p class="note"><strong>Update mit Rückfallmöglichkeit (v0.1.13):</strong> Die neue Version wird zuerst getrennt installiert und am endgültigen Ort geprüft. Scheitert die Installation oder der Wechsel, wird die vorherige funktionsfähige Programmumgebung wiederhergestellt. Die zuvor installierte Version bleibt als <code>.venv-rollback-*</code> erhalten. Anzeigendaten, Backups und Chrome-Profil werden nicht ersetzt. Seit v0.1.14 lässt sich eine geprüfte ältere Version nach ausdrücklicher Bestätigung im Kontrollfenster auswählen.</p>
 <ol>
-<li>Das offizielle <strong>Kleinanzeiger-v0.1.29-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
+<li>Das offizielle <strong>Kleinanzeiger-v0.1.30-Windows.zip</strong> herunterladen und vollständig in einen eigenen Ordner entpacken. Nicht direkt aus dem ZIP starten.</li>
 <li><strong>Kleinanzeiger.cmd</strong> doppelklicken. Das Windows-Kontrollfenster erscheint.</li>
 <li><strong>Einrichten und starten</strong> klicken. Fehlendes Python 3.12/3.13 sowie Chrome werden bei Bedarf über geprüfte offizielle Dateien bereitgestellt. Eine Internetverbindung ist dafür nötig.</li>
 <li>Im eigens gestarteten Chrome-Fenster bei <strong>kleinanzeigen.de</strong> anmelden; gegebenenfalls die Konto-Bestätigung selbst durchführen. Kleinanzeiger speichert kein Kontopasswort.</li>
@@ -196,5 +197,5 @@ oder verändert allein eine Anzeige.</p>
 <p>Die Vorlage startet keinen Auftrag. Prüfhinweise führen keine Plattformaktionen und keine kostenpflichtige KI-Verarbeitung aus. Wiederkehrende autonome Arbeitsregeln sind noch nicht enthalten.</p>
 <h2>14. Grenzen der aktuellen Ausgabe</h2>
 <p><strong>Noch nicht vollständig abgenommen:</strong> Echte kontogebundene Chat-Lesung und expliziter Einzelversand über die optionale unabhängige Konto-API sind ohne kostenpflichtig verbundenes Konto nicht live getestet; eine unbeaufsichtigte Nachrichten-Automatik ist nicht aktiviert. Ebenso fehlen automatische Plattform-Stapeländerungen/-veröffentlichungen, wiederkehrende KI-Autopilot-Regeln, eine unabhängig geprüfte Provider-Abrechnung sowie die Freigabe auf Ihrem tatsächlichen Windows-Kunden-PC. Diese Funktionen dürfen nicht mit vorhandenen lokalen Notizen, KI-Vorschlägen oder simulierten Tests verwechselt werden.</p>
-<footer>Kleinanzeiger v0.1.29 – Kundenunterlagen. Stand: 1. November 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
+<footer>Kleinanzeiger v0.1.30 – Kundenunterlagen. Stand: 1. November 2026. Technische Dokumentation: <a href="https://github.com/alexdermohr/kleinanzeiger">github.com/alexdermohr/kleinanzeiger</a>.</footer>
 </main></body></html>

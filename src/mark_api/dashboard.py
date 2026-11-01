@@ -4628,8 +4628,8 @@ async function syncNow() {
       status.textContent = "Bestand abgeglichen, aber lokale Ansicht konnte nicht neu geladen werden. Bitte Ansicht neu laden.";
       return;
     }
-    status.textContent = result.current_ads + " Anzeigen aus dem Kundenkonto abgeglichen."
-      + (localWorkAvailable ? " Plattformänderungen bleiben bis zum Neustart gesperrt." : "");
+    status.textContent = result.current_ads + " Anzeigen aus dem Kundenkonto abgeglichen. Lokale Anzeige aktualisiert."
+      + (localWorkAvailable ? " Plattformänderungen bleiben bis zum kontrollierten Neustart mit erneut bestätigtem Eigenbestand gesperrt." : "");
   } catch (_error) {
     status.textContent = "Abgleich fehlgeschlagen. Vorhandene Anzeigen bleiben gespeichert. " + failureHint;
   } finally {
