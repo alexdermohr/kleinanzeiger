@@ -521,15 +521,20 @@ context.globalThis=context;vm.createContext(context);
 const source=fs.readFileSync(0,"utf8").replace(/consumeWriteToken\(\);\s*load\(\);\s*$/," ");
 new vm.Script(source);vm.runInContext(source,context);
 vm.runInContext('existingAiActiveId="a".repeat(32)',context);
-const findCopy=row=>row.children[2].children.find(
-  child=>child.textContent==="Freigegebenen Vorschlag kopieren");
+const findAction=(row,label)=>row.children[2].children.find(child=>child.textContent===label);
+const findCopy=row=>findAction(row,"Freigegebenen Vorschlag kopieren");
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
   assert.equal(await vm.runInContext("loadExistingAiDetails()",context),true);
   const rows=by("existing-ai-items").children;
   assert.equal(rows.length,5);
   assert.ok(findCopy(rows[0]),"approved suggestion must be copyable");
-  for(const idx of [1,2,3,4])assert.equal(findCopy(rows[idx]),undefined);
+  assert.ok(findAction(rows[0],"Titel kopieren"));
+  assert.ok(findAction(rows[0],"Beschreibung kopieren"));
+  for(const idx of [1,2,3,4]){
+    for(const label of ["Freigegebenen Vorschlag kopieren","Titel kopieren","Beschreibung kopieren"])
+      assert.equal(findAction(rows[idx],label),undefined);
+  }
   assert.equal(requests.length,1,"only one read to populate the table");
   findCopy(rows[0]).click();await settle();
   assert.deepEqual(copied,["Titel:\nVerbesserter Titel\n\nBeschreibung:\nBelegte Details."]);
@@ -537,20 +542,24 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   assert.equal(copied[0].includes("OWNER_TOKEN"),false);
   assert.match(by("existing-ai-feedback").textContent,/kopiert/i);
   assert.equal(requests.length,1,"clipboard action must never call platform API");
+  findAction(rows[0],"Titel kopieren").click();await settle();
+  findAction(rows[0],"Beschreibung kopieren").click();await settle();
+  assert.deepEqual(copied.slice(1),["Verbesserter Titel","Belegte Details."]);
+  assert.equal(requests.length,1,"single-field copy remains network-free");
   navigator.clipboard=null;
   findCopy(rows[0]).click();await settle();
   assert.match(by("existing-ai-feedback").textContent,/nicht verfügbar/);
-  assert.equal(copied.length,1);
+  assert.equal(copied.length,3);
   navigator.clipboard={writeText:async()=>{throw new Error("SECRET_PRIVATE_TOKEN")}};
   findCopy(rows[0]).click();await settle();
   assert.match(by("existing-ai-feedback").textContent,/fehlgeschlagen/);
   assert.equal(by("existing-ai-feedback").textContent.includes("SECRET_PRIVATE_TOKEN"),false);
-  assert.equal(copied.length,1);
+  assert.equal(copied.length,3);
   navigator.clipboard={writeText:async value=>{copied.push(value)}};
   vm.runInContext('existingAiActiveId="b".repeat(32)',context);
   findCopy(rows[0]).click();await settle();
   assert.match(by("existing-ai-feedback").textContent,/neu laden/);
-  assert.equal(copied.length,1);
+  assert.equal(copied.length,3);
   assert.equal(requests.length,1);
 })().catch(error=>{console.error(error);process.exitCode=1});
 """
