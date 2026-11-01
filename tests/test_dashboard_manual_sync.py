@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -20,6 +22,67 @@ from mark_api.private_web_runtime import (
 )
 from mark_api.results import ReadResult, ReadStatus
 from mark_api.storage import SnapshotStore
+
+
+
+class DashboardManualSyncJavaScriptTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node required for shipped JavaScript")
+    def test_offline_sync_updates_local_view_without_unlocking_platform_writes(self):
+        # Execute the shipped controller with only transport and local reload mocked.
+        readiness = _DASHBOARD_JS.split("function writeUiReady() {", 1)[1].split(
+            "function validPendingEntry", 1)[0]
+        controller = _DASHBOARD_JS.split("const syncFailureHints =", 1)[1].split(
+            "function renderJobsAvailability", 1)[0]
+        source = "function writeUiReady() {" + readiness + "const syncFailureHints =" + controller
+        harness = r'''
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const source = require("node:fs").readFileSync(0, "utf8");
+const status = {textContent:""}, button = {disabled:false};
+const requests = [];
+let response = {ok:true,json:async()=>({status:"success",current_ads:7})};
+let reloaded = true, reloads = 0;
+const context = {
+  manualSyncAvailable:true, syncInFlight:false, localWorkAvailable:true,
+  writeUiAvailable:false, writeToken:"fixture-local-token-0123456789",
+  pendingRecoveryBlocked:false,
+  window:{location:{origin:"http://127.0.0.1:12345"}},
+  byId:id=>id === "status" ? status : button,
+  fetch:async(path,options)=>{requests.push({path,options});return response;},
+  load:async()=>{reloads++;return reloaded;},
+};
+vm.createContext(context);
+vm.runInContext(source, context);
+const run = expression => vm.runInContext(expression, context);
+(async()=>{
+  assert.equal(run("writeUiReady()"),false);
+  await run("syncNow()");
+  assert.equal(reloads,1);
+  assert.match(status.textContent,/7 Anzeigen.*Lokale Anzeige aktualisiert/);
+  assert.match(status.textContent,/Plattformänderungen bleiben bis zum kontrollierten Neustart.*gesperrt/);
+  assert.equal(run("writeUiReady()"),false);
+  assert.equal(context.writeUiAvailable,false);
+  assert.equal(context.localWorkAvailable,true);
+  assert.equal(button.disabled,false);
+  // A failed local reload must never claim an updated view.
+  reloaded=false;
+  await run("syncNow()");
+  assert.match(status.textContent,/lokale Ansicht konnte nicht neu geladen werden/);
+  assert.doesNotMatch(status.textContent,/Lokale Anzeige aktualisiert/);
+  // A failed inventory read keeps the failure message and performs no reload.
+  response={ok:false,json:async()=>({error:"owner_inventory_read_failed"})};
+  await run("syncNow()");
+  assert.equal(reloads,2);
+  assert.match(status.textContent,/Abgleich fehlgeschlagen.*Vorhandene Anzeigen bleiben gespeichert/);
+  assert.equal(run("writeUiReady()"),false);
+  assert.equal(requests.length,3);
+  assert.ok(requests.every(r=>r.path === "/api/dashboard/sync" && r.options.method === "POST"));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+        result = subprocess.run([shutil.which("node"), "-e", harness],
+                                input=source, text=True, encoding="utf-8",
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class DashboardManualSyncHttpTests(unittest.TestCase):
