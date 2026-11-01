@@ -30,6 +30,24 @@
 5. Danach den Desktop-Eintrag **Kleinanzeiger** benutzen. Der ursprünglich
    entpackte Installationsordner wird für den normalen Start nicht benötigt.
 
+## Diagnose bei Startproblemen – ohne Anmeldung
+
+Wenn im **entpackten offiziellen Windows-ZIP** die Datei
+**Kleinanzeiger-Diagnose.cmd** enthalten ist, diese doppelklicken. Das
+Diagnosefenster zeigt nur feste Zustandsangaben: ob die lokale
+Python-Programmdatei und eine Datenbankdatei vorhanden sind, ob die
+mitgelieferte Wheel-Pruefsumme stimmt und ob Port 8765 belegt ist.
+
+Die Diagnose liest **keine Anzeigen, Nachrichten, Browserprofile, Cookies,
+Kennwoerter oder Datenbankinhalte**. Sie nimmt keine Konto- oder
+Plattformverbindung auf, sendet nichts und aendert keine Dateien.
+**Wichtig:** Eine vorhandene Datenbankdatei beweist keine Datenintegritaet,
+und ein belegter Port beweist keinen erfolgreichen Kleinanzeiger-Start.
+Ein gemeldetes `unbekannt` ist kein Fehlernachweis. Nur die sichtbaren
+Statuszeilen nach eigener Pruefung fuer die Fehlersuche weitergeben.
+Fehlt die Diagnose-Datei im ZIP, enthaelt die betreffende aeltere Ausgabe
+diese Funktion noch nicht.
+
 Keine Konsoleingaben, manuelles Python, Docker, WSL, Ubuntu oder Kopieren
 technischer Dashboard-URLs erforderlich.
 
