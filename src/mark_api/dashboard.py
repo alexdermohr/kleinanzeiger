@@ -5687,9 +5687,9 @@ async function loadExistingAiJobs() {
     return true;
   } catch (error) { byId("existing-ai-feedback").textContent=error.message; return false; }
 }
-async function copyApprovedExistingAi(item, jobId) {
+async function copyApprovedExistingAi(item, jobId, part="both") {
   const proposal=item?.proposal;
-  if (item?.phase!=="approved" ||
+  if (!["both","title","description"].includes(part) || item?.phase!=="approved" ||
       typeof proposal?.title!=="string" || !proposal.title.trim() ||
       typeof proposal?.description!=="string" || !proposal.description.trim() ||
       existingAiBusy || existingAiBatchBusy ||
@@ -5706,10 +5706,14 @@ async function copyApprovedExistingAi(item, jobId) {
   }
   try {
     // Intentional manual handoff: no ad ID, source metadata, credentials or platform action.
-    await navigator.clipboard.writeText(
-      "Titel:\\n"+proposal.title+"\\n\\nBeschreibung:\\n"+proposal.description);
+    const content=part==="title" ? proposal.title :
+      part==="description" ? proposal.description :
+      "Titel:\\n"+proposal.title+"\\n\\nBeschreibung:\\n"+proposal.description;
+    await navigator.clipboard.writeText(content);
+    const copiedWhat=part==="title" ? "Titel" :
+      part==="description" ? "Beschreibung" : "Freigegebenen Vorschlag";
     byId("existing-ai-feedback").textContent=
-      "Freigegebenen Vorschlag kopiert. Auf Kleinanzeigen wurde nichts geändert.";
+      copiedWhat+" kopiert. Auf Kleinanzeigen wurde nichts geändert.";
     return true;
   } catch {
     byId("existing-ai-feedback").textContent=
@@ -5763,11 +5767,16 @@ async function loadExistingAiDetails(reset=false) {
       if (item.phase==="approved" &&
           typeof item.proposal?.title==="string" && item.proposal.title.trim() &&
           typeof item.proposal?.description==="string" && item.proposal.description.trim()) {
-        const copy=document.createElement("button");
-        copy.type="button";
-        copy.textContent="Freigegebenen Vorschlag kopieren";
-        copy.addEventListener("click",()=>{void copyApprovedExistingAi(item,job.job_id);});
-        diff.append(copy);
+        for (const [part,label] of [
+          ["title","Titel kopieren"],
+          ["description","Beschreibung kopieren"],
+          ["both","Freigegebenen Vorschlag kopieren"]
+        ]) {
+          const copy=document.createElement("button");
+          copy.type="button";copy.textContent=label;
+          copy.addEventListener("click",()=>{void copyApprovedExistingAi(item,job.job_id,part);});
+          diff.append(copy);
+        }
       }
       const phase=document.createElement("td");phase.textContent=item.phase;row.append(phase);body.append(row);
       if (item.phase==="unknown") {
