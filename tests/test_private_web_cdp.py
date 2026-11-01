@@ -3777,6 +3777,34 @@ class CdpPrivateWebPageTests(unittest.TestCase):
                 self.assertEqual(caught.exception.stage, "connect")
                 self.assertEqual(invoked, [])
 
+    def test_large_chrome_target_list_with_iframes_remains_usable(self) -> None:
+        # Chrome 156 can report >200 KiB of /json/list entries from iframe
+        # targets although the owner has only a few management tabs.
+        port = 19962
+        url = f"http://127.0.0.1:{port}"
+        targets = [
+            {"type": "iframe", "title": "x" * 3000}
+            for _ in range(70)
+        ] + [{
+            "type": "page",
+            "url": "https://www.kleinanzeigen.de/m-meine-anzeigen.html",
+            "webSocketDebuggerUrl":
+                f"ws://127.0.0.1:{port}/devtools/page/management",
+        }]
+        size = len(json.dumps(targets).encode("utf-8"))
+        self.assertGreater(size, 64 * 1024)
+        self.assertLess(size, 1024 * 1024)
+        client = _LoopbackCdpClient(
+            url, timeout_seconds=1,
+            opener=lambda discovery, **kw: FakeResponse(targets, url=discovery),
+            websocket_factory=lambda *a, **kw: FakeSocket([]),
+            tcp_socket_factory=lambda *a, **kw: FakeTcpSocket(),
+        )
+        try:
+            self.assertIsNotNone(client._target_reservation)
+        finally:
+            client.close()
+
     def test_loopback_client_requires_one_same_port_page_target(self) -> None:
         good_target = {
             "type": "page",

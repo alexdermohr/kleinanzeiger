@@ -450,6 +450,31 @@ class BrowserInventoryTests(unittest.TestCase):
         except Exception as exc:
             failures.append(type(exc))
 
+    def test_windows_cancellable_read_works_without_posix_signal_mask(self):
+        client = FakeClient([payload([{"id": "1234567890", "state": "active"}])])
+        with patch("mark_api.private_web_inventory_cdp.sys.platform", "win32"):
+            result = self.reader(client).read_ads(stop_requested=lambda: False)
+        self.assertEqual(result.status, ReadStatus.SUCCESS_NONEMPTY)
+        self.assertEqual(tuple(item.ad_id for item in result.value), ("1234567890",))
+        self.assertIsNotNone(client._send_guard)
+        self.assertEqual(
+            [method for method, _ in client.calls],
+            ["Runtime.evaluate", "Runtime.evaluate"],
+        )
+        self.assertTrue(client.closed)
+
+    def test_windows_cancelled_read_never_enters_browser(self):
+        client = FakeClient([payload([])])
+        reader = self.reader(client)
+        try:
+            with patch("mark_api.private_web_inventory_cdp.sys.platform", "win32"):
+                with self.assertRaises(PrivateWebInventoryReadCancelled):
+                    reader.read_ads(stop_requested=lambda: True)
+            self.assertEqual(client.calls, [])
+        finally:
+            reader.close()
+        self.assertTrue(client.closed)
+
     def test_missing_signal_mask_is_setup_failure_not_cancellation(self):
         client = FakeClient([payload([])])
         with patch("mark_api.private_web_inventory_cdp.signal.pthread_sigmask", None):
