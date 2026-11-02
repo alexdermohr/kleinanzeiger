@@ -302,7 +302,11 @@ class ProductOfflineWorkspaceTests(unittest.TestCase):
         for path in ("/api/portfolio/sales/update", "/api/portfolio/price-rules/mutate",
                      "/api/portfolio/jobs/create", "/api/dashboard/sync", "/api/write/ads"):
             with self.subTest(path=path):
-                self.assertGreaterEqual(self.request("POST", path, {})[0], 400)
+                status, payload = self.request("POST", path, {})
+                self.assertGreaterEqual(status, 400)
+                if path == "/api/write/ads":
+                    self.assertEqual(status, 405)
+                    self.assertEqual(payload, {"error": "method_not_allowed"})
         self.assertEqual(self.store.ad_history("10001"), (self.snapshot,))
         self.writer.assert_not_called()
 
