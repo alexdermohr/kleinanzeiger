@@ -13,7 +13,7 @@ import textwrap
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -3174,7 +3174,7 @@ class WriteApiTests(unittest.TestCase):
             )
         self.assertEqual(status, 202)
         import sqlite3
-        with sqlite3.connect(self.store.path) as connection:
+        with closing(sqlite3.connect(self.store.path)) as connection, connection:
             connection.execute(
                 "UPDATE write_api_requests SET response_json = ? "
                 "WHERE idempotency_key = ?",
