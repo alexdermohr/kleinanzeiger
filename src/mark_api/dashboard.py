@@ -1432,6 +1432,7 @@ let existingAiNextAfter = null;
 let existingAiSelected = new Set();
 let existingAiPending = null;
 let existingAiBusy = false;
+let existingAiHandoffBusy = false;
 let existingAiBatchStop = false;
 let existingAiBatchBusy = false;
 let existingAiJobsPage = 0;
@@ -5760,6 +5761,96 @@ async function loadExistingAiJobs() {
     return true;
   } catch (error) { byId("existing-ai-feedback").textContent=error.message; return false; }
 }
+// Explicitly approved existing-listing AI text may enter ONLY the current local
+// editor. Approval is not ownership, freshness or platform-write authorization.
+async function applyApprovedExistingAiToManage(item, jobId) {
+  const status=byId("existing-ai-feedback");
+  const id=item?.ad_id, original=item?.original, proposal=item?.proposal;
+  if (item?.phase!=="approved" || typeof id!=="string" ||
+      !/^[0-9]{1,32}$/.test(id) ||
+      typeof item?.source_sha256!=="string" || !item.source_sha256 ||
+      typeof original?.title!=="string" || typeof original?.description!=="string" ||
+      typeof proposal?.title!=="string" || !proposal.title.trim() ||
+      typeof proposal?.description!=="string" || !proposal.description.trim() ||
+      existingAiBusy || existingAiBatchBusy || existingAiHandoffBusy ||
+      existingAiActiveId!==jobId || existingAiDisplayedId!==jobId) {
+    status.textContent="Nur einen aktuell freigegebenen Vorschlag im geöffneten Auftrag übernehmen. Auftrag neu laden.";
+    return false;
+  }
+  const observed=latestAdsById.get(id), baseline=managedAdBaseline;
+  const pageIndex=existingAiPageIndex;
+  const cursor=existingAiCursors[pageIndex] || "";
+  const sameEditor=()=>!!observed && !!baseline &&
+    existingAiPageIndex===pageIndex && existingAiCursors[pageIndex]===cursor &&
+    existingAiActiveId===jobId && existingAiDisplayedId===jobId &&
+    !existingAiBusy && !existingAiBatchBusy && writeUiReady() &&
+    !pendingRecoveryBlocked && pendingWrites.size===0 && pendingForAd(id)===null &&
+    latestAdsById.get(id)===observed && managedAdBaseline===baseline &&
+    observed.ad_id===id && observed.present===true &&
+    ["active","paused"].includes(observed.lifecycle_state) &&
+    VERIFIED_EXISTING_AD_SOURCES.has(observed.source) &&
+    typeof observed.observed_at==="string" && !!observed.observed_at &&
+    observed.title===original.title && observed.description===original.description &&
+    baseline.adId===id && baseline.titleKnown && baseline.descriptionKnown &&
+    baseline.title===original.title && baseline.description===original.description &&
+    byId("manage-ad-id").value===id && byId("manage-ad-select").value===id &&
+    byId("manage-title").value===original.title &&
+    byId("manage-description").value===original.description;
+  if (!sameEditor()) {
+    status.textContent="Zuerst genau diese eigene Anzeige im Anzeigeneditor mit bestätigtem Originaltext auswählen. Vorhandene Änderungen bleiben erhalten.";
+    return false;
+  }
+  existingAiHandoffBusy=true;
+  try {
+    // Recheck the review phase against the same locally paginated job snapshot.
+    // Both requests below are local reads, never provider or platform actions.
+    const params=new URLSearchParams({job_id:jobId,limit:"50",after:cursor});
+    const currentJob=await _jobGet("/api/portfolio/existing-ai/detail?"+params.toString());
+    const matches=Array.isArray(currentJob?.items)
+      ? currentJob.items.filter(row=>row.ad_id===id) : [];
+    const freshItem=matches.length===1 ? matches[0] : null;
+    if (!sameEditor() || currentJob?.job_id!==jobId ||
+        currentJob.platform_writes!==0 || freshItem?.phase!=="approved" ||
+        freshItem.source_sha256!==item.source_sha256 ||
+        freshItem.original?.title!==original.title ||
+        freshItem.original?.description!==original.description ||
+        freshItem.proposal?.title!==proposal.title ||
+        freshItem.proposal?.description!==proposal.description) {
+      throw new Error("Freigabe oder Originaltext nicht mehr eindeutig. Auftrag neu laden.");
+    }
+    const fresh=(await getJson("/api/catalog/ad?id="+encodeURIComponent(id)))?.ad;
+    if (!sameEditor() || !fresh || fresh.ad_id!==id || fresh.present!==true ||
+        fresh.lifecycle_state!==observed.lifecycle_state ||
+        fresh.source!==observed.source || fresh.observed_at!==observed.observed_at ||
+        fresh.title!==original.title || fresh.description!==original.description) {
+      throw new Error("Eigene Anzeige hat sich verändert. Neu abgleichen; nichts übernommen.");
+    }
+    if (!window.confirm("Lokal freigegebenen KI-Titel und -Text für Anzeige "+id+
+        " nach Originalvergleich NUR ins geöffnete Bearbeitungsformular übernehmen? "+
+        "Keine Plattformänderung; Speichern ist ein gesonderter Vorgang.")) return false;
+    if (!sameEditor() || freshItem.phase!=="approved") {
+      throw new Error("Auswahl oder Daten während der Bestätigung geändert.");
+    }
+    resetGenerationExistingTarget();
+    byId("manage-title").value=proposal.title;
+    byId("manage-description").value=proposal.description;
+    const form=optionalById("manage-form");
+    if (form && typeof form.scrollIntoView==="function") {
+      form.scrollIntoView({behavior:"smooth",block:"nearest"});
+    }
+    status.textContent="Freigegebener KI-Vorschlag NUR im lokalen Anzeigeneditor. "+
+      "Titel und Fakten erneut prüfen. Erst „Änderungen speichern“ ist ein "+
+      "separat zu bestätigender Plattformvorgang. Keine KI-Kosten oder Versand.";
+    return true;
+  } catch (_error) {
+    status.textContent="Übernahme nicht bestätigt. Freigabe, Anzeige und Formular "+
+      "neu prüfen; bestehende Eingaben bleiben erhalten.";
+    return false;
+  } finally {
+    existingAiHandoffBusy=false;
+  }
+}
+
 async function copyApprovedExistingAi(item, jobId, part="both") {
   const proposal=item?.proposal;
   if (!["both","title","description"].includes(part) || item?.phase!=="approved" ||
@@ -5849,6 +5940,15 @@ async function loadExistingAiDetails(reset=false) {
           copy.type="button";copy.textContent=label;
           copy.addEventListener("click",()=>{void copyApprovedExistingAi(item,job.job_id,part);});
           diff.append(copy);
+        }
+        if (/^[0-9]{1,32}$/.test(item.ad_id) &&
+            typeof item.original?.title==="string" &&
+            typeof item.original?.description==="string") {
+          const apply=document.createElement("button");
+          apply.type="button";
+          apply.textContent="Im Anzeigeneditor lokal übernehmen";
+          apply.addEventListener("click",()=>{void applyApprovedExistingAiToManage(item,job.job_id);});
+          diff.append(apply);
         }
       }
       const phase=document.createElement("td");phase.textContent=item.phase;row.append(phase);body.append(row);
