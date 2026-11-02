@@ -279,9 +279,33 @@ class PortfolioReportingTests(unittest.TestCase):
                          for item in weekly["imported_messages_per_day"]),3)
         self.assertIsNone(weekly["imported_unique_buyers_window"])
 
+    def test_top_ad_ranking_is_bounded_provenance_bound_and_not_buyers(self):
+        for index in range(12):
+            own=str(30000+index)
+            self.ad(own)
+            for number in range(12-index):
+                self.message(own,f"conversation-{number//2}",
+                             f"own-{index}-{number}",NOW)
+        self.ad("99999",source="local-catalog")
+        for number in range(30):
+            self.message("99999",f"outsider-{number}",f"outsider-{number}",NOW)
+        data=report(self.store,days=7,now=NOW)
+        rows=data["imported_top_ads_window"]
+        self.assertEqual(len(rows),10)
+        self.assertEqual(rows[0],{
+            "ad_id":"30000","imported_conversations":6,
+            "imported_inbound_messages":12})
+        self.assertEqual(rows[-1]["ad_id"],"30009")
+        self.assertNotIn("99999",[item["ad_id"] for item in rows])
+        self.assertIsNone(data["imported_unique_buyers_window"])
+        self.assertFalse(data["unique_buyer_count_supported"])
+        self.assertEqual(data["platform_writes"],0)
+        self.assertEqual(report(self.store,days=7,now=NOW),data)
+
     def test_empty_data_and_invalid_window_and_clock(self):
         empty=report(self.store,days=7,now=NOW)
         self.assertEqual(empty["own_ads_with_inventory_history"],0)
+        self.assertEqual(empty["imported_top_ads_window"],[])
         self.assertIsNone(empty["imported_unique_buyers_window"])
         self.assertFalse(empty["unique_buyer_count_supported"])
         self.assertTrue(all(row["imported_conversations"] == 0

@@ -101,6 +101,21 @@ def report(store: SnapshotStore, *, days: int=7,
             "FROM inbound_message_events e "+filt+
             " GROUP BY e.ad_id,e.conversation_id)",params,
         ).fetchone()[0])
+        # Rank only confirmed own ads by distinct imported conversations,
+        # never by an unverified buyer count or incomplete platform inbox.
+        top_rows=conn.execute(
+            "SELECT e.ad_id,COUNT(*) messages,"
+            "COUNT(DISTINCT e.conversation_id) conversations "
+            "FROM inbound_message_events e "+filt+
+            " GROUP BY e.ad_id COLLATE BINARY "
+            "ORDER BY conversations DESC,messages DESC,"
+            "e.ad_id COLLATE BINARY ASC LIMIT 10",params,
+        ).fetchall()
+        top_ads=[{
+            "ad_id":row["ad_id"],
+            "imported_conversations":int(row["conversations"]),
+            "imported_inbound_messages":int(row["messages"]),
+        } for row in top_rows]
         rows=conn.execute(
             "SELECT date(e.observed_at) day,COUNT(*) quantity "
             "FROM inbound_message_events e "+filt+
@@ -191,6 +206,7 @@ def report(store: SnapshotStore, *, days: int=7,
         "own_ads_with_inventory_history":ads,
         "imported_inbound_messages_window":messages,
         "imported_conversations_window":conversations,
+        "imported_top_ads_window":top_ads,
         # Local EML data hold conversation IDs, NOT a verified buyer ID.
         # Unknown differs from zero and must not be derived from a
         # conversation count or an ad-level reaction counter.
