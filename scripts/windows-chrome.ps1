@@ -23,6 +23,25 @@ function Find-KleinanzeigerChrome([string]$StateDirectory) {
   return $null
 }
 
+# Chrome for Testing is distributed unsigned on Windows. Its trust comes
+# from Google's fixed HTTPS manifest/download path and the PE product version.
+# Signed binaries must still have a valid Google publisher signature.
+function Test-KleinanzeigerChromeForTestingBinary(
+    [string]$Executable, [string]$ExpectedVersion) {
+  if ($ExpectedVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') { return $false }
+  try {
+    $file = Get-Item -LiteralPath $Executable -ErrorAction Stop
+    if ([string]$file.VersionInfo.ProductVersion -ne $ExpectedVersion) { return $false }
+    $signature = Get-AuthenticodeSignature -LiteralPath $Executable
+    if ($signature.Status -eq 'NotSigned') { return $true }
+    return ($signature.Status -eq 'Valid' -and
+            $null -ne $signature.SignerCertificate -and
+            [string]$signature.SignerCertificate.Subject -match 'Google')
+  } catch {
+    return $false
+  }
+}
+
 function Install-KleinanzeigerChrome([string]$StateDirectory) {
   $directory = Join-Path $StateDirectory 'Browser'
   $exe = Join-Path $directory 'chrome-win64\chrome.exe'
@@ -33,8 +52,10 @@ function Install-KleinanzeigerChrome([string]$StateDirectory) {
     $manifest = Invoke-RestMethod -Uri 'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json'
     $matches = @($manifest.channels.Stable.downloads.chrome | Where-Object { $_.platform -eq 'win64' })
     if ($matches.Count -ne 1) { throw 'Google-Chrome-Download ist nicht eindeutig.' }
+    $version = [string]$manifest.channels.Stable.version
     $url = [string]$matches[0].url
-    if ($url -notmatch '^https://storage\.googleapis\.com/chrome-for-testing-public/[0-9.]+/win64/chrome-win64\.zip$') {
+    if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$' -or
+        $url -ne "https://storage.googleapis.com/chrome-for-testing-public/$version/win64/chrome-win64.zip") {
       throw 'Unerwarteter Google-Chrome-Downloadlink.'
     }
     $zip = Join-Path $work 'chrome-win64.zip'
@@ -43,9 +64,8 @@ function Install-KleinanzeigerChrome([string]$StateDirectory) {
     Expand-Archive -LiteralPath $zip -DestinationPath $extracted
     $sourceExe = Join-Path $extracted 'chrome-win64\chrome.exe'
     if (!(Test-Path -LiteralPath $sourceExe -PathType Leaf)) { throw 'Chrome-Archiv ist unvollstaendig.' }
-    $signature = Get-AuthenticodeSignature -LiteralPath $sourceExe
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Google') {
-      throw 'Google-Chrome-Binaerdatei besitzt keine gueltige Google-Signatur.'
+    if (!(Test-KleinanzeigerChromeForTestingBinary -Executable $sourceExe -ExpectedVersion $version)) {
+      throw 'Chrome-for-Testing-Version oder Signaturstatus stimmt nicht mit dem Google-Download ueberein.'
     }
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     if (Test-Path -LiteralPath (Join-Path $directory 'chrome-win64')) {

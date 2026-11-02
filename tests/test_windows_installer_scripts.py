@@ -64,10 +64,66 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("googlechromelabs.github.io", chrome)
         self.assertIn("storage", chrome)
         self.assertIn("Get-AuthenticodeSignature", chrome)
+        self.assertIn("Test-KleinanzeigerChromeForTestingBinary", chrome)
+        self.assertIn("$signature.Status -eq 'NotSigned'", chrome)
+        self.assertIn("$manifest.channels.Stable.version", chrome)
+        self.assertIn("ProductVersion", chrome)
         self.assertIn("Find-KleinanzeigerChrome", start)
         self.assertIn("127.0.0.1", start)
         self.assertIn("ChromeProfile", start)
         self.assertIn("Kleinanzeiger.cmd", (ROOT / "docs/windows-installation.md").read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(os.name == "nt", "Requires real Windows PowerShell 5.1")
+    def test_windows_chrome_for_testing_unsigned_version_and_signature_guard(self):
+        chrome = str(SCRIPTS / "windows-chrome.ps1").replace("'", "''")
+        probe = r"""
+. '__CHROME_SCRIPT__'
+$script:FakeProductVersion = '156.0.8078.80'
+$script:FakeSignatureStatus = 'NotSigned'
+$script:FakeSubject = $null
+function Get-Item {
+  param([string]$LiteralPath)
+  return [pscustomobject]@{
+    VersionInfo=[pscustomobject]@{ProductVersion=$script:FakeProductVersion}
+  }
+}
+function Get-AuthenticodeSignature {
+  param([string]$LiteralPath)
+  $certificate = $null
+  if ($script:FakeSubject) {
+    $certificate = [pscustomobject]@{Subject=$script:FakeSubject}
+  }
+  return [pscustomobject]@{
+    Status=$script:FakeSignatureStatus;SignerCertificate=$certificate
+  }
+}
+function Accepted {
+  return Test-KleinanzeigerChromeForTestingBinary -Executable 'C:\Test\chrome.exe' -ExpectedVersion '156.0.8078.80'
+}
+if (!(Accepted)) { throw 'unsigned official Chrome for Testing must be accepted' }
+$script:FakeProductVersion = '156.0.8078.81'
+if (Accepted) { throw 'version mismatch must be rejected even if unsigned' }
+$script:FakeProductVersion = '156.0.8078.80'
+$script:FakeSignatureStatus = 'HashMismatch'
+if (Accepted) { throw 'damaged signature must be rejected' }
+$script:FakeSignatureStatus = 'Valid'
+$script:FakeSubject = 'CN=Different Publisher'
+if (Accepted) { throw 'foreign signer must be rejected' }
+$script:FakeSubject = 'CN=Google LLC'
+if (!(Accepted)) { throw 'valid Google signer must be accepted' }
+if (Test-KleinanzeigerChromeForTestingBinary -Executable 'C:\Test\chrome.exe' -ExpectedVersion 'bogus') {
+  throw 'malformed expected version must be rejected'
+}
+Write-Output 'CFT_UNSIGNED_VERSION_GUARD_PASS'
+"""
+        probe = probe.replace("__CHROME_SCRIPT__", chrome)
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", probe],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CFT_UNSIGNED_VERSION_GUARD_PASS", result.stdout)
 
     def test_start_refuses_unowned_chrome_cdp_and_keeps_offline_fallback(self):
         chrome = (SCRIPTS / "windows-chrome.ps1").read_text(encoding="utf-8")
