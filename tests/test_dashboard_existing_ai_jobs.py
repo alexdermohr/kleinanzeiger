@@ -474,6 +474,156 @@ by("existing-ai-batch-count").value="100";by("existing-ai-consent").checked=true
 
 
     @unittest.skipUnless(shutil.which("node"), "Node.js needed for dashboard interaction")
+    def test_node_approved_existing_ai_local_owner_editor_handoff(self):
+        """A locally approved existing-ad AI draft may enter only the exact unedited own form."""
+        harness=r"""
+const vm=require("node:vm"),fs=require("node:fs"),assert=require("node:assert/strict");
+const full=fs.readFileSync(0,"utf8");
+const first=full.indexOf("async function applyApprovedExistingAiToManage(");
+const last=full.indexOf("async function copyApprovedExistingAi(",first);
+assert.ok(first>0 && last>first,"owner-scoped local handoff function");
+assert.match(full,/apply\.textContent="Im Anzeigeneditor lokal übernehmen"/);
+assert.match(full,/apply\.addEventListener\("click",\(\)=>\{void applyApprovedExistingAiToManage\(item,job\.job_id\);\}\)/);
+const source=full.slice(first,last);
+const jobId="a".repeat(32),requests=[],confirmations=[];
+const original={title:"Original",description:"Belegte Fakten."};
+const proposal={title:"Besserer Titel",description:"Faktenklarer Text."};
+const item={ad_id:"4711",phase:"approved",source_sha256:"sensitive-hash",
+  original:{...original},proposal:{...proposal}};
+const ad={ad_id:"4711",present:true,lifecycle_state:"active",source:"kleinanzeigen-management",
+  observed_at:"2026-11-02T04:05:00Z",title:original.title,description:original.description};
+const fields=new Map();
+const byId=id=>{
+  if(!fields.has(id))fields.set(id,{value:"",textContent:"",scrollIntoView(){}});
+  return fields.get(id);
+};
+const ctx={
+  byId,optionalById:byId,URLSearchParams,encodeURIComponent,
+  existingAiActiveId:jobId,existingAiDisplayedId:jobId,existingAiBusy:false,
+  existingAiBatchBusy:false,existingAiHandoffBusy:false,
+  existingAiCursors:[""],existingAiPageIndex:0,
+  pendingRecoveryBlocked:false,pendingWrites:new Map(),pendingForAd:()=>null,
+  writeUiReady:()=>true,latestAdsById:new Map([["4711",ad]]),
+  managedAdBaseline:{adId:"4711",titleKnown:true,descriptionKnown:true,
+    title:original.title,description:original.description},
+  VERIFIED_EXISTING_AD_SOURCES:new Set(["kleinanzeigen-management"]),
+  resetGenerationExistingTarget:()=>{},
+  window:{confirm:msg=>{confirmations.push(msg);return true}},
+  _jobGet:async path=>{requests.push(["job",path]);return {
+    job_id:jobId,platform_writes:0,items:[structuredClone(item)]}},
+  getJson:async path=>{requests.push(["ad",path]);return {ad:{...ad}}}
+};
+vm.createContext(ctx);new vm.Script(source).runInContext(ctx);
+const setForm=()=>{
+  byId("manage-ad-id").value="4711";
+  byId("manage-ad-select").value="4711";
+  byId("manage-title").value=original.title;
+  byId("manage-description").value=original.description;
+};
+const checkUnchanged=()=>{
+  assert.equal(byId("manage-title").value,original.title);
+  assert.equal(byId("manage-description").value,original.description);
+};
+const apply=changed=>ctx.applyApprovedExistingAiToManage(changed??item,jobId);
+const reset=()=>{
+  setForm();requests.length=0;confirmations.length=0;
+  ctx.existingAiActiveId=jobId;
+  ctx.existingAiDisplayedId=jobId;
+  ctx.existingAiBusy=false;ctx.existingAiBatchBusy=false;
+  ctx.existingAiHandoffBusy=false;ctx.pendingRecoveryBlocked=false;
+  ctx.writeUiReady=()=>true;
+  ctx.managedAdBaseline={adId:"4711",titleKnown:true,descriptionKnown:true,
+    title:original.title,description:original.description};
+  ctx.latestAdsById=new Map([["4711",ad]]);
+  ctx._jobGet=async path=>{requests.push(["job",path]);return {
+    job_id:jobId,platform_writes:0,items:[structuredClone(item)]}};
+  ctx.getJson=async path=>{requests.push(["ad",path]);return {ad:{...ad}}};
+  ctx.window.confirm=msg=>{confirmations.push(msg);return true};
+};
+(async()=>{
+  reset();
+  assert.equal(await apply(),true,"approved own ad goes into local editor");
+  assert.equal(byId("manage-title").value,proposal.title);
+  assert.equal(byId("manage-description").value,proposal.description);
+  assert.equal(requests.length,2,"exactly two local read-only requests");
+  assert.ok(requests[0][1].includes("/api/portfolio/existing-ai/detail?"));
+  assert.equal(requests[1][1],"/api/catalog/ad?id=4711");
+  assert.equal(confirmations.length,1,"explicit separate confirmation");
+  assert.match(confirmations[0],/Keine Plattformänderung/);
+  assert.match(byId("existing-ai-feedback").textContent,/lokalen Anzeigeneditor/);
+  assert.equal(ctx.existingAiHandoffBusy,false);
+
+  reset();
+  assert.equal(await apply({...item,phase:"proposed"}),false);
+  assert.equal(await apply({...item,ad_id:"4712"}),false);
+  checkUnchanged();assert.equal(requests.length,0);
+  assert.equal(confirmations.length,0);
+
+  reset();ctx.writeUiReady=()=>false;
+  assert.equal(await apply(),false);
+  checkUnchanged();assert.equal(requests.length,0);
+
+  reset();ctx.pendingRecoveryBlocked=true;
+  assert.equal(await apply(),false);
+  checkUnchanged();assert.equal(requests.length,0);
+
+  reset();byId("manage-title").value="Manuelle Änderung";
+  assert.equal(await apply(),false);
+  assert.equal(byId("manage-title").value,"Manuelle Änderung");
+  assert.equal(requests.length,0);
+
+  reset();ctx._jobGet=async path=>{requests.push(["job",path]);return {
+    job_id:jobId,platform_writes:0,items:[{...item,phase:"rejected"}]}};
+  assert.equal(await apply(),false);
+  checkUnchanged();assert.equal(requests.length,1);
+
+  reset();ctx._jobGet=async path=>{requests.push(["job",path]);return {
+    job_id:jobId,platform_writes:1,items:[item]}};
+  assert.equal(await apply(),false);
+  checkUnchanged();assert.equal(requests.length,1);
+
+  reset();ctx.getJson=async path=>{requests.push(["ad",path]);return {ad:{...ad,title:"Changed"}}};
+  assert.equal(await apply(),false);
+  checkUnchanged();assert.equal(requests.length,2);
+
+  reset();ctx.window.confirm=()=>{confirmations.push("race");
+    byId("manage-description").value="Benutzereingabe";return true};
+  assert.equal(await apply(),false);
+  assert.equal(byId("manage-description").value,"Benutzereingabe");
+  assert.equal(byId("manage-title").value,original.title);
+
+  reset();ctx._jobGet=async path=>{requests.push(["job",path]);
+    ctx.existingAiActiveId="b".repeat(32);
+    return {job_id:jobId,platform_writes:0,items:[item]}};
+  assert.equal(await apply(),false);
+  checkUnchanged();assert.equal(requests.length,1);
+
+  reset();ctx._jobGet=async path=>{requests.push(["job",path]);
+    ctx.existingAiPageIndex=1;ctx.existingAiCursors=["","after-key"];
+    return {job_id:jobId,platform_writes:0,items:[item]}};
+  assert.equal(await apply(),false,"page change during local fetch must invalidate approval");
+  checkUnchanged();assert.equal(requests.length,1);
+  ctx.existingAiPageIndex=0;ctx.existingAiCursors=[""];
+
+  reset();
+  let release;ctx._jobGet=async path=>{requests.push(["job",path]);
+    return await new Promise(resolve=>{release=resolve})};
+  const firstCall=apply();await Promise.resolve();
+  assert.equal(await apply(),false,"double click while in flight is rejected");
+  release({job_id:jobId,platform_writes:0,items:[item]});
+  assert.equal(await firstCall,true);
+  assert.equal(ctx.existingAiHandoffBusy,false);
+  assert.ok(requests.every(([method])=>method==="job"||method==="ad"));
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        result=subprocess.run(
+            [shutil.which("node") or "node", "-e", harness],
+            input=_DASHBOARD_JS,text=True,encoding="utf-8",
+            capture_output=True,timeout=25,
+        )
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js needed for dashboard interaction")
     def test_node_approved_existing_ai_clipboard_only_manual_handoff(self):
         harness=r"""
 const vm=require("node:vm"), fs=require("node:fs"), assert=require("node:assert/strict");
@@ -504,7 +654,7 @@ const job={
   budget_cents:200,estimate_cents:20,actual_cents:0,reserved_cents:0,
   counts:{approved:2,proposed:1,rejected:1,unknown:1,queued:0,inflight:0},
   has_more:false,next_after:null,
-  items:[ad("approved","ad-4711"),ad("proposed","ad-4712"),
+  items:[ad("approved","4711"),ad("proposed","ad-4712"),
     ad("rejected","ad-4713"),ad("unknown","ad-4714"),
     ad("approved","ad-4715",{title:" ",description:"Belegte Details."})]
 };
@@ -529,6 +679,8 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   const rows=by("existing-ai-items").children;
   assert.equal(rows.length,5);
   assert.ok(findCopy(rows[0]),"approved suggestion must be copyable");
+  assert.ok(findAction(rows[0],"Im Anzeigeneditor lokal übernehmen"),
+    "approved numeric own-ad suggestion offers explicit local handoff");
   assert.ok(findAction(rows[0],"Titel kopieren"));
   assert.ok(findAction(rows[0],"Beschreibung kopieren"));
   for(const idx of [1,2,3,4]){
@@ -538,7 +690,7 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
   assert.equal(requests.length,1,"only one read to populate the table");
   findCopy(rows[0]).click();await settle();
   assert.deepEqual(copied,["Titel:\nVerbesserter Titel\n\nBeschreibung:\nBelegte Details."]);
-  assert.equal(copied[0].includes("ad-4711"),false);
+  assert.equal(copied[0].includes("4711"),false);
   assert.equal(copied[0].includes("OWNER_TOKEN"),false);
   assert.match(by("existing-ai-feedback").textContent,/kopiert/i);
   assert.equal(requests.length,1,"clipboard action must never call platform API");
