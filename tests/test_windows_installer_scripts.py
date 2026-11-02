@@ -123,6 +123,18 @@ Write-Output 'CFT_UNSIGNED_AND_INVALID_SIGNATURE_CASES_PASS'
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CFT_UNSIGNED_AND_INVALID_SIGNATURE_CASES_PASS", result.stdout)
 
+    def test_release_pr_checks_do_not_run_twice_on_feature_push(self):
+        # Required check names must be produced once, from pull_request.
+        # Main still runs these workflows after protected integration.
+        for filename in ("ci.yml", "offline-wheel-acceptance.yml"):
+            workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            lines = workflow.splitlines()
+            position = lines.index("on:")
+            self.assertEqual(
+                lines[position:position + 4],
+                ["on:", "  pull_request:", "  push:", "    branches: [main]"],
+            )
+
     def test_start_refuses_unowned_chrome_cdp_and_keeps_offline_fallback(self):
         chrome = (SCRIPTS / "windows-chrome.ps1").read_text(encoding="utf-8")
         start = (SCRIPTS / "windows-start.ps1").read_text(encoding="utf-8")

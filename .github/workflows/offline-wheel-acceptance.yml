@@ -3,6 +3,7 @@ name: Installed offline wheel acceptance
 on:
   pull_request:
   push:
+    branches: [main]
 permissions:
   contents: read
 jobs:
