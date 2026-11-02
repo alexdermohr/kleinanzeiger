@@ -7237,6 +7237,27 @@ def _handler_factory(
             )
 
         def _method_not_allowed(self) -> None:
+            # A small rejected POST body left unread can make Winsock reset
+            # the connection before the client receives the intended HTTP 405.
+            # Drain only bounded bodies with a timeout; do not accept Writes.
+            try:
+                ignored_bytes = self._content_length(max_bytes=_MAX_PROXY_JSON_BODY_BYTES)
+            except ValueError:
+                self.close_connection = True
+                ignored_bytes = 0
+            if ignored_bytes:
+                previous_timeout = self.connection.gettimeout()
+                try:
+                    self.connection.settimeout(_PROXY_BODY_READ_TIMEOUT_SECONDS)
+                    if len(self.rfile.read(ignored_bytes)) != ignored_bytes:
+                        self.close_connection = True
+                except (OSError, TimeoutError):
+                    self.close_connection = True
+                finally:
+                    try:
+                        self.connection.settimeout(previous_timeout)
+                    except OSError:
+                        pass
             body = _json_bytes({"error": "method_not_allowed"})
             self._send(
                 405,
