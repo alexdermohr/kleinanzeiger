@@ -929,6 +929,14 @@ _DASHBOARD_HTML = """<!doctype html>
           <thead><tr><th>Kalendertag (UTC)</th><th id="report-daily-metric-heading">Importierte Eingangsnachrichten</th></tr></thead>
           <tbody id="report-daily-body"></tbody>
         </table></div>
+        <h3>Welche Anzeigen erhalten die meisten importierten Gespräche?</h3>
+        <p id="report-top-ads-note" class="muted">Noch keine lokale Nachfrageauswertung geladen.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Eigene Anzeigen-ID</th><th>Unterschiedliche importierte Gespräche</th><th>Importierte Eingangsnachrichten</th></tr></thead>
+          <tbody id="report-top-ads-body"></tbody>
+        </table></div>
+        <p class="muted">Höchstens zehn Anzeigen mit den meisten lokal importierten Gesprächen im gewählten Zeitraum.
+        Keine eindeutigen Käufer, keine vollständige Plattform-Inbox und kein Beleg für verkaufte Artikel.</p>
         <p class="muted">Angezeigt werden höchstens die letzten 14 Tageszeilen;
         der CSV-Export enthält den vollständigen gewählten Zeitraum.
         Die E-Mail-Importzahl ist keine vollständige Kleinanzeigen-Nachrichtenstatistik.
@@ -6514,6 +6522,47 @@ function renderPortfolioReportDaily() {
     body.append(row);
   }
 }
+function renderPortfolioReportTopAds(data) {
+  const items=data.imported_top_ads_window;
+  if (!Array.isArray(items) || items.length>10 ||
+      !Number.isSafeInteger(data.imported_conversations_window) ||
+      !Number.isSafeInteger(data.imported_inbound_messages_window) ||
+      data.imported_conversations_window<0 || data.imported_inbound_messages_window<0) {
+    throw new Error("Ungültige lokale Nachfragezahlen");
+  }
+  const seen=new Set();
+  const rows=[];
+  let previous=null;
+  for (const item of items) {
+    if (!item || typeof item.ad_id!=="string" ||
+        !/^[0-9]{1,32}$/.test(item.ad_id) || seen.has(item.ad_id) ||
+        !Number.isSafeInteger(item.imported_conversations) ||
+        !Number.isSafeInteger(item.imported_inbound_messages) ||
+        item.imported_conversations<1 ||
+        item.imported_inbound_messages<item.imported_conversations ||
+        item.imported_conversations>data.imported_conversations_window ||
+        item.imported_inbound_messages>data.imported_inbound_messages_window ||
+        (previous && (previous.imported_conversations<item.imported_conversations ||
+          (previous.imported_conversations===item.imported_conversations &&
+           previous.imported_inbound_messages<item.imported_inbound_messages)))) {
+      throw new Error("Unklare Anzeigen-Nachfrage; keine Daten übernehmen");
+    }
+    seen.add(item.ad_id);
+    const row=document.createElement("tr");
+    for (const value of [item.ad_id,item.imported_conversations,
+                         item.imported_inbound_messages]) {
+      const cell=document.createElement("td");
+      cell.textContent=String(value);
+      row.append(cell);
+    }
+    rows.push(row);
+    previous=item;
+  }
+  byId("report-top-ads-body").replaceChildren(...rows);
+  byId("report-top-ads-note").textContent=items.length
+    ? "Top "+items.length+" nach importierten Gesprächen; nicht nach Käufern oder Verkäufen."
+    : "Keine importierten Gespräche zu bestätigten eigenen Anzeigen in diesem Zeitraum; fehlende EML-Daten sind kein Null-Nachfragebeleg.";
+}
 function portfolioAiCostText(cost) {
   if (cost===null)
     return "Noch keine lokalen KI-Auftragskosten erfasst; kein Rechnungsabgleich.";
@@ -6569,6 +6618,7 @@ async function loadPortfolioReport() {
     const cost=data.ai_usage_estimate_all_time;
     byId("report-ai-summary").textContent=portfolioAiCostText(cost);
     renderPortfolioReportDaily();
+    renderPortfolioReportTopAds(data);
     byId("report-download").disabled=false;
     byId("report-feedback").textContent=
       "Lokal berechnet. Keine Veröffentlichung und keine Anbieteranfrage.";
@@ -6576,6 +6626,8 @@ async function loadPortfolioReport() {
   } catch (_error) {
     if (seq===reportLoadSeq) {
       reportData=null;
+      byId("report-top-ads-body").replaceChildren();
+      byId("report-top-ads-note").textContent="Bericht nicht verfügbar; keine Nachfragezahl bestätigt.";
       byId("report-feedback").textContent=
         "Bericht nicht verfügbar. Datengrundlage prüfen; keine Werte erfunden.";
     }
@@ -6614,6 +6666,8 @@ byId("report-refresh").addEventListener("click",loadPortfolioReport);
 byId("report-metric").addEventListener("change",renderPortfolioReportDaily);
 byId("report-days").addEventListener("change",() => {
   reportData=null;
+  byId("report-top-ads-body").replaceChildren();
+  byId("report-top-ads-note").textContent="Berichtszeitraum geändert; neu laden.";
   byId("report-download").disabled=true;
   if (byId("report-disclosure").open) loadPortfolioReport();
 });

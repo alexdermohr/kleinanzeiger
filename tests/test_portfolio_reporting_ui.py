@@ -90,5 +90,54 @@ for (const invalid of [
             capture_output=True,timeout=30)
         self.assertEqual(proc.returncode,0,proc.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node runtime needed")
+    def test_top_ad_report_is_bounded_dom_only_and_rejects_false_buyers(self):
+        script=r"""
+const vm=require("node:vm"),fs=require("node:fs"),assert=require("node:assert/strict");
+const input=fs.readFileSync(0,"utf8");
+new vm.Script(input);
+const start=input.indexOf("function renderPortfolioReportTopAds(data) {");
+const end=input.indexOf("function portfolioAiCostText(cost) {",start);
+assert.ok(start>0 && end>start);
+const code=input.slice(start,end);
+function element(tag) {
+  return {tag,textContent:"",children:[],append(node){this.children.push(node);},
+    replaceChildren(...nodes){this.children=nodes;}};
+}
+const nodes={"report-top-ads-body":element("tbody"),
+             "report-top-ads-note":element("p")};
+const ctx={
+  document:{createElement:element},
+  byId:id=>nodes[id],
+  data:{imported_conversations_window:2,imported_inbound_messages_window:3,
+    imported_top_ads_window:[
+      {ad_id:"101",imported_conversations:1,imported_inbound_messages:2},
+      {ad_id:"102",imported_conversations:1,imported_inbound_messages:1}]}
+};
+function run(){return vm.runInNewContext(code+";renderPortfolioReportTopAds(data)",ctx);}
+run();
+assert.equal(nodes["report-top-ads-body"].children.length,2);
+assert.deepEqual(nodes["report-top-ads-body"].children[0].children.map(c=>c.textContent),
+                 ["101","1","2"]);
+assert.ok(nodes["report-top-ads-note"].textContent.includes("nicht nach Käufern"));
+for (const rows of [
+  [{ad_id:"<img src=x>",imported_conversations:1,imported_inbound_messages:1}],
+  [{ad_id:"101",imported_conversations:3,imported_inbound_messages:3}],
+  [{ad_id:"101",imported_conversations:1,imported_inbound_messages:0}],
+  Array(11).fill({ad_id:"101",imported_conversations:1,imported_inbound_messages:1})
+]) {
+  ctx.data={...ctx.data,imported_top_ads_window:rows};
+  assert.throws(run,/Ungültige|Unklare/);
+}
+ctx.data={...ctx.data,imported_top_ads_window:[]};
+run();
+assert.equal(nodes["report-top-ads-body"].children.length,0);
+assert.ok(nodes["report-top-ads-note"].textContent.includes("kein Null-Nachfragebeleg"));
+"""
+        proc=subprocess.run([shutil.which("node") or "node","-e",script],
+                            input=_DASHBOARD_JS,text=True,encoding="utf-8",
+                            capture_output=True,timeout=30)
+        self.assertEqual(proc.returncode,0,proc.stderr)
+
 if __name__=="__main__":
     unittest.main()
