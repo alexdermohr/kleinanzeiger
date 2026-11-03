@@ -214,16 +214,32 @@ def list_jobs(store: SnapshotStore, limit: int = 50, *, offset: int = 0) -> list
             "ORDER BY created_at DESC,job_id DESC LIMIT ? OFFSET ?", (limit, offset))]
 
 
-def details(store: SnapshotStore, job_id: str, *, after: str = "", limit: int = 50) -> dict[str, object]:
-    if type(limit) is not int or not 1 <= limit <= 50 or type(after) is not str or (after and not _AD.fullmatch(after)):
+def details(store: SnapshotStore, job_id: str, *, after: str = "", limit: int = 50,
+            ad_id: str | None = None) -> dict[str, object]:
+    if (type(limit) is not int or not 1 <= limit <= 50
+            or type(after) is not str or (after and not _AD.fullmatch(after))
+            or (ad_id is not None and (
+                type(ad_id) is not str or _AD.fullmatch(ad_id) is None
+                or not ad_id.strip() or bool(after)))):
         raise ExistingJobError("invalid page")
     with closing(store._connect()) as conn:
         if not _schema(conn): raise ExistingJobError("no jobs")
         answer = _progress(conn, job_id)
-        rows = conn.execute("SELECT ad_id,source_json,source_sha256,phase,proposal_json,actual_cents,error_code FROM portfolio_existing_job_items WHERE job_id=? AND ad_id>? COLLATE BINARY ORDER BY ad_id COLLATE BINARY LIMIT ?", (job_id,after,limit+1)).fetchall()
+        columns = "SELECT ad_id,source_json,source_sha256,phase,proposal_json,actual_cents,error_code FROM portfolio_existing_job_items WHERE job_id=?"
+        if ad_id is None:
+            rows = conn.execute(
+                columns + " AND ad_id>? COLLATE BINARY ORDER BY ad_id COLLATE BINARY LIMIT ?",
+                (job_id, after, limit + 1),
+            ).fetchall()
+        else:
+            # The (job_id, ad_id) primary key provides a bounded exact lookup,
+            # even when the stored job contains 10,000 items.
+            rows = conn.execute(
+                columns + " AND ad_id=? COLLATE BINARY LIMIT 1", (job_id, ad_id),
+            ).fetchall()
         answer["items"] = [{"ad_id":r["ad_id"],"original":json.loads(r["source_json"]),"source_sha256":r["source_sha256"],"phase":r["phase"],"proposal":json.loads(r["proposal_json"]) if r["proposal_json"] else None,"actual_cents":r["actual_cents"],"error_code":r["error_code"]} for r in rows[:limit]]
-        answer["has_more"] = len(rows) > limit
-        answer["next_after"] = rows[limit-1]["ad_id"] if len(rows)>limit else None
+        answer["has_more"] = ad_id is None and len(rows) > limit
+        answer["next_after"] = rows[limit-1]["ad_id"] if answer["has_more"] else None
         return answer
 
 

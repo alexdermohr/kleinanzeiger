@@ -79,6 +79,7 @@ let autopilotNextOffset = null;
 let autopilotBusy = false;
 let autopilotOpeningTask = false;
 let autopilotFocusedJobId = "";
+let autopilotFocusedAdId = "";
 
 function renderPortfolioInsights() {
   const available = jobsAvailable && localUiReady();
@@ -267,6 +268,10 @@ async function openAutopilotTask(item) {
     let target;
     if (item.kind === "ai_uncertain" || item.kind === "ai_proposal") {
       if (!/^[0-9a-f]{32}$/.test(item.reference)) throw new Error("Ungültiger KI-Auftrag");
+      if (typeof item.ad_id !== "string" || item.ad_id.length>160 ||
+          /[\x00-\x1f\x7f]/.test(item.ad_id) || !item.ad_id.trim()) {
+        throw new Error("Ungültige Zielanzeige");
+      }
       if (existingAiBusy || existingAiBatchBusy) throw new Error("KI-Auftrag wird bereits geladen");
       target = optionalById("existing-ai-disclosure");
       if (!target || target.hidden) throw new Error("KI-Aufträge nicht verfügbar");
@@ -278,16 +283,17 @@ async function openAutopilotTask(item) {
         select.appendChild(option);
       }
       autopilotFocusedJobId = item.reference;
+      autopilotFocusedAdId = item.ad_id;
       existingAiActiveId = item.reference;
       select.value = item.reference;
       target.open = true;
-      const loaded = await loadExistingAiDetails(true);
+      const loaded = await loadExistingAiDetails(true,item.ad_id);
       if (!loaded || existingAiActiveId !== item.reference || existingAiDisplayedId !== item.reference) {
         throw new Error("Auftrag nicht mehr eindeutig. KI-Aufträge erneut laden");
       }
       byId("existing-ai-feedback").textContent =
         "Auftrag aus dem KI-Arbeitsradar geladen. Anzeige " + item.ad_id +
-        " in den Auftragsseiten prüfen. Keine KI-Anfrage oder Plattformaktion gestartet.";
+        " gezielt im Auftrag geöffnet. Keine KI-Anfrage oder Plattformaktion gestartet.";
     } else if (item.kind === "eml_unreviewed") {
       if (!/^[0-9]{1,32}$/.test(item.ad_id) ||
           !/^[A-Za-z0-9][A-Za-z0-9:_-]{2,255}$/.test(item.reference)) {
@@ -320,6 +326,7 @@ async function openAutopilotTask(item) {
     return true;
   } catch (error) {
     autopilotFocusedJobId = "";
+    autopilotFocusedAdId = "";
     status.textContent = "Prüfbereich nicht geöffnet: " + error.message +
       ". Keine KI-Anfrage, Nachricht oder Plattformaktion gestartet.";
     return false;
