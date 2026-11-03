@@ -326,14 +326,34 @@ async function openAutopilotTask(item) {
       if (catalogLoading || catalogBulkBusy) throw new Error("Anzeigenkatalog ist gerade beschäftigt");
       target = optionalById("ads-panel");
       if (!target || target.hidden) throw new Error("Eigene Anzeigen nicht verfügbar");
+      // A substring query may hide the exact ID behind 50 earlier title
+      // matches. Reuse the existing indexed local GET and present precisely
+      // the returned ad without treating it as a new owner/write capability.
+      const catalogBefore = catalogGeneration;
+      const found = (await getJson("/api/catalog/ad?id=" +
+        encodeURIComponent(item.ad_id)))?.ad;
+      if (!found || found.ad_id !== item.ad_id) {
+        throw new Error("Zielanzeige nicht eindeutig lokal bestätigt");
+      }
+      if (catalogBefore !== catalogGeneration || catalogLoading || catalogBulkBusy) {
+        throw new Error("Anzeigenkatalog hat sich während der Prüfung geändert");
+      }
+      catalogFilters = {search: item.ad_id, status: "all"};
       byId("catalog-search").value = item.ad_id;
       byId("catalog-status").value = "all";
-      if (!await searchCatalog() || !catalogRows.some(ad => ad.ad_id === item.ad_id)) {
-        throw new Error("Anzeige nicht auf der Katalogsuchseite bestätigt");
-      }
+      catalogCursors = [""];
+      catalogPageIndex = 0;
+      catalogNextAfter = null;
+      catalogRows = [found];
+      renderAds([found]);
+      renderFollowupChoices();
+      renderSaleChoices();
+      renderCatalogNavigation();
+      byId("catalog-page-label").textContent = "Einzelanzeige";
       byId("catalog-feedback").textContent =
-        "Aufrufe für Anzeige " + item.ad_id +
-        " über zwei bestätigte Messzeitpunkte unverändert. Fakten prüfen; keine Plattformaktion gestartet.";
+        "Anzeige " + item.ad_id + " über exakte ID geöffnet. " +
+        "Aufrufzähler über zwei bestätigte Messzeitpunkte unverändert. " +
+        "Für normale Seitenübersicht Suche erneut ausführen; keine Plattformaktion gestartet.";
     } else {
       throw new Error("Unbekannter Prüfpunkt");
     }

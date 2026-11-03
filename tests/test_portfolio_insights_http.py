@@ -164,6 +164,35 @@ class PortfolioInsightsHttpTests(unittest.TestCase):
         ))
         self.assertEqual(self.request("GET", path)[1]["counts"]["views_stagnant"], 0)
 
+    def test_radar_exact_ad_http_bypasses_50_earlier_substring_matches(self):
+        now = datetime.now(timezone.utc)
+        # Eighty unrelated titles match the target ID as a substring. The
+        # ordinary list only yields the first 50, never the actual target.
+        for index in range(80):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id=f"{index:05d}", observed_at=now,
+                source="kleinanzeigen-management",
+                lifecycle_state=LifecycleState.ACTIVE,
+                title="Fremder Titel enthält 10077", description="Nur Testdaten",
+            ))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="10077", observed_at=now,
+            source="kleinanzeigen-management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Eigentliche Zielanzeige", description="Nur Testdaten",
+        ))
+        listing_status, listing = self.request(
+            "GET", "/api/catalog/ads?q=10077&limit=50")
+        self.assertEqual(listing_status, 200)
+        self.assertEqual(len(listing["ads"]), 50)
+        self.assertTrue(listing["has_more"])
+        self.assertNotIn("10077", {ad["ad_id"] for ad in listing["ads"]})
+        code, exact = self.request("GET", "/api/catalog/ad?id=10077")
+        self.assertEqual(code, 200)
+        self.assertEqual(exact["ad"]["ad_id"], "10077")
+        self.assertEqual(exact["ad"]["title"], "Eigentliche Zielanzeige")
+        self.assertEqual(self.request("GET", "/api/catalog/ad?id=100770")[0], 404)
+
     def test_g4_compares_actual_launcher_and_explicit_retry_not_only_cli_rounds(self):
         self.round(0, "private-web-product-launcher", [("10001", "Alt"), ("10002", "Bleibt")])
         self.round(10, "private-web-periodic-readonly", [("10001", "Neu"), ("10002", "Bleibt"), ("10003", "Dazu")])

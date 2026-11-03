@@ -213,6 +213,35 @@ class AutopilotAttentionTests(unittest.TestCase):
             )
         self.assertEqual(attention_page(self.store, now=NOW)["counts"]["views_stagnant"], 0)
 
+    def test_production_owner_reader_without_explicit_metric_source(self):
+        # Management/CDP readers normally emit views with metric_source=None;
+        # reuse the existing query projection's source fallback, not a new
+        # ingestion path or a synthetic provenance field.
+        for ad_id, source in (("20001", "kleinanzeigen-management"),
+                              ("20002", "private-web-periodic-readonly")):
+            for age in (16, 0):
+                self.store.append_ad_snapshot(AdSnapshot(
+                    ad_id=ad_id, observed_at=NOW - timedelta(days=age),
+                    source=source, lifecycle_state=LifecycleState.ACTIVE,
+                    title="Echte Reader-Form, synthetische Daten", views=8,
+                    metric_source=None,
+                ))
+        page = attention_page(self.store, now=NOW)
+        self.assertEqual(page["counts"]["views_stagnant"], 2)
+        self.assertEqual([item["ad_id"] for item in page["items"]],
+                         ["20001", "20002"])
+        # If explicit and source-derived provenance differ, comparison stops:
+        # this is NOT a new ownership or metrics-admission permission.
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="20002", observed_at=NOW,
+            source="private-web-periodic-readonly",
+            lifecycle_state=LifecycleState.ACTIVE, views=8,
+            metric_source="different-explicit-counter",
+        ))
+        self.assertEqual([item["ad_id"] for item in
+                          attention_page(self.store, now=NOW)["items"]],
+                         ["20001"])
+
     def test_view_stagnation_has_real_10000_item_global_priority_pagination(self):
         # Synthetic fixtures use the actual append-only production table.
         with self.store._connect() as conn:
@@ -223,7 +252,7 @@ class AutopilotAttentionTests(unittest.TestCase):
                 "views,metric_source) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     (f"{n:05d}", when.isoformat(), "kleinanzeigen-management",
-                     "active", "Synthetisch", "Nur Testdaten", 3, "stats")
+                     "active", "Synthetisch", "Nur Testdaten", 3, None)
                     for n in range(10_000)
                     for when in (NOW - timedelta(days=15), NOW)
                 ),

@@ -53,6 +53,11 @@ def _stagnant_owned_views(
     oldest = instant - timedelta(days=_STAGNATION_BASELINE_MAX_DAYS)
     result: list[tuple[str, str, str]] = []
 
+    def metric_origin(row: sqlite3.Row) -> object:
+        # Production owner readers omit metric_source: preserve the exact
+        # existing MarkQueryService evidence fallback to snapshot.source.
+        return row["metric_source"] if row["metric_source"] is not None else row["source"]
+
     def classify(ad_id: object, group: list[sqlite3.Row]) -> None:
         if type(ad_id) is not str or _AD_ID.fullmatch(ad_id) is None or not ad_id.strip():
             return
@@ -69,7 +74,7 @@ def _stagnant_owned_views(
                 return
         observations.sort(key=lambda item: (item[0], item[1]))
         last_at, _, latest = observations[-1]
-        last_counter, metric_source = latest["views"], latest["metric_source"]
+        last_counter, metric_source = latest["views"], metric_origin(latest)
         if (
             not fresh <= last_at <= instant
             or latest["source"] not in OWN_INVENTORY_SOURCES
@@ -84,7 +89,7 @@ def _stagnant_owned_views(
             if oldest <= item[0] <= before
             and item[2]["source"] == latest["source"]
             and item[2]["lifecycle_state"] == "active"
-            and item[2]["metric_source"] == metric_source
+            and metric_origin(item[2]) == metric_source
             and type(item[2]["views"]) is int
             and item[2]["views"] >= 0
         ]
@@ -99,7 +104,7 @@ def _stagnant_owned_views(
             if first_at <= observed <= last_at and (
                 row["source"] != latest["source"]
                 or row["lifecycle_state"] != "active"
-                or row["metric_source"] != metric_source
+                or metric_origin(row) != metric_source
                 or type(row["views"]) is not int
                 or row["views"] != last_counter
             ):

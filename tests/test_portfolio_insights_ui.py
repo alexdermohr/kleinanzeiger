@@ -33,7 +33,7 @@ const context={console,URLSearchParams,Number,document:{createElement:()=>new El
   _newJobRequestKey:()=>String(++key).padStart(64,"0"),
   fetch:async(path,options)=>{sent.push({path,options});return fetchImpl(path,options);}};
 vm.createContext(context);
-vm.runInContext("let jobsAvailable=true; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false, conversationBusy=false, followupBusy=false, catalogLoading=false, catalogBulkBusy=false, catalogRows=[];\n"+source,context);
+vm.runInContext("let jobsAvailable=true; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false, conversationBusy=false, followupBusy=false, catalogLoading=false, catalogBulkBusy=false, catalogRows=[], catalogGeneration=0, catalogPageIndex=0, catalogCursors=[''], catalogNextAfter=null, catalogFilters={search:'',status:'all'};\n"+source,context);
 const run = expression => vm.runInContext(expression,context);
 const success = value => ({ok:true,status:200,json:async()=>value});
 const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
@@ -288,31 +288,52 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.match(byId("autopilot-body").children[0].children[2].textContent,/14 Tage/);
   assert.equal(byId("autopilot-body").children[0].children[4].children[0].textContent,
     "Anzeige im Katalog prüfen");
-  let catalogSearches=0;
-  context.searchCatalog=async()=>{
-    catalogSearches++;
-    assert.equal(byId("catalog-search").value,"10077");
-    assert.equal(byId("catalog-status").value,"all");
-    run("catalogRows=[{ad_id:'10077'}]");
-    return true;
+  // 80 earlier list matches would exclude this exact ID from the first 50
+  // substring hits. Only the indexed GET /api/catalog/ad?id= may be used.
+  let exactReads=0;
+  const rendered=[];
+  context.searchCatalog=async()=>{throw Error("substring search forbidden here");};
+  context.getJson=async path=>{
+    exactReads++;
+    assert.equal(path,"/api/catalog/ad?id=10077");
+    return {ad:{ad_id:"10077",title:"Owner fixture from indexed lookup"}};
   };
+  context.renderAds=ads=>rendered.push(ads);
+  context.renderFollowupChoices=()=>{};
+  context.renderSaleChoices=()=>{};
+  context.renderCatalogNavigation=()=>{byId("catalog-page-label").textContent="Seite 1";};
   assert.equal(await byId("autopilot-body").children[0].children[4].children[0].listeners.click(),true);
-  assert.equal(catalogSearches,1);
-  assert.match(byId("catalog-feedback").textContent,/Anzeige 10077/);
+  assert.equal(exactReads,1);
+  assert.equal(rendered.length,1);
+  assert.equal(rendered[0].length,1);
+  assert.equal(rendered[0][0].ad_id,"10077");
+  assert.equal(run("catalogRows[0].ad_id"),"10077");
+  assert.equal(byId("catalog-page-label").textContent,"Einzelanzeige");
+  assert.equal(byId("catalog-search").value,"10077");
+  assert.match(byId("catalog-feedback").textContent,/Anzeige 10077 über exakte ID/);
+  // Busy and stale current catalogue state must not be overwritten by a
+  // read that returns after the user has changed catalogue generation.
   run("catalogBulkBusy=true");
   assert.equal(await run("openAutopilotTask({kind:'views_stagnant',ad_id:'10077'})"),false);
-  assert.equal(catalogSearches,1);
+  assert.equal(exactReads,1);
   run("catalogBulkBusy=false");
-  context.searchCatalog=async()=>{
-    catalogSearches++;
-    run("catalogRows=[{ad_id:'not-the-requested-ad'}]");
-    return true;
+  let resolveOldExact;
+  context.getJson=()=>new Promise(resolve=>{resolveOldExact=resolve;});
+  const oldExact=run("openAutopilotTask({kind:'views_stagnant',ad_id:'10077'})");
+  run("catalogGeneration++");
+  resolveOldExact({ad:{ad_id:"10077"}});
+  assert.equal(await oldExact,false);
+  assert.equal(rendered.length,1);
+  context.getJson=async path=>{
+    exactReads++;
+    assert.equal(path,"/api/catalog/ad?id=10077");
+    return {ad:{ad_id:"100770",title:"Wrong target"}};
   };
   assert.equal(await run("openAutopilotTask({kind:'views_stagnant',ad_id:'10077'})"),false);
-  assert.match(byId("autopilot-status").textContent,/nicht auf der Katalogsuchseite bestätigt/);
-  assert.equal(catalogSearches,2);
+  assert.match(byId("autopilot-status").textContent,/nicht eindeutig lokal bestätigt/);
+  assert.equal(rendered.length,1);
   assert.equal(await run("openAutopilotTask({kind:'views_stagnant',ad_id:'invalid'})"),false);
-  assert.equal(catalogSearches,2);
+  assert.equal(rendered.length,1);
   ready=false;
   assert.equal(await run("openAutopilotTask({kind:'manual_overdue',ad_id:'10002'})"),false);
   assert.equal(selectedFollowups.length,2);
