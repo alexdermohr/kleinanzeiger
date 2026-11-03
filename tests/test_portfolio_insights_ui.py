@@ -217,7 +217,7 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   // Radar task buttons must navigate to the exact existing local job, never call a provider.
   const selectedAi=[];
   const selectedFollowups=[];
-  context.loadExistingAiDetails=async()=>{selectedAi.push(run("existingAiActiveId"));run("existingAiDisplayedId=existingAiActiveId");return true;};
+  context.loadExistingAiDetails=async(reset,adId)=>{selectedAi.push([run("existingAiActiveId"),adId,reset]);run("existingAiDisplayedId=existingAiActiveId");return true;};
   context.selectFollowupAd=id=>selectedFollowups.push(id);
   let loadedConversations=0;
   context.loadConversations=async()=>{loadedConversations++;return true;};
@@ -226,7 +226,14 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(await firstTask.children[4].children[0].listeners.click(),true);
   assert.equal(byId("existing-ai-disclosure").open,true);
   assert.equal(byId("existing-ai-choice").value,"a".repeat(32));
-  assert.equal(selectedAi[0],"a".repeat(32));
+  assert.deepEqual(selectedAi[0],["a".repeat(32),"10001",true]);
+  assert.equal(run("autopilotFocusedAdId"),"10001");
+  assert.equal(await run("openAutopilotTask({kind:'ai_proposal',ad_id:'item-09999-alnum',reference:'a'.repeat(32)})"),true);
+  assert.deepEqual(selectedAi.at(-1),["a".repeat(32),"item-09999-alnum",true]);
+  const beforeInvalid=selectedAi.length;
+  assert.equal(await run("openAutopilotTask({kind:'ai_uncertain',ad_id:'',reference:'a'.repeat(32)})"),false);
+  assert.equal(selectedAi.length,beforeInvalid);
+  assert.equal(run("autopilotFocusedAdId"),"");
   assert.equal(byId("autopilot-body").children[1].children[4].children.length,0,
     "malformed IDs must never become navigation actions");
   assert.equal(await run("openAutopilotTask({kind:'eml_unreviewed',ad_id:'10001',reference:'chat_10001'})"),true);

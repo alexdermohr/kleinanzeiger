@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from http.client import HTTPConnection
 import json
 from pathlib import Path
+from urllib.parse import quote
 import shutil
 import sqlite3
 import subprocess
@@ -67,6 +68,20 @@ class ExistingAiDashboardTests(unittest.TestCase):
         code,page=self.request("GET",f"/api/portfolio/existing-ai/detail?job_id={first['job_id']}")
         self.assertEqual(code,200); self.assertEqual(page["items"][0]["original"]["title"],"Original")
         self.assertEqual(page["platform_writes"],0)
+        # Exact job+ad ID lookups inherit the same local token boundary.
+        endpoint=f"/api/portfolio/existing-ai/detail?job_id={first['job_id']}&ad_id=4711&limit=1"
+        code,focused=self.request("GET",endpoint)
+        self.assertEqual(code,200)
+        self.assertEqual([x["ad_id"] for x in focused["items"]],["4711"])
+        self.assertFalse(focused["has_more"])
+        self.assertIsNone(focused["next_after"])
+        self.assertEqual(self.request("GET",endpoint,token="bad")[0],403)
+        self.assertEqual(self.request("GET",endpoint+"&after=0000")[0],400)
+        self.assertEqual(self.request("GET",endpoint+"&ad_id=4711")[0],400)
+        self.assertEqual(self.request("GET",endpoint.replace("ad_id=4711","ad_id="))[0],400)
+        code,missing=self.request("GET",endpoint.replace("ad_id=4711","ad_id=9999"))
+        self.assertEqual(code,200)
+        self.assertEqual(missing["items"],[])
 
     def test_10000_item_http_all_selected_large_payload_and_overflow(self):
         # 9,999 synthetic originals plus the single setUp owner ad.
@@ -104,6 +119,16 @@ class ExistingAiDashboardTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(len(page["items"]), 50)
         self.assertTrue(page["has_more"])
+        # 160-character-ish stored IDs on the last page must still be
+        # located immediately without visiting 200 cursor pages.
+        target_id=quote(ids[-1],safe="")
+        code,exact=self.request("GET",
+            f"/api/portfolio/existing-ai/detail?job_id={selected_job['job_id']}&ad_id={target_id}&limit=1")
+        self.assertEqual(code,200)
+        self.assertEqual([x["ad_id"] for x in exact["items"]],[ids[-1]])
+        self.assertEqual(exact["total"],10_000)
+        self.assertFalse(exact["has_more"])
+        self.assertEqual(exact["platform_writes"],0)
         self.store.append_ad_snapshot(AdSnapshot(
             ad_id="overflow", observed_at=now, source="kleinanzeigen-management",
             lifecycle_state=LifecycleState.ACTIVE,
@@ -116,7 +141,7 @@ class ExistingAiDashboardTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM portfolio_existing_jobs").fetchone()[0], 2)
 
     def test_dashboard_contains_complete_existing_ad_workflow(self):
-        for control in ("existing-ai-create", "existing-ai-start", "existing-ai-pause",
+        for control in ("existing-ai-create", "existing-ai-all-items", "existing-ai-start", "existing-ai-pause",
                         "existing-ai-next-call", "existing-ai-batch", "existing-ai-stop",
                         "existing-ai-approve", "existing-ai-reject", "existing-ai-next",
                         "existing-ai-recovery", "existing-ai-recover",
@@ -376,7 +401,7 @@ class E {
 }
 const elements=new Map(),by=id=>{if(!elements.has(id))elements.set(id,new E(id));return elements.get(id)};
 const id="a".repeat(32);
-let calls=0,mode="normal",release=null;
+let calls=0,mode="normal",release=null,detailUrls=[];
 const confirms=[];
 const state={job_id:id,state:"running",platform_writes:0,total:100,
   budget_cents:140,estimate_cents:20,actual_cents:0,reserved_cents:0,
@@ -386,7 +411,7 @@ const context={
  document:{getElementById:by,createElement:()=>new E(),querySelectorAll:()=>[]},
  console,URLSearchParams,Uint8Array,Blob,TextEncoder,setTimeout,clearTimeout,
  fetch:async(path,options={})=>{
-  if(path.includes("/existing-ai/detail?"))return response({...state});
+  if(path.includes("/existing-ai/detail?")){detailUrls.push(path);return response({...state});}
   if(path.includes("/existing-ai/jobs?"))return response({jobs:[{job_id:id,created_at:"2026-10-29T18:00:00",total:100,state:"running"}],has_more:false});
   if(path==="/api/portfolio/existing-ai/generate-next"){
    calls++;
@@ -411,6 +436,32 @@ new vm.Script(source);vm.runInContext(source,context);
 vm.runInContext('jobsAvailable=true;localWorkAvailable=true;writeUiAvailable=true;writeToken="t".repeat(32);generationUiAvailable=true;generationToken="g".repeat(32);existingAiActiveId="a".repeat(32);existingAiDisplayedId=existingAiActiveId',context);
 by("existing-ai-batch-count").value="100";by("existing-ai-consent").checked=true;
 (async()=>{
+ // The exact task from the Radar must reach the intended item through
+ // the shipped, real JS controller, independent of the job's first 50.
+ state.items=[{ad_id:"item-09999",phase:"queued",original:{title:"Alt",description:"Belegt"},
+   proposal:null,source_sha256:"a".repeat(64),actual_cents:0,error_code:null}];
+ assert.equal(await vm.runInContext('loadExistingAiDetails(true,"item-09999")',context),true);
+ assert.match(detailUrls.at(-1),/ad_id=item-09999/);
+ assert.match(detailUrls.at(-1),/limit=1/);
+ assert.equal(detailUrls.at(-1).includes("after="),false);
+ assert.match(by("existing-ai-page").textContent,/Anzeige item-09999/);
+ assert.equal(by("existing-ai-next").disabled,true);
+ assert.equal(by("existing-ai-all-items").hidden,false);
+ // One reversible click returns to the existing paginated job view.
+ vm.runInContext('autopilotFocusedJobId=existingAiActiveId;autopilotFocusedAdId="item-09999"',context);
+ by("existing-ai-all-items").click();
+ await new Promise(resolve=>setTimeout(resolve,0));
+ assert.equal(vm.runInContext("autopilotFocusedAdId",context),"");
+ assert.equal(by("existing-ai-all-items").hidden,true);
+ assert.equal(detailUrls.at(-1).includes("ad_id="),false);
+ assert.match(by("existing-ai-page").textContent,/Seite 1/);
+ state.items=[{...state.items[0],ad_id:"a different item"}];
+ assert.equal(await vm.runInContext('loadExistingAiDetails(true,"item-09999")',context),false);
+ assert.match(by("existing-ai-feedback").textContent,/nicht mehr im KI-Auftrag/);
+ assert.equal(by("existing-ai-items").children.length,0);
+ assert.equal(vm.runInContext("existingAiDisplayedId",context),"");
+ state.items=[];
+ vm.runInContext("existingAiDisplayedId=existingAiActiveId",context);
  // The persisted USD budget, NOT the editable text fields, permits only seven.
  by("existing-ai-budget").value="999999";
  await vm.runInContext("generateExistingAiBatch()",context);
@@ -502,6 +553,7 @@ const ctx={
   existingAiActiveId:jobId,existingAiDisplayedId:jobId,existingAiBusy:false,
   existingAiBatchBusy:false,existingAiHandoffBusy:false,
   existingAiCursors:[""],existingAiPageIndex:0,
+  autopilotFocusedJobId:"",autopilotFocusedAdId:"",
   pendingRecoveryBlocked:false,pendingWrites:new Map(),pendingForAd:()=>null,
   writeUiReady:()=>true,latestAdsById:new Map([["4711",ad]]),
   managedAdBaseline:{adId:"4711",titleKnown:true,descriptionKnown:true,
@@ -531,6 +583,7 @@ const reset=()=>{
   ctx.existingAiDisplayedId=jobId;
   ctx.existingAiBusy=false;ctx.existingAiBatchBusy=false;
   ctx.existingAiHandoffBusy=false;ctx.pendingRecoveryBlocked=false;
+  ctx.autopilotFocusedJobId="";ctx.autopilotFocusedAdId="";
   ctx.writeUiReady=()=>true;
   ctx.managedAdBaseline={adId:"4711",titleKnown:true,descriptionKnown:true,
     title:original.title,description:original.description};
@@ -552,6 +605,35 @@ const reset=()=>{
   assert.match(confirmations[0],/Keine Plattformänderung/);
   assert.match(byId("existing-ai-feedback").textContent,/lokalen Anzeigeneditor/);
   assert.equal(ctx.existingAiHandoffBusy,false);
+
+  // Direct Radar handoff must revalidate the exact ad ID rather than
+  // querying the first 50 items and rejecting an otherwise approved ad.
+  reset();ctx.autopilotFocusedJobId=jobId;ctx.autopilotFocusedAdId="4711";
+  ctx._jobGet=async path=>{requests.push(["job",path]);return {
+    job_id:jobId,platform_writes:0,items:[structuredClone(item)],
+    has_more:false,next_after:null}};
+  assert.equal(await apply(),true,"focused item can enter unchanged own editor");
+  assert.equal(requests.length,2);
+  assert.match(requests[0][1],/ad_id=4711/);
+  assert.match(requests[0][1],/limit=1/);
+  assert.equal(requests[0][1].includes("after="),false);
+  assert.equal(byId("manage-title").value,proposal.title);
+  reset();ctx.autopilotFocusedJobId=jobId;ctx.autopilotFocusedAdId="9999";
+  assert.equal(await apply(),false,"focused different ad must not be approved");
+  assert.equal(requests.length,0);checkUnchanged();
+  reset();ctx.autopilotFocusedJobId=jobId;ctx.autopilotFocusedAdId="4711";
+  ctx._jobGet=async path=>{requests.push(["job",path]);return {
+    job_id:jobId,platform_writes:0,items:[structuredClone(item)],
+    has_more:true,next_after:"4711"}};
+  assert.equal(await apply(),false,"inconsistent exact-item response fails closed");
+  checkUnchanged();assert.equal(requests.length,1);
+  reset();ctx.autopilotFocusedJobId=jobId;ctx.autopilotFocusedAdId="4711";
+  ctx._jobGet=async path=>{requests.push(["job",path]);
+    ctx.autopilotFocusedAdId="4712";
+    return {job_id:jobId,platform_writes:0,items:[structuredClone(item)],
+      has_more:false,next_after:null}};
+  assert.equal(await apply(),false,"task focus drift during read invalidates handoff");
+  checkUnchanged();assert.equal(requests.length,1);
 
   reset();
   assert.equal(await apply({...item,phase:"proposed"}),false);

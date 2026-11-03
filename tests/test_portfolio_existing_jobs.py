@@ -68,6 +68,20 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         self.assertEqual(len(page["items"]), 50)
         self.assertTrue(page["has_more"])
         self.assertEqual(details(self.store, jid, after=page["next_after"])["items"][0]["ad_id"], ids[50])
+        # Radar links must open the exact final item, not leave a user
+        # searching 200 pages by hand; the query is job/ID indexed.
+        focused = details(self.store, jid, ad_id=ids[-1], limit=1)
+        self.assertEqual(focused["total"], 10_000)
+        self.assertEqual([item["ad_id"] for item in focused["items"]], [ids[-1]])
+        self.assertFalse(focused["has_more"])
+        self.assertIsNone(focused["next_after"])
+        self.assertEqual(focused["platform_writes"], 0)
+        self.assertEqual(details(self.store, jid, ad_id="not-in-this-job")["items"], [])
+        for candidate in ("", " ", "bad\n", 42):
+            with self.subTest(ad_id=candidate), self.assertRaises(ExistingJobError):
+                details(self.store, jid, ad_id=candidate)
+        with self.assertRaises(ExistingJobError):
+            details(self.store, jid, ad_id=ids[-1], after=page["next_after"])
         change_state(self.store, jid, "start")
         first = claim_next(self.store, jid)
         self.assertEqual(first["ad_id"], ids[0])

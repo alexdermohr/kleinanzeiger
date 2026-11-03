@@ -715,6 +715,7 @@ _DASHBOARD_HTML = """<!doctype html>
         </table></div>
         <div class="catalog-pages">
           <button id="existing-ai-prev" type="button">Zurück</button><span id="existing-ai-page">Seite 1</span><button id="existing-ai-next" type="button">Weiter</button>
+          <button id="existing-ai-all-items" type="button" hidden>Gesamten Auftrag anzeigen</button>
         </div>
         <div class="write-actions">
           <button id="existing-ai-approve" type="button">Auswahl lokal freigeben</button>
@@ -5773,7 +5774,8 @@ async function loadExistingAiJobs() {
     byId("existing-ai-jobs-next").disabled=!existingAiJobsHasMore;
     select.value=existingAiActiveId;
     byId("existing-ai-feedback").textContent=data.jobs.length+" lokale Aufträge geladen.";
-    if (existingAiActiveId) await loadExistingAiDetails(true);
+    if (existingAiActiveId) await loadExistingAiDetails(true,
+      existingAiActiveId === autopilotFocusedJobId ? autopilotFocusedAdId : "");
     else { existingAiDisplayedId=""; byId("existing-ai-items").replaceChildren(); }
     return true;
   } catch (error) { byId("existing-ai-feedback").textContent=error.message; return false; }
@@ -5797,7 +5799,13 @@ async function applyApprovedExistingAiToManage(item, jobId) {
   const observed=latestAdsById.get(id), baseline=managedAdBaseline;
   const pageIndex=existingAiPageIndex;
   const cursor=existingAiCursors[pageIndex] || "";
+  const focusedAdId=autopilotFocusedJobId===jobId ? autopilotFocusedAdId : "";
+  if (focusedAdId && focusedAdId!==id) {
+    status.textContent="Nur die im KI-Arbeitsradar geöffnete Anzeige übernehmen.";
+    return false;
+  }
   const sameEditor=()=>!!observed && !!baseline &&
+    (autopilotFocusedJobId===jobId ? autopilotFocusedAdId : "")===focusedAdId &&
     existingAiPageIndex===pageIndex && existingAiCursors[pageIndex]===cursor &&
     existingAiActiveId===jobId && existingAiDisplayedId===jobId &&
     !existingAiBusy && !existingAiBatchBusy && writeUiReady() &&
@@ -5819,15 +5827,20 @@ async function applyApprovedExistingAiToManage(item, jobId) {
   }
   existingAiHandoffBusy=true;
   try {
-    // Recheck the review phase against the same locally paginated job snapshot.
-    // Both requests below are local reads, never provider or platform actions.
-    const params=new URLSearchParams({job_id:jobId,limit:"50",after:cursor});
+    // Recheck the same exact item when the Radar selected an item outside
+    // the first 50. All reads remain local; no provider or platform action.
+    const params=new URLSearchParams({job_id:jobId,limit:focusedAdId?"1":"50"});
+    if (focusedAdId) params.set("ad_id",focusedAdId);
+    else params.set("after",cursor);
     const currentJob=await _jobGet("/api/portfolio/existing-ai/detail?"+params.toString());
     const matches=Array.isArray(currentJob?.items)
       ? currentJob.items.filter(row=>row.ad_id===id) : [];
     const freshItem=matches.length===1 ? matches[0] : null;
     if (!sameEditor() || currentJob?.job_id!==jobId ||
-        currentJob.platform_writes!==0 || freshItem?.phase!=="approved" ||
+        currentJob.platform_writes!==0 ||
+        (focusedAdId && (currentJob.items.length!==1 ||
+            currentJob.has_more!==false || currentJob.next_after!==null)) ||
+        freshItem?.phase!=="approved" ||
         freshItem.source_sha256!==item.source_sha256 ||
         freshItem.original?.title!==original.title ||
         freshItem.original?.description!==original.description ||
@@ -5903,20 +5916,30 @@ async function copyApprovedExistingAi(item, jobId, part="both") {
   }
 }
 
-async function loadExistingAiDetails(reset=false) {
+async function loadExistingAiDetails(reset=false, focusedAdId="") {
   if (!existingAiActiveId||existingAiBusy) return false;
+  if (focusedAdId && (typeof focusedAdId!=="string" ||
+      focusedAdId.length>160 || /[\x00-\x1f\x7f]/.test(focusedAdId) ||
+      !focusedAdId.trim())) return false;
   if (reset) { existingAiPageIndex=0; existingAiCursors=[""]; existingAiSelected.clear(); }
   existingAiBusy=true; existingAiDisplayedId="";
+  byId("existing-ai-all-items").hidden=true;
   byId("existing-ai-recovery").hidden=true;
   byId("existing-ai-unknown-ad").replaceChildren();
   byId("existing-ai-checked").checked=false;
   byId("existing-ai-checked-cents").value="";
   try {
-    const params=new URLSearchParams({job_id:existingAiActiveId,limit:"50",
-      after:existingAiCursors[existingAiPageIndex]});
+    const params=new URLSearchParams({job_id:existingAiActiveId,
+      limit:focusedAdId ? "1" : "50"});
+    if (focusedAdId) params.set("ad_id",focusedAdId);
+    else params.set("after",existingAiCursors[existingAiPageIndex]);
     const job=await _jobGet("/api/portfolio/existing-ai/detail?"+params.toString());
     if (!job||job.job_id!==existingAiActiveId||!Array.isArray(job.items)||job.platform_writes!==0)
       throw new Error("Ungültige Detailantwort");
+    if (focusedAdId && (job.items.length!==1 || job.items[0].ad_id!==focusedAdId ||
+        job.has_more!==false || job.next_after!==null)) {
+      throw new Error("Konkrete Anzeige nicht mehr im KI-Auftrag. Aufgabe erneut prüfen.");
+    }
     existingAiNextAfter=job.has_more?job.next_after:null;
     const c=job.counts||{};
     byId("existing-ai-progress").textContent="Status: "+job.state+" · "+job.total+
@@ -5975,12 +5998,19 @@ async function loadExistingAiDetails(reset=false) {
         unknownChoice.append(option);
       }
     }
-    byId("existing-ai-page").textContent="Seite "+(existingAiPageIndex+1);
-    byId("existing-ai-prev").disabled=existingAiPageIndex===0;
-    byId("existing-ai-next").disabled=!existingAiNextAfter;
+    byId("existing-ai-page").textContent=focusedAdId
+      ? "Anzeige "+focusedAdId+" · gezielter lokaler Prüffall"
+      : "Seite "+(existingAiPageIndex+1);
+    byId("existing-ai-prev").disabled=Boolean(focusedAdId)||existingAiPageIndex===0;
+    byId("existing-ai-next").disabled=Boolean(focusedAdId)||!existingAiNextAfter;
+    byId("existing-ai-all-items").hidden=!focusedAdId;
     existingAiDisplayedId=job.job_id; return true;
-  } catch (error) { byId("existing-ai-feedback").textContent=error.message; return false; }
-  finally { existingAiBusy=false; }
+  } catch (error) {
+    // Never leave a previous unrelated task visible after an exact-item miss.
+    if (focusedAdId) byId("existing-ai-items").replaceChildren();
+    byId("existing-ai-feedback").textContent=error.message;
+    return false;
+  } finally { existingAiBusy=false; }
 }
 async function createExistingAiJob() {
   if (existingAiBusy||existingAiBatchBusy) return;
@@ -6146,10 +6176,10 @@ async function generateExistingAiBatch() {
   }
 }
 byId("existing-ai-create").addEventListener("click",createExistingAiJob);
-byId("existing-ai-refresh").addEventListener("click",loadExistingAiJobs);
-byId("existing-ai-jobs-prev").addEventListener("click",()=>{if(existingAiJobsPage){autopilotFocusedJobId="";existingAiJobsPage--;loadExistingAiJobs();}});
-byId("existing-ai-jobs-next").addEventListener("click",()=>{if(existingAiJobsHasMore){autopilotFocusedJobId="";existingAiJobsPage++;loadExistingAiJobs();}});
-byId("existing-ai-choice").addEventListener("change",()=>{autopilotFocusedJobId="";existingAiActiveId=byId("existing-ai-choice").value;loadExistingAiDetails(true);});
+byId("existing-ai-refresh").addEventListener("click",()=>{autopilotFocusedJobId="";autopilotFocusedAdId="";loadExistingAiJobs();});
+byId("existing-ai-jobs-prev").addEventListener("click",()=>{if(existingAiJobsPage){autopilotFocusedJobId="";autopilotFocusedAdId="";existingAiJobsPage--;loadExistingAiJobs();}});
+byId("existing-ai-jobs-next").addEventListener("click",()=>{if(existingAiJobsHasMore){autopilotFocusedJobId="";autopilotFocusedAdId="";existingAiJobsPage++;loadExistingAiJobs();}});
+byId("existing-ai-choice").addEventListener("change",()=>{autopilotFocusedJobId="";autopilotFocusedAdId="";existingAiActiveId=byId("existing-ai-choice").value;loadExistingAiDetails(true);});
 for (const action of ["start","pause","resume"])
   byId("existing-ai-"+action).addEventListener("click",()=>existingAiState(action));
 byId("existing-ai-recover").addEventListener("click",recoverExistingAiInterrupted);
@@ -6161,9 +6191,23 @@ byId("existing-ai-approve").addEventListener("click",()=>reviewExistingAi(true))
 byId("existing-ai-reject").addEventListener("click",()=>reviewExistingAi(false));
 byId("existing-ai-next").addEventListener("click",()=>{if(existingAiNextAfter&&!existingAiBusy){existingAiCursors.push(existingAiNextAfter);existingAiPageIndex++;existingAiSelected.clear();loadExistingAiDetails();}});
 byId("existing-ai-prev").addEventListener("click",()=>{if(existingAiPageIndex&&!existingAiBusy){existingAiPageIndex--;existingAiCursors=existingAiCursors.slice(0,existingAiPageIndex+1);existingAiSelected.clear();loadExistingAiDetails();}});
+byId("existing-ai-all-items").addEventListener("click",()=>{
+  if (existingAiBusy || existingAiBatchBusy || existingAiHandoffBusy ||
+      !localUiReady() || !autopilotFocusedAdId ||
+      existingAiActiveId !== autopilotFocusedJobId ||
+      existingAiDisplayedId !== existingAiActiveId) return;
+  autopilotFocusedJobId=""; autopilotFocusedAdId="";
+  void loadExistingAiDetails(true);
+});
 byId("existing-ai-disclosure").addEventListener("toggle",()=>{
   byId("existing-ai-selection").textContent=catalogSelectedIds.size+" aktuelle Kataloganzeigen ausgewählt";
-  if (byId("existing-ai-disclosure").open) loadExistingAiJobs();
+  if (!byId("existing-ai-disclosure").open) {
+    autopilotFocusedJobId=""; autopilotFocusedAdId="";
+  } else if (!autopilotFocusedJobId) {
+    // A Radar handoff already loads the exact item; do not race it with
+    // a generic first-page job fetch triggered by the disclosure toggle.
+    loadExistingAiJobs();
+  }
 });
 async function loadWorkTemplates() {
   if (!jobsAvailable || !localUiReady()) return false;
@@ -7959,9 +8003,9 @@ def _handler_factory(
                 if not self._write_token_authorized(require_origin=False):
                     self._send_json(403, {"error":"write_session_required"}); return
                 try:
-                    options=parse_qs(target.query,keep_blank_values=True,max_num_fields=3,
+                    options=parse_qs(target.query,keep_blank_values=True,max_num_fields=4,
                                     encoding="utf-8",errors="strict")
-                    allowed={"limit","offset"} if path.endswith("/jobs") else {"job_id","limit","after"}
+                    allowed={"limit","offset"} if path.endswith("/jobs") else {"job_id","limit","after","ad_id"}
                     if set(options)-allowed or any(len(v)!=1 for v in options.values()):
                         raise ValueError("invalid fields")
                     limit=int(options.get("limit",["50"])[0])
@@ -7971,8 +8015,11 @@ def _handler_factory(
                         answer={"jobs":page[:limit],"has_more":len(page)>limit,
                                 "offset":offset}
                     else:
+                        if "ad_id" in options and "after" in options:
+                            raise ValueError("ambiguous existing AI item page")
                         answer=existing_job_details(store,options["job_id"][0],
-                            after=options.get("after",[""])[0],limit=limit)
+                            after=options.get("after",[""])[0],limit=limit,
+                            ad_id=options.get("ad_id",[None])[0])
                 except (ValueError,UnicodeError,KeyError,ExistingJobError):
                     self._send_json(400,{"error":"invalid_existing_ai_query"}); return
                 except (sqlite3.Error,OSError):
