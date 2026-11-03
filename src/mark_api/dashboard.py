@@ -5758,7 +5758,15 @@ async function loadExistingAiJobs() {
       option.textContent=job.created_at.slice(0,16).replace("T"," ")+" · "+job.total+" Anzeigen · "+job.state;
       select.append(option);
     }
-    existingAiActiveId=data.jobs.some(job=>job.job_id===prior)?prior:(data.jobs[0]?.job_id||"");
+    const keepRadarJob = prior && prior === autopilotFocusedJobId;
+    if (keepRadarJob && !data.jobs.some(job => job.job_id === prior)) {
+      const radarOption = document.createElement("option");
+      radarOption.value = prior;
+      radarOption.textContent = "KI-Arbeitsradar · Auftrag " + prior.slice(0, 8);
+      select.appendChild(radarOption);
+    }
+    existingAiActiveId = data.jobs.some(job=>job.job_id===prior) || keepRadarJob
+      ? prior : (data.jobs[0]?.job_id||"");
     existingAiJobsHasMore=data.has_more===true;
     byId("existing-ai-jobs-page").textContent="Auftragsseite "+(existingAiJobsPage+1);
     byId("existing-ai-jobs-prev").disabled=existingAiJobsPage===0;
@@ -6139,9 +6147,9 @@ async function generateExistingAiBatch() {
 }
 byId("existing-ai-create").addEventListener("click",createExistingAiJob);
 byId("existing-ai-refresh").addEventListener("click",loadExistingAiJobs);
-byId("existing-ai-jobs-prev").addEventListener("click",()=>{if(existingAiJobsPage){existingAiJobsPage--;loadExistingAiJobs();}});
-byId("existing-ai-jobs-next").addEventListener("click",()=>{if(existingAiJobsHasMore){existingAiJobsPage++;loadExistingAiJobs();}});
-byId("existing-ai-choice").addEventListener("change",()=>{existingAiActiveId=byId("existing-ai-choice").value;loadExistingAiDetails(true);});
+byId("existing-ai-jobs-prev").addEventListener("click",()=>{if(existingAiJobsPage){autopilotFocusedJobId="";existingAiJobsPage--;loadExistingAiJobs();}});
+byId("existing-ai-jobs-next").addEventListener("click",()=>{if(existingAiJobsHasMore){autopilotFocusedJobId="";existingAiJobsPage++;loadExistingAiJobs();}});
+byId("existing-ai-choice").addEventListener("change",()=>{autopilotFocusedJobId="";existingAiActiveId=byId("existing-ai-choice").value;loadExistingAiDetails(true);});
 for (const action of ["start","pause","resume"])
   byId("existing-ai-"+action).addEventListener("click",()=>existingAiState(action));
 byId("existing-ai-recover").addEventListener("click",recoverExistingAiInterrupted);

@@ -33,7 +33,7 @@ INSIGHTS_HTML = """
         <button id="autopilot-next" type="button" disabled>Nächste 50 Aufgaben</button>
         <p id="autopilot-status" role="status" aria-live="polite">Noch keine Aufgabenprüfung durchgeführt.</p>
         <div class="table-scroll"><table>
-          <thead><tr><th>Priorität</th><th>Anzeige</th><th>Prüfschritt</th><th>Lokaler Nachweis</th></tr></thead>
+          <thead><tr><th>Priorität</th><th>Anzeige</th><th>Prüfschritt</th><th>Lokaler Nachweis</th><th>Weiter</th></tr></thead>
           <tbody id="autopilot-body"></tbody>
         </table></div>
       </details>
@@ -77,6 +77,8 @@ let priceRuleListBusy = false;
 let priceRuleLoadSerial = 0;
 let autopilotNextOffset = null;
 let autopilotBusy = false;
+let autopilotOpeningTask = false;
+let autopilotFocusedJobId = "";
 
 function renderPortfolioInsights() {
   const available = jobsAvailable && localUiReady();
@@ -217,6 +219,23 @@ async function loadAutopilotAttention(next = false) {
       insightCell(row, item.ad_id);
       insightCell(row, labels[item.kind]);
       insightCell(row, item.reference + " · " + item.evidence);
+      const actionCell = document.createElement("td");
+      const usable = item.kind.startsWith("ai_")
+        ? /^[0-9a-f]{32}$/.test(item.reference)
+        : /^[0-9]{1,32}$/.test(item.ad_id);
+      if (usable) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = item.kind.startsWith("ai_") ? "KI-Auftrag öffnen"
+          : item.kind === "eml_unreviewed" ? "EML-Prüfung öffnen" : "Wiedervorlage öffnen";
+        button.setAttribute("aria-label", button.textContent + " · Anzeige " + item.ad_id +
+          (item.kind.startsWith("ai_") ? " · Auftrag " + item.reference.slice(0, 8) : ""));
+        button.addEventListener("click", () => openAutopilotTask(item));
+        actionCell.appendChild(button);
+      } else {
+        actionCell.textContent = "ID prüfen";
+      }
+      row.appendChild(actionCell);
       body.appendChild(row);
     }
     autopilotNextOffset = page.has_more ? page.next_offset : null;
@@ -235,6 +254,75 @@ async function loadAutopilotAttention(next = false) {
     autopilotBusy = false;
     byId("autopilot-load").disabled = !localUiReady();
     byId("autopilot-next").disabled = autopilotNextOffset === null || !localUiReady();
+  }
+}
+
+
+async function openAutopilotTask(item) {
+  if (!jobsAvailable || !localUiReady() || autopilotBusy || autopilotOpeningTask) return false;
+  const status = byId("autopilot-status");
+  autopilotOpeningTask = true;
+  try {
+    if (!item || typeof item !== "object") throw new Error("Ungültiger Prüfpunkt");
+    let target;
+    if (item.kind === "ai_uncertain" || item.kind === "ai_proposal") {
+      if (!/^[0-9a-f]{32}$/.test(item.reference)) throw new Error("Ungültiger KI-Auftrag");
+      if (existingAiBusy || existingAiBatchBusy) throw new Error("KI-Auftrag wird bereits geladen");
+      target = optionalById("existing-ai-disclosure");
+      if (!target || target.hidden) throw new Error("KI-Aufträge nicht verfügbar");
+      const select = byId("existing-ai-choice");
+      if (!Array.from(select.options || select.children).some(option => option.value === item.reference)) {
+        const option = document.createElement("option");
+        option.value = item.reference;
+        option.textContent = "KI-Arbeitsradar · Auftrag " + item.reference.slice(0, 8);
+        select.appendChild(option);
+      }
+      autopilotFocusedJobId = item.reference;
+      existingAiActiveId = item.reference;
+      select.value = item.reference;
+      target.open = true;
+      const loaded = await loadExistingAiDetails(true);
+      if (!loaded || existingAiActiveId !== item.reference || existingAiDisplayedId !== item.reference) {
+        throw new Error("Auftrag nicht mehr eindeutig. KI-Aufträge erneut laden");
+      }
+      byId("existing-ai-feedback").textContent =
+        "Auftrag aus dem KI-Arbeitsradar geladen. Anzeige " + item.ad_id +
+        " in den Auftragsseiten prüfen. Keine KI-Anfrage oder Plattformaktion gestartet.";
+    } else if (item.kind === "eml_unreviewed") {
+      if (!/^[0-9]{1,32}$/.test(item.ad_id) ||
+          !/^[A-Za-z0-9][A-Za-z0-9:_-]{2,255}$/.test(item.reference)) {
+        throw new Error("Ungültiger EML-Hinweis");
+      }
+      target = optionalById("buyer-disclosure");
+      if (!target || target.hidden || byId("buyer-imported").hidden) {
+        throw new Error("Lokale EML-Gespräche nicht verfügbar");
+      }
+      target.open = true;
+      byId("buyer-conversations-filter").value = "new";
+      if (!await loadConversations(true)) throw new Error("EML-Gespräche konnten nicht geladen werden");
+      byId("buyer-conversations-status").textContent +=
+        " Gesuchter Hinweis: Anzeige " + item.ad_id + ", Gespräch " + item.reference +
+        ". Ist es nicht auf dieser Seite, durch die lokalen Gesprächsseiten blättern.";
+    } else if (item.kind === "manual_overdue" || item.kind === "manual_due_soon") {
+      if (!/^[0-9]{1,32}$/.test(item.ad_id)) throw new Error("Ungültige Anzeigen-ID");
+      target = optionalById("followup-pane");
+      if (!target || target.hidden) throw new Error("Wiedervorlagen nicht verfügbar");
+      target.open = true;
+      selectFollowupAd(item.ad_id, "");
+    } else {
+      throw new Error("Unbekannter Prüfpunkt");
+    }
+    if (typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({behavior: "smooth", block: "start"});
+    }
+    return true;
+  } catch (error) {
+    autopilotFocusedJobId = "";
+    status.textContent = "Prüfbereich nicht geöffnet: " + error.message +
+      ". Keine KI-Anfrage, Nachricht oder Plattformaktion gestartet.";
+    return false;
+  } finally {
+    autopilotOpeningTask = false;
   }
 }
 
