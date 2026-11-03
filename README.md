@@ -1,6 +1,8 @@
 # Kleinanzeiger
 
-**Ausgabe v0.1.36:** Das KI-Arbeitsradar besitzt jetzt direkte, sicher gebundene Schaltflächen für vorhandene KI-Aufträge, lokale EML-Gespräche und manuelle Wiedervorlagen (PR #321). Während EML-Seiten oder Wiedervorlagen geladen bzw. gespeichert werden, verhindert die Bedienoberfläche konkurrierende Navigationswechsel. Keine kostenpflichtige KI-Anfrage, kein Versand und kein Plattformwrite durch einen Aufgabenklick.
+**Ausgabe v0.1.37:** Das KI-Arbeitsradar öffnet jetzt direkt die konkrete Anzeige innerhalb eines Bestands-KI-Auftrags mit bis zu 10.000 Einträgen, ohne die 50er-Seiten durchsuchen zu müssen. Über „Gesamten Auftrag anzeigen“ gelangt man zurück. Nach ausdrücklicher lokaler Freigabe kann genau diese unveränderte eigene Anzeige kontrolliert in den lokalen Texteditor übernommen werden; die erneute Einzelprüfung erfolgt per exakter Anzeigen-ID (PR #323). Keine automatische Plattformänderung, kein Nachrichtenversand, keine zusätzlichen KI-Kosten durch Navigation.
+
+**Bereits in v0.1.36:** Das KI-Arbeitsradar besitzt jetzt direkte, sicher gebundene Schaltflächen für vorhandene KI-Aufträge, lokale EML-Gespräche und manuelle Wiedervorlagen (PR #321). Während EML-Seiten oder Wiedervorlagen geladen bzw. gespeichert werden, verhindert die Bedienoberfläche konkurrierende Navigationswechsel. Keine kostenpflichtige KI-Anfrage, kein Versand und kein Plattformwrite durch einen Aufgabenklick.
 
 **Bereits in v0.1.35:** Der Windows-Installer akzeptiert nun auch offiziell von Google gelieferte unsignierte Chrome-for-Testing-Dateien, prüft deren PE-Version gegen die fest gebundene Google-Manifestversion und weist ungültige Signaturen oder Versionsabweichungen zurück (PR #316). Keine Plattform- oder Provideraktion.
 
