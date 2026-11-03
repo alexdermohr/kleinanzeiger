@@ -132,6 +132,38 @@ class PortfolioInsightsHttpTests(unittest.TestCase):
                 "UPDATE portfolio_followups SET due_date='corrupt' WHERE ad_id='10001'")
         self.assertEqual(self.request("GET", endpoint)[0], 503)
 
+    def test_view_stagnation_http_requires_owner_metrics_and_stays_read_only(self):
+        now = datetime.now(timezone.utc)
+        for observed in (now - timedelta(days=16), now):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id="10077", observed_at=observed,
+                source="kleinanzeigen-management",
+                lifecycle_state=LifecycleState.ACTIVE,
+                title="Synthetischer Artikel", description="Keine echte Anzeige",
+                views=12, metric_source="verified-owner-stats",
+            ))
+        path = "/api/portfolio/autopilot-attention"
+        self.assertEqual(self.request("GET", path, token=False)[0], 403)
+        status, page = self.request("GET", path + "?limit=1")
+        self.assertEqual(status, 200, page)
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["counts"]["views_stagnant"], 1)
+        self.assertEqual(page["items"][0]["kind"], "views_stagnant")
+        self.assertEqual(page["items"][0]["ad_id"], "10077")
+        self.assertEqual(page["items"][0]["priority"], 5)
+        self.assertEqual(page["items"][0]["evidence"], "Aufrufe 12 → 12")
+        self.assertEqual(page["provider_requests"], 0)
+        self.assertEqual(page["platform_writes"], 0)
+        self.assertNotIn("Synthetischer Artikel", str(page))
+        # The newest owner snapshot is still the source of identity.
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="10077", observed_at=now + timedelta(seconds=1),
+            source="user-supplied-local-catalog",
+            lifecycle_state=LifecycleState.ACTIVE, views=12,
+            metric_source="verified-owner-stats",
+        ))
+        self.assertEqual(self.request("GET", path)[1]["counts"]["views_stagnant"], 0)
+
     def test_g4_compares_actual_launcher_and_explicit_retry_not_only_cli_rounds(self):
         self.round(0, "private-web-product-launcher", [("10001", "Alt"), ("10002", "Bleibt")])
         self.round(10, "private-web-periodic-readonly", [("10001", "Neu"), ("10002", "Bleibt"), ("10003", "Dazu")])

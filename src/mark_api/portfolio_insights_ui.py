@@ -28,7 +28,7 @@ INSIGHTS_HTML = """
       <h2>KI-Arbeitsradar</h2>
       <details id="autopilot-disclosure" class="feature-disclosure" open>
         <summary>Priorisierter Tagesplan (lokal und kostenlos)</summary>
-        <p>Vorrang für unklare KI-Kosten, neue importierte E-Mail-Hinweise, manuelle Wiedervorlagen und offene KI-Vorschläge. Nur Prüfvorschläge aus gespeicherten Daten; keine automatische Kontoaktion, kein Nachrichtenversand, kein KI-Aufruf.</p>
+        <p>Vorrang für unklare KI-Kosten, neue importierte E-Mail-Hinweise, manuelle Wiedervorlagen, offene KI-Vorschläge und 14 Tage unveränderte gemessene Aufrufe bestätigter aktiver Eigenanzeigen. Nur Prüfvorschläge aus gespeicherten Daten; keine automatische Kontoaktion, kein Nachrichtenversand, kein KI-Aufruf.</p>
         <button id="autopilot-load" type="button">Aufgaben prüfen</button>
         <button id="autopilot-next" type="button" disabled>Nächste 50 Aufgaben</button>
         <p id="autopilot-status" role="status" aria-live="polite">Noch keine Aufgabenprüfung durchgeführt.</p>
@@ -205,7 +205,8 @@ async function loadAutopilotAttention(next = false) {
       eml_unreviewed: "Neue importierte E-Mail-Benachrichtigung lokal prüfen; kein Live-Posteingang",
       manual_overdue: "Manuelle Wiedervorlage überfällig; kein Plattform-Ablaufbeleg",
       ai_proposal: "Gespeicherten KI-Vorschlag mit Original vergleichen und lokal freigeben/ablehnen",
-      manual_due_soon: "Manuelle Wiedervorlage innerhalb von sieben Tagen prüfen"
+      manual_due_soon: "Manuelle Wiedervorlage innerhalb von sieben Tagen prüfen",
+      views_stagnant: "14 Tage unveränderte belegte Aufrufe; Anzeige fachlich prüfen (kein Verkaufs- oder Nachfragebeweis)"
     };
     const body = byId("autopilot-body");
     body.replaceChildren();
@@ -228,7 +229,9 @@ async function loadAutopilotAttention(next = false) {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = item.kind.startsWith("ai_") ? "KI-Auftrag öffnen"
-          : item.kind === "eml_unreviewed" ? "EML-Prüfung öffnen" : "Wiedervorlage öffnen";
+          : item.kind === "eml_unreviewed" ? "EML-Prüfung öffnen"
+          : item.kind === "views_stagnant" ? "Anzeige im Katalog prüfen"
+          : "Wiedervorlage öffnen";
         button.setAttribute("aria-label", button.textContent + " · Anzeige " + item.ad_id +
           (item.kind.startsWith("ai_") ? " · Auftrag " + item.reference.slice(0, 8) : ""));
         button.addEventListener("click", () => openAutopilotTask(item));
@@ -242,7 +245,8 @@ async function loadAutopilotAttention(next = false) {
     autopilotNextOffset = page.has_more ? page.next_offset : null;
     status.textContent = page.total + " lokale Prüfpunkte; davon " +
       (page.counts?.ai_uncertain || 0) + " unklare/laufende KI-Vorgänge und " +
-      (page.counts?.eml_unreviewed || 0) + " neue importierte Hinweise. " +
+      (page.counts?.eml_unreviewed || 0) + " neue importierte Hinweise und " +
+      (page.counts?.views_stagnant || 0) + " Anzeigen mit 14 Tagen unveränderten gemessenen Aufrufen. " +
       "Keine KI-Kosten oder Plattformaktion durch die Prüfung. Seite " +
       (Math.floor(offset / 50) + 1) + ".";
     return true;
@@ -317,6 +321,19 @@ async function openAutopilotTask(item) {
       if (!target || target.hidden) throw new Error("Wiedervorlagen nicht verfügbar");
       target.open = true;
       selectFollowupAd(item.ad_id, "");
+    } else if (item.kind === "views_stagnant") {
+      if (!/^[0-9]{1,32}$/.test(item.ad_id)) throw new Error("Ungültige Anzeigen-ID");
+      if (catalogLoading || catalogBulkBusy) throw new Error("Anzeigenkatalog ist gerade beschäftigt");
+      target = optionalById("ads-panel");
+      if (!target || target.hidden) throw new Error("Eigene Anzeigen nicht verfügbar");
+      byId("catalog-search").value = item.ad_id;
+      byId("catalog-status").value = "all";
+      if (!await searchCatalog() || !catalogRows.some(ad => ad.ad_id === item.ad_id)) {
+        throw new Error("Anzeige nicht auf der Katalogsuchseite bestätigt");
+      }
+      byId("catalog-feedback").textContent =
+        "Aufrufe für Anzeige " + item.ad_id +
+        " über zwei bestätigte Messzeitpunkte unverändert. Fakten prüfen; keine Plattformaktion gestartet.";
     } else {
       throw new Error("Unbekannter Prüfpunkt");
     }
