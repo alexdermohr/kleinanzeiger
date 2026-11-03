@@ -41,11 +41,16 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   // Local capability permits local work, without any platform Write capability.
   run("renderPortfolioInsights()");
   assert.equal(byId("price-rules-panel").hidden,false);
+  assert.equal(byId("autopilot-panel").hidden,false);
+  assert.equal(byId("nav-autopilot").hidden,false);
   ready=false;run("renderPortfolioInsights()");
   assert.equal(byId("price-rules-panel").hidden,true);
+  assert.equal(byId("autopilot-panel").hidden,true);
+  assert.equal(byId("nav-autopilot").hidden,true);
   assert.equal(await run("loadPriceRule('SKU-1')"),false);
   assert.equal(sent.length,0);
-  ready=true;
+  ready=true;run("renderPortfolioInsights()");
+  assert.equal(byId("autopilot-panel").hidden,false);
   fetchImpl=async()=>success(detail("SKU-1"));
   assert.equal(await run("loadPriceRule('SKU-1')"),true);
   byId("price-rule-min").value="40"; byId("price-rule-step").value="20"; byId("price-rule-wait").value="7";
@@ -206,6 +211,8 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
       automatic_execution_authorized:false
     });
   };
+  assert.equal(await byId("nav-autopilot").listeners.click(),true);
+  assert.equal(byId("autopilot-body").children.length,2);
   assert.equal(await byId("autopilot-load").listeners.click(),true);
   assert.equal(byId("autopilot-body").children.length,2);
   assert.match(byId("autopilot-body").children[1].children[1].textContent,/<img onerror=bad\(\)>/);

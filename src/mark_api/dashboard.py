@@ -388,6 +388,7 @@ _DASHBOARD_HTML = """<!doctype html>
       <a href="#top">Übersicht</a>
       <a href="#workspace">Meine Anzeigen</a>
       <a id="nav-drafts" href="#drafts-panel">Artikel &amp; KI</a>
+      <a id="nav-autopilot" href="#autopilot-panel" hidden>KI-Arbeitsradar</a>
       <a id="nav-buyer" href="#buyer-panel">Interessenten</a>
       <a id="nav-analytics" href="#analytics-panel">Auswertungen</a>
       <details id="nav-more" class="nav-more">

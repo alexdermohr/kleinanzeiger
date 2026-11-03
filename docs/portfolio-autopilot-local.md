@@ -1,7 +1,7 @@
 # Lokaler Autopilot-Tagesplan – priorisierte Prüfliste
 
-Dieser Entwicklungsstand ergänzt die bestehende Dashboard-Seite **Bestandsänderungen**
-um **Priorisierter Tagesplan (lokal und kostenlos)**. Das ist eine deterministische
+Der lokale Tagesplan hat den eigenen Dashboard-Hauptbereich **KI-Arbeitsradar**
+mit der Liste **Priorisierter Tagesplan (lokal und kostenlos)**. Das ist eine deterministische
 Aufgabenliste aus bereits gespeicherten lokalen Fakten. Sie ist **keine** autonome
 KI-Ausführung und kein Ersatz für eine Plattformberechtigung. Ein Klick auf
 **Aufgaben prüfen** löst nur eine lokal authentifizierte GET-Abfrage aus.
