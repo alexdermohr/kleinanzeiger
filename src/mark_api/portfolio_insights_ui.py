@@ -23,7 +23,10 @@ INSIGHTS_HTML = """
         <thead><tr><th>Anzeigen-ID</th><th>Änderung</th><th>Vorher</th><th>Jetzt</th><th>Quelle und Zeitpunkt</th></tr></thead>
         <tbody id="inventory-diff-body"></tbody>
       </table></div>
-      <details id="autopilot-disclosure" class="feature-disclosure">
+    </section>
+    <section id="autopilot-panel" class="panel" hidden>
+      <h2>KI-Arbeitsradar</h2>
+      <details id="autopilot-disclosure" class="feature-disclosure" open>
         <summary>Priorisierter Tagesplan (lokal und kostenlos)</summary>
         <p>Vorrang für unklare KI-Kosten, neue importierte E-Mail-Hinweise, manuelle Wiedervorlagen und offene KI-Vorschläge. Nur Prüfvorschläge aus gespeicherten Daten; keine automatische Kontoaktion, kein Nachrichtenversand, kein KI-Aufruf.</p>
         <button id="autopilot-load" type="button">Aufgaben prüfen</button>
@@ -77,7 +80,7 @@ let autopilotBusy = false;
 
 function renderPortfolioInsights() {
   const available = jobsAvailable && localUiReady();
-  for (const id of ["inventory-diff-panel", "price-rules-panel", "nav-inventory-diff", "nav-price-rules"]) {
+  for (const id of ["inventory-diff-panel", "price-rules-panel", "autopilot-panel", "nav-inventory-diff", "nav-price-rules", "nav-autopilot"]) {
     const element = optionalById(id);
     if (element) element.hidden = !available;
   }
@@ -376,6 +379,7 @@ async function mutatePriceRule(action) {
 for (const [id, handler] of [
   ["inventory-diff-load", () => loadInventoryDiff()], ["inventory-diff-next", () => loadInventoryDiff(true)],
   ["autopilot-load", () => loadAutopilotAttention()], ["autopilot-next", () => loadAutopilotAttention(true)],
+  ["nav-autopilot", () => loadAutopilotAttention()],
   ["nav-inventory-diff", () => loadInventoryDiff()], ["nav-price-rules", () => loadPriceRules()],
   ["price-rule-open", () => loadPriceRule(byId("price-rule-sku").value)],
   ["price-rule-list", () => loadPriceRules()], ["price-rule-next", () => loadPriceRules(true)],

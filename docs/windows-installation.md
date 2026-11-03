@@ -238,7 +238,7 @@ selbst im originalen Kleinanzeigen-Dialog.
 
 ## Kostenloser Autopilot-Tagesplan (ab v0.1.22)
 
-Im Dashboard unter **Bestandsänderungen → Priorisierter Tagesplan (lokal und kostenlos)** auf **Aufgaben prüfen** klicken. Die Anwendung zeigt zuerst unklare/laufende KI-Kostenansprüche, anschließend neue lokal importierte EML-Hinweise, überfällige selbst gesetzte Wiedervorlagen, ungeprüfte lokale KI-Vorschläge sowie manuelle Termine der nächsten sieben Tage. Bis zu 50 Aufgaben je Seite, auch bei 10.000 gespeicherten Einträgen. Eine Anzeige kann mehrere Prüfpunkte haben.
+Im Dashboard den eigenen Hauptbereich **KI-Arbeitsradar** öffnen (die lokale Aufgabenliste wird beim Öffnen geladen). Mit **Aufgaben prüfen** jederzeit aktualisieren. Die Anwendung zeigt zuerst unklare/laufende KI-Kostenansprüche, anschließend neue lokal importierte EML-Hinweise, überfällige selbst gesetzte Wiedervorlagen, ungeprüfte lokale KI-Vorschläge sowie manuelle Termine der nächsten sieben Tage. Bis zu 50 Aufgaben je Seite, auch bei 10.000 gespeicherten Einträgen. Eine Anzeige kann mehrere Prüfpunkte haben.
 
 **Nur lokale Hinweise:** Keine kostenpflichtigen KI-Aufrufe, keine Plattform-Liveinbox, kein automatischer Versand, keine Preis- oder Statusänderung. Die ursprünglichen KI-UNKNOWN-Kosten müssen weiterhin im Anbieter-Konto unabhängig geprüft und im bestehenden Arbeitsbereich ausdrücklich geklärt werden; die Tagesliste startet sie nie erneut. Eine Plattformberechtigung oder ein bestätigter aktueller Eigentumsstatus wird daraus nicht abgeleitet.
 

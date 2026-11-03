@@ -289,13 +289,16 @@ class PortfolioInsightsHttpTests(unittest.TestCase):
         self.assertNotIn("private customer path", str(body))
 
     def test_shipped_navigation_and_article_action_are_connected(self):
-        for name in ("inventory-diff-panel", "price-rules-panel", "nav-inventory-diff", "nav-price-rules",
+        for name in ("inventory-diff-panel", "price-rules-panel", "autopilot-panel", "nav-inventory-diff", "nav-price-rules", "nav-autopilot",
                      "price-rule-original", "price-rule-min", "price-rule-step", "price-rule-wait", "price-rule-preview"):
             self.assertIn('id="' + name + '"', _DASHBOARD_HTML)
         self.assertIn('priceRuleButton.addEventListener("click", () => loadPriceRule(draft.sku))', _DASHBOARD_JS)
         self.assertIn('readInsight("/api/portfolio/inventory-diff?', _DASHBOARD_JS)
         self.assertIn('fetch("/api/portfolio/price-rules/mutate"', _DASHBOARD_JS)
         self.assertIn('renderPortfolioInsights();', _DASHBOARD_JS)
+        self.assertIn('["nav-autopilot", () => loadAutopilotAttention()]', _DASHBOARD_JS)
+        self.assertIn('href="#autopilot-panel"', _DASHBOARD_HTML)
+        self.assertIn('    </section>\n    <section id="autopilot-panel"', _DASHBOARD_HTML)
 
 
 if __name__ == "__main__":

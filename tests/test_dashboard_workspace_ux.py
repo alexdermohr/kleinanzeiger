@@ -43,9 +43,9 @@ class DashboardWorkspaceUXTests(unittest.TestCase):
         html = _DASHBOARD_HTML
         navigation = html.split('<nav class="quick-nav"', 1)[1].split("</nav>", 1)[0]
         primary = navigation.split('<details id="nav-more"', 1)[0]
-        self.assertEqual(primary.count("<a "), 5)
+        self.assertEqual(primary.count("<a "), 6)
         for label in ("Übersicht", "Meine Anzeigen", "Artikel &amp; KI",
-                      "Interessenten", "Auswertungen"):
+                      "KI-Arbeitsradar", "Interessenten", "Auswertungen"):
             self.assertIn(label, primary)
         self.assertIn('id="nav-more"', navigation)
         for link in ('id="nav-create"', 'id="nav-jobs"', 'id="nav-sales"',
