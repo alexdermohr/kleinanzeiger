@@ -58,16 +58,82 @@ class WindowsInstallerContractTests(unittest.TestCase):
             code = (SCRIPTS / filename).read_text(encoding="utf-8")
             self.assertNotRegex(code, r"(?i)\$home\b", filename)
 
-    def test_chrome_has_official_signed_download_fallback(self):
+    def test_chrome_for_testing_unsigned_official_download_and_invalid_signature_rejection(self):
         chrome = (SCRIPTS / "windows-chrome.ps1").read_text(encoding="utf-8")
         start = (SCRIPTS / "windows-start.ps1").read_text(encoding="utf-8")
         self.assertIn("googlechromelabs.github.io", chrome)
-        self.assertIn("storage", chrome)
-        self.assertIn("Get-AuthenticodeSignature", chrome)
+        self.assertIn("https://storage.googleapis.com/chrome-for-testing-public/$version/win64/chrome-win64.zip", chrome)
+        self.assertIn("$version = [string]$manifest.channels.Stable.version", chrome)
+        self.assertIn("function Test-KleinanzeigerChromeForTestingBinary(", chrome)
+        self.assertIn("[string]$file.VersionInfo.ProductVersion -ne $ExpectedVersion", chrome)
+        self.assertIn("Get-AuthenticodeSignature -LiteralPath $Executable", chrome)
+        self.assertIn("if ($signature.Status -eq 'NotSigned') { return $true }", chrome)
+        self.assertIn("return ($signature.Status -eq 'Valid' -and", chrome)
+        self.assertIn("O=Google (?:LLC|Inc", chrome)
+        self.assertIn("if (!(Test-KleinanzeigerChromeForTestingBinary -Executable $sourceExe", chrome)
+        self.assertLess(chrome.index("chrome-for-testing-public/$version"), chrome.index("Invoke-WebRequest -Uri $url"))
+        self.assertLess(chrome.index("Test-KleinanzeigerChromeForTestingBinary -Executable $sourceExe"),
+                        chrome.index("Move-Item -LiteralPath"))
         self.assertIn("Find-KleinanzeigerChrome", start)
         self.assertIn("127.0.0.1", start)
         self.assertIn("ChromeProfile", start)
         self.assertIn("Kleinanzeiger.cmd", (ROOT / "docs/windows-installation.md").read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(os.name == "nt", "Requires real Windows PowerShell 5.1")
+    def test_windows_cft_signature_and_version_negative_cases(self):
+        path = str(SCRIPTS / "windows-chrome.ps1").replace("'", "''")
+        probe = r"""
+. '__CHROME_SCRIPT__'
+$script:FakeVersion = '156.0.8078.80'
+$script:FakeStatus = 'NotSigned'
+$script:FakeCert = $null
+function Get-Item {
+  param([string]$LiteralPath, [string]$ErrorAction)
+  return [pscustomobject]@{ VersionInfo = [pscustomobject]@{ ProductVersion = $script:FakeVersion } }
+}
+function Get-AuthenticodeSignature {
+  param([string]$LiteralPath)
+  return [pscustomobject]@{ Status = $script:FakeStatus; SignerCertificate = $script:FakeCert }
+}
+function Accepted {
+  return Test-KleinanzeigerChromeForTestingBinary -Executable 'C:\test\chrome.exe' -ExpectedVersion '156.0.8078.80'
+}
+if (!(Accepted)) { throw 'official unsigned Chrome for Testing should be accepted' }
+$script:FakeVersion = '156.0.8078.79'
+if (Accepted) { throw 'wrong binary version accepted' }
+$script:FakeVersion = '156.0.8078.80'
+$script:FakeStatus = 'HashMismatch'
+if (Accepted) { throw 'invalid signature status accepted' }
+$script:FakeStatus = 'Valid'
+$script:FakeCert = [pscustomobject]@{ Subject = 'CN=Example, O=Not Google' }
+if (Accepted) { throw 'non-Google valid signature accepted' }
+$script:FakeCert = [pscustomobject]@{ Subject = 'CN=Google LLC, O=Google LLC' }
+if (!(Accepted)) { throw 'valid Google-signed Chrome rejected' }
+if (Test-KleinanzeigerChromeForTestingBinary -Executable 'C:\test\chrome.exe' -ExpectedVersion 'invalid') {
+  throw 'malformed expected version accepted'
+}
+Write-Output 'CFT_UNSIGNED_AND_INVALID_SIGNATURE_CASES_PASS'
+"""
+        probe = probe.replace("__CHROME_SCRIPT__", path)
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", probe],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CFT_UNSIGNED_AND_INVALID_SIGNATURE_CASES_PASS", result.stdout)
+
+    def test_release_pr_checks_do_not_run_twice_on_feature_push(self):
+        # Required check names must be produced once, from pull_request.
+        # Main still runs these workflows after protected integration.
+        for filename in ("ci.yml", "offline-wheel-acceptance.yml"):
+            workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            lines = workflow.splitlines()
+            position = lines.index("on:")
+            self.assertEqual(
+                lines[position:position + 4],
+                ["on:", "  pull_request:", "  push:", "    branches: [main]"],
+            )
 
     def test_start_refuses_unowned_chrome_cdp_and_keeps_offline_fallback(self):
         chrome = (SCRIPTS / "windows-chrome.ps1").read_text(encoding="utf-8")
