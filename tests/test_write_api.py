@@ -1212,7 +1212,15 @@ class WriteApiTests(unittest.TestCase):
         self.addCleanup(first.server_close)
 
         alias_path = Path(self.tmp.name) / "mark-alias.sqlite"
-        alias_path.symlink_to(self.store.path)
+        try:
+            alias_path.symlink_to(self.store.path)
+        except OSError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) != 1314:
+                raise
+            # Ordinary Windows accounts cannot create symbolic links.
+            # A case-only alias still refers to the same NTFS file and lock.
+            alias_path = self.store.path.with_name(self.store.path.name.upper())
+            self.assertTrue(alias_path.samefile(self.store.path))
         alias_store = SnapshotStore(alias_path)
 
         with self.assertRaisesRegex(RuntimeError, "already active"):
