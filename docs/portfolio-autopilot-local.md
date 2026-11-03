@@ -6,6 +6,13 @@ Aufgabenliste aus bereits gespeicherten lokalen Fakten. Sie ist **keine** autono
 KI-Ausführung und kein Ersatz für eine Plattformberechtigung. Ein Klick auf
 **Aufgaben prüfen** löst nur eine lokal authentifizierte GET-Abfrage aus.
 
+Die zusätzliche Spalte **Weiter** verbindet die Hinweise mit bereits vorhandenen
+lokalen Arbeitsbereichen: per Auftrags-ID direkt zur Bestands-KI-Detailansicht,
+per Anzeigen-ID zur eigenen Wiedervorlage oder zu den neuen importierten
+EML-Gesprächen (25 je Seite, gegebenenfalls weiterblättern). Der Klick ist
+Navigation und ausschließlich lokale Lesevorbereitung: keine automatische
+KI-Generierung, keine Plattformänderung und kein Nachrichtenversand.
+
 ## Reihenfolge der Prüfschritte
 
 1. **Unklare oder noch laufende KI-Anfragen:** Im persistenten

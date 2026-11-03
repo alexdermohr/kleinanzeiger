@@ -19,6 +19,7 @@ const source = require("node:fs").readFileSync(0, "utf8");
 class Element {
   constructor() { this.value=""; this.textContent=""; this.disabled=false; this.hidden=false; this.children=[]; this.listeners={}; }
   addEventListener(type, handler) { this.listeners[type]=handler; }
+  setAttribute(name,value) { this[name]=value; }
   appendChild(child) { this.children.push(child); }
   replaceChildren(...children) { this.children=children; }
   scrollIntoView() {}
@@ -32,7 +33,7 @@ const context={console,URLSearchParams,Number,document:{createElement:()=>new El
   _newJobRequestKey:()=>String(++key).padStart(64,"0"),
   fetch:async(path,options)=>{sent.push({path,options});return fetchImpl(path,options);}};
 vm.createContext(context);
-vm.runInContext("let jobsAvailable=true;\n"+source,context);
+vm.runInContext("let jobsAvailable=true; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false, conversationBusy=false, followupBusy=false;\n"+source,context);
 const run = expression => vm.runInContext(expression,context);
 const success = value => ({ok:true,status:200,json:async()=>value});
 const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
@@ -213,6 +214,37 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   };
   assert.equal(await byId("nav-autopilot").listeners.click(),true);
   assert.equal(byId("autopilot-body").children.length,2);
+  // Radar task buttons must navigate to the exact existing local job, never call a provider.
+  const selectedAi=[];
+  const selectedFollowups=[];
+  context.loadExistingAiDetails=async()=>{selectedAi.push(run("existingAiActiveId"));run("existingAiDisplayedId=existingAiActiveId");return true;};
+  context.selectFollowupAd=id=>selectedFollowups.push(id);
+  let loadedConversations=0;
+  context.loadConversations=async()=>{loadedConversations++;return true;};
+  const firstTask=byId("autopilot-body").children[0];
+  assert.equal(firstTask.children.length,5);
+  assert.equal(await firstTask.children[4].children[0].listeners.click(),true);
+  assert.equal(byId("existing-ai-disclosure").open,true);
+  assert.equal(byId("existing-ai-choice").value,"a".repeat(32));
+  assert.equal(selectedAi[0],"a".repeat(32));
+  assert.equal(byId("autopilot-body").children[1].children[4].children.length,0,
+    "malformed IDs must never become navigation actions");
+  assert.equal(await run("openAutopilotTask({kind:'eml_unreviewed',ad_id:'10001',reference:'chat_10001'})"),true);
+  assert.equal(byId("buyer-disclosure").open,true);
+  assert.equal(byId("buyer-conversations-filter").value,"new");
+  assert.match(byId("buyer-conversations-status").textContent,/chat_10001/);
+  assert.equal(loadedConversations,1);
+  // Existing EML fetch for another filter must finish under its own filter.
+  // Opening a radar hint cannot retag the in-flight page and pagination.
+  byId("buyer-conversations-filter").value="all";
+  run("conversationBusy=true");
+  assert.equal(await run("openAutopilotTask({kind:'eml_unreviewed',ad_id:'10001',reference:'chat_10001'})"),false);
+  assert.equal(byId("buyer-conversations-filter").value,"all");
+  assert.equal(loadedConversations,1);
+  run("conversationBusy=false");
+  assert.equal(await run("openAutopilotTask({kind:'eml_unreviewed',ad_id:'10001',reference:'chat_10001'})"),true);
+  assert.equal(byId("buyer-conversations-filter").value,"new");
+  assert.equal(loadedConversations,2);
   assert.equal(await byId("autopilot-load").listeners.click(),true);
   assert.equal(byId("autopilot-body").children.length,2);
   assert.match(byId("autopilot-body").children[1].children[1].textContent,/<img onerror=bad\(\)>/);
@@ -222,6 +254,23 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(byId("autopilot-next").disabled,true);
   assert.equal(byId("autopilot-body").children.length,1);
   assert.match(byId("autopilot-status").textContent,/Seite 2/);
+  assert.equal(await byId("autopilot-body").children[0].children[4].children[0].listeners.click(),true);
+  assert.equal(byId("followup-pane").open,true);
+  assert.deepEqual(selectedFollowups,["10002"]);
+  // A concurrent local reminder mutation must never show a different
+  // selected ad while falsely reporting navigation to the requested ad.
+  run("followupBusy=true");
+  byId("followup-pane").open=false;
+  assert.equal(await run("openAutopilotTask({kind:'manual_due_soon',ad_id:'10003'})"),false);
+  assert.deepEqual(selectedFollowups,["10002"]);
+  assert.equal(byId("followup-pane").open,false);
+  run("followupBusy=false");
+  assert.equal(await run("openAutopilotTask({kind:'manual_due_soon',ad_id:'10003'})"),true);
+  assert.deepEqual(selectedFollowups,["10002","10003"]);
+  ready=false;
+  assert.equal(await run("openAutopilotTask({kind:'manual_overdue',ad_id:'10002'})"),false);
+  assert.equal(selectedFollowups.length,2);
+  ready=true;
   fetchImpl=async()=>({ok:false,status:503});
   assert.equal(await run("loadAutopilotAttention()"),false);
   assert.equal(byId("autopilot-body").children.length,0);
