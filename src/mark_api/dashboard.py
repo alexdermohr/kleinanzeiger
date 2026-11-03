@@ -7209,6 +7209,8 @@ def _handler_factory(
         def parse_request(self) -> bool:
             # Reset per-request state before parsing even malformed HTTP/0.9.
             self.headers = None
+            # A reply must not race an unread request body on Winsock.
+            self._request_body_started = False
             if not super().parse_request():
                 return False
             # Both native loopback and independently-relayed public origin
@@ -7277,6 +7279,8 @@ def _handler_factory(
             self.wfile.write(body)
 
         def _send_json(self, status: int, value: object) -> None:
+            if status >= 400 and getattr(self, "command", None) in {"POST", "PATCH", "DELETE"}:
+                self._drain_rejected_body()
             try:
                 encoded = _json_bytes(value)
             except (TypeError, ValueError, OverflowError, RecursionError):
@@ -7290,28 +7294,35 @@ def _handler_factory(
                 "application/json; charset=utf-8",
             )
 
-        def _method_not_allowed(self) -> None:
-            # A small rejected POST body left unread can make Winsock reset
-            # the connection before the client receives the intended HTTP 405.
-            # Drain only bounded bodies with a timeout; do not accept Writes.
+        def _drain_rejected_body(self) -> None:
+            # Winsock may reset the socket before sending a denial when a POST
+            # is rejected before its body is consumed. This reads bounded
+            # bytes only; no request is parsed, stored or forwarded.
+            if getattr(self, "_request_body_started", False):
+                return
+            self._request_body_started = True
             try:
                 ignored_bytes = self._content_length(max_bytes=_MAX_PROXY_JSON_BODY_BYTES)
             except ValueError:
                 self.close_connection = True
-                ignored_bytes = 0
-            if ignored_bytes:
-                previous_timeout = self.connection.gettimeout()
-                try:
-                    self.connection.settimeout(_PROXY_BODY_READ_TIMEOUT_SECONDS)
-                    if len(self.rfile.read(ignored_bytes)) != ignored_bytes:
-                        self.close_connection = True
-                except (OSError, TimeoutError):
+                return
+            if not ignored_bytes:
+                return
+            previous_timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(_PROXY_BODY_READ_TIMEOUT_SECONDS)
+                if len(self.rfile.read(ignored_bytes)) != ignored_bytes:
                     self.close_connection = True
-                finally:
-                    try:
-                        self.connection.settimeout(previous_timeout)
-                    except OSError:
-                        pass
+            except (OSError, TimeoutError):
+                self.close_connection = True
+            finally:
+                try:
+                    self.connection.settimeout(previous_timeout)
+                except OSError:
+                    pass
+
+        def _method_not_allowed(self) -> None:
+            self._drain_rejected_body()
             body = _json_bytes({"error": "method_not_allowed"})
             self._send(
                 405,
@@ -7429,6 +7440,7 @@ def _handler_factory(
             self.connection.settimeout(_PROXY_BODY_READ_TIMEOUT_SECONDS)
             try:
                 try:
+                    self._request_body_started = True
                     body = self.rfile.read(length)
                 except TimeoutError as exc:
                     raise ValueError("request_body_timeout") from exc
@@ -8638,6 +8650,7 @@ def _handler_factory(
                 previous_timeout=self.connection.gettimeout()
                 self.connection.settimeout(_PROXY_BODY_READ_TIMEOUT_SECONDS)
                 try:
+                    self._request_body_started = True
                     raw=self.rfile.read(size)
                 finally:
                     self.connection.settimeout(previous_timeout)
@@ -8733,6 +8746,7 @@ def _handler_factory(
                 if self.headers.get("Content-Type","").split(";",1)[0].strip().lower()!="application/json":
                     raise ValueError("content type")
                 size=self._content_length(max_bytes=2*1024*1024 if target.path.endswith(("/create","/review")) else 512*1024)
+                self._request_body_started = True
                 payload=strict_json_object(self.rfile.read(size))
                 if target.path.endswith("/create"):
                     if set(payload)!={"mode","ad_ids","instruction","budget_cents","estimate_cents","request_key"}:
