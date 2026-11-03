@@ -1,6 +1,8 @@
 # Kleinanzeiger
 
-**Ausgabe v0.1.35:** Der Windows-Installer akzeptiert nun auch offiziell von Google gelieferte unsignierte Chrome-for-Testing-Dateien, prüft deren PE-Version gegen die fest gebundene Google-Manifestversion und weist ungültige Signaturen oder Versionsabweichungen zurück (PR #316). Keine Plattform- oder Provideraktion.
+**Ausgabe v0.1.36:** Das KI-Arbeitsradar besitzt jetzt direkte, sicher gebundene Schaltflächen für vorhandene KI-Aufträge, lokale EML-Gespräche und manuelle Wiedervorlagen (PR #321). Während EML-Seiten oder Wiedervorlagen geladen bzw. gespeichert werden, verhindert die Bedienoberfläche konkurrierende Navigationswechsel. Keine kostenpflichtige KI-Anfrage, kein Versand und kein Plattformwrite durch einen Aufgabenklick.
+
+**Bereits in v0.1.35:** Der Windows-Installer akzeptiert nun auch offiziell von Google gelieferte unsignierte Chrome-for-Testing-Dateien, prüft deren PE-Version gegen die fest gebundene Google-Manifestversion und weist ungültige Signaturen oder Versionsabweichungen zurück (PR #316). Keine Plattform- oder Provideraktion.
 
 **Bereits in v0.1.34:** Im Portfolio-Controlling zeigen die zehn eigenen Anzeigen mit den meisten lokal importierten EML-Gesprächen die Nachfrage für 7, 30 oder 90 Tage. Gespräche und Nachrichten werden getrennt gezählt; ohne EML-Daten ist die Nachfrage unbekannt, nicht null (PR #312). Keine Plattform- oder Provideraktion.
 
