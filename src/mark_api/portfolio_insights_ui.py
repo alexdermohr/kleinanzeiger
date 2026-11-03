@@ -306,6 +306,7 @@ async function openAutopilotTask(item) {
         ". Ist es nicht auf dieser Seite, durch die lokalen Gesprächsseiten blättern.";
     } else if (item.kind === "manual_overdue" || item.kind === "manual_due_soon") {
       if (!/^[0-9]{1,32}$/.test(item.ad_id)) throw new Error("Ungültige Anzeigen-ID");
+      if (followupBusy) throw new Error("Wiedervorlage wird noch gespeichert oder geladen");
       target = optionalById("followup-pane");
       if (!target || target.hidden) throw new Error("Wiedervorlagen nicht verfügbar");
       target.open = true;

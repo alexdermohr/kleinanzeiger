@@ -33,7 +33,7 @@ const context={console,URLSearchParams,Number,document:{createElement:()=>new El
   _newJobRequestKey:()=>String(++key).padStart(64,"0"),
   fetch:async(path,options)=>{sent.push({path,options});return fetchImpl(path,options);}};
 vm.createContext(context);
-vm.runInContext("let jobsAvailable=true; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false, conversationBusy=false;\n"+source,context);
+vm.runInContext("let jobsAvailable=true; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false, conversationBusy=false, followupBusy=false;\n"+source,context);
 const run = expression => vm.runInContext(expression,context);
 const success = value => ({ok:true,status:200,json:async()=>value});
 const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
@@ -257,9 +257,19 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(await byId("autopilot-body").children[0].children[4].children[0].listeners.click(),true);
   assert.equal(byId("followup-pane").open,true);
   assert.deepEqual(selectedFollowups,["10002"]);
+  // A concurrent local reminder mutation must never show a different
+  // selected ad while falsely reporting navigation to the requested ad.
+  run("followupBusy=true");
+  byId("followup-pane").open=false;
+  assert.equal(await run("openAutopilotTask({kind:'manual_due_soon',ad_id:'10003'})"),false);
+  assert.deepEqual(selectedFollowups,["10002"]);
+  assert.equal(byId("followup-pane").open,false);
+  run("followupBusy=false");
+  assert.equal(await run("openAutopilotTask({kind:'manual_due_soon',ad_id:'10003'})"),true);
+  assert.deepEqual(selectedFollowups,["10002","10003"]);
   ready=false;
   assert.equal(await run("openAutopilotTask({kind:'manual_overdue',ad_id:'10002'})"),false);
-  assert.equal(selectedFollowups.length,1);
+  assert.equal(selectedFollowups.length,2);
   ready=true;
   fetchImpl=async()=>({ok:false,status:503});
   assert.equal(await run("loadAutopilotAttention()"),false);
