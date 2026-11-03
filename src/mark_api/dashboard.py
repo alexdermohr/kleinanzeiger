@@ -5799,7 +5799,13 @@ async function applyApprovedExistingAiToManage(item, jobId) {
   const observed=latestAdsById.get(id), baseline=managedAdBaseline;
   const pageIndex=existingAiPageIndex;
   const cursor=existingAiCursors[pageIndex] || "";
+  const focusedAdId=autopilotFocusedJobId===jobId ? autopilotFocusedAdId : "";
+  if (focusedAdId && focusedAdId!==id) {
+    status.textContent="Nur die im KI-Arbeitsradar geöffnete Anzeige übernehmen.";
+    return false;
+  }
   const sameEditor=()=>!!observed && !!baseline &&
+    (autopilotFocusedJobId===jobId ? autopilotFocusedAdId : "")===focusedAdId &&
     existingAiPageIndex===pageIndex && existingAiCursors[pageIndex]===cursor &&
     existingAiActiveId===jobId && existingAiDisplayedId===jobId &&
     !existingAiBusy && !existingAiBatchBusy && writeUiReady() &&
@@ -5821,15 +5827,20 @@ async function applyApprovedExistingAiToManage(item, jobId) {
   }
   existingAiHandoffBusy=true;
   try {
-    // Recheck the review phase against the same locally paginated job snapshot.
-    // Both requests below are local reads, never provider or platform actions.
-    const params=new URLSearchParams({job_id:jobId,limit:"50",after:cursor});
+    // Recheck the same exact item when the Radar selected an item outside
+    // the first 50. All reads remain local; no provider or platform action.
+    const params=new URLSearchParams({job_id:jobId,limit:focusedAdId?"1":"50"});
+    if (focusedAdId) params.set("ad_id",focusedAdId);
+    else params.set("after",cursor);
     const currentJob=await _jobGet("/api/portfolio/existing-ai/detail?"+params.toString());
     const matches=Array.isArray(currentJob?.items)
       ? currentJob.items.filter(row=>row.ad_id===id) : [];
     const freshItem=matches.length===1 ? matches[0] : null;
     if (!sameEditor() || currentJob?.job_id!==jobId ||
-        currentJob.platform_writes!==0 || freshItem?.phase!=="approved" ||
+        currentJob.platform_writes!==0 ||
+        (focusedAdId && (currentJob.items.length!==1 ||
+            currentJob.has_more!==false || currentJob.next_after!==null)) ||
+        freshItem?.phase!=="approved" ||
         freshItem.source_sha256!==item.source_sha256 ||
         freshItem.original?.title!==original.title ||
         freshItem.original?.description!==original.description ||

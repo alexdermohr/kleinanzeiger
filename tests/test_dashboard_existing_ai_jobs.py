@@ -553,6 +553,7 @@ const ctx={
   existingAiActiveId:jobId,existingAiDisplayedId:jobId,existingAiBusy:false,
   existingAiBatchBusy:false,existingAiHandoffBusy:false,
   existingAiCursors:[""],existingAiPageIndex:0,
+  autopilotFocusedJobId:"",autopilotFocusedAdId:"",
   pendingRecoveryBlocked:false,pendingWrites:new Map(),pendingForAd:()=>null,
   writeUiReady:()=>true,latestAdsById:new Map([["4711",ad]]),
   managedAdBaseline:{adId:"4711",titleKnown:true,descriptionKnown:true,
@@ -582,6 +583,7 @@ const reset=()=>{
   ctx.existingAiDisplayedId=jobId;
   ctx.existingAiBusy=false;ctx.existingAiBatchBusy=false;
   ctx.existingAiHandoffBusy=false;ctx.pendingRecoveryBlocked=false;
+  ctx.autopilotFocusedJobId="";ctx.autopilotFocusedAdId="";
   ctx.writeUiReady=()=>true;
   ctx.managedAdBaseline={adId:"4711",titleKnown:true,descriptionKnown:true,
     title:original.title,description:original.description};
@@ -603,6 +605,35 @@ const reset=()=>{
   assert.match(confirmations[0],/Keine Plattformänderung/);
   assert.match(byId("existing-ai-feedback").textContent,/lokalen Anzeigeneditor/);
   assert.equal(ctx.existingAiHandoffBusy,false);
+
+  // Direct Radar handoff must revalidate the exact ad ID rather than
+  // querying the first 50 items and rejecting an otherwise approved ad.
+  reset();ctx.autopilotFocusedJobId=jobId;ctx.autopilotFocusedAdId="4711";
+  ctx._jobGet=async path=>{requests.push(["job",path]);return {
+    job_id:jobId,platform_writes:0,items:[structuredClone(item)],
+    has_more:false,next_after:null}};
+  assert.equal(await apply(),true,"focused item can enter unchanged own editor");
+  assert.equal(requests.length,2);
+  assert.match(requests[0][1],/ad_id=4711/);
+  assert.match(requests[0][1],/limit=1/);
+  assert.equal(requests[0][1].includes("after="),false);
+  assert.equal(byId("manage-title").value,proposal.title);
+  reset();ctx.autopilotFocusedJobId=jobId;ctx.autopilotFocusedAdId="9999";
+  assert.equal(await apply(),false,"focused different ad must not be approved");
+  assert.equal(requests.length,0);checkUnchanged();
+  reset();ctx.autopilotFocusedJobId=jobId;ctx.autopilotFocusedAdId="4711";
+  ctx._jobGet=async path=>{requests.push(["job",path]);return {
+    job_id:jobId,platform_writes:0,items:[structuredClone(item)],
+    has_more:true,next_after:"4711"}};
+  assert.equal(await apply(),false,"inconsistent exact-item response fails closed");
+  checkUnchanged();assert.equal(requests.length,1);
+  reset();ctx.autopilotFocusedJobId=jobId;ctx.autopilotFocusedAdId="4711";
+  ctx._jobGet=async path=>{requests.push(["job",path]);
+    ctx.autopilotFocusedAdId="4712";
+    return {job_id:jobId,platform_writes:0,items:[structuredClone(item)],
+      has_more:false,next_after:null}};
+  assert.equal(await apply(),false,"task focus drift during read invalidates handoff");
+  checkUnchanged();assert.equal(requests.length,1);
 
   reset();
   assert.equal(await apply({...item,phase:"proposed"}),false);
