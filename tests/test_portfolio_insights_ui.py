@@ -33,7 +33,7 @@ const context={console,URLSearchParams,Number,document:{createElement:()=>new El
   _newJobRequestKey:()=>String(++key).padStart(64,"0"),
   fetch:async(path,options)=>{sent.push({path,options});return fetchImpl(path,options);}};
 vm.createContext(context);
-vm.runInContext("let jobsAvailable=true; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false;\n"+source,context);
+vm.runInContext("let jobsAvailable=true; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false, conversationBusy=false;\n"+source,context);
 const run = expression => vm.runInContext(expression,context);
 const success = value => ({ok:true,status:200,json:async()=>value});
 const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
@@ -219,7 +219,8 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   const selectedFollowups=[];
   context.loadExistingAiDetails=async()=>{selectedAi.push(run("existingAiActiveId"));run("existingAiDisplayedId=existingAiActiveId");return true;};
   context.selectFollowupAd=id=>selectedFollowups.push(id);
-  context.loadConversations=async()=>true;
+  let loadedConversations=0;
+  context.loadConversations=async()=>{loadedConversations++;return true;};
   const firstTask=byId("autopilot-body").children[0];
   assert.equal(firstTask.children.length,5);
   assert.equal(await firstTask.children[4].children[0].listeners.click(),true);
@@ -232,6 +233,18 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(byId("buyer-disclosure").open,true);
   assert.equal(byId("buyer-conversations-filter").value,"new");
   assert.match(byId("buyer-conversations-status").textContent,/chat_10001/);
+  assert.equal(loadedConversations,1);
+  // Existing EML fetch for another filter must finish under its own filter.
+  // Opening a radar hint cannot retag the in-flight page and pagination.
+  byId("buyer-conversations-filter").value="all";
+  run("conversationBusy=true");
+  assert.equal(await run("openAutopilotTask({kind:'eml_unreviewed',ad_id:'10001',reference:'chat_10001'})"),false);
+  assert.equal(byId("buyer-conversations-filter").value,"all");
+  assert.equal(loadedConversations,1);
+  run("conversationBusy=false");
+  assert.equal(await run("openAutopilotTask({kind:'eml_unreviewed',ad_id:'10001',reference:'chat_10001'})"),true);
+  assert.equal(byId("buyer-conversations-filter").value,"new");
+  assert.equal(loadedConversations,2);
   assert.equal(await byId("autopilot-load").listeners.click(),true);
   assert.equal(byId("autopilot-body").children.length,2);
   assert.match(byId("autopilot-body").children[1].children[1].textContent,/<img onerror=bad\(\)>/);

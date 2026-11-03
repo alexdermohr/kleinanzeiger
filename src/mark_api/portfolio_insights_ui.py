@@ -297,6 +297,7 @@ async function openAutopilotTask(item) {
       if (!target || target.hidden || byId("buyer-imported").hidden) {
         throw new Error("Lokale EML-Gespräche nicht verfügbar");
       }
+      if (conversationBusy) throw new Error("Eine EML-Gesprächsliste wird gerade geladen");
       target.open = true;
       byId("buyer-conversations-filter").value = "new";
       if (!await loadConversations(true)) throw new Error("EML-Gespräche konnten nicht geladen werden");
