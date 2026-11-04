@@ -212,6 +212,21 @@ def _validated_inventory(
     return snapshots
 
 
+_OWNER_POLL_TARGET_SNAPSHOTS_PER_DAY = 120_000
+
+
+def _default_owner_poll_interval(owner_count: int) -> float:
+    """Adapt one full owner snapshot to portfolio size without daily bloat.
+
+    For 10,000 listings the default is two hours, not five minutes; the
+    customer can explicitly choose a shorter interval when needed.
+    """
+    if type(owner_count) is not int or owner_count < 0:
+        raise ValueError("owner inventory count must be nonnegative")
+    minutes = math.ceil(owner_count * 1440 / _OWNER_POLL_TARGET_SNAPSHOTS_PER_DAY)
+    return float(max(300, min(86400, minutes * 60)))
+
+
 def _validated_owner_poll_interval(value: object) -> float:
     """Zero disables polling; otherwise wait a bounded 1 minute to 1 day."""
     if (type(value) not in (int, float) or not math.isfinite(float(value))
@@ -242,8 +257,11 @@ class ProductLauncherRuntime:
         periodic_interval_seconds: float = 0,
         periodic_enabled: Event | None = None,
         periodic_decision_lock: Lock | None = None,
+        periodic_auto_interval: bool = False,
     ) -> None:
         interval = _validated_owner_poll_interval(periodic_interval_seconds)
+        if type(periodic_auto_interval) is not bool:
+            raise TypeError("periodic_auto_interval must be bool")
         if periodic_sync is not None and not callable(periodic_sync):
             raise TypeError("periodic_sync must be callable or None")
         if periodic_sync is None and interval:
@@ -276,6 +294,7 @@ class ProductLauncherRuntime:
         self._inventory_close_failed = False
         self._periodic_sync = periodic_sync
         self._periodic_interval = interval
+        self._periodic_auto_interval = periodic_auto_interval
         self._periodic_enabled = periodic_enabled if periodic_enabled is not None else Event()
         self._periodic_decision_lock = periodic_decision_lock or Lock()
         if periodic_enabled is None:
@@ -367,7 +386,9 @@ class ProductLauncherRuntime:
                 if not self._periodic_enabled.is_set():
                     continue
                 try:
-                    sync()
+                    observed_count = sync()
+                    if self._periodic_auto_interval:
+                        self._periodic_interval = _default_owner_poll_interval(observed_count)
                 except OwnerInventorySyncFailure as exc:
                     if exc.kind == "busy":
                         # A manual read/write owns the existing CDP lock.
@@ -598,7 +619,7 @@ def _build_online_product_launcher(
     generation_access: DashboardGenerationAccess | None = None,
     token_factory: _TokenFactory | None = None,
     dashboard_token_factory: _TokenFactory | None = None,
-    sync_interval_seconds: float = 0,
+    sync_interval_seconds: float | None = 0,
     clock: _Clock = _utc_now,
 ) -> ProductLauncherRuntime:
     """Perform one fresh owner sync, then start Write API and dashboard.
@@ -624,7 +645,11 @@ def _build_online_product_launcher(
             public_origin_port, name="public_origin_port", allow_zero=False,
         )
     timeout = _validated_timeout(timeout_seconds)
-    sync_interval = _validated_owner_poll_interval(sync_interval_seconds)
+    auto_sync_interval = sync_interval_seconds is None
+    sync_interval = (
+        None if auto_sync_interval
+        else _validated_owner_poll_interval(sync_interval_seconds)
+    )
     if analytics_contract is not None and not isinstance(
         analytics_contract,
         AnalyticsContract,
@@ -734,6 +759,8 @@ def _build_online_product_launcher(
             raise ProductInventoryUnavailable("private Web inventory reader unavailable") from None
         try:
             snapshots = _validated_inventory(result)
+            if sync_interval is None:
+                sync_interval = _default_owner_poll_interval(len(snapshots))
         except Exception:
             if isinstance(result, ReadResult) and not result.is_success:
                 store.append_inventory_result(
@@ -921,6 +948,7 @@ def _build_online_product_launcher(
         periodic_interval_seconds=sync_interval if shared_owner_reader is not None else 0,
         periodic_enabled=periodic_enabled,
         periodic_decision_lock=periodic_decision_lock,
+        periodic_auto_interval=auto_sync_interval,
     )
 
 
@@ -1060,12 +1088,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--owner-sync-interval-seconds",
         type=float,
-        default=300,
+        default=None,
         metavar="SECONDS",
         help=(
             "Automatischer rein lesender Eigentümerbestand-Abgleich im "
-            "bereits authentifizierten lokalen Chrome: 60..86400 Sekunden "
-            "(Standard 300), 0 zum Ausschalten. Nach unbekanntem Ergebnis "
+            "bereits authentifizierten lokalen Chrome: 60..86400 Sekunden; "
+            "Standard größenabhängig (5 Minuten bei kleinen, ca. 2 Stunden "
+            "bei 10.000 Anzeigen), 0 zum Abschalten. Nach unbekanntem Ergebnis "
             "nur nach erfolgreichem manuellem Sync fortsetzen."
         ),
     )

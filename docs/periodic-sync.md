@@ -5,13 +5,22 @@
 ## Automatisch im normalen Windows-Kundenprogramm
 
 Nach einem **erfolgreichen authentifizierten Kundenstart** gleicht Kleinanzeiger
-den eigenen Bestand im Hintergrund standardmäßig alle fünf Minuten (300 Sekunden)
-erneut ab. Der Worker benutzt **denselben bereits geöffneten, serialisierten
-Chrome-/CDP-Zugang** wie der manuelle Button „Mit Kleinanzeigen abgleichen“.
-Es entsteht weder ein zweiter Browseroperator noch ein Plattform-Write.
+den eigenen Bestand regelmäßig mit demselben bereits geöffneten, serialisierten
+Chrome-/CDP-Zugang wie „Mit Kleinanzeigen abgleichen“ ab. Der Standard
+richtet sich nach der letzten vollständig bestätigten Anzeigenzahl:
+bei kleinen Beständen mindestens alle fünf Minuten, bei 1.000 Anzeigen
+etwa alle zwölf Minuten, bei 5.000 Anzeigen stündlich und bei 10.000 Anzeigen
+alle zwei Stunden. Das begrenzt vollständige Bestandsbeobachtungen rechnerisch
+auf ungefähr 120.000 Anzeigen-Snapshots pro Tag, statt bei 10.000 Anzeigen
+alle fünf Minuten 2,88 Millionen lokale Snapshots pro Tag zu erzeugen.
+Nach jedem erfolgreichen Hintergrundabgleich wird das Standardintervall
+an den aktuellen Bestand angepasst. Es entsteht weder ein zweiter
+Browseroperator noch ein Plattform-Write.
 
-- Das Intervall ist im Programmaufruf mit `--owner-sync-interval-seconds 900`
-  beispielsweise auf 15 Minuten einstellbar; gültig sind 60 bis 86.400 Sekunden.
+- Ein abweichendes festes Intervall lässt sich bewusst mit
+  `--owner-sync-interval-seconds 900` auf 15 Minuten einstellen;
+  60 bis 86.400 Sekunden sind zulässig. Bei großen Beständen kann ein
+  sehr kurzes festes Intervall die Datenbank stark wachsen lassen.
 - Mit `--owner-sync-interval-seconds 0` wird nur die Automatik ausgeschaltet.
 - Ein belegter CDP-Zugang (durch laufenden Write oder manuellen Read) lässt
   den nächsten Zyklus ausfallen, statt konkurrierende Reads anzustauen.

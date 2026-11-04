@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import tempfile
 import threading
+from datetime import datetime, timezone
 import unittest
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from mark_api.launcher import (
-    ProductLauncherRuntime, _validated_owner_poll_interval, build_product_launcher,
+    ProductLauncherRuntime, _validated_owner_poll_interval,
+    _default_owner_poll_interval, _parser, build_product_launcher,
 )
+from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.private_web_runtime import OwnerInventorySyncFailure
 from mark_api.results import ReadResult
 from mark_api.storage import SnapshotStore
@@ -69,7 +72,7 @@ class _Writer:
         self.close_calls += 1
 
 
-def _runtime(sync, *, enabled=None, decision_lock=None):
+def _runtime(sync, *, enabled=None, decision_lock=None, auto=False):
     server = _Server()
     inventory = _Inventory()
     writer = _Writer()
@@ -81,6 +84,7 @@ def _runtime(sync, *, enabled=None, decision_lock=None):
         startup_email_import_report=SimpleNamespace(), writes_enabled=True,
         periodic_sync=sync, periodic_interval_seconds=60,
         periodic_enabled=enabled, periodic_decision_lock=decision_lock,
+        periodic_auto_interval=auto,
     )
     # Fast test clock; public builder rejects intervals below one minute.
     runtime._periodic_interval = 0.025
@@ -94,6 +98,98 @@ class NativePeriodicInventoryTests(unittest.TestCase):
         for value in (-1, 59, 86401, True, False, float("nan"), float("inf"), "300"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 _validated_owner_poll_interval(value)
+
+    def test_default_interval_follows_confirmed_portfolio_size(self):
+        expected = (
+            (0, 300), (50, 300), (100, 300), (1000, 720),
+            (5000, 3600), (10000, 7200), (24000, 17280),
+            (120000, 86400), (1000000, 86400),
+        )
+        for count, seconds in expected:
+            with self.subTest(count=count):
+                self.assertEqual(_default_owner_poll_interval(count), seconds)
+        for bad in (None, True, 1.0, -1, "1000"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                _default_owner_poll_interval(bad)
+        self.assertLessEqual(
+            10000 * 86400 / _default_owner_poll_interval(10000),
+            120000, "large portfolios must not cause uncontrolled daily snapshot growth",
+        )
+
+    def test_cli_uses_adaptive_default_but_respects_explicit_interval(self):
+        base = ["--db", "synthetic.sqlite", "--cdp-port", "9222"]
+        self.assertIsNone(_parser().parse_args(base).owner_sync_interval_seconds)
+        self.assertEqual(_parser().parse_args(
+            base + ["--owner-sync-interval-seconds", "900"],
+        ).owner_sync_interval_seconds, 900)
+        self.assertEqual(_parser().parse_args(
+            base + ["--owner-sync-interval-seconds", "0"],
+        ).owner_sync_interval_seconds, 0)
+
+    def test_real_product_builder_initializes_10k_adaptive_interval(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "synthetic-owner.sqlite"
+            SnapshotStore(database, create_if_missing=True)
+            observed = datetime(2026, 11, 4, tzinfo=timezone.utc)
+            ads = tuple(
+                AdSnapshot(
+                    ad_id=str(1_000_000_000 + i),
+                    title="synthetic-item-%05d" % i,
+                    observed_at=observed,
+                    source="private-web-product-launcher",
+                    lifecycle_state=LifecycleState.ACTIVE,
+                )
+                for i in range(10_000)
+            )
+            class OwnerInventory(_Inventory):
+                def read_inventory(self):
+                    return ReadResult.success_nonempty(ads)
+
+            reader = OwnerInventory()
+            writer = _Writer()
+            with (patch("mark_api.launcher._require_private_web_cdp_authority"),
+                  patch("mark_api.launcher.build_private_web_write_api_runtime", return_value=writer)):
+                launcher = build_product_launcher(
+                    db_path=database,
+                    cdp_port=9222,
+                    dashboard_port=0,
+                    write_port=0,
+                    runtime_factory=lambda **kwargs: reader,
+                    dashboard_factory=lambda store, **options: _Server(),
+                    sync_interval_seconds=None,
+                )
+            try:
+                self.assertEqual(launcher.startup_inventory_count, 10_000)
+                self.assertEqual(launcher._periodic_interval, 7200)
+                self.assertTrue(launcher._periodic_auto_interval)
+                self.assertEqual(
+                    SnapshotStore(database, create_if_missing=False)
+                    .latest_sync_attempt().snapshot_count, 10_000
+                )
+                self.assertEqual(len(SnapshotStore(database).tracked_ad_ids()), 10_000)
+            finally:
+                launcher.close()
+
+    def test_successful_scheduled_read_recomputes_10k_interval(self):
+        reached = threading.Event()
+        def sync():
+            reached.set()
+            return 10000
+
+        runtime, server, _, _ = _runtime(sync, auto=True)
+        worker = threading.Thread(target=runtime.serve_forever)
+        worker.start()
+        try:
+            self.assertTrue(server.started.wait(1))
+            self.assertTrue(reached.wait(1))
+            deadline = monotonic() + 1.0
+            while runtime._periodic_interval != 7200 and monotonic() < deadline:
+                sleep(0.005)
+            self.assertEqual(runtime._periodic_interval, 7200)
+            self.assertTrue(runtime._periodic_enabled.is_set())
+        finally:
+            runtime.close()
+            worker.join(1)
 
     def test_failed_browser_read_pauses_until_confirmed_manual_rearm(self):
         first = threading.Event()
