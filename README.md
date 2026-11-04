@@ -1,6 +1,8 @@
 # Kleinanzeiger
 
-**Ausgabe v0.1.39:** Die lokale Preisregelliste liest Gesamtzahl und Seiteneintraege jetzt aus demselben schreibgeschuetzten SQLite-Snapshot. Gleichzeitig geaenderte Regeln erzeugen dadurch keine gemischten Zaehl- und Zeilenstaende. Die Vorschau aendert keine Preise auf Kleinanzeigen (PR #327).
+**Ausgabe v0.1.40:** Wiederkehrender, rein lesender Abgleich des bestätigten Eigenbestands im laufenden Windows-Kleinanzeiger über den bestehenden autorisierten Chrome-Zugang. Unklare Leseergebnisse pausieren den nächsten Durchlauf; ein erfolgreicher manueller Abgleich aktiviert ihn wieder. Die Intervallfrequenz passt sich dem Bestand an (5 Minuten bei kleinen Beständen, ungefähr 2 Stunden bei 10.000 Anzeigen), ein explizites Intervall oder Abschalten bleibt möglich. Keine automatischen Plattformänderungen und keine kostenpflichtigen KI-Anfragen (PR #329, #331).
+
+**Bereits in v0.1.39:** Die lokale Preisregelliste liest Gesamtzahl und Seiteneintraege jetzt aus demselben schreibgeschuetzten SQLite-Snapshot. Gleichzeitig geaenderte Regeln erzeugen dadurch keine gemischten Zaehl- und Zeilenstaende. Die Vorschau aendert keine Preise auf Kleinanzeigen (PR #327).
 
 **Bereits in v0.1.38:** Das KI-Arbeitsradar weist auf eigene aktive Anzeigen hin, deren vergleichbare gemessene Aufrufzahlen mindestens 14 Tage unverändert sind: jüngster Stand höchstens 48 Stunden alt, Vergleichsbasis höchstens 30 Tage alt, keine widersprechenden Zwischenmessungen. Der Klick öffnet die exakt betroffene Anzeige unabhängig von 50er-Substringtreffern. Unveränderte Aufrufe beweisen weder fehlende Nachfrage noch einen sinnvollen Preisnachlass. Ausschließlich lokale Prüfung, keine zusätzliche KI-Anfrage, keine automatische Plattformänderung und kein Nachrichtenversand (PR #325).
 
