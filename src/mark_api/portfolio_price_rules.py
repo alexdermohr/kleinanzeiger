@@ -315,6 +315,10 @@ def price_suggestions_page(
         raise PriceRuleError("Ungueltiger Katalogcursor oder Seitengroesse.")
     instant = _now(now)
     with closing(store._connect()) as conn:
+        # One read-only snapshot for schema, total and keyset rows: a concurrent
+        # local edit must not produce a count from one version and rows from another.
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
         if not _schema(conn, create=False):
             return {"rules": [], "total": 0, "has_more": False, "next_after": None}
         has_drafts = _has_table(conn)

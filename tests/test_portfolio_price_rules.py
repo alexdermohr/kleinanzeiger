@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mark_api.portfolio_drafts import _DDL as DRAFT_DDL, import_drafts, preview_import
 from mark_api.portfolio_price_rules import (
@@ -53,6 +54,35 @@ class PriceRuleTests(unittest.TestCase):
                 self.assertIsNone(conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE name=?", (name,),
                 ).fetchone())
+
+    def test_list_count_and_rows_share_one_read_only_snapshot(self):
+        self.seed()
+        self.set(wait=0)
+        observed = []
+        original_connect = self.store._connect
+
+        def traced_connect():
+            conn = original_connect()
+            conn.set_trace_callback(
+                lambda sql: observed.append((sql, conn.in_transaction))
+            )
+            return conn
+
+        with patch.object(self.store, "_connect", side_effect=traced_connect):
+            page = price_suggestions_page(self.store, now=_START)
+        self.assertEqual(page["total"], len(page["rules"]))
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["platform_writes"], 0)
+        self.assertTrue(any(sql == "PRAGMA query_only=ON" for sql, _ in observed))
+        for prefix in (
+            "SELECT COUNT(*) FROM portfolio_price_rules WHERE deleted=0",
+            "SELECT r.sku,r.minimum_price_eur",
+        ):
+            self.assertTrue(
+                any(sql.startswith(prefix) and in_transaction
+                    for sql, in_transaction in observed),
+                msg="not a common read transaction: " + prefix,
+            )
 
     def test_clamp_to_minimum_cooldown_and_no_automatic_write(self):
         self.seed()
