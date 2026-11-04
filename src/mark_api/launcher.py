@@ -356,10 +356,14 @@ class ProductLauncherRuntime:
         while not self._periodic_stop.wait(self._periodic_interval):
             if self._shutdown_started:
                 return
-            # Manual success must not be overtaken by a preceding failed poll.
-            # Hold the decision lock across read and pause; the manual path sets
-            # the same Event under this lock only after its own successful read.
-            with self._periodic_decision_lock:
+            # A manual sync owns this decision lock until its observation has
+            # settled. Skip the due tick instead of queuing an automatic browser
+            # read that could start after manual success or during shutdown.
+            if not self._periodic_decision_lock.acquire(blocking=False):
+                continue
+            try:
+                if self._periodic_stop.is_set() or self._shutdown_started:
+                    return
                 if not self._periodic_enabled.is_set():
                     continue
                 try:
@@ -382,6 +386,8 @@ class ProductLauncherRuntime:
                         "letzte bestätigte Daten bleiben erhalten.",
                         file=sys.stderr,
                     )
+            finally:
+                self._periodic_decision_lock.release()
 
     def serve_forever(self) -> None:
         with self._state_lock:

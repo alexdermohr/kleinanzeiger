@@ -178,6 +178,73 @@ class NativePeriodicInventoryTests(unittest.TestCase):
             runtime.close()
             owner.join(1)
 
+    def test_manual_lock_skips_due_poll_instead_of_queueing_it(self):
+        decision_lock = threading.Lock()
+        decision_lock.acquire()
+        started = threading.Event()
+        calls = []
+
+        def sync():
+            calls.append("automatic")
+            started.set()
+            return 0
+
+        runtime, server, _, _ = _runtime(sync, decision_lock=decision_lock)
+        runtime._periodic_interval = 0.12
+        owner = threading.Thread(target=runtime.serve_forever)
+        owner.start()
+        try:
+            self.assertTrue(server.started.wait(1))
+            sleep(0.15)
+            self.assertFalse(started.is_set())
+            decision_lock.release()
+            self.assertFalse(started.wait(0.045),
+                             "manual sync must not queue a catch-up browser read")
+            self.assertTrue(started.wait(0.35),
+                            "the next fresh polling tick may read normally")
+            self.assertEqual(calls, ["automatic"])
+        finally:
+            if decision_lock.locked():
+                decision_lock.release()
+            runtime.close()
+            owner.join(1)
+
+    def test_shutdown_while_manual_lock_held_never_starts_queued_read(self):
+        decision_lock = threading.Lock()
+        decision_lock.acquire()
+        started = threading.Event()
+
+        def sync():
+            started.set()
+            return 0
+
+        runtime, server, _, _ = _runtime(sync, decision_lock=decision_lock)
+        owner = threading.Thread(target=runtime.serve_forever)
+        owner.start()
+        errors = []
+        try:
+            self.assertTrue(server.started.wait(1))
+            sleep(0.09)
+            def close_owner():
+                try:
+                    runtime.close()
+                except BaseException as exc:
+                    errors.append(exc)
+            closer = threading.Thread(target=close_owner)
+            closer.start()
+            sleep(0.06)
+            decision_lock.release()
+            closer.join(1.5)
+            self.assertFalse(closer.is_alive())
+            self.assertEqual(errors, [], "shutdown must drain without a delayed read")
+            self.assertFalse(started.is_set(),
+                             "a read must not start after shutdown began")
+        finally:
+            if decision_lock.locked():
+                decision_lock.release()
+            runtime.close()
+            owner.join(1)
+
     def test_busy_cycle_skips_without_disabling_next_read(self):
         second = threading.Event()
         calls = []
