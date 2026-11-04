@@ -334,6 +334,44 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(rendered.length,1);
   assert.equal(await run("openAutopilotTask({kind:'views_stagnant',ad_id:'invalid'})"),false);
   assert.equal(rendered.length,1);
+  // A recently confirmed owner ad with no locally captured original text is
+  // NOT proof that Kleinanzeigen lacks a description. Use the existing exact
+  // local catalog GET and never trigger AI/provider or platform actions.
+  fetchImpl=async path=>{
+    assert.ok(path.startsWith("/api/portfolio/autopilot-attention?"));
+    return success({
+      items:[{kind:"owner_original_unread",priority:6,ad_id:"90077",
+              reference:"2026-11-04",evidence:"Originaltext bislang lokal nicht belegt"}],
+      offset:0,has_more:false,next_offset:null,total:1,
+      counts:{owner_original_unread:1,views_stagnant:0},
+      platform_writes:0,provider_requests:0,platform_messages_read:false,
+      automatic_execution_authorized:false,
+    });
+  };
+  assert.equal(await run("loadAutopilotAttention()"),true);
+  assert.match(byId("autopilot-status").textContent,/1 eigenen Anzeigen mit lokal noch nicht erfasstem Originaltext/);
+  const uncheckedRow=byId("autopilot-body").children[0];
+  assert.match(uncheckedRow.children[2].textContent,/lokal noch nicht erfasst/);
+  assert.equal(uncheckedRow.children[4].children[0].textContent,"Anzeige im Katalog prüfen");
+  let unreadReads=0;
+  context.getJson=async path=>{
+    unreadReads++;
+    assert.equal(path,"/api/catalog/ad?id=90077");
+    return {ad:{ad_id:"90077",title:"Synthetische Eigenanzeige"}};
+  };
+  assert.equal(await uncheckedRow.children[4].children[0].listeners.click(),true);
+  assert.equal(unreadReads,1);
+  assert.equal(rendered.length,2);
+  assert.equal(rendered.at(-1)[0].ad_id,"90077");
+  assert.match(byId("catalog-feedback").textContent,/Originalbeschreibung bislang lokal nicht bestätigt/);
+  assert.doesNotMatch(byId("catalog-feedback").textContent,/Aufrufzähler über zwei/);
+  context.getJson=async path=>{
+    assert.equal(path,"/api/catalog/ad?id=90077");
+    return {ad:{ad_id:"900770",title:"Unpassende Anzeige"}};
+  };
+  assert.equal(await run("openAutopilotTask({kind:'owner_original_unread',ad_id:'90077'})"),false);
+  assert.equal(rendered.length,2);
+  assert.match(byId("autopilot-status").textContent,/nicht eindeutig lokal bestätigt/);
   ready=false;
   assert.equal(await run("openAutopilotTask({kind:'manual_overdue',ad_id:'10002'})"),false);
   assert.equal(selectedFollowups.length,2);

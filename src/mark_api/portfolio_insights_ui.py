@@ -28,7 +28,7 @@ INSIGHTS_HTML = """
       <h2>KI-Arbeitsradar</h2>
       <details id="autopilot-disclosure" class="feature-disclosure" open>
         <summary>Priorisierter Tagesplan (lokal und kostenlos)</summary>
-        <p>Vorrang für unklare KI-Kosten, neue importierte E-Mail-Hinweise, manuelle Wiedervorlagen, offene KI-Vorschläge und 14 Tage unveränderte gemessene Aufrufe bestätigter aktiver Eigenanzeigen. Nur Prüfvorschläge aus gespeicherten Daten; keine automatische Kontoaktion, kein Nachrichtenversand, kein KI-Aufruf.</p>
+        <p>Vorrang für unklare KI-Kosten, neue importierte E-Mail-Hinweise, manuelle Wiedervorlagen, offene KI-Vorschläge und 14 Tage unveränderte gemessene Aufrufe bestätigter aktiver Eigenanzeigen. Zusätzlich werden bestätigte eigene Anzeigen mit bisher nicht lokal erfasstem Originaltext als nachrangiger Prüfpunkt gezeigt; das beweist keine fehlende Beschreibung auf Kleinanzeigen. Nur Prüfvorschläge aus gespeicherten Daten; keine automatische Kontoaktion, kein Nachrichtenversand, kein KI-Aufruf.</p>
         <button id="autopilot-load" type="button">Aufgaben prüfen</button>
         <button id="autopilot-next" type="button" disabled>Nächste 50 Aufgaben</button>
         <p id="autopilot-status" role="status" aria-live="polite">Noch keine Aufgabenprüfung durchgeführt.</p>
@@ -206,7 +206,8 @@ async function loadAutopilotAttention(next = false) {
       manual_overdue: "Manuelle Wiedervorlage überfällig; kein Plattform-Ablaufbeleg",
       ai_proposal: "Gespeicherten KI-Vorschlag mit Original vergleichen und lokal freigeben/ablehnen",
       manual_due_soon: "Manuelle Wiedervorlage innerhalb von sieben Tagen prüfen",
-      views_stagnant: "14 Tage unveränderte belegte Aufrufe; Anzeige fachlich prüfen (kein Verkaufs- oder Nachfragebeweis)"
+      views_stagnant: "14 Tage unveränderte belegte Aufrufe; Anzeige fachlich prüfen (kein Verkaufs- oder Nachfragebeweis)",
+      owner_original_unread: "Eigene Anzeige: Originalbeschreibung lokal noch nicht erfasst (nicht zwingend auf Kleinanzeigen fehlend)"
     };
     const body = byId("autopilot-body");
     body.replaceChildren();
@@ -230,7 +231,8 @@ async function loadAutopilotAttention(next = false) {
         button.type = "button";
         button.textContent = item.kind.startsWith("ai_") ? "KI-Auftrag öffnen"
           : item.kind === "eml_unreviewed" ? "EML-Prüfung öffnen"
-          : item.kind === "views_stagnant" ? "Anzeige im Katalog prüfen"
+          : item.kind === "views_stagnant" || item.kind === "owner_original_unread"
+            ? "Anzeige im Katalog prüfen"
           : "Wiedervorlage öffnen";
         button.setAttribute("aria-label", button.textContent + " · Anzeige " + item.ad_id +
           (item.kind.startsWith("ai_") ? " · Auftrag " + item.reference.slice(0, 8) : ""));
@@ -246,7 +248,8 @@ async function loadAutopilotAttention(next = false) {
     status.textContent = page.total + " lokale Prüfpunkte; davon " +
       (page.counts?.ai_uncertain || 0) + " unklare/laufende KI-Vorgänge und " +
       (page.counts?.eml_unreviewed || 0) + " neue importierte Hinweise und " +
-      (page.counts?.views_stagnant || 0) + " Anzeigen mit 14 Tagen unveränderten gemessenen Aufrufen. " +
+      (page.counts?.views_stagnant || 0) + " Anzeigen mit 14 Tagen unveränderten gemessenen Aufrufen und " +
+      (page.counts?.owner_original_unread || 0) + " eigenen Anzeigen mit lokal noch nicht erfasstem Originaltext. " +
       "Keine KI-Kosten oder Plattformaktion durch die Prüfung. Seite " +
       (Math.floor(offset / 50) + 1) + ".";
     return true;
@@ -321,7 +324,7 @@ async function openAutopilotTask(item) {
       if (!target || target.hidden) throw new Error("Wiedervorlagen nicht verfügbar");
       target.open = true;
       selectFollowupAd(item.ad_id, "");
-    } else if (item.kind === "views_stagnant") {
+    } else if (item.kind === "views_stagnant" || item.kind === "owner_original_unread") {
       if (!/^[0-9]{1,32}$/.test(item.ad_id)) throw new Error("Ungültige Anzeigen-ID");
       if (catalogLoading || catalogBulkBusy) throw new Error("Anzeigenkatalog ist gerade beschäftigt");
       target = optionalById("ads-panel");
@@ -352,7 +355,9 @@ async function openAutopilotTask(item) {
       byId("catalog-page-label").textContent = "Einzelanzeige";
       byId("catalog-feedback").textContent =
         "Anzeige " + item.ad_id + " über exakte ID geöffnet. " +
-        "Aufrufzähler über zwei bestätigte Messzeitpunkte unverändert. " +
+        (item.kind === "views_stagnant"
+          ? "Aufrufzähler über zwei bestätigte Messzeitpunkte unverändert. "
+          : "Originalbeschreibung bislang lokal nicht bestätigt; daraus folgt keine fehlende Beschreibung auf Kleinanzeigen. ") +
         "Für normale Seitenübersicht Suche erneut ausführen; keine Plattformaktion gestartet.";
     } else {
       throw new Error("Unbekannter Prüfpunkt");

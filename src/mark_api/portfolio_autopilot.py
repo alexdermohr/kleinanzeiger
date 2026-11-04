@@ -26,6 +26,7 @@ class AutopilotAttentionError(ValueError):
 _KINDS = frozenset((
     "ai_uncertain", "eml_unreviewed", "manual_overdue",
     "ai_proposal", "manual_due_soon", "views_stagnant",
+    "owner_original_unread",
 ))
 _AD_ID = re.compile(r"[^\x00-\x1f\x7f]{1,160}\Z")
 _JOB_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -38,7 +39,8 @@ _STAGNATION_FRESH_HOURS = 48
 
 
 def _stagnant_owned_views(
-    conn: sqlite3.Connection, instant: datetime,
+    conn: sqlite3.Connection, instant: datetime, *,
+    original_unread: list[tuple[str, str, str]] | None = None,
 ) -> list[tuple[str, str, str]]:
     """Conservative 14-day view-counter evidence, never inferred buyer demand.
 
@@ -74,6 +76,26 @@ def _stagnant_owned_views(
                 return
         observations.sort(key=lambda item: (item[0], item[1]))
         last_at, _, latest = observations[-1]
+        if (
+            original_unread is not None
+            and fresh <= last_at <= instant
+            and latest["source"] in OWN_INVENTORY_SOURCES
+            and latest["lifecycle_state"] == "active"
+            and latest["description"] is None
+            # "Not locally captured" is NOT "missing on Kleinanzeigen".
+            # A historical confirmed original text remains known even when
+            # the current management-list reader omits that optional field.
+            and not any(
+                observation["source"] in OWN_INVENTORY_SOURCES
+                and isinstance(observation["description"], str)
+                and bool(observation["description"].strip())
+                for _, _, observation in observations
+            )
+        ):
+            original_unread.append((
+                ad_id, last_at.date().isoformat(),
+                "Originaltext bislang lokal nicht belegt",
+            ))
         last_counter, metric_source = latest["views"], metric_origin(latest)
         if (
             not fresh <= last_at <= instant
@@ -120,7 +142,7 @@ def _stagnant_owned_views(
     # Existing ad-ID index supports this streaming, memory-bounded group scan;
     # do not create a cache, temp table or persistent claim from a read.
     for row in conn.execute(
-        "SELECT id,ad_id,observed_at,source,lifecycle_state,views,metric_source "
+        "SELECT id,ad_id,observed_at,source,lifecycle_state,views,metric_source,description "
         "FROM ad_snapshots ORDER BY ad_id COLLATE BINARY,id"
     ):
         if group and row["ad_id"] != last_id:
@@ -147,6 +169,8 @@ def attention_page(
     Automatic actions are prohibited. IDs, local counter values, dates and
     source labels only: message content, model prompts, buyer PII and
     user-entered reminder notes never leave the store through this endpoint.
+    Low-priority owner-original hints mean "not captured locally", never that
+    the actual marketplace listing is missing a description or image.
     """
     if (type(store) is not SnapshotStore
             or type(offset) is not int or not 0 <= offset <= 100_000
@@ -236,9 +260,19 @@ def attention_page(
                 raise sqlite3.DatabaseError("invalid local attention tally")
             total_by_kind[r["kind"]] = r["total"]
         prior_total = sum(total_by_kind.values())
-        stagnant = _stagnant_owned_views(conn, instant.astimezone(timezone.utc))
+        unread_candidates: list[tuple[str, str, str]] = []
+        stagnant = _stagnant_owned_views(
+            conn, instant.astimezone(timezone.utc),
+            original_unread=unread_candidates,
+        )
+        # One reviewed ad should not occupy two adjacent low-priority slots.
+        stagnant_ids = {ad_id for ad_id, _, _ in stagnant}
+        unread = [
+            item for item in unread_candidates if item[0] not in stagnant_ids
+        ]
         total_by_kind["views_stagnant"] = len(stagnant)
-        total = prior_total + len(stagnant)
+        total_by_kind["owner_original_unread"] = len(unread)
+        total = prior_total + len(stagnant) + len(unread)
         prior_size = min(limit, max(0, prior_total - offset))
         rows = conn.execute(
             cte + "SELECT priority,kind,ad_id,reference,evidence FROM attention "
@@ -287,7 +321,7 @@ def attention_page(
             })
         if len(results) != prior_size:
             raise sqlite3.DatabaseError("attention page count mismatch")
-        if len(results) < limit:
+        if len(results) < limit and offset < prior_total + len(stagnant):
             stagnant_offset = max(0, offset - prior_total)
             for ad_id, period, observed_views in stagnant[
                 stagnant_offset:stagnant_offset + limit - len(results)
@@ -297,6 +331,17 @@ def attention_page(
                     "ad_id": ad_id, "reference": period,
                     "evidence": observed_views,
                     "source": "confirmed_own_view_counter_history",
+                })
+        if len(results) < limit:
+            unread_offset = max(0, offset - prior_total - len(stagnant))
+            for ad_id, verified_on, reason in unread[
+                unread_offset:unread_offset + limit - len(results)
+            ]:
+                results.append({
+                    "kind": "owner_original_unread", "priority": 6,
+                    "ad_id": ad_id, "reference": verified_on,
+                    "evidence": reason,
+                    "source": "fresh_confirmed_owner_without_local_original",
                 })
         if len(results) != min(limit, max(0, total - offset)):
             raise sqlite3.DatabaseError("attention page count mismatch")
