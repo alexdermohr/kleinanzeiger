@@ -132,6 +132,67 @@ class PortfolioInsightsHttpTests(unittest.TestCase):
                 "UPDATE portfolio_followups SET due_date='corrupt' WHERE ad_id='10001'")
         self.assertEqual(self.request("GET", endpoint)[0], 503)
 
+    def test_view_stagnation_http_requires_owner_metrics_and_stays_read_only(self):
+        now = datetime.now(timezone.utc)
+        for observed in (now - timedelta(days=16), now):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id="10077", observed_at=observed,
+                source="kleinanzeigen-management",
+                lifecycle_state=LifecycleState.ACTIVE,
+                title="Synthetischer Artikel", description="Keine echte Anzeige",
+                views=12, metric_source="verified-owner-stats",
+            ))
+        path = "/api/portfolio/autopilot-attention"
+        self.assertEqual(self.request("GET", path, token=False)[0], 403)
+        status, page = self.request("GET", path + "?limit=1")
+        self.assertEqual(status, 200, page)
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["counts"]["views_stagnant"], 1)
+        self.assertEqual(page["items"][0]["kind"], "views_stagnant")
+        self.assertEqual(page["items"][0]["ad_id"], "10077")
+        self.assertEqual(page["items"][0]["priority"], 5)
+        self.assertEqual(page["items"][0]["evidence"], "Aufrufe 12 → 12")
+        self.assertEqual(page["provider_requests"], 0)
+        self.assertEqual(page["platform_writes"], 0)
+        self.assertNotIn("Synthetischer Artikel", str(page))
+        # The newest owner snapshot is still the source of identity.
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="10077", observed_at=now + timedelta(seconds=1),
+            source="user-supplied-local-catalog",
+            lifecycle_state=LifecycleState.ACTIVE, views=12,
+            metric_source="verified-owner-stats",
+        ))
+        self.assertEqual(self.request("GET", path)[1]["counts"]["views_stagnant"], 0)
+
+    def test_radar_exact_ad_http_bypasses_50_earlier_substring_matches(self):
+        now = datetime.now(timezone.utc)
+        # Eighty unrelated titles match the target ID as a substring. The
+        # ordinary list only yields the first 50, never the actual target.
+        for index in range(80):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id=f"{index:05d}", observed_at=now,
+                source="kleinanzeigen-management",
+                lifecycle_state=LifecycleState.ACTIVE,
+                title="Fremder Titel enthält 10077", description="Nur Testdaten",
+            ))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="10077", observed_at=now,
+            source="kleinanzeigen-management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Eigentliche Zielanzeige", description="Nur Testdaten",
+        ))
+        listing_status, listing = self.request(
+            "GET", "/api/catalog/ads?q=10077&limit=50")
+        self.assertEqual(listing_status, 200)
+        self.assertEqual(len(listing["ads"]), 50)
+        self.assertTrue(listing["has_more"])
+        self.assertNotIn("10077", {ad["ad_id"] for ad in listing["ads"]})
+        code, exact = self.request("GET", "/api/catalog/ad?id=10077")
+        self.assertEqual(code, 200)
+        self.assertEqual(exact["ad"]["ad_id"], "10077")
+        self.assertEqual(exact["ad"]["title"], "Eigentliche Zielanzeige")
+        self.assertEqual(self.request("GET", "/api/catalog/ad?id=100770")[0], 404)
+
     def test_g4_compares_actual_launcher_and_explicit_retry_not_only_cli_rounds(self):
         self.round(0, "private-web-product-launcher", [("10001", "Alt"), ("10002", "Bleibt")])
         self.round(10, "private-web-periodic-readonly", [("10001", "Neu"), ("10002", "Bleibt"), ("10003", "Dazu")])

@@ -25,11 +25,112 @@ class AutopilotAttentionError(ValueError):
 
 _KINDS = frozenset((
     "ai_uncertain", "eml_unreviewed", "manual_overdue",
-    "ai_proposal", "manual_due_soon",
+    "ai_proposal", "manual_due_soon", "views_stagnant",
 ))
 _AD_ID = re.compile(r"[^\x00-\x1f\x7f]{1,160}\Z")
 _JOB_ID = re.compile(r"[0-9a-f]{32}\Z")
 _CONVERSATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_-]{2,255}\Z")
+
+
+_STAGNATION_DAYS = 14
+_STAGNATION_BASELINE_MAX_DAYS = 30
+_STAGNATION_FRESH_HOURS = 48
+
+
+def _stagnant_owned_views(
+    conn: sqlite3.Connection, instant: datetime,
+) -> list[tuple[str, str, str]]:
+    """Conservative 14-day view-counter evidence, never inferred buyer demand.
+
+    An active owned ad is eligible only when the newest *overall* observation
+    is fresh, two owner-observed counters have the same explicit metric source
+    at least 14 days apart (but at most 30), and every intervening observation
+    remains active, owned, comparable and equal. Unknown counters, timestamp
+    errors, counter resets, foreign imports, stale reads and source changes
+    suppress the hint rather than manufacture a zero-demand claim.
+    """
+    fresh = instant - timedelta(hours=_STAGNATION_FRESH_HOURS)
+    oldest = instant - timedelta(days=_STAGNATION_BASELINE_MAX_DAYS)
+    result: list[tuple[str, str, str]] = []
+
+    def metric_origin(row: sqlite3.Row) -> object:
+        # Production owner readers omit metric_source: preserve the exact
+        # existing MarkQueryService evidence fallback to snapshot.source.
+        return row["metric_source"] if row["metric_source"] is not None else row["source"]
+
+    def classify(ad_id: object, group: list[sqlite3.Row]) -> None:
+        if type(ad_id) is not str or _AD_ID.fullmatch(ad_id) is None or not ad_id.strip():
+            return
+        observations: list[tuple[datetime, int, sqlite3.Row]] = []
+        for row in group:
+            try:
+                if type(row["id"]) is not int or row["id"] <= 0 or type(row["observed_at"]) is not str:
+                    return
+                observed = datetime.fromisoformat(row["observed_at"])
+                if observed.tzinfo is None or observed.utcoffset() is None:
+                    return
+                observations.append((observed.astimezone(timezone.utc), row["id"], row))
+            except (TypeError, ValueError, OverflowError):
+                return
+        observations.sort(key=lambda item: (item[0], item[1]))
+        last_at, _, latest = observations[-1]
+        last_counter, metric_source = latest["views"], metric_origin(latest)
+        if (
+            not fresh <= last_at <= instant
+            or latest["source"] not in OWN_INVENTORY_SOURCES
+            or latest["lifecycle_state"] != "active"
+            or type(last_counter) is not int or last_counter < 0
+            or type(metric_source) is not str or not metric_source.strip()
+        ):
+            return
+        before = last_at - timedelta(days=_STAGNATION_DAYS)
+        eligible = [
+            item for item in observations
+            if oldest <= item[0] <= before
+            and item[2]["source"] == latest["source"]
+            and item[2]["lifecycle_state"] == "active"
+            and metric_origin(item[2]) == metric_source
+            and type(item[2]["views"]) is int
+            and item[2]["views"] >= 0
+        ]
+        if not eligible:
+            return
+        first_at, _, baseline = eligible[-1]
+        if baseline["views"] != last_counter:
+            return
+        # Reject missing measurements between the two comparisons as well:
+        # zero growth is only meaningful if no intervening row contradicts it.
+        for observed, _, row in observations:
+            if first_at <= observed <= last_at and (
+                row["source"] != latest["source"]
+                or row["lifecycle_state"] != "active"
+                or metric_origin(row) != metric_source
+                or type(row["views"]) is not int
+                or row["views"] != last_counter
+            ):
+                return
+        result.append((
+            ad_id,
+            first_at.date().isoformat() + " bis " + last_at.date().isoformat(),
+            "Aufrufe " + str(last_counter) + " → " + str(last_counter),
+        ))
+
+    last_id: object = None
+    group: list[sqlite3.Row] = []
+    # Existing ad-ID index supports this streaming, memory-bounded group scan;
+    # do not create a cache, temp table or persistent claim from a read.
+    for row in conn.execute(
+        "SELECT id,ad_id,observed_at,source,lifecycle_state,views,metric_source "
+        "FROM ad_snapshots ORDER BY ad_id COLLATE BINARY,id"
+    ):
+        if group and row["ad_id"] != last_id:
+            classify(last_id, group)
+            group = []
+        last_id = row["ad_id"]
+        group.append(row)
+    if group:
+        classify(last_id, group)
+    return result
 
 
 def attention_page(
@@ -40,11 +141,12 @@ def attention_page(
 
     Priority: uncertain/potentially billable AI outcomes; imported unreviewed
     notifications for historically observed own ads; manually overdue reminders;
-    generated but locally unreviewed AI proposals; manually due-soon reminders.
+    generated but locally unreviewed AI proposals; manually due-soon reminders;
+    finally fresh and comparable views that have not increased for 14 days.
 
-    Automatic actions are prohibited. IDs and source labels only: message
-    content, model prompts, buyer PII and user-entered reminder notes never
-    leave the local store through this endpoint.
+    Automatic actions are prohibited. IDs, local counter values, dates and
+    source labels only: message content, model prompts, buyer PII and
+    user-entered reminder notes never leave the store through this endpoint.
     """
     if (type(store) is not SnapshotStore
             or type(offset) is not int or not 0 <= offset <= 100_000
@@ -133,15 +235,19 @@ def attention_page(
             if r["kind"] not in _KINDS or type(r["total"]) is not int:
                 raise sqlite3.DatabaseError("invalid local attention tally")
             total_by_kind[r["kind"]] = r["total"]
-        total = sum(total_by_kind.values())
+        prior_total = sum(total_by_kind.values())
+        stagnant = _stagnant_owned_views(conn, instant.astimezone(timezone.utc))
+        total_by_kind["views_stagnant"] = len(stagnant)
+        total = prior_total + len(stagnant)
+        prior_size = min(limit, max(0, prior_total - offset))
         rows = conn.execute(
             cte + "SELECT priority,kind,ad_id,reference,evidence FROM attention "
             "ORDER BY priority,ad_id COLLATE BINARY,reference COLLATE BINARY "
             "LIMIT ? OFFSET ?",
-            (*parameters, limit + 1, offset),
-        ).fetchall()
+            (*parameters, prior_size, offset),
+        ).fetchall() if prior_size else []
         results = []
-        for row in rows[:limit]:
+        for row in rows:
             kind, ad_id, reference, evidence, priority = (
                 row["kind"], row["ad_id"], row["reference"],
                 row["evidence"], row["priority"],
@@ -179,13 +285,27 @@ def attention_page(
                     "manual_user_followup"
                 ),
             })
-        if bool(len(rows) > limit) != bool(offset + len(results) < total):
+        if len(results) != prior_size:
             raise sqlite3.DatabaseError("attention page count mismatch")
+        if len(results) < limit:
+            stagnant_offset = max(0, offset - prior_total)
+            for ad_id, period, observed_views in stagnant[
+                stagnant_offset:stagnant_offset + limit - len(results)
+            ]:
+                results.append({
+                    "kind": "views_stagnant", "priority": 5,
+                    "ad_id": ad_id, "reference": period,
+                    "evidence": observed_views,
+                    "source": "confirmed_own_view_counter_history",
+                })
+        if len(results) != min(limit, max(0, total - offset)):
+            raise sqlite3.DatabaseError("attention page count mismatch")
+        has_more = offset + len(results) < total
     return {
         "items": results,
         "total": total, "counts": total_by_kind, "offset": offset,
-        "limit": limit, "has_more": len(rows) > limit,
-        "next_offset": offset + limit if len(rows) > limit else None,
+        "limit": limit, "has_more": has_more,
+        "next_offset": offset + limit if has_more else None,
         "as_of_utc": instant.astimezone(timezone.utc).isoformat(),
         "platform_writes": 0,
         "provider_requests": 0,
