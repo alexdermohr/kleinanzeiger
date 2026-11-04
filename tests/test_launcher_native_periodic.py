@@ -69,7 +69,7 @@ class _Writer:
         self.close_calls += 1
 
 
-def _runtime(sync, *, enabled=None):
+def _runtime(sync, *, enabled=None, decision_lock=None):
     server = _Server()
     inventory = _Inventory()
     writer = _Writer()
@@ -80,7 +80,7 @@ def _runtime(sync, *, enabled=None):
         startup_inventory_count=0, startup_persisted_count=0,
         startup_email_import_report=SimpleNamespace(), writes_enabled=True,
         periodic_sync=sync, periodic_interval_seconds=60,
-        periodic_enabled=enabled,
+        periodic_enabled=enabled, periodic_decision_lock=decision_lock,
     )
     # Fast test clock; public builder rejects intervals below one minute.
     runtime._periodic_interval = 0.025
@@ -126,6 +126,57 @@ class NativePeriodicInventoryTests(unittest.TestCase):
             owner.join(1)
         self.assertFalse(owner.is_alive())
         self.assertEqual((server.close_calls, inventory.close_calls, writer.close_calls), (1, 1, 1))
+
+    def test_manual_success_after_failed_poll_cannot_be_lost_to_late_pause(self):
+        enabled = threading.Event()
+        enabled.set()
+        decision_lock = threading.Lock()
+        inside_clear = threading.Event()
+        continue_clear = threading.Event()
+        manual_finished = threading.Event()
+        original_clear = enabled.clear
+
+        def delayed_clear():
+            inside_clear.set()
+            self.assertTrue(continue_clear.wait(2))
+            original_clear()
+
+        enabled.clear = delayed_clear
+
+        attempts = []
+
+        def failing_sync():
+            attempts.append("read")
+            if len(attempts) == 1:
+                raise OwnerInventorySyncFailure("login_required")
+            return 0
+
+        runtime, server, inventory, writer = _runtime(
+            failing_sync, enabled=enabled, decision_lock=decision_lock,
+        )
+        owner = threading.Thread(target=runtime.serve_forever)
+        owner.start()
+        try:
+            self.assertTrue(inside_clear.wait(1), "poll reached failure pause")
+
+            def manual_success():
+                # Real dashboard callback acquires after successful owner read.
+                with decision_lock:
+                    enabled.set()
+                manual_finished.set()
+
+            manual = threading.Thread(target=manual_success)
+            manual.start()
+            self.assertFalse(manual_finished.wait(0.05),
+                             "manual rearm must wait for older poll decision")
+            continue_clear.set()
+            self.assertTrue(manual_finished.wait(1))
+            manual.join(1)
+            self.assertTrue(enabled.is_set(), "newer manual success remains armed")
+        finally:
+            continue_clear.set()
+            runtime.close()
+            owner.join(1)
 
     def test_busy_cycle_skips_without_disabling_next_read(self):
         second = threading.Event()

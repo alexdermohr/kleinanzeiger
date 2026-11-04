@@ -241,6 +241,7 @@ class ProductLauncherRuntime:
         periodic_sync: Callable[[], int] | None = None,
         periodic_interval_seconds: float = 0,
         periodic_enabled: Event | None = None,
+        periodic_decision_lock: Lock | None = None,
     ) -> None:
         interval = _validated_owner_poll_interval(periodic_interval_seconds)
         if periodic_sync is not None and not callable(periodic_sync):
@@ -276,6 +277,7 @@ class ProductLauncherRuntime:
         self._periodic_sync = periodic_sync
         self._periodic_interval = interval
         self._periodic_enabled = periodic_enabled if periodic_enabled is not None else Event()
+        self._periodic_decision_lock = periodic_decision_lock or Lock()
         if periodic_enabled is None:
             self._periodic_enabled.set()
         self._periodic_stop = Event()
@@ -354,29 +356,32 @@ class ProductLauncherRuntime:
         while not self._periodic_stop.wait(self._periodic_interval):
             if self._shutdown_started:
                 return
-            if not self._periodic_enabled.is_set():
-                continue
-            try:
-                sync()
-            except OwnerInventorySyncFailure as exc:
-                if exc.kind == "busy":
-                    # The customer's write/manual read owns the same CDP lock.
-                    # Skip the cycle; never queue a catch-up poll.
+            # Manual success must not be overtaken by a preceding failed poll.
+            # Hold the decision lock across read and pause; the manual path sets
+            # the same Event under this lock only after its own successful read.
+            with self._periodic_decision_lock:
+                if not self._periodic_enabled.is_set():
                     continue
-                self._periodic_enabled.clear()
-                print(
-                    "Kleinanzeiger: automatischer Kontoabgleich ausgesetzt; "
-                    "lokaler Bestand bleibt erhalten. Manuell abgleichen, "
-                    "um nach bestätigtem Read fortzusetzen.",
-                    file=sys.stderr,
-                )
-            except Exception:
-                self._periodic_enabled.clear()
-                print(
-                    "Kleinanzeiger: automatischer Kontoabgleich ausgesetzt; "
-                    "letzte bestätigte Daten bleiben erhalten.",
-                    file=sys.stderr,
-                )
+                try:
+                    sync()
+                except OwnerInventorySyncFailure as exc:
+                    if exc.kind == "busy":
+                        # A manual read/write owns the existing CDP lock.
+                        continue
+                    self._periodic_enabled.clear()
+                    print(
+                        "Kleinanzeiger: automatischer Kontoabgleich ausgesetzt; "
+                        "lokaler Bestand bleibt erhalten. Manuell abgleichen, "
+                        "um nach bestätigtem Read fortzusetzen.",
+                        file=sys.stderr,
+                    )
+                except Exception:
+                    self._periodic_enabled.clear()
+                    print(
+                        "Kleinanzeiger: automatischer Kontoabgleich ausgesetzt; "
+                        "letzte bestätigte Daten bleiben erhalten.",
+                        file=sys.stderr,
+                    )
 
     def serve_forever(self) -> None:
         with self._state_lock:
@@ -710,6 +715,7 @@ def _build_online_product_launcher(
     # manual inventory read may resume polling after ambiguous failure.
     periodic_enabled = Event()
     periodic_enabled.set()
+    periodic_decision_lock = Lock()
     shared_owner_reader: Callable[[], int] | None = None
     try:
         try:
@@ -821,7 +827,8 @@ def _build_online_product_launcher(
 
                 def refresh_and_rearm() -> int:
                     observed = manual_sync()
-                    periodic_enabled.set()
+                    with periodic_decision_lock:
+                        periodic_enabled.set()
                     return observed
 
                 dashboard_options["sync_once"] = refresh_and_rearm
@@ -896,6 +903,7 @@ def _build_online_product_launcher(
         periodic_sync=shared_owner_reader if sync_interval else None,
         periodic_interval_seconds=sync_interval if shared_owner_reader is not None else 0,
         periodic_enabled=periodic_enabled,
+        periodic_decision_lock=periodic_decision_lock,
     )
 
 
