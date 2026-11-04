@@ -30,6 +30,7 @@ from .fence_witness import FenceWitnessClient, FenceWitnessError
 from .private_web import PrivateWebSubmitUnknownError
 from .private_web_cdp import PrivateWebCdpError, _require_private_web_cdp_authority
 from .private_web_runtime import (
+    OwnerInventorySyncFailure,
     PrivateWebRuntimeDependencyError,
     require_private_web_runtime_dependency,
     build_private_web_inventory_runtime,
@@ -211,6 +212,14 @@ def _validated_inventory(
     return snapshots
 
 
+def _validated_owner_poll_interval(value: object) -> float:
+    """Zero disables polling; otherwise wait a bounded 1 minute to 1 day."""
+    if (type(value) not in (int, float) or not math.isfinite(float(value))
+            or (value != 0 and not 60 <= value <= 86400)):
+        raise ValueError("owner sync interval must be 0 or between 60 and 86400 seconds")
+    return float(value)
+
+
 class ProductLauncherRuntime:
     """Own the default-on write runtime, dashboard and startup owner inventory."""
 
@@ -229,7 +238,17 @@ class ProductLauncherRuntime:
         generation_token: str | None = None,
         public_origin_port: int | None = None,
         offline_mode: bool = False,
+        periodic_sync: Callable[[], int] | None = None,
+        periodic_interval_seconds: float = 0,
+        periodic_enabled: Event | None = None,
     ) -> None:
+        interval = _validated_owner_poll_interval(periodic_interval_seconds)
+        if periodic_sync is not None and not callable(periodic_sync):
+            raise TypeError("periodic_sync must be callable or None")
+        if periodic_sync is None and interval:
+            raise ValueError("periodic sync callback required for enabled interval")
+        if periodic_enabled is not None and not isinstance(periodic_enabled, Event):
+            raise TypeError("periodic_enabled must be an Event")
         self._inventory_runtime = inventory_runtime
         self._write_runtime = write_runtime
         self._write_access = write_access
@@ -254,6 +273,13 @@ class ProductLauncherRuntime:
         self._write_closed = write_runtime is None
         self._inventory_closed = False
         self._inventory_close_failed = False
+        self._periodic_sync = periodic_sync
+        self._periodic_interval = interval
+        self._periodic_enabled = periodic_enabled if periodic_enabled is not None else Event()
+        if periodic_enabled is None:
+            self._periodic_enabled.set()
+        self._periodic_stop = Event()
+        self._periodic_worker: Thread | None = None
 
     def _ensure_open_locked(self) -> None:
         if self._shutdown_started:
@@ -316,6 +342,42 @@ class ProductLauncherRuntime:
                 raise ProductLauncherError("product launcher write runtime is closed")
         self._write_runtime.reconcile_media_submit()
 
+    def _periodic_inventory_loop(self) -> None:
+        """Use only the launcher's pinned, serialized owner-read callback.
+
+        Any ambiguous browser/storage result pauses future reads until an
+        explicit successful dashboard sync re-arms this same session.
+        """
+        sync = self._periodic_sync
+        if sync is None:
+            return
+        while not self._periodic_stop.wait(self._periodic_interval):
+            if self._shutdown_started:
+                return
+            if not self._periodic_enabled.is_set():
+                continue
+            try:
+                sync()
+            except OwnerInventorySyncFailure as exc:
+                if exc.kind == "busy":
+                    # The customer's write/manual read owns the same CDP lock.
+                    # Skip the cycle; never queue a catch-up poll.
+                    continue
+                self._periodic_enabled.clear()
+                print(
+                    "Kleinanzeiger: automatischer Kontoabgleich ausgesetzt; "
+                    "lokaler Bestand bleibt erhalten. Manuell abgleichen, "
+                    "um nach bestätigtem Read fortzusetzen.",
+                    file=sys.stderr,
+                )
+            except Exception:
+                self._periodic_enabled.clear()
+                print(
+                    "Kleinanzeiger: automatischer Kontoabgleich ausgesetzt; "
+                    "letzte bestätigte Daten bleiben erhalten.",
+                    file=sys.stderr,
+                )
+
     def serve_forever(self) -> None:
         with self._state_lock:
             self._ensure_open_locked()
@@ -323,10 +385,28 @@ class ProductLauncherRuntime:
                 raise ProductLauncherError("product launcher is already serving")
             self._serve_thread = current_thread()
             self._server_quiesced = False
+            if self._periodic_sync is not None and self._periodic_interval:
+                if self._periodic_worker is not None and self._periodic_worker.is_alive():
+                    self._serve_thread = None
+                    raise ProductLauncherError("previous periodic owner reader still active")
+                self._periodic_stop.clear()
+                worker = Thread(
+                    target=self._periodic_inventory_loop, daemon=True,
+                    name="kleinanzeiger-owner-periodic-read",
+                )
+                self._periodic_worker = worker
+                try:
+                    worker.start()
+                except RuntimeError:
+                    self._periodic_worker = None
+                    self._serve_thread = None
+                    self._server_quiesced = True
+                    raise ProductLauncherError("periodic owner reader unavailable") from None
 
         try:
             self._server.serve_forever()
         finally:
+            self._periodic_stop.set()
             with self._state_lock:
                 if self._serve_thread is current_thread():
                     self._serve_thread = None
@@ -410,6 +490,18 @@ class ProductLauncherRuntime:
                     )
                 if server_quiesced:
                     self._server_quiesced = True
+
+            # A scheduled read borrows the writer's pinned CDP target and
+            # SQLite owner. Do not release either until that read has drained.
+            self._periodic_stop.set()
+            polling = self._periodic_worker
+            if polling is not None:
+                polling.join(_PRODUCT_CLOSE_TOTAL_SECONDS / 2)
+                if polling.is_alive():
+                    raise ProductLauncherError(
+                        "periodic inventory read not drained; retain recovery fences"
+                    )
+                self._periodic_worker = None
 
             cleanup_failed = False
             if not server_quiesced:
@@ -495,6 +587,7 @@ def _build_online_product_launcher(
     generation_access: DashboardGenerationAccess | None = None,
     token_factory: _TokenFactory | None = None,
     dashboard_token_factory: _TokenFactory | None = None,
+    sync_interval_seconds: float = 0,
     clock: _Clock = _utc_now,
 ) -> ProductLauncherRuntime:
     """Perform one fresh owner sync, then start Write API and dashboard.
@@ -520,6 +613,7 @@ def _build_online_product_launcher(
             public_origin_port, name="public_origin_port", allow_zero=False,
         )
     timeout = _validated_timeout(timeout_seconds)
+    sync_interval = _validated_owner_poll_interval(sync_interval_seconds)
     if analytics_contract is not None and not isinstance(
         analytics_contract,
         AnalyticsContract,
@@ -612,6 +706,11 @@ def _build_online_product_launcher(
 
     server: LoopbackDashboardServer | None = None
     write_runtime: _WriteRuntime | None = None
+    # Initial browser inventory was verified; only another *successful*
+    # manual inventory read may resume polling after ambiguous failure.
+    periodic_enabled = Event()
+    periodic_enabled.set()
+    shared_owner_reader: Callable[[], int] | None = None
     try:
         try:
             result = inventory_runtime.read_inventory()
@@ -718,7 +817,14 @@ def _build_online_product_launcher(
         if enable_writes and fence_witness is None:
             manual_sync = getattr(write_runtime, "sync_owner_inventory", None)
             if callable(manual_sync):
-                dashboard_options["sync_once"] = manual_sync
+                shared_owner_reader = manual_sync
+
+                def refresh_and_rearm() -> int:
+                    observed = manual_sync()
+                    periodic_enabled.set()
+                    return observed
+
+                dashboard_options["sync_once"] = refresh_and_rearm
             read_original = getattr(write_runtime, "refresh_owned_ad_content", None)
             if callable(read_original):
                 dashboard_options["original_read_once"] = read_original
@@ -787,6 +893,9 @@ def _build_online_product_launcher(
         writes_enabled=enable_writes,
         generation_token=generation_access.ui_token if generation_access else None,
         public_origin_port=public_origin_port,
+        periodic_sync=shared_owner_reader if sync_interval else None,
+        periodic_interval_seconds=sync_interval if shared_owner_reader is not None else 0,
+        periodic_enabled=periodic_enabled,
     )
 
 
@@ -922,6 +1031,18 @@ def _parser() -> argparse.ArgumentParser:
         "--stop-on-stdin",
         action="store_true",
         help="Allow the owning local Windows control window to request the existing graceful SIGINT shutdown using its private stdin pipe.",
+    )
+    parser.add_argument(
+        "--owner-sync-interval-seconds",
+        type=float,
+        default=300,
+        metavar="SECONDS",
+        help=(
+            "Automatischer rein lesender Eigentümerbestand-Abgleich im "
+            "bereits authentifizierten lokalen Chrome: 60..86400 Sekunden "
+            "(Standard 300), 0 zum Ausschalten. Nach unbekanntem Ergebnis "
+            "nur nach erfolgreichem manuellem Sync fortsetzen."
+        ),
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -1117,6 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
                         dashboard_port=args.dashboard_port,
                         write_port=args.write_port,
                         timeout_seconds=args.timeout_seconds,
+                        sync_interval_seconds=args.owner_sync_interval_seconds,
                         analytics_contract=contract,
                         email_paths=tuple(args.email_paths),
                         enable_writes=args.enable_writes,
