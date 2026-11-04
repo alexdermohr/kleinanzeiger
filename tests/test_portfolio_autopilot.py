@@ -238,9 +238,117 @@ class AutopilotAttentionTests(unittest.TestCase):
             lifecycle_state=LifecycleState.ACTIVE, views=8,
             metric_source="different-explicit-counter",
         ))
-        self.assertEqual([item["ad_id"] for item in
-                          attention_page(self.store, now=NOW)["items"]],
-                         ["20001"])
+        self.assertEqual(
+            [item["ad_id"] for item in attention_page(self.store, now=NOW)["items"]
+             if item["kind"] == "views_stagnant"], ["20001"],
+        )
+        # Changing the metrics source suppresses the *view trend* only; an
+        # independently unrecorded owner description may still need review.
+        self.assertEqual(
+            attention_page(self.store, now=NOW)["counts"]["owner_original_unread"], 1,
+        )
+
+    def test_missing_local_original_is_not_asserted_as_missing_on_platform(self):
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="30001", observed_at=NOW, source="kleinanzeigen-management",
+            lifecycle_state=LifecycleState.ACTIVE, title="Confirmed own item",
+            description=None, views=None,
+        ))
+        result = attention_page(self.store, now=NOW)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["counts"]["owner_original_unread"], 1)
+        self.assertEqual(result["counts"]["views_stagnant"], 0)
+        task = result["items"][0]
+        self.assertEqual((task["kind"], task["priority"], task["ad_id"]),
+                         ("owner_original_unread", 6, "30001"))
+        self.assertEqual(task["source"], "fresh_confirmed_owner_without_local_original")
+        self.assertEqual(task["reference"], NOW.date().isoformat())
+        self.assertIn("lokal", task["evidence"])
+        self.assertNotIn("Kleinanzeigen", task["evidence"])
+        self.assertEqual(result["platform_writes"], 0)
+        self.assertEqual(result["provider_requests"], 0)
+        self.assertFalse(result["automatic_execution_authorized"])
+        # Once a confirmed owner original is known, a later list-only read
+        # does not erase that known description or create a false missing hint.
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="30001", observed_at=NOW + timedelta(minutes=1),
+            source="private-web-owner-inventory", lifecycle_state=LifecycleState.ACTIVE,
+            description="Von der Plattform gelesener Originaltext",
+        ))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="30001", observed_at=NOW + timedelta(minutes=2),
+            source="kleinanzeigen-management", lifecycle_state=LifecycleState.ACTIVE,
+            description=None,
+        ))
+        self.assertEqual(attention_page(
+            self.store, now=NOW + timedelta(minutes=2)
+        )["counts"]["owner_original_unread"], 0)
+
+    def test_unread_original_rejects_stale_unowned_paused_and_corrupt_evidence(self):
+        rows = [
+            ("40001", NOW-timedelta(hours=49), "kleinanzeigen-management",
+             LifecycleState.ACTIVE),
+            ("40002", NOW, "local-catalog", LifecycleState.ACTIVE),
+            ("40003", NOW, "kleinanzeigen-management", LifecycleState.PAUSED),
+            ("40004", NOW+timedelta(days=1), "kleinanzeigen-management",
+             LifecycleState.ACTIVE),
+        ]
+        for ad_id, when, source, state in rows:
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id=ad_id, observed_at=when, source=source,
+                lifecycle_state=state, description=None,
+            ))
+        self.assertEqual(attention_page(self.store, now=NOW)["total"], 0)
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="40005", observed_at=NOW, source="kleinanzeigen-management",
+            lifecycle_state=LifecycleState.ACTIVE, description=None,
+        ))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="40005", observed_at=NOW + timedelta(minutes=1),
+            source="user-supplied-local-catalog", lifecycle_state=LifecycleState.UNKNOWN,
+        ))
+        self.assertEqual(attention_page(
+            self.store, now=NOW + timedelta(minutes=1)
+        )["counts"]["owner_original_unread"], 0)
+
+    def test_stagnation_and_unread_original_share_one_action_per_ad(self):
+        for age in (15, 0):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id="50001", observed_at=NOW-timedelta(days=age),
+                source="kleinanzeigen-management",
+                lifecycle_state=LifecycleState.ACTIVE,
+                description=None, views=11, metric_source="owner-metric",
+            ))
+        result = attention_page(self.store, now=NOW)
+        self.assertEqual(result["counts"]["views_stagnant"], 1)
+        self.assertEqual(result["counts"]["owner_original_unread"], 0)
+        self.assertEqual([(x["kind"], x["ad_id"]) for x in result["items"]],
+                         [("views_stagnant", "50001")])
+
+    def test_10000_unread_original_tasks_paginate_without_false_authority(self):
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                "INSERT INTO ad_snapshots(ad_id,observed_at,source,lifecycle_state,"
+                "title,description,views) VALUES(?,?,?,?,?,?,?)",
+                ((f"{idx:05d}", NOW.isoformat(), "kleinanzeigen-management",
+                  "active", "Synthetisch", None, None)
+                 for idx in range(10_000)),
+            )
+        first = attention_page(self.store, now=NOW)
+        self.assertEqual(first["total"], 10_000)
+        self.assertEqual(first["counts"]["owner_original_unread"], 10_000)
+        self.assertEqual(first["counts"]["views_stagnant"], 0)
+        self.assertEqual(first["items"][0]["ad_id"], "00000")
+        self.assertEqual(first["items"][-1]["ad_id"], "00049")
+        last = attention_page(self.store, offset=9_950, now=NOW)
+        self.assertFalse(last["has_more"])
+        self.assertEqual(len(last["items"]), 50)
+        self.assertEqual(last["items"][0]["ad_id"], "09950")
+        self.assertEqual(last["items"][-1]["ad_id"], "09999")
+        self.assertTrue(all(x["priority"] == 6 for x in last["items"]))
+        self.assertEqual(last["platform_writes"], 0)
+        self.assertEqual(last["provider_requests"], 0)
 
     def test_view_stagnation_has_real_10000_item_global_priority_pagination(self):
         # Synthetic fixtures use the actual append-only production table.
@@ -304,6 +412,35 @@ class AutopilotAttentionTests(unittest.TestCase):
         self.assertEqual(second["next_offset"], None)
         self.assertEqual(second["platform_writes"], 0)
         self.assertEqual(second["provider_requests"], 0)
+
+    def test_pagination_across_urgent_stagnant_and_unread_priority(self):
+        self.owner("60000")
+        self.followup("60000", "2026-10-27", "f"*64)
+        for age in (15, 0):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id="60001", observed_at=NOW-timedelta(days=age),
+                source="kleinanzeigen-management",
+                lifecycle_state=LifecycleState.ACTIVE,
+                description="Bekannter Originaltext", views=7,
+                metric_source="owner-statistics",
+            ))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="60002", observed_at=NOW,
+            source="kleinanzeigen-management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            description=None,
+        ))
+        first = attention_page(self.store, now=NOW, limit=2)
+        self.assertEqual(first["total"], 3)
+        self.assertEqual([x["kind"] for x in first["items"]],
+                         ["manual_overdue", "views_stagnant"])
+        self.assertTrue(first["has_more"])
+        second = attention_page(self.store, now=NOW, limit=2, offset=2)
+        self.assertEqual([x["kind"] for x in second["items"]],
+                         ["owner_original_unread"])
+        self.assertEqual(second["items"][0]["ad_id"], "60002")
+        self.assertFalse(second["has_more"])
+        self.assertEqual(second["next_offset"], None)
 
     def test_bad_inputs_corrupt_schema_and_dates_fail_closed(self):
         for args in ({"offset":-1}, {"offset": True}, {"offset":100_001},

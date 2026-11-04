@@ -132,6 +132,47 @@ class PortfolioInsightsHttpTests(unittest.TestCase):
                 "UPDATE portfolio_followups SET due_date='corrupt' WHERE ad_id='10001'")
         self.assertEqual(self.request("GET", endpoint)[0], 503)
 
+    def test_recent_owned_original_unread_is_local_token_bound_and_nonwriting(self):
+        now = datetime.now(timezone.utc)
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="90077", observed_at=now,
+            source="kleinanzeigen-management",
+            lifecycle_state=LifecycleState.ACTIVE,
+            title="Synthetischer Eigenartikel", description=None,
+        ))
+        path = "/api/portfolio/autopilot-attention"
+        self.assertEqual(self.request("GET", path, token=False)[0], 403)
+        status, page = self.request("GET", path + "?offset=0&limit=50")
+        self.assertEqual(status, 200, page)
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["counts"]["owner_original_unread"], 1)
+        self.assertEqual(page["items"][0]["kind"], "owner_original_unread")
+        self.assertEqual(page["items"][0]["ad_id"], "90077")
+        self.assertEqual(page["items"][0]["priority"], 6)
+        self.assertEqual(page["items"][0]["reference"], now.date().isoformat())
+        self.assertEqual(page["platform_writes"], 0)
+        self.assertEqual(page["provider_requests"], 0)
+        self.assertNotIn("Synthetischer Eigenartikel", str(page))
+        code, target = self.request("GET", "/api/catalog/ad?id=90077")
+        self.assertEqual(code, 200)
+        self.assertEqual(target["ad"]["ad_id"], "90077")
+        # A genuinely known original eliminates the local missing-information
+        # hint; absent description in later management pages cannot restore it.
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="90077", observed_at=now + timedelta(seconds=1),
+            source="private-web-owner-inventory", lifecycle_state=LifecycleState.ACTIVE,
+            description="Nachweislich gelesener Originaltext",
+        ))
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="90077", observed_at=now + timedelta(seconds=2),
+            source="kleinanzeigen-management", lifecycle_state=LifecycleState.ACTIVE,
+            description=None,
+        ))
+        second_status, second = self.request("GET", path)
+        self.assertEqual(second_status, 200)
+        self.assertEqual(second["counts"]["owner_original_unread"], 0)
+        self.assertEqual(second["items"], [])
+
     def test_view_stagnation_http_requires_owner_metrics_and_stays_read_only(self):
         now = datetime.now(timezone.utc)
         for observed in (now - timedelta(days=16), now):
