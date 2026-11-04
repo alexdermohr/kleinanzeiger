@@ -9,7 +9,8 @@ from mark_api.domain import AdSnapshot, LifecycleState
 from mark_api.portfolio_existing_jobs import (
     ExistingJobError, change_state, claim_next, create_job, details,
     eligible_ad_ids, finish_claim, process_one, recover_interrupted, review_items,
-    settle_unknown,
+    settle_unknown, configure_autonomy, stop_autonomy,
+    next_autonomy_job, consume_autonomy_call, recover_enabled_autonomy,
 )
 from mark_api.results import ReadResult
 from mark_api.storage import SnapshotStore
@@ -58,7 +59,7 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
             observed_at=self.now), 10_000)
         self.assertEqual(eligible_ad_ids(self.store), ids)
         args = dict(instruction="Nur belegte Angaben", request_key="7"*64,
-                    budget_cents=20, estimate_cents=20)
+                    budget_cents=40, estimate_cents=20)
         job = create_job(self.store, ids, **args)
         jid = job["job_id"]
         self.assertEqual(job["total"], 10_000)
@@ -96,6 +97,19 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         self.assertEqual(settled["counts"]["queued"], 9_999)
         self.assertEqual(settled["actual_cents"], 6)
         self.assertEqual(settled["platform_writes"], 0)
+        change_state(self.store, jid, "resume")
+        granted=configure_autonomy(self.store,jid,max_calls=1,grant_key="9"*64)
+        self.assertEqual(granted["total"],10_000)
+        self.assertEqual(next_autonomy_job(self.store),jid)
+        consume_autonomy_call(self.store,jid)
+        generated=process_one(self.store,jid,lambda original,_instruction:(
+            {"title":"Neu","description":original["description"]},7))
+        self.assertTrue(generated["claimed"])
+        end=details(self.store,jid)
+        self.assertEqual(end["counts"]["proposed"],1)
+        self.assertEqual(end["counts"]["queued"],9_998)
+        self.assertFalse(end["autonomy"]["enabled"])
+        self.assertIsNone(next_autonomy_job(self.store))
         self.add("overflow")
         with self.assertRaisesRegex(ExistingJobError, "more than 10000"):
             eligible_ad_ids(self.store)
@@ -269,6 +283,80 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         with self.store._connect() as conn:
             conn.execute("ALTER TABLE portfolio_existing_jobs ADD COLUMN drift TEXT")
         with self.assertRaises(Exception): details(self.store,jid)
+
+
+    def test_autonomy_is_explicit_persistent_and_call_limited(self):
+        self.add("auto-1");self.add("auto-2")
+        jid=create_job(self.store,["auto-1","auto-2"],instruction="Sachlich",
+            request_key="e"*64,budget_cents=70,estimate_cents=20)["job_id"]
+        self.assertEqual(details(self.store,jid)["autonomy"]["reason"],"not_authorized")
+        with self.assertRaises(ExistingJobError):
+            configure_autonomy(self.store,jid,max_calls=2,grant_key="a"*64)
+        change_state(self.store,jid,"start")
+        with self.assertRaises(ExistingJobError):
+            configure_autonomy(self.store,jid,max_calls=True,grant_key="a"*64)
+        configured=configure_autonomy(self.store,jid,max_calls=2,grant_key="a"*64)
+        self.assertTrue(configured["autonomy"]["enabled"])
+        replay=configure_autonomy(self.store,jid,max_calls=2,grant_key="a"*64)
+        self.assertEqual(replay["autonomy"]["used_calls"],0)
+        with self.assertRaises(ExistingJobError):
+            configure_autonomy(self.store,jid,max_calls=1,grant_key="a"*64)
+        with self.assertRaises(ExistingJobError):
+            configure_autonomy(self.store,jid,max_calls=2,grant_key="9"*64)
+        self.assertEqual(next_autonomy_job(self.store),jid)
+        consume_autonomy_call(self.store,jid)
+        self.assertEqual(details(self.store,jid)["autonomy"]["used_calls"],1)
+        process_one(self.store,jid,lambda original,_instruction:(
+            {"title":"Besser","description":original["description"]},7))
+        self.assertEqual(next_autonomy_job(self.store),jid)
+        exhausted=consume_autonomy_call(self.store,jid)
+        self.assertEqual(exhausted["autonomy"]["used_calls"],2)
+        self.assertFalse(exhausted["autonomy"]["enabled"])
+        self.assertEqual(exhausted["autonomy"]["reason"],"call_limit_reached")
+        self.assertIsNone(next_autonomy_job(self.store))
+        with self.assertRaises(ExistingJobError):
+            consume_autonomy_call(self.store,jid)
+        replay=configure_autonomy(self.store,jid,max_calls=2,grant_key="a"*64)
+        self.assertEqual(replay["autonomy"]["used_calls"],2)
+        self.assertFalse(replay["autonomy"]["enabled"])
+        renewed=configure_autonomy(self.store,jid,max_calls=1,grant_key="9"*64)
+        self.assertEqual(renewed["autonomy"]["remaining_calls"],1)
+        replay=configure_autonomy(self.store,jid,max_calls=2,grant_key="a"*64)
+        self.assertEqual(replay["autonomy"]["remaining_calls"],1)
+        with self.assertRaises(ExistingJobError):
+            configure_autonomy(self.store,"0"*32,max_calls=2,grant_key="a"*64)
+        # Local data never lost its budget or existing ad evidence.
+        self.assertEqual(details(self.store,jid)["actual_cents"],7)
+        self.assertEqual(details(self.store,jid)["platform_writes"],0)
+
+    def test_autonomy_restart_quarantines_inflight_without_replay(self):
+        self.add("restart-1");self.add("restart-2")
+        jid=create_job(self.store,["restart-1","restart-2"],instruction="Nur Fakten",
+            request_key="d"*64,budget_cents=100,estimate_cents=20)["job_id"]
+        change_state(self.store,jid,"start")
+        configure_autonomy(self.store,jid,max_calls=3,grant_key="b"*64)
+        consume_autonomy_call(self.store,jid)
+        self.assertIsNotNone(claim_next(self.store,jid))
+        self.assertEqual(recover_enabled_autonomy(self.store),1)
+        progress=details(self.store,jid)
+        self.assertEqual(progress["state"],"needs_attention")
+        self.assertEqual(progress["counts"]["unknown"],1)
+        self.assertFalse(progress["autonomy"]["enabled"])
+        self.assertEqual(progress["autonomy"]["reason"],"provider_outcome_unknown")
+        self.assertEqual(progress["autonomy"]["used_calls"],1)
+        self.assertIsNone(next_autonomy_job(self.store))
+        self.assertEqual(recover_enabled_autonomy(self.store),0)
+        stopped=stop_autonomy(self.store,jid)
+        self.assertFalse(stopped["autonomy"]["enabled"])
+
+    def test_autonomy_requires_budget_and_only_own_originals(self):
+        self.add("owned-1")
+        jid=create_job(self.store,["owned-1"],instruction="Sachlich",
+            request_key="c"*64,budget_cents=20,estimate_cents=19)["job_id"]
+        change_state(self.store,jid,"start")
+        with self.assertRaises(ExistingJobError):
+            configure_autonomy(self.store,jid,max_calls=1,grant_key="c"*64)
+        self.assertEqual(details(self.store,jid)["autonomy"]["reason"],"not_authorized")
 
 
 if __name__ == "__main__": unittest.main()

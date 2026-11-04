@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from threading import Lock
+from threading import Event, Lock, Thread
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -53,6 +53,12 @@ from .portfolio_existing_jobs import (
     eligible_ad_ids, list_jobs as list_existing_jobs,
     process_one as process_one_existing, recover_interrupted as recover_existing_interrupted,
     review_items as review_existing_items, settle_unknown as settle_existing_unknown,
+    configure_autonomy as configure_existing_autonomy,
+    stop_autonomy as stop_existing_autonomy,
+    next_autonomy_job as next_existing_autonomy_job,
+    consume_autonomy_call as consume_existing_autonomy_call,
+    recover_enabled_autonomy as recover_existing_autonomy,
+    claim_next as claim_next_existing,
 )
 from .portfolio_provider import (
     PROVIDER_MODEL, PROVIDER_OUTPUT_TOKEN_LIMIT, PROVIDER_REQUIRED_RESERVE_CENTS,
@@ -302,20 +308,29 @@ class DashboardGenerationAccess:
             self._lock.release()
 
     def generate_one_existing_proposal(
-        self, store: SnapshotStore, job_id: str,
+        self, store: SnapshotStore, job_id: str, *, autonomous: bool = False,
     ) -> dict[str, object]:
-        """One explicitly confirmed existing-ad call; no retry or platform write."""
+        """One existing-ad call: manual session cap or durable autonomous grant."""
         if not self._lock.acquire(blocking=False):
             raise DashboardGenerationBusy("generation already in progress")
         try:
-            if self._used >= self._max_requests:
+            if not autonomous and self._used >= self._max_requests:
                 raise DashboardGenerationLimit("generation session call limit reached")
             progress = existing_job_details(store, job_id, limit=1)
+            if not autonomous and progress["autonomy"]["enabled"]:
+                raise ExistingJobError("autonomous provider call owns this job")
             if progress["state"] != "running":
                 raise ExistingJobError("job must be started")
             if progress["estimate_cents"] < PROVIDER_REQUIRED_RESERVE_CENTS:
                 raise ExistingJobError("minimum reserve required")
-            self._used += 1  # before the potentially billable request
+            if autonomous:
+                # Called under the session lock. Never spend before this
+                # exact job's persistent approval consumes one call credit.
+                consume_existing_autonomy_call(store, job_id)
+            if not autonomous:
+                # Manual session quota. Autonomous credit was persisted above
+                # under the same lock, and remains bounded by the frozen budget.
+                self._used += 1
 
             def generate(original: dict[str, object], instruction: str):
                 prompt = json.dumps({
@@ -708,6 +723,11 @@ _DASHBOARD_HTML = """<!doctype html>
           <label>Stapelgröße (1–100)<input id="existing-ai-batch-count" type="number" min="1" max="100" value="10"></label>
           <button id="existing-ai-batch" type="button">Bestätigten Stapel starten</button>
           <button id="existing-ai-stop" type="button" disabled>Nach laufendem Aufruf stoppen</button>
+          <label>Automatische KI-Anfragen höchstens
+            <input id="existing-ai-auto-count" type="number" min="1" max="10000" value="10">
+          </label>
+          <button id="existing-ai-auto-enable" type="button">Budgetierten Autopilot freigeben</button>
+          <button id="existing-ai-auto-stop" type="button">Autopilot nach laufendem Aufruf stoppen</button>
         </div>
         <div class="table-wrap"><table>
           <thead><tr><th>Wählen</th><th>Anzeige</th><th>Original / Vorschlag</th><th>Status</th></tr></thead>
@@ -1441,6 +1461,7 @@ let existingAiPageIndex = 0;
 let existingAiNextAfter = null;
 let existingAiSelected = new Set();
 let existingAiPending = null;
+let existingAiAutoPending = null;
 let existingAiBusy = false;
 let existingAiHandoffBusy = false;
 let existingAiBatchStop = false;
@@ -5948,6 +5969,17 @@ async function loadExistingAiDetails(reset=false, focusedAdId="") {
       (c.inflight||0)+" laufend/unterbrochen · "+
       (job.actual_cents/100).toFixed(2)+" USD geschätzt · "+
       (job.reserved_cents/100).toFixed(2)+" USD bei unklaren Aufrufen reserviert";
+    const a=job.autonomy||{};
+    byId("existing-ai-progress").textContent+=a.enabled
+      ? " · KI-Autopilot freigegeben: "+a.used_calls+"/"+a.max_calls+
+        " Aufrufe verbraucht (nach Neustart fortsetzbar)"
+      : a.max_calls ? " · KI-Autopilot gestoppt: "+a.reason+
+          " ("+a.used_calls+"/"+a.max_calls+" Aufrufe verbraucht)"
+        : " · KI-Autopilot nicht freigegeben";
+    byId("existing-ai-auto-enable").disabled=Boolean(a.enabled);
+    byId("existing-ai-auto-stop").disabled=!a.enabled;
+    byId("existing-ai-next-call").disabled=Boolean(a.enabled);
+    byId("existing-ai-batch").disabled=Boolean(a.enabled);
     byId("existing-ai-recovery").hidden=!(c.unknown>0||c.inflight>0);
     byId("existing-ai-recover").disabled=!(c.inflight>0);
     byId("existing-ai-settle-unknown").disabled=!(c.unknown>0);
@@ -6175,6 +6207,57 @@ async function generateExistingAiBatch() {
     }
   }
 }
+async function enableExistingAiAutonomy() {
+  if (existingAiBatchBusy||existingAiBusy||!generationUiReady()||
+      !existingAiActiveId||existingAiDisplayedId!==existingAiActiveId||
+      !byId("existing-ai-consent").checked) {
+    byId("existing-ai-feedback").textContent=
+      "Gestarteten Auftrag und einmalige KI-Kostenfreigabe prüfen.";return;
+  }
+  const raw=byId("existing-ai-auto-count").value.trim();
+  if (!/^[1-9][0-9]{0,3}$|^10000$/.test(raw)) {
+    byId("existing-ai-feedback").textContent="1 bis 10000 automatische KI-Anfragen wählen.";return;
+  }
+  const id=existingAiActiveId,maxCalls=Number(raw);
+  try {
+    const job=await _jobGet("/api/portfolio/existing-ai/detail?"+
+      new URLSearchParams({job_id:id,limit:"1"}));
+    const counts=job.counts||{};
+    if (job.state!=="running"||job.platform_writes!==0||
+        !Number.isSafeInteger(job.budget_cents)||!Number.isSafeInteger(job.estimate_cents)||
+        job.estimate_cents<20||!(counts.queued>0)||
+        (counts.unknown||0)>0||(counts.inflight||0)>0)
+      throw new Error("Auftragszustand unklar. Autopilot nicht gestartet.");
+    if (!window.confirm("Dauerhafte KI-Freigabe für bis zu "+maxCalls+
+        " kostenpflichtige Provideraufrufe mit dem gespeicherten Gesamtbudget "+
+        (job.budget_cents/100).toFixed(2)+" USD? "+
+        "Der Autopilot läuft selbstständig, auch nach Neustarts. "+
+        "Bei unklaren Ergebnissen stoppt er ohne Wiederholung. "+
+        "Es erfolgen keine Plattformänderungen oder Nachrichten.")) return;
+    // Repeated HTTP delivery must not reset a consumed paid allowance.
+    if (!existingAiAutoPending || existingAiAutoPending.id!==id
+        || existingAiAutoPending.maxCalls!==maxCalls)
+      existingAiAutoPending={id,maxCalls,key:_newJobRequestKey()};
+    await existingAiPost("autonomy",{job_id:id,action:"enable",
+      max_calls:maxCalls,grant_key:existingAiAutoPending.key,
+      acknowledge_provider_cost:true},true);
+    existingAiAutoPending=null;
+    byId("existing-ai-consent").checked=false;
+    await loadExistingAiJobs();
+  } catch(error) {
+    byId("existing-ai-feedback").textContent=error.message;
+  }
+}
+async function stopExistingAiAutonomy() {
+  if (!existingAiActiveId) return;
+  const id=existingAiActiveId;
+  try {
+    await existingAiPost("autonomy",{job_id:id,action:"stop"});
+    await loadExistingAiJobs();
+  } catch(error) { byId("existing-ai-feedback").textContent=error.message; }
+}
+byId("existing-ai-auto-enable").addEventListener("click",enableExistingAiAutonomy);
+byId("existing-ai-auto-stop").addEventListener("click",stopExistingAiAutonomy);
 byId("existing-ai-create").addEventListener("click",createExistingAiJob);
 byId("existing-ai-refresh").addEventListener("click",()=>{autopilotFocusedJobId="";autopilotFocusedAdId="";loadExistingAiJobs();});
 byId("existing-ai-jobs-prev").addEventListener("click",()=>{if(existingAiJobsPage){autopilotFocusedJobId="";autopilotFocusedAdId="";existingAiJobsPage--;loadExistingAiJobs();}});
@@ -8791,7 +8874,8 @@ def _handler_factory(
             target=urlsplit(self.path)
             commands={"/api/portfolio/existing-ai/create","/api/portfolio/existing-ai/state",
                       "/api/portfolio/existing-ai/review","/api/portfolio/existing-ai/generate-next",
-                      "/api/portfolio/existing-ai/recover","/api/portfolio/existing-ai/settle-unknown"}
+                      "/api/portfolio/existing-ai/recover","/api/portfolio/existing-ai/settle-unknown",
+                      "/api/portfolio/existing-ai/autonomy"}
             if (target.path not in commands or target.query or target.fragment
                     or target.path!=self.path or type(store) is not SnapshotStore
                     or not local_work_available):
@@ -8838,6 +8922,22 @@ def _handler_factory(
                         explicitly_checked=payload["explicitly_checked"])
                     result=(generation_access.run_idle_local_recovery(operation)
                         if generation_access is not None else operation())
+                elif target.path.endswith("/autonomy"):
+                    if payload.get("action") == "enable":
+                        if (set(payload)!={"job_id","action","max_calls","grant_key","acknowledge_provider_cost"}
+                                or payload["acknowledge_provider_cost"] is not True):
+                            raise ExistingJobError("explicit durable cost approval required")
+                        if generation_access is None or not self._generation_session_authorized():
+                            self._send_json(403,{"error":"generation_session_required"}); return
+                        result=configure_existing_autonomy(
+                            store,payload["job_id"],max_calls=payload["max_calls"],
+                            grant_key=payload["grant_key"])
+                    elif payload.get("action") == "stop":
+                        if set(payload)!={"job_id","action"}:
+                            raise ExistingJobError("fields")
+                        result=stop_existing_autonomy(store,payload["job_id"])
+                    else:
+                        raise ExistingJobError("invalid autonomy action")
                 else:
                     if (generation_access is None or set(payload)!={"job_id","acknowledge_provider_cost"}
                             or payload["acknowledge_provider_cost"] is not True):
@@ -9137,6 +9237,73 @@ class LoopbackDashboardServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def start_existing_ai_worker(
+        self, store: SnapshotStore, generation_access: DashboardGenerationAccess,
+    ) -> None:
+        self._autonomy_stop = Event()
+        self._autonomy_thread = Thread(
+            target=self._existing_ai_worker, args=(store, generation_access),
+            daemon=True, name="kleinanzeiger-existing-ai-worker",
+        )
+        self._autonomy_thread.start()
+
+    def _existing_ai_worker(
+        self, store: SnapshotStore, generation_access: DashboardGenerationAccess,
+    ) -> None:
+        # An unfinished provider request from an earlier process is UNKNOWN.
+        # Neither the SQLite claim nor the persistent approval permits replay.
+        try:
+            recover_existing_autonomy(store)
+        except (sqlite3.Error, OSError):
+            return
+        while not self._autonomy_stop.wait(0.25):
+            try:
+                job_id=next_existing_autonomy_job(store)
+            except (sqlite3.Error, OSError):
+                continue
+            if job_id is None or self._autonomy_stop.is_set():
+                continue
+            try:
+                result=generation_access.generate_one_existing_proposal(
+                    store,job_id,autonomous=True)
+                # When the last item completes, advance the original job to
+                # REVIEW and terminalize the existing permission. A budget
+                # exhausted claim also leaves no pollable autonomous work.
+                if result.get("claimed"):
+                    if (not result["progress"]["counts"].get("queued",0)
+                            and not self._autonomy_stop.is_set()):
+                        try:
+                            claim_next_existing(store,job_id)
+                            stop_existing_autonomy(store,job_id,reason="finished")
+                        except ExistingJobError:
+                            pass
+                else:
+                    state=existing_job_details(store,job_id,limit=1)["state"]
+                    stop_existing_autonomy(
+                        store,job_id,reason="budget_exhausted"
+                        if state=="budget_exhausted" else "job_needs_attention")
+            except DashboardGenerationBusy:
+                pass  # Manual call owns the shared generation lock.
+            except DashboardGenerationLimit:
+                stop_existing_autonomy(store,job_id,reason="session_limit")
+            except Exception:
+                # process_one has quarantined any ambiguous external outcome;
+                # halt permission even if the DB is now awaiting manual review.
+                try:
+                    stop_existing_autonomy(
+                        store,job_id,reason="provider_outcome_unknown")
+                except (ExistingJobError,sqlite3.Error,OSError):
+                    pass
+
+    def server_close(self) -> None:
+        stop=getattr(self,"_autonomy_stop",None)
+        if stop is not None:
+            stop.set()
+            thread=getattr(self,"_autonomy_thread",None)
+            if thread is not None:
+                thread.join(timeout=0.5)
+        super().server_close()
+
 
 def create_server(
     store: SnapshotStore | StorageOwnerClient,
@@ -9198,7 +9365,7 @@ def create_server(
         store.verify_completion_profile()
     query = MarkQueryService(store)
     analytics = AnalyticsService(store, contract=analytics_contract)
-    return LoopbackDashboardServer(
+    server = LoopbackDashboardServer(
         (host, port),
         _handler_factory(
             store, query, analytics, write_proxy, generation_access,
@@ -9209,6 +9376,11 @@ def create_server(
             offline_mode=offline_mode,
         ),
     )
+    if (generation_access is not None and type(store) is SnapshotStore
+            and (write_proxy is not None or local_session_token is not None)
+            and not offline_mode):
+        server.start_existing_ai_worker(store, generation_access)
+    return server
 
 
 def main(argv: list[str] | None = None) -> int:

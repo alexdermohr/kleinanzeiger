@@ -10,7 +10,8 @@ import sqlite3
 import subprocess
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
+from time import monotonic, sleep
 import unittest
 from unittest.mock import patch
 
@@ -803,6 +804,176 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
             capture_output=True,timeout=25,
         )
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+
+    def _await_autonomous(self, job_id, predicate, *, seconds=4):
+        deadline=monotonic()+seconds
+        latest=None
+        while monotonic()<deadline:
+            latest=existing_job_details(self.store,job_id)
+            if predicate(latest):
+                return latest
+            sleep(0.05)
+        self.fail(f"autonomy did not reach expected persisted state: {latest}")
+
+    def test_autonomy_needs_separate_cost_authorization_then_processes_and_stops(self):
+        for i in range(2):
+            self.store.append_ad_snapshot(AdSnapshot(
+                ad_id=f"auto-{i}",observed_at=datetime.now(timezone.utc),
+                source="private-web-owner-inventory",lifecycle_state=LifecycleState.ACTIVE,
+                title=f"Original {i}",description="Nur belegte Fakten"))
+        calls=[]
+        class Responses:
+            def create(_self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(status="completed",
+                    output_text=json.dumps({"title":"Neu","description":"Nur belegte Fakten"}),
+                    usage=SimpleNamespace(input_tokens=10,output_tokens=10))
+        generator=SimpleNamespace(_provider=lambda:SimpleNamespace(responses=Responses()))
+        access=DashboardGenerationAccess(ui_token="g"*32,generator_factory=lambda:generator,max_requests=1)
+        self.start_server(access)
+        code,job=self.request("POST","/api/portfolio/existing-ai/create",{
+            "mode":"all","ad_ids":[],"instruction":"Sachlich verbessern",
+            "budget_cents":200,"estimate_cents":20,"request_key":"a"*64})
+        self.assertEqual(code,200,job)
+        jid=job["job_id"]
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/state",
+            {"job_id":jid,"action":"start"})[0],200)
+        endpoint="/api/portfolio/existing-ai/autonomy"
+        enable={"job_id":jid,"action":"enable","max_calls":2,"grant_key":"f"*64,"acknowledge_provider_cost":True}
+        self.assertEqual(self.request("POST",endpoint,enable)[0],403)
+        self.assertEqual(self.request("POST",endpoint,enable,token="bad",generation=True)[0],403)
+        self.assertEqual(self.request("POST",endpoint,enable,origin="http://evil.invalid",
+                                       generation=True)[0],403)
+        self.assertEqual(self.request("POST",endpoint,{**enable,
+            "acknowledge_provider_cost":False},generation=True)[0],400)
+        self.assertEqual(calls,[])
+        code,started=self.request("POST",endpoint,enable,generation=True)
+        self.assertEqual(code,200,started)
+        self.assertEqual(started["autonomy"]["max_calls"],2)
+        # A duplicate current grant is a readback, not a fresh allowance.
+        code,replay=self.request("POST",endpoint,enable,generation=True)
+        self.assertEqual(code,200,replay)
+        self.assertEqual(replay["autonomy"]["max_calls"],2)
+        done=self._await_autonomous(jid,lambda p:p["counts"].get("proposed",0)==2)
+        self.assertEqual(len(calls),2)
+        code,replay=self.request("POST",endpoint,enable,generation=True)
+        self.assertEqual(code,200,replay)
+        self.assertEqual(replay["autonomy"]["used_calls"],2)
+        self.assertEqual(done["counts"]["queued"],1)
+        self.assertEqual(done["autonomy"]["used_calls"],2)
+        self.assertEqual(done["autonomy"]["reason"],"call_limit_reached")
+        self.assertFalse(done["autonomy"]["enabled"])
+        self.assertEqual(done["platform_writes"],0)
+        code,restart=self.request("POST",endpoint,{**enable,"max_calls":1,"grant_key":"e"*64},generation=True)
+        self.assertEqual(code,200,restart)
+        done=self._await_autonomous(jid,lambda p:p["state"]=="review")
+        self.assertEqual(done["counts"]["proposed"],3)
+        self.assertEqual(len(calls),3)
+        self.assertEqual(done["autonomy"]["used_calls"],1)
+        self.assertEqual(done["platform_writes"],0)
+
+    def test_autonomy_stop_during_provider_excludes_second_call(self):
+        self.store.append_ad_snapshot(AdSnapshot(ad_id="auto-second",
+            observed_at=datetime.now(timezone.utc),source="private-web-owner-inventory",
+            lifecycle_state=LifecycleState.ACTIVE,title="Zweite",description="Belegte Fakten"))
+        entered,released=Event(),Event()
+        self.addCleanup(released.set)
+        calls=[]
+        class Responses:
+            def create(_self,**_kwargs):
+                calls.append(1)
+                entered.set()
+                if not released.wait(3):
+                    raise TimeoutError("test provider did not release")
+                return SimpleNamespace(status="completed",
+                    output_text=json.dumps({"title":"Neu","description":"Nur belegte Fakten"}),
+                    usage=SimpleNamespace(input_tokens=10,output_tokens=10))
+        generator=SimpleNamespace(_provider=lambda:SimpleNamespace(responses=Responses()))
+        self.start_server(DashboardGenerationAccess(
+            ui_token="g"*32,generator_factory=lambda:generator,max_requests=5))
+        code,job=self.request("POST","/api/portfolio/existing-ai/create",{
+            "mode":"all","ad_ids":[],"instruction":"Nur Fakten","budget_cents":200,
+            "estimate_cents":20,"request_key":"b"*64})
+        self.assertEqual(code,200,job)
+        jid=job["job_id"]
+        self.request("POST","/api/portfolio/existing-ai/state",
+                     {"job_id":jid,"action":"start"})
+        auto="/api/portfolio/existing-ai/autonomy"
+        self.assertEqual(self.request("POST",auto,{"job_id":jid,"action":"enable",
+            "max_calls":2,"grant_key":"c"*64,"acknowledge_provider_cost":True},generation=True)[0],200)
+        self.assertTrue(entered.wait(3),"worker did not start synthetic call")
+        try:
+            code,stopped=self.request("POST",auto,{"job_id":jid,"action":"stop"})
+            self.assertEqual(code,200,stopped)
+            self.assertFalse(stopped["autonomy"]["enabled"])
+        finally:
+            released.set()
+        done=self._await_autonomous(jid,lambda p:p["counts"].get("proposed",0)==1)
+        self.assertEqual(done["counts"]["queued"],1)
+        sleep(0.4)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(done["autonomy"]["reason"],"stopped")
+
+    def test_autonomous_unknown_is_quarantined_without_retry(self):
+        self.store.append_ad_snapshot(AdSnapshot(ad_id="auto-unknown-second",
+            observed_at=datetime.now(timezone.utc),source="private-web-owner-inventory",
+            lifecycle_state=LifecycleState.ACTIVE,title="Zweite",description="Belegte Fakten"))
+        calls=[]
+        class Responses:
+            def create(_self,**_kwargs):
+                calls.append(1)
+                raise TimeoutError("provider response lost")
+        generator=SimpleNamespace(_provider=lambda:SimpleNamespace(responses=Responses()))
+        self.start_server(DashboardGenerationAccess(ui_token="g"*32,
+            generator_factory=lambda:generator,max_requests=5))
+        code,job=self.request("POST","/api/portfolio/existing-ai/create",{
+            "mode":"all","ad_ids":[],"instruction":"Nur Fakten","budget_cents":200,
+            "estimate_cents":20,"request_key":"d"*64})
+        self.assertEqual(code,200,job)
+        jid=job["job_id"]
+        self.request("POST","/api/portfolio/existing-ai/state",
+                     {"job_id":jid,"action":"start"})
+        auto="/api/portfolio/existing-ai/autonomy"
+        self.assertEqual(self.request("POST",auto,{"job_id":jid,"action":"enable",
+            "max_calls":3,"grant_key":"d"*64,"acknowledge_provider_cost":True},generation=True)[0],200)
+        done=self._await_autonomous(jid,lambda p:p["state"]=="needs_attention" and
+                                    not p["autonomy"]["enabled"])
+        self.assertEqual(done["counts"]["unknown"],1)
+        self.assertEqual(done["counts"]["queued"],1)
+        self.assertEqual(done["reserved_cents"],20)
+        self.assertEqual(done["autonomy"]["reason"],"provider_outcome_unknown")
+        sleep(0.4)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(done["platform_writes"],0)
+
+    def test_autonomous_restart_recovers_lost_claim_before_provider(self):
+        from mark_api.portfolio_existing_jobs import (
+            configure_autonomy,consume_autonomy_call,
+        )
+        self.store.append_ad_snapshot(AdSnapshot(ad_id="auto-restart-next",
+            observed_at=datetime.now(timezone.utc),source="private-web-owner-inventory",
+            lifecycle_state=LifecycleState.ACTIVE,title="Zweite",description="Belegte Fakten"))
+        # A persisted explicit permission with an unfinished provider call:
+        # next process startup must quarantine rather than try again.
+        from mark_api.portfolio_existing_jobs import create_job as create_existing
+        jid=create_existing(self.store,["4711","auto-restart-next"],
+            instruction="Nur Fakten",budget_cents=200,estimate_cents=20,
+            request_key="f"*64)["job_id"]
+        from mark_api.portfolio_existing_jobs import change_state as change_existing
+        change_existing(self.store,jid,"start")
+        configure_autonomy(self.store,jid,max_calls=3,grant_key="b"*64)
+        consume_autonomy_call(self.store,jid)
+        claim_next(self.store,jid)
+        calls=[]
+        generator=SimpleNamespace(_provider=lambda: calls.append(1))
+        self.start_server(DashboardGenerationAccess(ui_token="g"*32,
+            generator_factory=lambda:generator,max_requests=5))
+        done=self._await_autonomous(jid,lambda p:p["state"]=="needs_attention" and
+                                    not p["autonomy"]["enabled"])
+        self.assertEqual(done["counts"]["unknown"],1)
+        self.assertEqual(done["autonomy"]["used_calls"],1)
+        self.assertEqual(calls,[])
 
 
 if __name__ == "__main__": unittest.main()
