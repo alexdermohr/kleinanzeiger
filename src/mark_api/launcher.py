@@ -826,10 +826,21 @@ def _build_online_product_launcher(
                 shared_owner_reader = manual_sync
 
                 def refresh_and_rearm() -> int:
-                    observed = manual_sync()
+                    # Both manual and periodic reads decide the next polling
+                    # state under one lock. A failed manual read is not proof
+                    # that the existing authenticated session remains usable.
                     with periodic_decision_lock:
+                        try:
+                            observed = manual_sync()
+                        except OwnerInventorySyncFailure as exc:
+                            if exc.kind != "busy":
+                                periodic_enabled.clear()
+                            raise
+                        except Exception:
+                            periodic_enabled.clear()
+                            raise
                         periodic_enabled.set()
-                    return observed
+                        return observed
 
                 dashboard_options["sync_once"] = refresh_and_rearm
             read_original = getattr(write_runtime, "refresh_owned_ad_content", None)

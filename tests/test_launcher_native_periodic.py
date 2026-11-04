@@ -256,15 +256,39 @@ class NativePeriodicInventoryTests(unittest.TestCase):
                 self.assertIsNotNone(launcher._periodic_sync)
                 self.assertEqual(launcher._periodic_interval, 60)
                 self.assertTrue(callable(captured.get("sync_once")))
-                launcher._periodic_enabled.clear()
-                writer.sync_failure = OwnerInventorySyncFailure("login_required")
+                self.assertTrue(launcher._periodic_enabled.is_set())
+                for kind in ("login_required", "connection_unavailable",
+                             "read_failed", "storage_unavailable"):
+                    writer.sync_failure = OwnerInventorySyncFailure(kind)
+                    with self.subTest(kind=kind), self.assertRaises(OwnerInventorySyncFailure):
+                        captured["sync_once"]()
+                    self.assertFalse(launcher._periodic_enabled.is_set(),
+                                     "failed manual read must pause automatic reads")
+                    writer.sync_failure = None
+                    self.assertEqual(captured["sync_once"](), 0)
+                    self.assertTrue(launcher._periodic_enabled.is_set())
+                writer.sync_failure = OwnerInventorySyncFailure("busy")
                 with self.assertRaises(OwnerInventorySyncFailure):
                     captured["sync_once"]()
+                self.assertTrue(launcher._periodic_enabled.is_set(),
+                                "another reader holding the CDP lock is not a failed observation")
+                writer.sync_failure = RuntimeError("synthetic unknown failure")
+                with self.assertRaises(RuntimeError):
+                    captured["sync_once"]()
                 self.assertFalse(launcher._periodic_enabled.is_set())
-                writer.sync_failure = None
-                self.assertEqual(captured["sync_once"](), 0)
-                self.assertTrue(launcher._periodic_enabled.is_set())
-                self.assertEqual(writer.sync_calls, 2)
+                before = writer.sync_calls
+                launcher._periodic_interval = 0.025
+                thread = threading.Thread(target=launcher.serve_forever)
+                thread.start()
+                try:
+                    self.assertTrue(launcher._server.started.wait(1))
+                    sleep(0.11)
+                    self.assertEqual(writer.sync_calls, before,
+                                     "scheduled reads must not resume after manual failure")
+                finally:
+                    launcher.close()
+                    thread.join(1)
+                    self.assertFalse(thread.is_alive())
             finally:
                 launcher.close()
             self.assertEqual((writer.close_calls, reader.close_calls), (1, 1))
