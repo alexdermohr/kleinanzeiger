@@ -2,6 +2,28 @@
 
 **Technische Funktion:** Der installierte Befehl `kleinanzeiger-sync` verwendet denselben abgesicherten, rein lesenden Besitzerbestand-Adapter und das SQLite-Synchronisationsjournal wie Kleinanzeiger. Er benötigt eine bereits vom Anwender authentifizierte lokale Chrome-/Chromium-Sitzung mit exakt lokal gebundenem CDP-Port. Der Befehl startet keinen Browser und führt weder Login/MFA/CAPTCHA noch Anzeigenänderungen aus.
 
+## Automatisch im normalen Windows-Kundenprogramm
+
+Nach einem **erfolgreichen authentifizierten Kundenstart** gleicht Kleinanzeiger
+den eigenen Bestand im Hintergrund standardmäßig alle fünf Minuten (300 Sekunden)
+erneut ab. Der Worker benutzt **denselben bereits geöffneten, serialisierten
+Chrome-/CDP-Zugang** wie der manuelle Button „Mit Kleinanzeigen abgleichen“.
+Es entsteht weder ein zweiter Browseroperator noch ein Plattform-Write.
+
+- Das Intervall ist im Programmaufruf mit `--owner-sync-interval-seconds 900`
+  beispielsweise auf 15 Minuten einstellbar; gültig sind 60 bis 86.400 Sekunden.
+- Mit `--owner-sync-interval-seconds 0` wird nur die Automatik ausgeschaltet.
+- Ein belegter CDP-Zugang (durch laufenden Write oder manuellen Read) lässt
+  den nächsten Zyklus ausfallen, statt konkurrierende Reads anzustauen.
+- Fehlerhafte oder uneindeutige Bestandsreads verändern den letzten
+  bestätigten lokalen Bestand nicht. Automatische Folgeversuche pausieren,
+  bis „Mit Kleinanzeigen abgleichen“ erneut **erfolgreich** durchgeführt wurde.
+- Der lokale Offline-Arbeitsbereich benutzt den Browser nicht periodisch.
+
+Die separate CLI `kleinanzeiger-sync` bleibt für kontrollierte Einzel- und
+Spezialläufe verfügbar; sie darf nicht parallel zum Kundenstarter dasselbe
+Chrome-Profil oder CDP-Ziel beanspruchen.
+
 ## Benutzung
 
 ```bash
