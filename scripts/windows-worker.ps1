@@ -369,10 +369,10 @@ function Invoke-PortfolioWorker([string]$mode) {
 
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
-  $names = @(Get-ReleaseAssetNames '0.1.41')
-  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.41-Windows.zip' -or
-      $names[1] -ne 'Kleinanzeiger-v0.1.41-Windows.sha256' -or
-      $names[2] -ne 'Kleinanzeiger-v0.1.41-Release-Manifest.json') {
+  $names = @(Get-ReleaseAssetNames '0.1.42')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.42-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.42-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.42-Release-Manifest.json') {
     throw 'Release-Dateinamen sind nicht eindeutig.'
   }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
