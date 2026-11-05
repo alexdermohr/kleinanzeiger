@@ -134,8 +134,8 @@ class CustomerHubTests(unittest.TestCase):
         self.assertIn("ConvertFrom-SecureString", script)
         self.assertIn("KLAZ_API_KEY", script)
         self.assertIn("Nachrichten verwalten", hub)
-        self.assertIn("'0.1.42'", workflow)
-        self.assertIn("0.1.42", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertIn("'0.1.43'", workflow)
+        self.assertIn("0.1.43", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(
             email_parser().parse_args(["--db", "ads.sqlite", "x.eml"]).emails,
             [Path("x.eml")],
