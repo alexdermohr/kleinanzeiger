@@ -620,4 +620,32 @@ def recover_enabled_autonomy(store: SnapshotStore) -> int:
     for job_id in ids:
         recover_interrupted(store, job_id)
         stop_autonomy(store, job_id, reason="provider_outcome_unknown")
-    return len(ids)
+
+    # The last provider result may already be committed when the process
+    # stops, before the worker advances the job to REVIEW and ends the grant.
+    # Reconcile that entirely local transition atomically on restart. Never
+    # contact a provider, repeat a claim, or finalize unresolved UNKNOWN work.
+    with closing(store._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        completed = conn.execute(
+            "SELECT a.job_id,j.state FROM portfolio_existing_job_autonomy a "
+            "JOIN portfolio_existing_jobs j ON j.job_id=a.job_id "
+            "WHERE j.state IN ('running','review') "
+            "AND (a.enabled=1 OR j.state='running') "
+            "AND NOT EXISTS(SELECT 1 FROM portfolio_existing_job_items i "
+            "WHERE i.job_id=j.job_id AND i.phase IN ('queued','inflight','unknown'))"
+        ).fetchall()
+        stamp = _now()
+        for row in completed:
+            if row["state"] == "running":
+                conn.execute(
+                    "UPDATE portfolio_existing_jobs SET state='review',updated_at=? "
+                    "WHERE job_id=? AND state='running'",
+                    (stamp, row["job_id"]),
+                )
+            conn.execute(
+                "UPDATE portfolio_existing_job_autonomy "
+                "SET enabled=0,reason='finished',updated_at=? WHERE job_id=?",
+                (stamp, row["job_id"]),
+            )
+    return len(ids) + len(completed)

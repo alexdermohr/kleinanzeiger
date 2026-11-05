@@ -349,6 +349,51 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         stopped=stop_autonomy(self.store,jid)
         self.assertFalse(stopped["autonomy"]["enabled"])
 
+    def test_autonomy_recovers_completed_last_proposal_without_new_provider_call(self):
+        self.add("final-1")
+        jid=create_job(self.store,["final-1"],instruction="Faktengetreu",
+            request_key="f"*64,budget_cents=100,estimate_cents=20)["job_id"]
+        change_state(self.store,jid,"start")
+        configure_autonomy(self.store,jid,max_calls=3,grant_key="6"*64)
+        consume_autonomy_call(self.store,jid)
+        calls=[]
+        def provider(original, instruction):
+            calls.append(original["ad_id"])
+            return {"title":"Neu","description":"Belegter Inhalt"},7
+        process_one(self.store,jid,provider)
+        before=details(self.store,jid)
+        self.assertEqual(before["state"],"running")
+        self.assertEqual(before["counts"]["proposed"],1)
+        self.assertTrue(before["autonomy"]["enabled"])
+        # Simulate power loss after the final result was committed.
+        self.assertEqual(recover_enabled_autonomy(self.store),1)
+        after=details(self.store,jid)
+        self.assertEqual(after["state"],"review")
+        self.assertFalse(after["autonomy"]["enabled"])
+        self.assertEqual(after["autonomy"]["reason"],"finished")
+        self.assertEqual(after["autonomy"]["used_calls"],1)
+        self.assertEqual(after["actual_cents"],7)
+        self.assertEqual(after["items"][0]["proposal"]["title"],"Neu")
+        self.assertEqual(calls,["final-1"])
+        self.assertIsNone(next_autonomy_job(self.store))
+        self.assertEqual(recover_enabled_autonomy(self.store),0)
+        self.assertEqual(details(self.store,jid)["actual_cents"],7)
+
+        # Also reconcile a crash between REVIEW transition and grant stop.
+        self.add("final-2")
+        other=create_job(self.store,["final-2"],instruction="Faktengetreu",
+            request_key="7"*64,budget_cents=100,estimate_cents=20)["job_id"]
+        change_state(self.store,other,"start")
+        configure_autonomy(self.store,other,max_calls=3,grant_key="8"*64)
+        consume_autonomy_call(self.store,other)
+        process_one(self.store,other,lambda original,instruction:(
+            {"title":"Neu","description":"Belegter Inhalt"},3))
+        self.assertIsNone(claim_next(self.store,other))
+        self.assertEqual(details(self.store,other)["state"],"review")
+        self.assertTrue(details(self.store,other)["autonomy"]["enabled"])
+        self.assertEqual(recover_enabled_autonomy(self.store),1)
+        self.assertFalse(details(self.store,other)["autonomy"]["enabled"])
+
     def test_autonomy_requires_budget_and_only_own_originals(self):
         self.add("owned-1")
         jid=create_job(self.store,["owned-1"],instruction="Sachlich",

@@ -34,10 +34,15 @@ class ExistingAiDashboardTests(unittest.TestCase):
             source="kleinanzeigen-management",lifecycle_state=LifecycleState.ACTIVE,
             title="Original",description="Nur belegte Fakten"))
 
-    def start_server(self, generation=None):
-        proxy=DashboardWriteProxy(host="127.0.0.1",port=8999,bearer_token="b"*32,ui_token=self.TOKEN)
-        self.server=create_server(self.store,port=0,write_proxy=proxy,
-                                  generation_access=generation)
+    def start_server(self, generation=None, *, offline=False):
+        proxy=(None if offline else DashboardWriteProxy(
+            host="127.0.0.1",port=8999,bearer_token="b"*32,ui_token=self.TOKEN))
+        self.server=create_server(
+            self.store,port=0,write_proxy=proxy,
+            generation_access=generation,
+            local_session_token=self.TOKEN if offline else None,
+            offline_mode=offline,
+        )
         self.thread=Thread(target=self.server.serve_forever,daemon=True); self.thread.start()
         self.addCleanup(self.thread.join,2); self.addCleanup(self.server.server_close); self.addCleanup(self.server.shutdown)
 
@@ -83,6 +88,32 @@ class ExistingAiDashboardTests(unittest.TestCase):
         code,missing=self.request("GET",endpoint.replace("ad_id=4711","ad_id=9999"))
         self.assertEqual(code,200)
         self.assertEqual(missing["items"],[])
+
+    def test_offline_dashboard_rejects_unserviceable_autonomy_grant(self):
+        self.start_server(
+            DashboardGenerationAccess(ui_token="g"*32,generator_factory=lambda:None),
+            offline=True,
+        )
+        self.assertFalse(hasattr(self.server,"_autonomy_thread"))
+        create={"mode":"selected","ad_ids":["4711"],
+                "instruction":"Nur Fakten","budget_cents":100,
+                "estimate_cents":20,"request_key":"8"*64}
+        code,job=self.request("POST","/api/portfolio/existing-ai/create",create)
+        self.assertEqual(code,200,job)
+        jid=job["job_id"]
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/state",
+            {"job_id":jid,"action":"start"})[0],200)
+        code,answer=self.request(
+            "POST","/api/portfolio/existing-ai/autonomy",
+            {"job_id":jid,"action":"enable","max_calls":2,"grant_key":"9"*64,
+             "acknowledge_provider_cost":True},generation=True)
+        self.assertEqual((code,answer),(409,{"error":"autonomy_unavailable_offline"}))
+        code,detail=self.request(
+            "GET","/api/portfolio/existing-ai/detail?job_id="+jid)
+        self.assertEqual(code,200)
+        self.assertFalse(detail["autonomy"]["enabled"])
+        self.assertEqual(detail["autonomy"]["reason"],"not_authorized")
+        self.assertEqual(detail["state"],"running")
 
     def test_10000_item_http_all_selected_large_payload_and_overflow(self):
         # 9,999 synthetic originals plus the single setUp owner ad.

@@ -8927,6 +8927,10 @@ def _handler_factory(
                         if (set(payload)!={"job_id","action","max_calls","grant_key","acknowledge_provider_cost"}
                                 or payload["acknowledge_provider_cost"] is not True):
                             raise ExistingJobError("explicit durable cost approval required")
+                        if offline_mode:
+                            # An offline dashboard has no autonomous worker.
+                            # Never persist credits that would lock manual work.
+                            self._send_json(409,{"error":"autonomy_unavailable_offline"}); return
                         if generation_access is None or not self._generation_session_authorized():
                             self._send_json(403,{"error":"generation_session_required"}); return
                         result=configure_existing_autonomy(
@@ -9270,8 +9274,7 @@ class LoopbackDashboardServer(ThreadingHTTPServer):
                 # REVIEW and terminalize the existing permission. A budget
                 # exhausted claim also leaves no pollable autonomous work.
                 if result.get("claimed"):
-                    if (not result["progress"]["counts"].get("queued",0)
-                            and not self._autonomy_stop.is_set()):
+                    if not result["progress"]["counts"].get("queued",0):
                         try:
                             claim_next_existing(store,job_id)
                             stop_existing_autonomy(store,job_id,reason="finished")
