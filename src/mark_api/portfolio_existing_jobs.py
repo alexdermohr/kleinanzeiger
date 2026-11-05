@@ -115,7 +115,8 @@ def _progress(conn: sqlite3.Connection, job_id: str) -> dict[str, object]:
             "budget_cents": job["budget_cents"], "estimate_cents": job["estimate_cents"],
             "actual_cents": cost[0], "reserved_cents": cost[1],
             "created_at": job["created_at"], "updated_at": job["updated_at"],
-            "platform_writes": 0, "approval_scope": "local_only"}
+            "platform_writes": 0, "approval_scope": "local_only",
+            "autonomy": _autonomy_status_conn(conn, job_id)}
 
 
 def _instant(value: object) -> datetime:
@@ -423,3 +424,241 @@ def review_items(store: SnapshotStore, job_id: str, ad_ids: list[str], *, approv
                 raise ExistingJobError("original changed since suggestion")
         conn.executemany("UPDATE portfolio_existing_job_items SET phase=?,updated_at=? WHERE job_id=? AND ad_id=?",(("approved" if approve else "rejected",_now(),job_id,x) for x in ad_ids))
         return _progress(conn,job_id)
+
+
+# Explicit, durable provider-spend permission for a *specific* existing job.
+# Job budget and per-request reservations remain the authority for money;
+# this record additionally caps autonomous request starts over restarts.
+_AUTONOMY_CREATE = """
+CREATE TABLE IF NOT EXISTS portfolio_existing_job_autonomy (
+ job_id TEXT PRIMARY KEY COLLATE BINARY,
+ enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+ max_calls INTEGER NOT NULL CHECK(max_calls BETWEEN 1 AND 10000),
+ used_calls INTEGER NOT NULL CHECK(used_calls BETWEEN 0 AND 10000),
+ reason TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS portfolio_existing_job_autonomy_grants (
+ job_id TEXT NOT NULL COLLATE BINARY,
+ grant_key TEXT NOT NULL UNIQUE,
+ max_calls INTEGER NOT NULL CHECK(max_calls BETWEEN 1 AND 10000),
+ authorized_at TEXT NOT NULL,
+ PRIMARY KEY(job_id,grant_key));
+"""
+_GRANT_COLUMNS = {"job_id", "grant_key", "max_calls", "authorized_at"}
+_AUTONOMY_COLUMNS = {"job_id", "enabled", "max_calls", "used_calls", "reason", "updated_at"}
+
+
+def _autonomy_schema(conn: sqlite3.Connection, *, create: bool = False) -> bool:
+    names = ("portfolio_existing_job_autonomy",
+             "portfolio_existing_job_autonomy_grants")
+    found = {row["name"]: row["type"] for row in conn.execute(
+        "SELECT name,type FROM sqlite_master WHERE name IN (?,?)", names)}
+    if not found:
+        if not create:
+            return False
+        for statement in _AUTONOMY_CREATE.split(";"):
+            if statement.strip():
+                conn.execute(statement)
+        return True
+    if found != {name: "table" for name in names}:
+        raise sqlite3.DatabaseError("partial existing-job autonomy schema")
+    for name, columns in ((names[0], _AUTONOMY_COLUMNS),
+                          (names[1], _GRANT_COLUMNS)):
+        if {x["name"] for x in conn.execute(
+                f"PRAGMA table_info({name})")} != columns:
+            raise sqlite3.DatabaseError("invalid existing-job autonomy schema")
+    return True
+
+
+def _autonomy_status_conn(conn: sqlite3.Connection, job_id: str) -> dict[str, object]:
+    if not _autonomy_schema(conn):
+        return {"enabled": False, "max_calls": 0, "used_calls": 0,
+                "remaining_calls": 0, "reason": "not_authorized"}
+    row = conn.execute(
+        "SELECT enabled,max_calls,used_calls,reason FROM portfolio_existing_job_autonomy "
+        "WHERE job_id=?", (job_id,)
+    ).fetchone()
+    if row is None:
+        return {"enabled": False, "max_calls": 0, "used_calls": 0,
+                "remaining_calls": 0, "reason": "not_authorized"}
+    return {"enabled": bool(row["enabled"]), "max_calls": row["max_calls"],
+            "used_calls": row["used_calls"],
+            "remaining_calls": max(0, row["max_calls"]-row["used_calls"]),
+            "reason": row["reason"]}
+
+
+def configure_autonomy(
+    store: SnapshotStore, job_id: str, *, max_calls: int, grant_key: str,
+) -> dict[str, object]:
+    """Idempotent, exact-job authorization; every NEW grant needs a new key."""
+    if type(max_calls) is not int or not 1 <= max_calls <= MAX_ITEMS:
+        raise ExistingJobError("invalid autonomous call allowance")
+    if type(grant_key) is not str or not _KEY.fullmatch(grant_key):
+        raise ExistingJobError("invalid autonomy grant key")
+    with closing(store._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        job = _job(conn, job_id)
+        _autonomy_schema(conn, create=True)
+        earlier = conn.execute(
+            "SELECT job_id,max_calls FROM portfolio_existing_job_autonomy_grants "
+            "WHERE grant_key=?", (grant_key,)
+        ).fetchone()
+        if earlier:
+            if earlier["job_id"] != job_id or earlier["max_calls"] != max_calls:
+                raise ExistingJobError("autonomy grant key reused")
+            # A duplicate message can NEVER reset exhausted credit, including
+            # after another grant or a state change. This is a pure readback.
+            return _progress(conn, job_id)
+        active = conn.execute(
+            "SELECT enabled FROM portfolio_existing_job_autonomy WHERE job_id=?",
+            (job_id,)
+        ).fetchone()
+        if active and active["enabled"]:
+            raise ExistingJobError("stop the current autonomous grant first")
+        if (job["state"] != "running" or job["estimate_cents"] < 20
+                or job["budget_cents"] < job["estimate_cents"]):
+            raise ExistingJobError("job not ready for autonomous generation")
+        counts = {r["phase"]: r["n"] for r in conn.execute(
+            "SELECT phase,COUNT(*) n FROM portfolio_existing_job_items "
+            "WHERE job_id=? GROUP BY phase", (job_id,)
+        )}
+        costs = conn.execute(
+            "SELECT COALESCE(SUM(actual_cents+reserved_cents),0) "
+            "FROM portfolio_existing_job_items WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+        if (not counts.get("queued") or counts.get("inflight")
+                or counts.get("unknown")
+                or costs + job["estimate_cents"] > job["budget_cents"]):
+            raise ExistingJobError("job requires manual attention or budget")
+        stamp = _now()
+        conn.execute(
+            "INSERT INTO portfolio_existing_job_autonomy_grants VALUES(?,?,?,?)",
+            (job_id, grant_key, max_calls, stamp),
+        )
+        conn.execute(
+            "INSERT INTO portfolio_existing_job_autonomy VALUES(?,1,?,0,'enabled',?) "
+            "ON CONFLICT(job_id) DO UPDATE SET enabled=1,max_calls=excluded.max_calls,"
+            "used_calls=0,reason='enabled',updated_at=excluded.updated_at",
+            (job_id, max_calls, stamp),
+        )
+        return _progress(conn, job_id)
+
+
+def stop_autonomy(store: SnapshotStore, job_id: str, *, reason: str = "stopped") -> dict[str, object]:
+    """Stop after any in-progress provider request; never revoke its claim."""
+    if reason not in ("stopped", "provider_outcome_unknown", "session_limit",
+                      "job_needs_attention", "database_error",
+                      "finished", "budget_exhausted"):
+        raise ExistingJobError("invalid autonomous stop reason")
+    with closing(store._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _job(conn, job_id)
+        if _autonomy_schema(conn):
+            conn.execute(
+                "UPDATE portfolio_existing_job_autonomy SET enabled=0,reason=?,updated_at=? "
+                "WHERE job_id=? AND (enabled=1 OR ?='provider_outcome_unknown')",
+                (reason, _now(), job_id, reason)
+            )
+        return _progress(conn, job_id)
+
+
+def next_autonomy_job(store: SnapshotStore) -> str | None:
+    """One cheap candidate at a time. Never claim merely by polling."""
+    with closing(store._connect()) as conn:
+        if not _autonomy_schema(conn):
+            return None
+        row = conn.execute(
+            "SELECT a.job_id FROM portfolio_existing_job_autonomy a "
+            "JOIN portfolio_existing_jobs j ON j.job_id=a.job_id "
+            "WHERE a.enabled=1 AND a.used_calls<a.max_calls AND j.state='running' "
+            "AND EXISTS(SELECT 1 FROM portfolio_existing_job_items i "
+            "WHERE i.job_id=j.job_id AND i.phase='queued') "
+            "AND NOT EXISTS(SELECT 1 FROM portfolio_existing_job_items i "
+            "WHERE i.job_id=j.job_id AND i.phase IN ('unknown','inflight')) "
+            "ORDER BY a.updated_at,a.job_id LIMIT 1"
+        ).fetchone()
+        return row["job_id"] if row else None
+
+
+def consume_autonomy_call(store: SnapshotStore, job_id: str) -> dict[str, object]:
+    """Count a *possible* billable invocation durably BEFORE calling provider.
+
+    Must run under the same generation session lock as claim_next/process_one.
+    Losing a slot to a crash is safe; retrying an UNKNOWN external effect is not.
+    """
+    with closing(store._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        job = _job(conn, job_id)
+        if job["state"] != "running" or not _autonomy_schema(conn):
+            raise ExistingJobError("autonomous job not running")
+        row = conn.execute(
+            "SELECT enabled,max_calls,used_calls FROM portfolio_existing_job_autonomy "
+            "WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if row is None or not row["enabled"] or row["used_calls"] >= row["max_calls"]:
+            raise ExistingJobError("autonomous permission exhausted")
+        next_used = row["used_calls"] + 1
+        conn.execute(
+            "UPDATE portfolio_existing_job_autonomy "
+            "SET used_calls=?,enabled=?,reason=?,updated_at=? WHERE job_id=?",
+            (next_used, int(next_used < row["max_calls"]),
+             "enabled" if next_used < row["max_calls"] else "call_limit_reached",
+             _now(), job_id),
+        )
+        return _progress(conn, job_id)
+
+
+def recover_enabled_autonomy(store: SnapshotStore) -> int:
+    """Startup: quarantine any pre-restart unresolved claim, never replay it."""
+    # Quarantine and revoke the grant in ONE transaction: an interrupted
+    # shutdown must not leave persisted UNKNOWN results with live paid consent.
+    with closing(store._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not _autonomy_schema(conn):
+            return 0
+        pending = [row["job_id"] for row in conn.execute(
+            "SELECT DISTINCT a.job_id FROM portfolio_existing_job_autonomy a "
+            "JOIN portfolio_existing_job_items i ON i.job_id=a.job_id "
+            "WHERE i.phase='inflight' OR (i.phase='unknown' AND a.enabled=1)"
+        )]
+        stamp = _now()
+        for job_id in pending:
+            conn.execute(
+                "UPDATE portfolio_existing_job_items SET phase='unknown',"
+                "error_code='interrupted_outcome_unknown',updated_at=? "
+                "WHERE job_id=? AND phase='inflight'", (stamp, job_id),
+            )
+            conn.execute(
+                "UPDATE portfolio_existing_jobs SET state='needs_attention',updated_at=? "
+                "WHERE job_id=? AND state!='cancelled'", (stamp, job_id),
+            )
+            conn.execute(
+                "UPDATE portfolio_existing_job_autonomy "
+                "SET enabled=0,reason='provider_outcome_unknown',updated_at=? "
+                "WHERE job_id=?", (stamp, job_id),
+            )
+
+        # The final provider result might have been saved before the worker
+        # could finish the job. Reconcile without repeating any provider call,
+        # while excluding every still-unresolved UNKNOWN in the same transaction.
+        completed = conn.execute(
+            "SELECT a.job_id,j.state FROM portfolio_existing_job_autonomy a "
+            "JOIN portfolio_existing_jobs j ON j.job_id=a.job_id "
+            "WHERE j.state IN ('running','review') "
+            "AND (a.enabled=1 OR j.state='running') "
+            "AND NOT EXISTS(SELECT 1 FROM portfolio_existing_job_items i "
+            "WHERE i.job_id=j.job_id AND i.phase IN ('queued','inflight','unknown'))"
+        ).fetchall()
+        stamp = _now()
+        for row in completed:
+            if row["state"] == "running":
+                conn.execute(
+                    "UPDATE portfolio_existing_jobs SET state='review',updated_at=? "
+                    "WHERE job_id=? AND state='running'",
+                    (stamp, row["job_id"]),
+                )
+            conn.execute(
+                "UPDATE portfolio_existing_job_autonomy "
+                "SET enabled=0,reason='finished',updated_at=? WHERE job_id=?",
+                (stamp, row["job_id"]),
+            )
+    return len(pending) + len(completed)
