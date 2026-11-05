@@ -6,7 +6,7 @@ observation used for a suggestion and stores human approval as a local fact.
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
@@ -469,29 +469,86 @@ def _autonomy_schema(conn: sqlite3.Connection, *, create: bool = False) -> bool:
     return True
 
 
+# Optional, per-grant pacing without changing the persisted v0.1.42 grant schema.
+# Legacy grants are immediate; a new schedule never creates spend permission.
+_PACING_DDL = """CREATE TABLE IF NOT EXISTS portfolio_existing_job_autonomy_pacing (
+ grant_key TEXT PRIMARY KEY COLLATE BINARY,
+ job_id TEXT NOT NULL COLLATE BINARY,
+ interval_seconds INTEGER NOT NULL CHECK(interval_seconds BETWEEN 60 AND 86400),
+ next_eligible_at TEXT);
+"""
+_PACING_COLUMNS = {"grant_key", "job_id", "interval_seconds", "next_eligible_at"}
+
+
+class AutonomyNotDue(ExistingJobError):
+    """A second worker or early retry must not consume another paid allowance."""
+
+
+def _pacing_schema(conn: sqlite3.Connection, *, create: bool = False) -> bool:
+    row = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name='portfolio_existing_job_autonomy_pacing'"
+    ).fetchone()
+    if row is None:
+        if not create:
+            return False
+        conn.execute(_PACING_DDL)
+    elif row["type"] != "table":
+        raise sqlite3.DatabaseError("invalid autonomy pacing schema")
+    actual = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(portfolio_existing_job_autonomy_pacing)"
+    )}
+    if actual != _PACING_COLUMNS:
+        raise sqlite3.DatabaseError("invalid autonomy pacing columns")
+    return True
+
+
+def _active_pacing(conn: sqlite3.Connection, job_id: str):
+    """Only the latest accepted grant can pace an active job."""
+    if not _pacing_schema(conn):
+        return None
+    row = conn.execute(
+        "SELECT p.grant_key,p.interval_seconds,p.next_eligible_at "
+        "FROM portfolio_existing_job_autonomy_grants g "
+        "LEFT JOIN portfolio_existing_job_autonomy_pacing p "
+        "ON p.grant_key=g.grant_key "
+        "WHERE g.job_id=? ORDER BY g.rowid DESC LIMIT 1", (job_id,)
+    ).fetchone()
+    # A new immediate grant supersedes older timed grants.
+    return row if row is not None and row["grant_key"] is not None else None
+
+
 def _autonomy_status_conn(conn: sqlite3.Connection, job_id: str) -> dict[str, object]:
+    empty = {"enabled": False, "max_calls": 0, "used_calls": 0,
+             "remaining_calls": 0, "reason": "not_authorized",
+             "interval_seconds": 0, "next_eligible_at": None}
     if not _autonomy_schema(conn):
-        return {"enabled": False, "max_calls": 0, "used_calls": 0,
-                "remaining_calls": 0, "reason": "not_authorized"}
+        return empty
     row = conn.execute(
         "SELECT enabled,max_calls,used_calls,reason FROM portfolio_existing_job_autonomy "
         "WHERE job_id=?", (job_id,)
     ).fetchone()
     if row is None:
-        return {"enabled": False, "max_calls": 0, "used_calls": 0,
-                "remaining_calls": 0, "reason": "not_authorized"}
+        return empty
+    paced = _active_pacing(conn, job_id)
     return {"enabled": bool(row["enabled"]), "max_calls": row["max_calls"],
             "used_calls": row["used_calls"],
             "remaining_calls": max(0, row["max_calls"]-row["used_calls"]),
-            "reason": row["reason"]}
+            "reason": row["reason"],
+            "interval_seconds": paced["interval_seconds"] if paced else 0,
+            "next_eligible_at": paced["next_eligible_at"] if paced else None}
+
 
 
 def configure_autonomy(
     store: SnapshotStore, job_id: str, *, max_calls: int, grant_key: str,
+    interval_seconds: int = 0,
 ) -> dict[str, object]:
-    """Idempotent, exact-job authorization; every NEW grant needs a new key."""
+    """Exact-job, budgeted call grant; optional 60-second to 24-hour call spacing."""
     if type(max_calls) is not int or not 1 <= max_calls <= MAX_ITEMS:
         raise ExistingJobError("invalid autonomous call allowance")
+    if type(interval_seconds) is not int or (interval_seconds != 0
+            and not 60 <= interval_seconds <= 86400):
+        raise ExistingJobError("invalid autonomous call interval")
     if type(grant_key) is not str or not _KEY.fullmatch(grant_key):
         raise ExistingJobError("invalid autonomy grant key")
     with closing(store._connect()) as conn, conn:
@@ -505,8 +562,14 @@ def configure_autonomy(
         if earlier:
             if earlier["job_id"] != job_id or earlier["max_calls"] != max_calls:
                 raise ExistingJobError("autonomy grant key reused")
-            # A duplicate message can NEVER reset exhausted credit, including
-            # after another grant or a state change. This is a pure readback.
+            # Idempotent replay cannot silently change spacing, even after a
+            # later grant superseded this one or its calls were consumed.
+            prior = (conn.execute(
+                "SELECT interval_seconds FROM portfolio_existing_job_autonomy_pacing "
+                "WHERE grant_key=?", (grant_key,)
+            ).fetchone() if _pacing_schema(conn) else None)
+            if (prior["interval_seconds"] if prior else 0) != interval_seconds:
+                raise ExistingJobError("autonomy grant key reused")
             return _progress(conn, job_id)
         active = conn.execute(
             "SELECT enabled FROM portfolio_existing_job_autonomy WHERE job_id=?",
@@ -534,6 +597,13 @@ def configure_autonomy(
             "INSERT INTO portfolio_existing_job_autonomy_grants VALUES(?,?,?,?)",
             (job_id, grant_key, max_calls, stamp),
         )
+        if interval_seconds:
+            _pacing_schema(conn, create=True)
+            conn.execute(
+                "INSERT INTO portfolio_existing_job_autonomy_pacing "
+                "(grant_key,job_id,interval_seconds,next_eligible_at) "
+                "VALUES(?,?,?,NULL)", (grant_key,job_id,interval_seconds),
+            )
         conn.execute(
             "INSERT INTO portfolio_existing_job_autonomy VALUES(?,1,?,0,'enabled',?) "
             "ON CONFLICT(job_id) DO UPDATE SET enabled=1,max_calls=excluded.max_calls,"
@@ -541,6 +611,7 @@ def configure_autonomy(
             (job_id, max_calls, stamp),
         )
         return _progress(conn, job_id)
+
 
 
 def stop_autonomy(store: SnapshotStore, job_id: str, *, reason: str = "stopped") -> dict[str, object]:
@@ -562,10 +633,19 @@ def stop_autonomy(store: SnapshotStore, job_id: str, *, reason: str = "stopped")
 
 
 def next_autonomy_job(store: SnapshotStore) -> str | None:
-    """One cheap candidate at a time. Never claim merely by polling."""
+    """Only a due candidate; polling never creates a claim or paid cost."""
     with closing(store._connect()) as conn:
         if not _autonomy_schema(conn):
             return None
+        due_filter = (
+            "AND NOT EXISTS ("
+            " SELECT 1 FROM portfolio_existing_job_autonomy_pacing p"
+            " WHERE p.grant_key=("
+            "  SELECT g.grant_key FROM portfolio_existing_job_autonomy_grants g"
+            "  WHERE g.job_id=a.job_id ORDER BY g.rowid DESC LIMIT 1)"
+            " AND p.next_eligible_at > ?) "
+            if _pacing_schema(conn) else ""
+        )
         row = conn.execute(
             "SELECT a.job_id FROM portfolio_existing_job_autonomy a "
             "JOIN portfolio_existing_jobs j ON j.job_id=a.job_id "
@@ -574,17 +654,15 @@ def next_autonomy_job(store: SnapshotStore) -> str | None:
             "WHERE i.job_id=j.job_id AND i.phase='queued') "
             "AND NOT EXISTS(SELECT 1 FROM portfolio_existing_job_items i "
             "WHERE i.job_id=j.job_id AND i.phase IN ('unknown','inflight')) "
-            "ORDER BY a.updated_at,a.job_id LIMIT 1"
+            + due_filter + "ORDER BY a.updated_at,a.job_id LIMIT 1",
+            (_now(),) if due_filter else (),
         ).fetchone()
         return row["job_id"] if row else None
 
 
-def consume_autonomy_call(store: SnapshotStore, job_id: str) -> dict[str, object]:
-    """Count a *possible* billable invocation durably BEFORE calling provider.
 
-    Must run under the same generation session lock as claim_next/process_one.
-    Losing a slot to a crash is safe; retrying an UNKNOWN external effect is not.
-    """
+def consume_autonomy_call(store: SnapshotStore, job_id: str) -> dict[str, object]:
+    """Persist credit AND next call boundary before any potentially paid request."""
     with closing(store._connect()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         job = _job(conn, job_id)
@@ -596,15 +674,28 @@ def consume_autonomy_call(store: SnapshotStore, job_id: str) -> dict[str, object
         ).fetchone()
         if row is None or not row["enabled"] or row["used_calls"] >= row["max_calls"]:
             raise ExistingJobError("autonomous permission exhausted")
+        paced = _active_pacing(conn, job_id)
+        stamp = _now()
+        if paced and paced["next_eligible_at"] and paced["next_eligible_at"] > stamp:
+            raise AutonomyNotDue("autonomy call interval not elapsed")
         next_used = row["used_calls"] + 1
         conn.execute(
             "UPDATE portfolio_existing_job_autonomy "
             "SET used_calls=?,enabled=?,reason=?,updated_at=? WHERE job_id=?",
             (next_used, int(next_used < row["max_calls"]),
              "enabled" if next_used < row["max_calls"] else "call_limit_reached",
-             _now(), job_id),
+             stamp, job_id),
         )
+        if paced:
+            next_at = (datetime.fromisoformat(stamp)
+                       + timedelta(seconds=paced["interval_seconds"])).isoformat()
+            conn.execute(
+                "UPDATE portfolio_existing_job_autonomy_pacing "
+                "SET next_eligible_at=? WHERE grant_key=?",
+                (next_at, paced["grant_key"]),
+            )
         return _progress(conn, job_id)
+
 
 
 def recover_enabled_autonomy(store: SnapshotStore) -> int:

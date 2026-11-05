@@ -114,6 +114,8 @@ class ExistingAiDashboardTests(unittest.TestCase):
         self.assertFalse(detail["autonomy"]["enabled"])
         self.assertEqual(detail["autonomy"]["reason"],"not_authorized")
         self.assertEqual(detail["state"],"running")
+        self.assertEqual(detail["autonomy"]["interval_seconds"],0)
+        self.assertIsNone(detail["autonomy"]["next_eligible_at"])
 
     def test_10000_item_http_all_selected_large_payload_and_overflow(self):
         # 9,999 synthetic originals plus the single setUp owner ad.
@@ -903,6 +905,59 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
         self.assertEqual(len(calls),3)
         self.assertEqual(done["autonomy"]["used_calls"],1)
         self.assertEqual(done["platform_writes"],0)
+
+    def test_autonomy_pacing_is_customer_selectable_persistent_and_not_early(self):
+        self.assertIn('id="existing-ai-auto-interval"',_DASHBOARD_HTML)
+        self.assertIn('interval_seconds:intervalSeconds',_DASHBOARD_JS)
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="paced-second",observed_at=datetime.now(timezone.utc),
+            source="private-web-owner-inventory",lifecycle_state=LifecycleState.ACTIVE,
+            title="Zweite Eigenanzeige",description="Belegte Fakten"))
+        calls=[]
+        class Responses:
+            def create(_self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(status="completed",
+                    output_text=json.dumps({"title":"Neu","description":"Nur belegte Fakten"}),
+                    usage=SimpleNamespace(input_tokens=10,output_tokens=10))
+        generator=SimpleNamespace(_provider=lambda:SimpleNamespace(responses=Responses()))
+        self.start_server(DashboardGenerationAccess(
+            ui_token="g"*32,generator_factory=lambda:generator,max_requests=3))
+        code,job=self.request("POST","/api/portfolio/existing-ai/create",{
+            "mode":"all","ad_ids":[],"instruction":"Nur Fakten",
+            "budget_cents":100,"estimate_cents":20,"request_key":"c"*64})
+        self.assertEqual(code,200,job)
+        jid=job["job_id"]
+        self.assertEqual(self.request("POST","/api/portfolio/existing-ai/state",
+            {"job_id":jid,"action":"start"})[0],200)
+        endpoint="/api/portfolio/existing-ai/autonomy"
+        enable={"job_id":jid,"action":"enable","max_calls":2,
+                "grant_key":"d"*64,"interval_seconds":60,
+                "acknowledge_provider_cost":True}
+        for invalid in (True,59,-1,86401,"300"):
+            code,_=self.request("POST",endpoint,{
+                **enable,"interval_seconds":invalid},generation=True)
+            self.assertEqual(code,400)
+        code,started=self.request("POST",endpoint,enable,generation=True)
+        self.assertEqual(code,200,started)
+        self.assertEqual(started["autonomy"]["interval_seconds"],60)
+        self.assertEqual(started["autonomy"]["remaining_calls"],2)
+        code,_=self.request("POST",endpoint,{
+            **enable,"interval_seconds":0},generation=True)
+        self.assertEqual(code,400)
+        done=self._await_autonomous(jid,lambda p:p["autonomy"]["used_calls"]==1
+                                    and p["counts"].get("proposed",0)==1)
+        self.assertEqual(done["autonomy"]["interval_seconds"],60)
+        self.assertTrue(done["autonomy"]["next_eligible_at"])
+        sleep(0.6)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(existing_job_details(self.store,jid)["platform_writes"],0)
+        code,stopped=self.request("POST",endpoint,{
+            "job_id":jid,"action":"stop"})
+        self.assertEqual(code,200,stopped)
+        self.assertFalse(stopped["autonomy"]["enabled"])
+        self.assertEqual(stopped["autonomy"]["used_calls"],1)
+        self.assertEqual(len(calls),1)
 
     def test_autonomy_stop_during_provider_excludes_second_call(self):
         self.store.append_ad_snapshot(AdSnapshot(ad_id="auto-second",

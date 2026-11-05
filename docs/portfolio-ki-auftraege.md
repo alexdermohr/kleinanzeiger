@@ -204,3 +204,23 @@ inflight oder unknown ein einklappbarer Bereich
 - Eine noch tatsächlich laufende Provider-Anfrage sperrt die lokale
   Abrechnungsklärung (HTTP 409). Auch ein Neustart ist keine Garantie,
   dass dem Anbieter keine Kosten entstanden sind.
+
+
+## Zeitlich verteilte, budgetierte KI-Prüfung bestehender Eigenanzeigen
+
+Im laufenden Auftrag kann Mark bei **Budgetierten Autopilot freigeben** neben der
+maximalen Zahl kostenpflichtiger KI-Aufrufe einen Mindestabstand wählen:
+sofort, 1, 5 oder 15 Minuten, 1 oder 24 Stunden. Dieser Abstand wird für die
+unveränderte Freigabe und für Neustarts in SQLite gespeichert. Die erste Anfrage
+kann sofort erfolgen; eine weitere wird frühestens nach Ablauf der gewählten
+Zeit gestartet. Das Dashboard nennt den nächsten möglichen Zeitpunkt.
+
+Der Abstand **erweitert weder Gesamtbudget noch Aufrufzahl**. Jeder mögliche
+kostenpflichtige Aufruf benötigt weiterhin die explizite Daten- und
+Kostenfreigabe für den konkreten Auftrag. Der Kostenanspruch und der nächste
+Zeitpunkt werden vor dem Providerkontakt festgehalten; bei unklarem Ausgang
+wird ohne blinde Wiederholung angehalten. Eine erneute Übertragung derselben
+Freigabe darf weder Intervall noch Kostenrahmen verändern. Altaufträge ohne
+Intervall bleiben kompatibel (sofortige Abarbeitung ihrer gespeicherten
+Aufrufgrenze). Es werden nur lokale Vorschläge erzeugt; **keine automatischen
+Preis-, Anzeigen- oder Nachrichtenänderungen auf der Plattform**.
