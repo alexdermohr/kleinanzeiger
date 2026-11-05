@@ -609,24 +609,37 @@ def consume_autonomy_call(store: SnapshotStore, job_id: str) -> dict[str, object
 
 def recover_enabled_autonomy(store: SnapshotStore) -> int:
     """Startup: quarantine any pre-restart unresolved claim, never replay it."""
-    with closing(store._connect()) as conn:
-        if not _autonomy_schema(conn):
-            return 0
-        ids = [r["job_id"] for r in conn.execute(
-            "SELECT DISTINCT a.job_id FROM portfolio_existing_job_autonomy a "
-            "JOIN portfolio_existing_job_items i ON i.job_id=a.job_id "
-            "WHERE i.phase='inflight'"
-        )]
-    for job_id in ids:
-        recover_interrupted(store, job_id)
-        stop_autonomy(store, job_id, reason="provider_outcome_unknown")
-
-    # The last provider result may already be committed when the process
-    # stops, before the worker advances the job to REVIEW and ends the grant.
-    # Reconcile that entirely local transition atomically on restart. Never
-    # contact a provider, repeat a claim, or finalize unresolved UNKNOWN work.
+    # Quarantine and revoke the grant in ONE transaction: an interrupted
+    # shutdown must not leave persisted UNKNOWN results with live paid consent.
     with closing(store._connect()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
+        if not _autonomy_schema(conn):
+            return 0
+        pending = [row["job_id"] for row in conn.execute(
+            "SELECT DISTINCT a.job_id FROM portfolio_existing_job_autonomy a "
+            "JOIN portfolio_existing_job_items i ON i.job_id=a.job_id "
+            "WHERE i.phase='inflight' OR (i.phase='unknown' AND a.enabled=1)"
+        )]
+        stamp = _now()
+        for job_id in pending:
+            conn.execute(
+                "UPDATE portfolio_existing_job_items SET phase='unknown',"
+                "error_code='interrupted_outcome_unknown',updated_at=? "
+                "WHERE job_id=? AND phase='inflight'", (stamp, job_id),
+            )
+            conn.execute(
+                "UPDATE portfolio_existing_jobs SET state='needs_attention',updated_at=? "
+                "WHERE job_id=? AND state!='cancelled'", (stamp, job_id),
+            )
+            conn.execute(
+                "UPDATE portfolio_existing_job_autonomy "
+                "SET enabled=0,reason='provider_outcome_unknown',updated_at=? "
+                "WHERE job_id=?", (stamp, job_id),
+            )
+
+        # The final provider result might have been saved before the worker
+        # could finish the job. Reconcile without repeating any provider call,
+        # while excluding every still-unresolved UNKNOWN in the same transaction.
         completed = conn.execute(
             "SELECT a.job_id,j.state FROM portfolio_existing_job_autonomy a "
             "JOIN portfolio_existing_jobs j ON j.job_id=a.job_id "
@@ -648,4 +661,4 @@ def recover_enabled_autonomy(store: SnapshotStore) -> int:
                 "SET enabled=0,reason='finished',updated_at=? WHERE job_id=?",
                 (stamp, row["job_id"]),
             )
-    return len(ids) + len(completed)
+    return len(pending) + len(completed)

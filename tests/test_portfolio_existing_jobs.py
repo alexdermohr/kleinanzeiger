@@ -349,6 +349,49 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         stopped=stop_autonomy(self.store,jid)
         self.assertFalse(stopped["autonomy"]["enabled"])
 
+    def test_restart_revokes_grant_for_already_persisted_unknown(self):
+        self.add("unknown-1"); self.add("unknown-2")
+        jid=create_job(self.store,["unknown-1","unknown-2"],
+            instruction="Nur Fakten",request_key="1"*64,
+            budget_cents=100,estimate_cents=20)["job_id"]
+        change_state(self.store,jid,"start")
+        configure_autonomy(self.store,jid,max_calls=3,grant_key="2"*64)
+        consume_autonomy_call(self.store,jid)
+        attempts=[]
+        def failed_provider(original,instruction):
+            attempts.append(original["ad_id"])
+            raise RuntimeError("paid provider result not confirmed")
+        with self.assertRaises(RuntimeError):
+            process_one(self.store,jid,failed_provider)
+        pending=details(self.store,jid)
+        self.assertEqual(pending["state"],"needs_attention")
+        self.assertEqual(pending["counts"]["unknown"],1)
+        self.assertTrue(pending["autonomy"]["enabled"],
+            "simulate shutdown before the worker revokes permission")
+        self.assertEqual(recover_enabled_autonomy(self.store),1)
+        stopped=details(self.store,jid)
+        self.assertFalse(stopped["autonomy"]["enabled"])
+        self.assertEqual(stopped["autonomy"]["reason"],"provider_outcome_unknown")
+        self.assertEqual(stopped["autonomy"]["used_calls"],1)
+        self.assertEqual(stopped["counts"]["queued"],1)
+        self.assertEqual(recover_enabled_autonomy(self.store),0)
+
+        # Settling UNKNOWN cannot revive an old grant.
+        settled=settle_unknown(self.store,jid,"unknown-1",
+            actual_cents=8,explicitly_checked=True)
+        self.assertEqual(settled["state"],"paused")
+        change_state(self.store,jid,"resume")
+        self.assertIsNone(next_autonomy_job(self.store))
+        replay=configure_autonomy(self.store,jid,max_calls=3,
+                                  grant_key="2"*64)
+        self.assertFalse(replay["autonomy"]["enabled"])
+        self.assertEqual(replay["autonomy"]["used_calls"],1)
+        self.assertEqual(details(self.store,jid)["actual_cents"],8)
+        self.assertEqual(attempts,["unknown-1"])
+        fresh=configure_autonomy(self.store,jid,max_calls=1,grant_key="3"*64)
+        self.assertTrue(fresh["autonomy"]["enabled"])
+        self.assertEqual(next_autonomy_job(self.store),jid)
+
     def test_autonomy_recovers_completed_last_proposal_without_new_provider_call(self):
         self.add("final-1")
         jid=create_job(self.store,["final-1"],instruction="Faktengetreu",
