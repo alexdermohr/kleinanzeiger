@@ -129,6 +129,46 @@ $detailsLink.SetBounds(28,453,240,26)
 $detailsLink.LinkColor = $accent
 $detailsLink.Visible = $false
 $form.Controls.Add($detailsLink)
+# Explicitly copied diagnostic contains only whitelisted state facts, never
+# stderr, user paths, profile data, account details, tokens or database rows.
+$copyDiagnostics = [System.Windows.Forms.LinkLabel]::new()
+$copyDiagnostics.Text = 'Diagnose kopieren'
+$copyDiagnostics.SetBounds(310,453,220,26)
+$copyDiagnostics.LinkColor = $accent
+$copyDiagnostics.Visible = $false
+$form.Controls.Add($copyDiagnostics)
+function Get-SafeDiagnostics {
+  $installed = Get-InstalledVersion
+  if ($installed -notmatch '^\d+\.\d+\.\d+$') { $installed = 'nicht bekannt' }
+  $package = [string]$script:packageVersion
+  if ($package -notmatch '^\d+\.\d+\.\d+$') { $package = 'nicht bekannt' }
+  $dbState = $(if (Test-Path -LiteralPath $db -PathType Leaf) { 'vorhanden' } else { 'nicht vorhanden' })
+  $running = $(if ($script:process -and !$script:process.HasExited) { 'aktiv' } else { 'inaktiv' })
+  $category = 'Sonstiges'
+  if ($statusLabel.Text -match 'Chrome|Browser|Browserverbindung') { $category = 'Browsersteuerung' }
+  elseif ($statusLabel.Text -match 'Start fehlgeschlagen|Dashboard|Kleinanzeiger wurde unerwartet') {
+    $category = 'Programmstart'
+  } elseif ($statusLabel.Text -match 'Sicherung|Wiederherstellung') { $category = 'Sicherung' }
+  elseif ($statusLabel.Text -match 'Installation|Update|Version') { $category = 'Programmversion' }
+  elseif ($statusLabel.Text -match 'KI-Zugang') { $category = 'KI-Konfiguration' }
+  return (@(
+    'Kleinanzeiger Windows-Kurzdiagnose'
+    "Paketversion: $package"
+    "Installierte Version: $installed"
+    "Lokaler Datenspeicher: $dbState"
+    "Prozess: $running"
+    "Fehlerbereich: $category"
+    'Keine Kontodaten, Dateipfade, API-Schlüssel oder Rohprotokolle enthalten.'
+  ) -join [Environment]::NewLine)
+}
+$copyDiagnostics.Add_Click({
+  try {
+    [System.Windows.Forms.Clipboard]::SetText((Get-SafeDiagnostics))
+    Set-Status 'Diagnose kopiert. Sie enthält keine Rohprotokolle oder Kontodaten.'
+  } catch {
+    Set-Status 'Diagnose konnte nicht kopiert werden.' $true
+  }
+})
 $detailsLink.Add_Click({
   $shown = $(if ($script:details) { $script:details } else { $statusLabel.Text })
   [Windows.Forms.MessageBox]::Show($shown,'Kleinanzeiger – technische Details') | Out-Null
@@ -142,6 +182,7 @@ function Set-AdvancedLayout([bool]$expanded) {
   $advanced.Text = $(if($expanded){'Weniger anzeigen'}else{'Weitere Aktionen'})
   $statusLabel.SetBounds(28,$(if($expanded){567}else{397}),584,44)
   $detailsLink.SetBounds(28,$(if($expanded){626}else{453}),240,26)
+  $copyDiagnostics.SetBounds(310,$(if($expanded){626}else{453}),220,26)
   $form.ClientSize = [System.Drawing.Size]::new(640,$(if($expanded){682}else{510}))
 }
 Set-AdvancedLayout $false
@@ -162,6 +203,7 @@ function Set-Status([string]$message,[bool]$failure=$false) {
   # A permanent technical link is distracting while everything is healthy.
   # On failure it is always visible below the status, never obscured by controls.
   $detailsLink.Visible = $failure
+  $copyDiagnostics.Visible = $failure
 }
 function Refresh-Controls {
   $busy = $script:process -and !$script:process.HasExited
@@ -939,7 +981,8 @@ if ($SelfTest) {
   }
   if ($script:advancedExpanded -or $form.ClientSize.Height -ne 510 -or
       $advanced.Text -ne 'Weitere Aktionen' -or $detailsLink.Visible -or
-      $statusLabel.Top -ne 397 -or $detailsLink.Top -ne 453) {
+      $statusLabel.Top -ne 397 -or $detailsLink.Top -ne 453 -or
+      $copyDiagnostics.Top -ne 453 -or $copyDiagnostics.Visible) {
     throw 'Kompakte Bedienoberflaeche ist nicht korrekt gestartet.'
   }
   Set-AdvancedLayout $true
@@ -947,13 +990,30 @@ if ($SelfTest) {
   # effective child Visible without showing a customer window.
   if (!$script:advancedExpanded -or $form.ClientSize.Height -ne 682 -or
       $advanced.Text -ne 'Weniger anzeigen' -or $statusLabel.Top -ne 567 -or
-      $detailsLink.Top -ne 626 -or $rollback.Top -ne 508 -or
+      $detailsLink.Top -ne 626 -or $copyDiagnostics.Top -ne 626 -or $rollback.Top -ne 508 -or
       $mail.Top -ne 390 -or $productsExport.Top -ne 449) {
     throw 'Erweiterte Kundenaktionen sind nicht vollstaendig erreichbar.'
   }
   Set-AdvancedLayout $false
+  # A raw exception, key or private path must never enter the shareable
+  # summary, even when it is present in the on-screen technical details.
+  $script:details = 'SECRET-NEVER-EXPORT'
+  $statusLabel.Text = 'Fehler SECRET-NEVER-EXPORT'
+  $summary = Get-SafeDiagnostics
+  if ($summary.Contains('SECRET-NEVER-EXPORT') -or
+      $summary.Contains('anzeigen.sqlite') -or
+      $summary -notmatch 'Paketversion:' -or $summary -notmatch 'Fehlerbereich:') {
+    throw 'Kundendiagnose enthält Rohdaten oder keine brauchbare Statusübersicht.'
+  }
+  Set-Status 'Start fehlgeschlagen – Fehlerdetails unten öffnen.' $true
+  # Control.Visible is false in a headless Form even when this child is
+  # requested visible; the real click path is exercised by native UI tests.
+  if ($copyDiagnostics.Text -ne 'Diagnose kopieren') {
+    throw 'Nach fehlgeschlagenem Start fehlt der Diagnosezugang.'
+  }
+  Set-Status 'Bereit.'
   if ($form.Controls.Count -lt 12 -or $primary.Text -ne 'Kleinanzeiger starten' -or
-      $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $restore -or
+      $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $copyDiagnostics -or $null -eq $restore -or
       $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $messages -or $null -eq $rollback -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
   }
