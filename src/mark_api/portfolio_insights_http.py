@@ -9,14 +9,20 @@ from .portfolio_inventory_diff import product_inventory_diff_page
 from .portfolio_price_rules import (
     delete_price_rule, price_rule_detail, price_suggestions_page, set_price_rule,
 )
+from .portfolio_owner_price_rules import (
+    owner_price_rule_detail, owner_price_suggestions_page,
+    set_owner_price_rule, delete_owner_price_rule,
+)
 from .storage import SnapshotStore
 
 
 READ_PATHS = frozenset((
     "/api/portfolio/inventory-diff", "/api/portfolio/price-rules",
     "/api/portfolio/price-rules/detail", "/api/portfolio/autopilot-attention",
+    "/api/portfolio/owner-price-rules", "/api/portfolio/owner-price-rules/detail",
 ))
 PRICE_MUTATE_PATH = "/api/portfolio/price-rules/mutate"
+OWNER_PRICE_MUTATE_PATH = "/api/portfolio/owner-price-rules/mutate"
 
 
 class InsightRequestError(ValueError):
@@ -51,6 +57,11 @@ def read_insight(store: SnapshotStore, path: str, query: str) -> dict:
         if not 0 <= offset <= 100_000 or not 1 <= limit <= 50:
             raise InsightRequestError("invalid attention bounds")
         return attention_page(store, offset=offset, limit=limit)
+    if path == "/api/portfolio/owner-price-rules/detail":
+        options = _options(query, {"ad_id"})
+        if set(options) != {"ad_id"}:
+            raise InsightRequestError("missing ad_id")
+        return owner_price_rule_detail(store, ad_id=options["ad_id"])
     if path.endswith("/detail"):
         options = _options(query, {"sku"})
         if set(options) != {"sku"}:
@@ -76,6 +87,8 @@ def read_insight(store: SnapshotStore, path: str, query: str) -> dict:
             raise InsightRequestError("invalid state filter")
         return product_inventory_diff_page(store, after=after, limit=limit,
                                            expected_epoch=epoch, state_filter=state)
+    if path == "/api/portfolio/owner-price-rules":
+        return owner_price_suggestions_page(store, after=options.get("after", ""), limit=limit)
     return price_suggestions_page(store, after=options.get("after", ""), limit=limit)
 
 
@@ -108,3 +121,32 @@ def mutate_price_rule(store: SnapshotStore, body: bytes) -> dict:
             raise InsightRequestError("invalid deletion fields")
         return delete_price_rule(store, **{key: value for key, value in data.items() if key != "action"})
     raise InsightRequestError("unsupported action")
+
+def mutate_owner_price_rule(store: SnapshotStore, body: bytes) -> dict:
+    """Manual own-listing arithmetic only; same strict JSON and local UI authority."""
+    if not body or len(body) > 8192:
+        raise InsightRequestError("invalid request size")
+    try:
+        data = json.loads(body.decode("utf-8"), object_pairs_hook=_unique_object)
+    except (ValueError, UnicodeError):
+        raise InsightRequestError("invalid JSON") from None
+    if type(data) is not dict:
+        raise InsightRequestError("object required")
+    action = data.get("action")
+    required = {"action", "ad_id", "expected_revision", "request_key"}
+    if action == "set":
+        if set(data) != required | {
+            "manual_price_eur", "minimum_price_eur", "reduction_step_eur",
+            "wait_days",
+        }:
+            raise InsightRequestError("invalid own price rule fields")
+        return set_owner_price_rule(
+            store, **{key: value for key, value in data.items() if key != "action"},
+        )
+    if action == "delete":
+        if set(data) != required:
+            raise InsightRequestError("invalid own price deletion fields")
+        return delete_owner_price_rule(
+            store, **{key: value for key, value in data.items() if key != "action"},
+        )
+    raise InsightRequestError("unsupported own price action")

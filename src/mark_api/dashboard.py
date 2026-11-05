@@ -74,8 +74,8 @@ from .query import (
     summary_to_dict,
 )
 from .portfolio_insights_http import (
-    READ_PATHS as INSIGHT_READ_PATHS, PRICE_MUTATE_PATH,
-    InsightRequestError, read_insight, mutate_price_rule,
+    READ_PATHS as INSIGHT_READ_PATHS, PRICE_MUTATE_PATH, OWNER_PRICE_MUTATE_PATH,
+    InsightRequestError, read_insight, mutate_price_rule, mutate_owner_price_rule,
 )
 from .portfolio_inventory_diff import InventoryDiffError
 from .portfolio_price_rules import PriceRuleError
@@ -9050,7 +9050,8 @@ def _handler_factory(
 
         def _portfolio_price_rule_command(self) -> None:
             target = urlsplit(self.path)
-            if (target.path != PRICE_MUTATE_PATH or target.path != self.path
+            if (target.path not in (PRICE_MUTATE_PATH, OWNER_PRICE_MUTATE_PATH)
+                    or target.path != self.path
                     or target.query or target.fragment or type(store) is not SnapshotStore
                     or not local_work_available):
                 self._send_json(404, {"error": "not_found"})
@@ -9063,7 +9064,9 @@ def _handler_factory(
                 return
             try:
                 raw, _ = self._read_proxy_body("local_json")
-                response = mutate_price_rule(store, raw)
+                response = (mutate_owner_price_rule(store, raw)
+                            if target.path == OWNER_PRICE_MUTATE_PATH
+                            else mutate_price_rule(store, raw))
             except PriceRuleError:
                 self._send_json(409, {"error": "invalid_or_stale_price_rule"})
                 return
@@ -9202,7 +9205,7 @@ def _handler_factory(
             if urlsplit(self.path).path.startswith("/api/portfolio/existing-ai/"):
                 self._portfolio_existing_ai_command()
                 return
-            if urlsplit(self.path).path == PRICE_MUTATE_PATH:
+            if urlsplit(self.path).path in (PRICE_MUTATE_PATH, OWNER_PRICE_MUTATE_PATH):
                 self._portfolio_price_rule_command()
                 return
             if urlsplit(self.path).path=="/api/portfolio/conversations/review":
