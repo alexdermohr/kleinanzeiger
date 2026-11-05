@@ -162,11 +162,13 @@ function Get-SafeDiagnostics {
   ) -join [Environment]::NewLine)
 }
 $copyDiagnostics.Add_Click({
+  # Clipboard feedback must not overwrite or dismiss the original failure.
+  # The technical-details link and its original message remain available.
   try {
     [System.Windows.Forms.Clipboard]::SetText((Get-SafeDiagnostics))
-    Set-Status 'Diagnose kopiert. Sie enthält keine Rohprotokolle oder Kontodaten.'
+    $copyDiagnostics.Text = 'Diagnose kopiert - erneut kopieren'
   } catch {
-    Set-Status 'Diagnose konnte nicht kopiert werden.' $true
+    $copyDiagnostics.Text = 'Kopieren fehlgeschlagen - erneut versuchen'
   }
 })
 $detailsLink.Add_Click({
@@ -204,6 +206,7 @@ function Set-Status([string]$message,[bool]$failure=$false) {
   # On failure it is always visible below the status, never obscured by controls.
   $detailsLink.Visible = $failure
   $copyDiagnostics.Visible = $failure
+  if ($failure) { $copyDiagnostics.Text = 'Diagnose kopieren' }
 }
 function Refresh-Controls {
   $busy = $script:process -and !$script:process.HasExited
