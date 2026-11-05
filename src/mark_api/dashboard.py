@@ -57,6 +57,7 @@ from .portfolio_existing_jobs import (
     stop_autonomy as stop_existing_autonomy,
     next_autonomy_job as next_existing_autonomy_job,
     consume_autonomy_call as consume_existing_autonomy_call,
+    AutonomyNotDue,
     recover_enabled_autonomy as recover_existing_autonomy,
     claim_next as claim_next_existing,
 )
@@ -725,6 +726,9 @@ _DASHBOARD_HTML = """<!doctype html>
           <button id="existing-ai-stop" type="button" disabled>Nach laufendem Aufruf stoppen</button>
           <label>Automatische KI-Anfragen höchstens
             <input id="existing-ai-auto-count" type="number" min="1" max="10000" value="10">
+          </label>
+          <label>Abstand zwischen KI-Aufrufen
+            <select id="existing-ai-auto-interval"><option value="0">Ohne Wartezeit</option><option value="60">1 Minute</option><option value="300">5 Minuten</option><option value="900">15 Minuten</option><option value="3600">1 Stunde</option><option value="86400">24 Stunden</option></select>
           </label>
           <button id="existing-ai-auto-enable" type="button">Budgetierten Autopilot freigeben</button>
           <button id="existing-ai-auto-stop" type="button">Autopilot nach laufendem Aufruf stoppen</button>
@@ -5972,7 +5976,11 @@ async function loadExistingAiDetails(reset=false, focusedAdId="") {
     const a=job.autonomy||{};
     byId("existing-ai-progress").textContent+=a.enabled
       ? " · KI-Autopilot freigegeben: "+a.used_calls+"/"+a.max_calls+
-        " Aufrufe verbraucht (nach Neustart fortsetzbar)"
+        " Aufrufe verbraucht (nach Neustart fortsetzbar)"+
+        (a.interval_seconds>0
+          ? " · mindestens "+a.interval_seconds+" Sekunden Abstand"+
+            (a.next_eligible_at ? " · nächste frühestens "+
+              new Date(a.next_eligible_at).toLocaleString("de-DE") : "") : "")
       : a.max_calls ? " · KI-Autopilot gestoppt: "+a.reason+
           " ("+a.used_calls+"/"+a.max_calls+" Aufrufe verbraucht)"
         : " · KI-Autopilot nicht freigegeben";
@@ -6218,7 +6226,11 @@ async function enableExistingAiAutonomy() {
   if (!/^[1-9][0-9]{0,3}$|^10000$/.test(raw)) {
     byId("existing-ai-feedback").textContent="1 bis 10000 automatische KI-Anfragen wählen.";return;
   }
-  const id=existingAiActiveId,maxCalls=Number(raw);
+  const intervalRaw=byId("existing-ai-auto-interval").value;
+  if (!["0","60","300","900","3600","86400"].includes(intervalRaw)) {
+    byId("existing-ai-feedback").textContent="Zeitabstand auswählen.";return;
+  }
+  const id=existingAiActiveId,maxCalls=Number(raw),intervalSeconds=Number(intervalRaw);
   try {
     const job=await _jobGet("/api/portfolio/existing-ai/detail?"+
       new URLSearchParams({job_id:id,limit:"1"}));
@@ -6232,15 +6244,18 @@ async function enableExistingAiAutonomy() {
         " kostenpflichtige Provideraufrufe mit dem gespeicherten Gesamtbudget "+
         (job.budget_cents/100).toFixed(2)+" USD? "+
         "Der Autopilot läuft selbstständig, auch nach Neustarts. "+
+        (intervalSeconds ? "Zwischen zwei KI-Aufrufen liegen mindestens "+
+          intervalSeconds+" Sekunden. " : "")+
         "Bei unklaren Ergebnissen stoppt er ohne Wiederholung. "+
         "Es erfolgen keine Plattformänderungen oder Nachrichten.")) return;
     // Repeated HTTP delivery must not reset a consumed paid allowance.
     if (!existingAiAutoPending || existingAiAutoPending.id!==id
-        || existingAiAutoPending.maxCalls!==maxCalls)
-      existingAiAutoPending={id,maxCalls,key:_newJobRequestKey()};
+        || existingAiAutoPending.maxCalls!==maxCalls
+        || existingAiAutoPending.intervalSeconds!==intervalSeconds)
+      existingAiAutoPending={id,maxCalls,intervalSeconds,key:_newJobRequestKey()};
     await existingAiPost("autonomy",{job_id:id,action:"enable",
       max_calls:maxCalls,grant_key:existingAiAutoPending.key,
-      acknowledge_provider_cost:true},true);
+      interval_seconds:intervalSeconds,acknowledge_provider_cost:true},true);
     existingAiAutoPending=null;
     byId("existing-ai-consent").checked=false;
     await loadExistingAiJobs();
@@ -8924,7 +8939,8 @@ def _handler_factory(
                         if generation_access is not None else operation())
                 elif target.path.endswith("/autonomy"):
                     if payload.get("action") == "enable":
-                        if (set(payload)!={"job_id","action","max_calls","grant_key","acknowledge_provider_cost"}
+                        required={"job_id","action","max_calls","grant_key","acknowledge_provider_cost"}
+                        if (set(payload) not in (required,required|{"interval_seconds"})
                                 or payload["acknowledge_provider_cost"] is not True):
                             raise ExistingJobError("explicit durable cost approval required")
                         if offline_mode:
@@ -8935,7 +8951,8 @@ def _handler_factory(
                             self._send_json(403,{"error":"generation_session_required"}); return
                         result=configure_existing_autonomy(
                             store,payload["job_id"],max_calls=payload["max_calls"],
-                            grant_key=payload["grant_key"])
+                            grant_key=payload["grant_key"],
+                            interval_seconds=payload.get("interval_seconds",0))
                     elif payload.get("action") == "stop":
                         if set(payload)!={"job_id","action"}:
                             raise ExistingJobError("fields")
@@ -9287,6 +9304,8 @@ class LoopbackDashboardServer(ThreadingHTTPServer):
                         if state=="budget_exhausted" else "job_needs_attention")
             except DashboardGenerationBusy:
                 pass  # Manual call owns the shared generation lock.
+            except AutonomyNotDue:
+                pass  # Another worker committed the next-call boundary first.
             except DashboardGenerationLimit:
                 stop_existing_autonomy(store,job_id,reason="session_limit")
             except Exception:

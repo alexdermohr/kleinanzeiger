@@ -329,6 +329,67 @@ class ExistingPortfolioJobsTests(unittest.TestCase):
         self.assertEqual(details(self.store,jid)["actual_cents"],7)
         self.assertEqual(details(self.store,jid)["platform_writes"],0)
 
+    def test_autonomy_call_pacing_survives_restart_without_cost_replay(self):
+        from unittest.mock import patch
+        self.add("paced-1"); self.add("paced-2")
+        jid=create_job(self.store,["paced-1","paced-2"],
+                       instruction="Fakten",request_key="a"*64,
+                       budget_cents=100,estimate_cents=20)["job_id"]
+        change_state(self.store,jid,"start")
+        clock="2026-11-05T12:00:00+00:00"
+        with patch("mark_api.portfolio_existing_jobs._now",return_value=clock):
+            for bad in (True,-1,59,86401,"300"):
+                with self.subTest(interval=bad),self.assertRaises(ExistingJobError):
+                    configure_autonomy(self.store,jid,max_calls=2,
+                                       grant_key="b"*64,interval_seconds=bad)
+            a=configure_autonomy(self.store,jid,max_calls=2,
+                                 grant_key="b"*64,interval_seconds=60)
+            self.assertTrue(a["autonomy"]["enabled"])
+            self.assertEqual(a["autonomy"]["interval_seconds"],60)
+            self.assertEqual(next_autonomy_job(self.store),jid)
+            consume_autonomy_call(self.store,jid)
+            self.assertIsNone(next_autonomy_job(self.store))
+            with self.assertRaises(ExistingJobError):
+                configure_autonomy(self.store,jid,max_calls=2,
+                                   grant_key="b"*64,interval_seconds=0)
+            with self.assertRaises(ExistingJobError):
+                consume_autonomy_call(self.store,jid)
+            process_one(self.store,jid,lambda original,_instruction:(
+                {"title":"Besser","description":original["description"]},5))
+        from mark_api.storage import SnapshotStore as ReopenedStore
+        reopened=ReopenedStore(Path(self.tmp.name)/"store.sqlite")
+        with patch("mark_api.portfolio_existing_jobs._now",
+                   return_value="2026-11-05T12:00:59+00:00"):
+            self.assertIsNone(next_autonomy_job(reopened))
+        with patch("mark_api.portfolio_existing_jobs._now",
+                   return_value="2026-11-05T12:01:00+00:00"):
+            self.assertEqual(next_autonomy_job(reopened),jid)
+            exhausted=consume_autonomy_call(reopened,jid)
+            self.assertEqual(exhausted["autonomy"]["used_calls"],2)
+            self.assertFalse(exhausted["autonomy"]["enabled"])
+            self.assertIsNone(next_autonomy_job(reopened))
+        self.assertEqual(details(reopened,jid)["platform_writes"],0)
+        self.assertEqual(details(reopened,jid)["actual_cents"],5)
+
+    def test_new_unpaced_grant_remains_compatible_with_existing_pacing_history(self):
+        self.add("two-grants")
+        jid=create_job(self.store,["two-grants"],instruction="Fakten",
+                       request_key="c"*64,budget_cents=80,
+                       estimate_cents=20)["job_id"]
+        change_state(self.store,jid,"start")
+        configure_autonomy(self.store,jid,max_calls=1,
+                           grant_key="d"*64,interval_seconds=300)
+        stop_autonomy(self.store,jid)
+        unpaced=configure_autonomy(self.store,jid,max_calls=1,grant_key="e"*64)
+        self.assertEqual(unpaced["autonomy"]["interval_seconds"],0)
+        self.assertEqual(next_autonomy_job(self.store),jid)
+        with self.assertRaises(ExistingJobError):
+            configure_autonomy(self.store,jid,max_calls=1,
+                               grant_key="d"*64,interval_seconds=60)
+        self.assertEqual(configure_autonomy(
+            self.store,jid,max_calls=1,grant_key="d"*64,
+            interval_seconds=300)["autonomy"]["interval_seconds"],0)
+
     def test_autonomy_restart_quarantines_inflight_without_replay(self):
         self.add("restart-1");self.add("restart-2")
         jid=create_job(self.store,["restart-1","restart-2"],instruction="Nur Fakten",
