@@ -330,3 +330,7 @@ das Chrome-Profil, die Datenbank und die Backups **nicht löschen**.
 Ein neu aufgerufener Browser-Tab beweist noch nicht, dass das
 Chrome-Debugging verbunden ist. Der Test auf einem anderen PC ersetzt keine
 Abnahme auf dem Kundenrechner.
+
+### Kurzdiagnose nach einem Fehlstart
+
+Im Kleinanzeiger-Kontrollfenster erscheint bei einer Fehlermeldung **Diagnose kopieren**. Der Klick kopiert ausschließlich die Paket-/Installationsversion, ob ein lokaler Datenspeicher existiert, ob der Programmprozess aktiv ist und eine grobe Fehlerkategorie in die Windows-Zwischenablage. Weder persönliche Anzeigen und Nachrichten noch Dateipfade, API-Schlüssel oder Rohprotokolle werden übernommen. Die Kurzdiagnose kann manuell an den Support übermittelt werden; der ausführliche, nur lokal angezeigte Fehlertext bleibt davon getrennt. Es werden keine Browser-, Konto- oder Plattformaktionen ausgelöst.

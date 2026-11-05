@@ -121,6 +121,33 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertLess(gui.index("$update = Add-Button"), gui.index("$account = Add-Button"))
         self.assertLess(gui.index("$account = Add-Button"), gui.index("$mail = Add-Button"))
 
+    def test_failure_diagnosis_copy_contains_no_raw_logs_or_customer_data(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Diagnose kopieren", gui)
+        self.assertIn("function Get-SafeDiagnostics", gui)
+        self.assertIn("[System.Windows.Forms.Clipboard]::SetText((Get-SafeDiagnostics))", gui)
+        self.assertIn("$copyDiagnostics.Visible = $failure", gui)
+        self.assertIn("$copyDiagnostics.Top -ne 626", gui)
+        self.assertIn("SECRET-NEVER-EXPORT", gui)
+        self.assertIn("$copyDiagnostics.Text = 'Diagnose kopiert - erneut kopieren'", gui)
+        self.assertIn("$copyDiagnostics.Text = 'Kopieren fehlgeschlagen - erneut versuchen'", gui)
+        self.assertIn("if ($failure) { $copyDiagnostics.Text = 'Diagnose kopieren' }", gui)
+        # A successful/failed clipboard operation must never clear the prior error.
+        click_handler = gui.split("$copyDiagnostics.Add_Click({", 1)[1].split(
+            "$detailsLink.Add_Click({", 1
+        )[0]
+        self.assertNotIn("Set-Status", click_handler)
+        self.assertNotIn("$statusLabel.Text =", click_handler)
+        self.assertNotIn("$script:details =", click_handler)
+        summary = gui.split("function Get-SafeDiagnostics {", 1)[1].split(
+            "$copyDiagnostics.Add_Click({", 1
+        )[0]
+        self.assertNotIn("$script:details", summary)
+        self.assertNotIn("ReadAllText", summary)
+        self.assertNotIn("OPENAI_API_KEY", summary)
+        self.assertNotIn("Get-Content", summary)
+        self.assertNotIn("Get-ChildItem", summary)
+
     def test_manual_rollback_is_explicit_and_preserves_customer_data(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
         hub = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
