@@ -119,7 +119,7 @@ const detail=(id,confirmed=true,revision=0)=>({ad_id:id,owner:owner(confirmed),p
 '''
         process = subprocess.run(
             ["node", "-e", harness], input=INSIGHTS_JS, text=True,
-            capture_output=True, timeout=45, check=False,
+            encoding="utf-8", capture_output=True, timeout=45, check=False,
         )
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertIn("OWNER_PRICE_UI_PASS", process.stdout)
