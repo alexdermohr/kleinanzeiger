@@ -32,7 +32,7 @@ const context={console,URLSearchParams,Number,document:{createElement:()=>new El
   _newJobRequestKey:()=>String(++key).padStart(64,"0"),
   fetch:async(path,options)=>{sent.push({path,options});return impl(path,options);}};
 vm.createContext(context);
-vm.runInContext("let jobsAvailable=true;"+source,context);
+vm.runInContext("let jobsAvailable=true; let localWorkAvailable=true;"+source,context);
 const run=expression=>vm.runInContext(expression,context);
 const success=value=>({ok:true,status:200,json:async()=>value});
 const owner=(confirmed=true)=>({confirmed,state:confirmed?"active":"paused",observed_at:"2026-11-05T18:00:00Z",source:"kleinanzeigen-management"});
