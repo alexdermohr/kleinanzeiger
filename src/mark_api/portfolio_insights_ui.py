@@ -111,7 +111,7 @@ let autopilotFocusedJobId = "";
 let autopilotFocusedAdId = "";
 
 function renderPortfolioInsights() {
-  const available = localWorkAvailable && localUiReady();
+  const available = (localWorkAvailable || writeUiAvailable) && localUiReady();
   for (const id of ["inventory-diff-panel", "price-rules-panel", "autopilot-panel", "nav-inventory-diff", "nav-price-rules", "nav-autopilot"]) {
     const element = optionalById(id);
     if (element) element.hidden = !available;
@@ -135,7 +135,7 @@ async function readInsight(path) {
 }
 
 async function loadInventoryDiff(next = false) {
-  if (!localWorkAvailable || !localUiReady() || inventoryDiffBusy || (next && !inventoryDiffCursor)) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || inventoryDiffBusy || (next && !inventoryDiffCursor)) return false;
   const filter = byId("inventory-diff-filter").value || "all";
   const filterSerial = inventoryDiffFilterSerial;
   inventoryDiffBusy = true;
@@ -204,13 +204,13 @@ async function loadInventoryDiff(next = false) {
     byId("inventory-diff-next").disabled = !inventoryDiffCursor || !localUiReady();
     if (inventoryDiffReloadPending) {
       inventoryDiffReloadPending = false;
-      if (localWorkAvailable && localUiReady()) void loadInventoryDiff();
+      if ((localWorkAvailable || writeUiAvailable) && localUiReady()) void loadInventoryDiff();
     }
   }
 }
 
 async function loadAutopilotAttention(next = false) {
-  if (!localWorkAvailable || !localUiReady() || autopilotBusy || (next && autopilotNextOffset === null)) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || autopilotBusy || (next && autopilotNextOffset === null)) return false;
   const offset = next ? autopilotNextOffset : 0;
   autopilotBusy = true;
   byId("autopilot-load").disabled = true;
@@ -296,7 +296,7 @@ async function loadAutopilotAttention(next = false) {
 
 
 async function openAutopilotTask(item) {
-  if (!localWorkAvailable || !localUiReady() || autopilotBusy || autopilotOpeningTask) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || autopilotBusy || autopilotOpeningTask) return false;
   const status = byId("autopilot-status");
   autopilotOpeningTask = true;
   try {
@@ -438,7 +438,7 @@ function previewPriceRule() {
 }
 
 async function loadPriceRule(sku) {
-  if (!localWorkAvailable || !localUiReady() || priceRuleBusy) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || priceRuleBusy) return false;
   const selected = String(sku).trim();
   const serial = ++priceRuleLoadSerial;
   priceRuleTarget = null;
@@ -469,7 +469,7 @@ async function loadPriceRule(sku) {
 }
 
 async function loadPriceRules(next = false) {
-  if (!localWorkAvailable || !localUiReady() || priceRuleListBusy || (next && !priceRuleCursor)) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || priceRuleListBusy || (next && !priceRuleCursor)) return false;
   priceRuleListBusy = true;
   byId("price-rule-list").disabled = true;
   byId("price-rule-next").disabled = true;
@@ -508,7 +508,7 @@ async function loadPriceRules(next = false) {
 }
 
 async function mutatePriceRule(action) {
-  if (!localWorkAvailable || !localUiReady() || priceRuleBusy || !priceRuleTarget) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || priceRuleBusy || !priceRuleTarget) return false;
   const target = priceRuleTarget;
   if (target.sku !== byId("price-rule-sku").value.trim()) return false;
   const payload = {action, sku: target.sku, expected_revision: target.rule ? target.rule.revision : 0,
@@ -549,7 +549,7 @@ function previewOwnerPriceRule() {
   const target = ownerPriceTarget;
   const writable = !!target && !!target.owner && target.owner.confirmed === true
     && target.ad_id === byId("owner-price-ad-id").value.trim()
-    && localWorkAvailable && localUiReady() && !ownerPriceBusy;
+    && (localWorkAvailable || writeUiAvailable) && localUiReady() && !ownerPriceBusy;
   byId("owner-price-save").disabled = true;
   byId("owner-price-delete").disabled = !target || !target.rule || !localUiReady() || ownerPriceBusy;
   if (!writable) {
@@ -574,7 +574,7 @@ function previewOwnerPriceRule() {
 }
 
 async function loadOwnerPriceRule(adId) {
-  if (!localWorkAvailable || !localUiReady() || ownerPriceBusy) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || ownerPriceBusy) return false;
   const selected = String(adId).trim();
   const serial = ++ownerPriceLoadSerial;
   ownerPriceTarget = null;
@@ -615,7 +615,7 @@ async function loadOwnerPriceRule(adId) {
 }
 
 async function loadOwnerPriceRules(next = false) {
-  if (!localWorkAvailable || !localUiReady() || ownerPriceListBusy || (next && !ownerPriceCursor)) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || ownerPriceListBusy || (next && !ownerPriceCursor)) return false;
   ownerPriceListBusy = true;
   byId("owner-price-list").disabled = true;
   byId("owner-price-next").disabled = true;
@@ -665,7 +665,7 @@ async function loadOwnerPriceRules(next = false) {
 }
 
 async function mutateOwnerPriceRule(action) {
-  if (!localWorkAvailable || !localUiReady() || ownerPriceBusy || !ownerPriceTarget) return false;
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady() || ownerPriceBusy || !ownerPriceTarget) return false;
   const target = ownerPriceTarget;
   if (target.ad_id !== byId("owner-price-ad-id").value.trim()) return false;
   const payload = {
