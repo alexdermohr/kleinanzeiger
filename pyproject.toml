@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kleinanzeiger"
-version = "0.1.46"
+version = "0.1.47"
 description = "Kleinanzeiger: Anzeigenverwaltung, Synchronisation, Auswertung und KI-Unterstützung"
 requires-python = ">=3.12"
 dependencies = []
@@ -27,6 +27,7 @@ kleinanzeiger-protected-pair = "kleinanzeiger.cli:protected_pair"
 kleinanzeiger-offline = "kleinanzeiger.cli:offline"
 kleinanzeiger-generate = "kleinanzeiger.cli:generate"
 kleinanzeiger-backup = "kleinanzeiger.cli:backup"
+kleinanzeiger-wochenbericht = "mark_api.weekly_report:main"
 kleinanzeiger-windows-restore = "kleinanzeiger.cli:windows_restore"
 kleinanzeiger-sync = "kleinanzeiger.cli:sync"
 kleinanzeiger-import-mail = "kleinanzeiger.cli:import_mail"

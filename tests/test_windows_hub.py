@@ -61,6 +61,18 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertNotIn("function Open-Kleinanzeigen {\\n  . (Join-Path", gui)
         self.assertIn("Get-Command -Name Find-KleinanzeigerChrome", gui)
 
+    def test_weekly_report_buttons_keep_script_scope_and_button_actions(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        callback = gui.split("function Show-WeeklyReportDialog {", 1)[1].split(
+            "$weekly.Add_Click({", 1
+        )[0]
+        self.assertIn("$button.Tag=[string]$spec[1]", callback)
+        self.assertIn("param($sender, $eventArgs)", callback)
+        self.assertIn("$selectedAction=[string]$sender.Tag", callback)
+        self.assertIn("Start-Worker $selectedAction", callback)
+        self.assertIn("$sender.FindForm().Close()", callback)
+        self.assertNotIn("GetNewClosure()", callback)
+
     def test_powershell_51_version_and_update_regressions(self) -> None:
         gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
@@ -75,7 +87,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertLess(worker.index("if ($null -eq $download)"),
                         worker.index("Write-Output 'ALREADY_CURRENT'"))
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn("-SelfTest -ExpectedInstalledVersion '0.1.46'", workflow)
+        self.assertIn("-SelfTest -ExpectedInstalledVersion '0.1.47'", workflow)
 
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
@@ -112,7 +124,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("'Weitere Aktionen'", gui)
         self.assertIn("'Weniger anzeigen'", gui)
         self.assertIn("$form.ClientSize = [System.Drawing.Size]::new(640,510)", gui)
-        self.assertIn("$(if($expanded){682}else{510})", gui)
+        self.assertIn("$(if($expanded){744}else{510})", gui)
         self.assertIn("$control.Visible = $expanded", gui)
         self.assertIn("$detailsLink.Visible = $failure", gui)
         self.assertIn("$detailsLink.SetBounds(28,453,240,26)", gui)
@@ -127,7 +139,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("function Get-SafeDiagnostics", gui)
         self.assertIn("[System.Windows.Forms.Clipboard]::SetText((Get-SafeDiagnostics))", gui)
         self.assertIn("$copyDiagnostics.Visible = $failure", gui)
-        self.assertIn("$copyDiagnostics.Top -ne 626", gui)
+        self.assertIn("$copyDiagnostics.Top -ne 694", gui)
         self.assertIn("SECRET-NEVER-EXPORT", gui)
         self.assertIn("$copyDiagnostics.Text = 'Diagnose kopiert - erneut kopieren'", gui)
         self.assertIn("$copyDiagnostics.Text = 'Kopieren fehlgeschlagen - erneut versuchen'", gui)
@@ -178,7 +190,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("if (!$installed) {\n        Start-Worker 'Install' $true", hub)
         self.assertIn("Start-Worker 'Rollback' $false $selected", hub)
         self.assertIn("[Windows.Forms.MessageBoxButtons]::YesNo", hub)
-        self.assertIn("$(if($expanded){682}else{510})", hub)
+        self.assertIn("$(if($expanded){744}else{510})", hub)
         self.assertIn("Verify Windows upgrade rollback and non-destructive failed staging", workflow)
         self.assertIn("Native Windows manual rollback and untrusted path rejection", workflow)
         self.assertIn("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -Action Rollback", workflow)
@@ -254,10 +266,10 @@ except KeyboardInterrupt:
         meta = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.1.46"', meta)
-        self.assertIn("kleinanzeiger-0.1.46-py3-none-any.whl", script)
-        self.assertIn("Kleinanzeiger-v0.1.46-Windows.zip", workflow)
-        self.assertIn("publish-windows-v0.1.46", workflow)
+        self.assertIn('version = "0.1.47"', meta)
+        self.assertIn("kleinanzeiger-0.1.47-py3-none-any.whl", script)
+        self.assertIn("Kleinanzeiger-v0.1.47-Windows.zip", workflow)
+        self.assertIn("publish-windows-v0.1.47", workflow)
 
 
 if __name__ == "__main__":
