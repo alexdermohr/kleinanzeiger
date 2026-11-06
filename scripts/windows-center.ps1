@@ -835,7 +835,7 @@ $ai.Add_Click({ if (!$script:process) { Show-KiDialog } })
 function Show-WeeklyReportDialog {
   $dialog=[Windows.Forms.Form]::new()
   $dialog.Text='Wochenbericht'
-  $dialog.ClientSize=[Drawing.Size]::new(570,185)
+  $dialog.ClientSize=[Drawing.Size]::new(570,221)
   $dialog.FormBorderStyle='FixedDialog'
   $dialog.MaximizeBox=$false
   $dialog.StartPosition='CenterParent'
@@ -843,17 +843,37 @@ function Show-WeeklyReportDialog {
   $note.Text='Nur lokale E-Mails und Bestandsbelege, kein Kontoabruf und keine KI-Kosten. Automatik nur auf ausdruecklichen Klick: montags 09:00 bei Anmeldung.'
   $note.SetBounds(15,12,540,73)
   $dialog.Controls.Add($note)
-  foreach($spec in @(@('Jetzt erstellen','ReportNow',10),@('Automatik an','ReportEnable',195),@('Automatik aus','ReportDisable',380))) {
+  foreach($spec in @(
+    @('Jetzt erstellen','ReportNow',10,103,180),
+    @('Automatik an','ReportEnable',195,103,180),
+    @('Automatik aus','ReportDisable',380,103,180),
+    @('Letzten Bericht öffnen','ReportOpen',10,157,550)
+  )) {
     $button=[Windows.Forms.Button]::new()
     $button.Text=[string]$spec[0]
-    $button.SetBounds([int]$spec[2],103,180,44)
+    $button.SetBounds([int]$spec[2],[int]$spec[3],[int]$spec[4],44)
     $dialog.Controls.Add($button)
     $button.Tag=[string]$spec[1]
     $button.Add_Click({
       param($sender, $eventArgs)
       $selectedAction=[string]$sender.Tag
-      $sender.FindForm().Close()
-      try { Start-Worker $selectedAction } catch { Set-Status $_.Exception.Message $true }
+      try {
+        if ($selectedAction -eq 'ReportOpen') {
+          $folder=Join-Path $state 'Berichte'
+          $last=@(Get-ChildItem -LiteralPath $folder -File -Filter 'Kleinanzeiger-Wochenbericht-*.html' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^Kleinanzeiger-Wochenbericht-\d{4}-\d{2}-\d{2}\.html$' -and
+              -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+            Sort-Object Name -Descending | Select-Object -First 1)
+          if ($last.Count -eq 0) {
+            [void][Windows.Forms.MessageBox]::Show('Noch kein Wochenbericht vorhanden. Bitte zuerst "Jetzt erstellen" wählen.','Wochenbericht')
+            return
+          }
+          Start-Process -FilePath $last[0].FullName
+        } else {
+          Start-Worker $selectedAction
+        }
+        $sender.FindForm().Close()
+      } catch { Set-Status $_.Exception.Message $true }
     })
   }
   [void]$dialog.ShowDialog($form)
