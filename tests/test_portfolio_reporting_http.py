@@ -56,6 +56,10 @@ class ReportingHttpTests(unittest.TestCase):
             self.assertEqual(len(data["imported_messages_per_day"]),days)
             self.assertEqual(data["own_ads_with_inventory_history"],1)
             self.assertEqual(data["imported_inbound_messages_window"],0)
+            self.assertEqual(data["imported_previous_window"]["imported_inbound_messages"],0)
+            self.assertEqual(data["imported_previous_window"]["delta_imported_conversations"],0)
+            self.assertEqual(data["imported_previous_window"]["source"],"local_eml_only")
+            self.assertFalse(data["imported_previous_window"]["platform_inbox_complete"])
             self.assertIsNone(data["imported_unique_buyers_window"])
             self.assertFalse(data["unique_buyer_count_supported"])
             self.assertTrue(all(row["imported_conversations"] == 0
@@ -144,7 +148,8 @@ class ReportingHttpTests(unittest.TestCase):
             self.assertIn(text,_DASHBOARD_HTML)
         for text in ('/api/portfolio/report?days=',
                      'known_surplus_eur','revenue_period_attributed',
-                     'imported_conversations','unique_buyer_count_supported'):
+                     'imported_conversations','unique_buyer_count_supported',
+                     'imported_previous_window','report-trend-summary'):
             self.assertIn(text,_DASHBOARD_JS)
 
 

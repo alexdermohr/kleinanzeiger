@@ -116,6 +116,41 @@ class PortfolioReportingTests(unittest.TestCase):
         self.assertEqual(estimate["unknown_outcomes"],0)
         self.assertFalse(estimate["invoice_verified"])
 
+    def test_previous_equal_utc_window_comparison_counts_only_local_eml(self):
+        self.ad("10001")
+        prior_day=datetime(2026,10,19,22,30,tzinfo=timezone.utc)
+        self.message("10001","conv-same","prior-1",
+                     prior_day.astimezone(timezone(timedelta(hours=2))))
+        self.message("10001","conv-same","prior-2",
+                     datetime(2026,10,18,11,tzinfo=timezone.utc))
+        self.message("10001","conv-same","current-1",
+                     datetime(2026,10,20,10,tzinfo=timezone.utc))
+        self.message("10001","conv-other","current-2",
+                     datetime(2026,10,26,10,tzinfo=timezone.utc))
+        self.message("99999","foreign","foreign-1",
+                     datetime(2026,10,26,10,tzinfo=timezone.utc))
+        result=report(self.store,days=7,now=NOW)
+        previous=result["imported_previous_window"]
+        self.assertEqual((previous["start_day_utc"],previous["end_day_utc"]),
+                         ("2026-10-13","2026-10-19"))
+        self.assertEqual((previous["imported_inbound_messages"],
+                          previous["imported_conversations"]), (2,1))
+        self.assertEqual((result["imported_inbound_messages_window"],
+                          result["imported_conversations_window"]), (2,2))
+        self.assertEqual((previous["delta_imported_inbound_messages"],
+                          previous["delta_imported_conversations"]), (0,1))
+        self.assertEqual(previous["source"],"local_eml_only")
+        self.assertFalse(previous["platform_inbox_complete"])
+        self.assertIsNone(result["imported_unique_buyers_window"])
+        self.assertEqual(result["platform_writes"],0)
+        thirty=report(self.store,days=30,now=NOW)
+        self.assertEqual(thirty["imported_previous_window"]["start_day_utc"],
+                         "2026-08-28")
+        self.assertEqual(thirty["imported_previous_window"]["end_day_utc"],
+                         "2026-09-26")
+        self.assertEqual(thirty["imported_previous_window"]["imported_inbound_messages"],0)
+        self.assertEqual(thirty["imported_previous_window"]["delta_imported_inbound_messages"],4)
+
     def test_published_ad_costs_include_checked_unknown_and_unsettled_reserves(self):
         # Each generator below is a local stub, not an OpenAI/provider call.
         for ad_id in ("10001", "10002", "10003"):

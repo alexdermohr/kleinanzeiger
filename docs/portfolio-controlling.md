@@ -1,6 +1,9 @@
 # Kleinanzeiger – P4 Portfolio-Controlling (Entwicklungsstand)
 
-**26. Oktober 2026 – noch nicht als Windows-Kundenrelease ausgeliefert.**
+**Stand: 6. November 2026.** Der P4-Basiskern war bereits in Windows v0.1.45 enthalten.
+Der hier ergänzte Vergleich mit dem unmittelbar vorhergehenden, gleich langen
+EML-Zeitfenster ist eine neue lokale Auswertung und braucht für die endgültige
+Kundeninstallation weiterhin den normalen Release- und Windows-Testnachweis.
 Diese Erweiterung baut auf P1 CSV-/Excel-Entwürfen, P2
 KI-Stapelverwaltung und P3 lokalen Verkaufsvermerken auf.
 
@@ -21,6 +24,12 @@ Der Bericht zeigt in einer einzigen SQLite-Lese-Generation:
 - Tageszahlen; die Oberfläche zeigt maximal die letzten 14
   Tage, eine **UTF-8-CSV** bietet alle 7/30/90 Tage mit
   geschützten ISO-Datumszellen und Excel-kompatiblen Zeilenenden.
+- Für 7/30/90 Tage daneben **gleich langen unmittelbaren Vorzeitraum**
+  mit Start-/Enddatum, importierten Eingangs-E-Mails und eindeutig
+  gezählten Gesprächen sowie den arithmetischen Änderungen aus derselben
+  SQLite-Lesegeneration. Dies ist ein Vergleich importierter EML-Daten,
+  **kein vollständiger Plattformposteingang**, keine deduzierte
+  Käuferzahl und keine kausale Optimierung oder Marktanteilszahl.
 - Manuell als verkauft/reserviert geführte Anzeigen,
   Erlöse, bekannte Kosten und bekannte Überschüsse.
   **Achtung:** Dies sind aktuelle, manuell eingetragene
@@ -69,7 +78,8 @@ Schutz gegen Tabellenformeln. Kein realer Anzeigen-/Providerwrite.
 P4 ist **erst teilweise erledigt**: belastbare Live-Verkaufs-
 und Kontaktmetriken, experimentelle Titel-/Preisvorschläge,
 qualifizierte Kontakte, kontrollierte A/B-Tests und
-automatische Wochenberichte benötigen eigene Datenquellen,
-Funktionen und Test-/Sicherheitsgates. Native Windows-
-Abnahme, Merge, Release und Kunden-PC-Test sind ausstehend.
-Der Vaterrechner fotolabor bleibt unangetastet.
+automatisch gespeicherte oder versendete Wochenberichte benötigen
+weitere Datenquellen und Prüfungen. Eine echte Kundenkonto-Abnahme
+bleibt offen; native Windows-CI, Release und tatsächlicher
+Kundeneinsatz sind getrennte Nachweise. Der Vaterrechner
+fotolabor bleibt unangetastet.

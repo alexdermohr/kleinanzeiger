@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 import os
@@ -386,13 +386,31 @@ class Outbox:
         return {**result, "state": "sent", "delivered": False}
 
 
-def require_locally_owned(store: SnapshotStore, ad_id: str) -> dict[str, str]:
-    """A historical local snapshot is only a *candidate*, never fresh owner proof."""
+def require_locally_owned(
+    store: SnapshotStore, ad_id: str, *, now: datetime | None = None,
+) -> dict[str, str]:
+    """Require the latest *chronological*, fresh own-ad observation for paid chat.
+
+    A past ownership record, newer foreign-source observation or uncertain
+    lifecycle must not authorize opening a billable conversation or sending.
+    This remains local evidence; it is not a live platform account certificate.
+    """
     aid = _ad_id(ad_id)
+    instant = datetime.now(timezone.utc) if now is None else now
+    if (type(instant) is not datetime or instant.tzinfo is None
+            or instant.utcoffset() is None):
+        raise MessagingError("invalid_owner_check_clock")
     snapshot = store.latest_ad_snapshot(aid)
     if (snapshot is None or snapshot.source not in _OK_SOURCES
             or snapshot.lifecycle_state not in (LifecycleState.ACTIVE, LifecycleState.PAUSED)):
         raise MessagingError("no_confirmed_local_owner", http_status=403)
+    observed = snapshot.observed_at
+    if (type(observed) is not datetime or observed.tzinfo is None
+            or observed.utcoffset() is None):
+        raise MessagingError("no_confirmed_local_owner", http_status=403)
+    age = instant.astimezone(timezone.utc) - observed.astimezone(timezone.utc)
+    if not timedelta(0) <= age <= timedelta(hours=48):
+        raise MessagingError("stale_local_owner", http_status=403)
     return {"ad_id": aid, "title": snapshot.title or "", "local_owner_only": True}
 
 # A dedicated, local-only customer window avoids broadening the privileged

@@ -949,6 +949,7 @@ _DASHBOARD_HTML = """<!doctype html>
         </div>
         <p id="report-feedback" role="status" aria-live="polite"></p>
         <p id="report-summary" class="note">Noch kein Bericht geladen.</p>
+        <p id="report-trend-summary" class="muted">Noch kein Vergleich mit dem Vorzeitraum geladen.</p>
         <p id="report-sales-summary" class="muted"></p>
         <p id="report-ai-summary" class="muted"></p>
         <div class="table-wrap"><table>
@@ -6732,6 +6733,35 @@ function portfolioAiCostText(cost) {
     (cost.usd_cent_reserved/100).toFixed(2)+" USD für ungeklärte Anfragen reserviert; "+
     cost.unknown_outcomes+" unklare und "+cost.inflight_outcomes+" laufende Anfragen.";
 }
+function portfolioImportedTrendText(data) {
+  const previous=data?.imported_previous_window;
+  const date=/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+  if (!previous || !date.test(previous.start_day_utc) ||
+      !date.test(previous.end_day_utc) ||
+      previous.start_day_utc>previous.end_day_utc ||
+      previous.end_day_utc>=data.start_day_utc ||
+      previous.source!=="local_eml_only" ||
+      previous.platform_inbox_complete!==false) {
+    throw new Error("Ungültiger EML-Vorperiodenvergleich");
+  }
+  const fields=["imported_inbound_messages","imported_conversations"];
+  const current=["imported_inbound_messages_window","imported_conversations_window"];
+  for (let i=0;i<fields.length;i++) {
+    const old=previous[fields[i]], now=data[current[i]];
+    if (!Number.isSafeInteger(old) || old<0 || !Number.isSafeInteger(now) || now<0 ||
+        !Number.isSafeInteger(now-old) ||
+        previous["delta_"+fields[i]]!==now-old) {
+      throw new Error("Widersprüchlicher EML-Vorperiodenvergleich");
+    }
+  }
+  const sign=value=>value>0?"+"+value:String(value);
+  return "Vergleich mit "+previous.start_day_utc+" bis "+previous.end_day_utc+
+    " (UTC): "+previous.imported_inbound_messages+" importierte Eingangsnachrichten"+
+    " (Änderung "+sign(previous.delta_imported_inbound_messages)+") und "+
+    previous.imported_conversations+" unterschiedliche importierte Gespräche"+
+    " (Änderung "+sign(previous.delta_imported_conversations)+"). "+
+    "Nur lokal importierte EML-Belege; fehlende E-Mails beweisen keine ausbleibende Plattformnachfrage.";
+}
 async function loadPortfolioReport() {
   if (!reportingAvailable || !localUiReady()) return false;
   const selected=byId("report-days").value;
@@ -6751,7 +6781,9 @@ async function loadPortfolioReport() {
         data.imported_unique_buyers_window!==null) {
       throw new Error("Ungültige Daten");
     }
+    const trend=portfolioImportedTrendText(data);
     reportData=data;
+    byId("report-trend-summary").textContent=trend;
     byId("report-summary").textContent="Zeitraum "+data.start_day_utc+
       " bis "+data.end_day_utc+" (UTC) · Eigene Anzeigen mit belegter Bestandshistorie: "+
       data.own_ads_with_inventory_history+" · Lokal importierte Eingangsnachrichten: "+
@@ -6777,6 +6809,7 @@ async function loadPortfolioReport() {
   } catch (_error) {
     if (seq===reportLoadSeq) {
       reportData=null;
+      byId("report-trend-summary").textContent="Vergleich nicht bestätigt; keine Werte übernommen.";
       byId("report-top-ads-body").replaceChildren();
       byId("report-top-ads-note").textContent="Bericht nicht verfügbar; keine Nachfragezahl bestätigt.";
       byId("report-feedback").textContent=
@@ -6817,6 +6850,7 @@ byId("report-refresh").addEventListener("click",loadPortfolioReport);
 byId("report-metric").addEventListener("change",renderPortfolioReportDaily);
 byId("report-days").addEventListener("change",() => {
   reportData=null;
+  byId("report-trend-summary").textContent="Berichtszeitraum geändert; Vergleich neu laden.";
   byId("report-top-ads-body").replaceChildren();
   byId("report-top-ads-note").textContent="Berichtszeitraum geändert; neu laden.";
   byId("report-download").disabled=true;

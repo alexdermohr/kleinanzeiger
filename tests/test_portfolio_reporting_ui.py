@@ -54,6 +54,52 @@ assert.equal(saved,null);
         self.assertEqual(proc.returncode,0,proc.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node runtime needed")
+    def test_previous_window_label_is_source_bound_and_fail_closed(self):
+        script=r"""
+const vm=require("node:vm"),fs=require("node:fs"),assert=require("node:assert/strict");
+const input=fs.readFileSync(0,"utf8");
+new vm.Script(input);
+const start=input.indexOf("function portfolioImportedTrendText(data) {");
+const end=input.indexOf("async function loadPortfolioReport()",start);
+assert.ok(start>0 && end>start);
+const code=input.slice(start,end);
+const value={start_day_utc:"2026-10-20",end_day_utc:"2026-10-26",
+ imported_inbound_messages_window:4,imported_conversations_window:2,
+ imported_previous_window:{start_day_utc:"2026-10-13",end_day_utc:"2026-10-19",
+   imported_inbound_messages:2,imported_conversations:1,
+   delta_imported_inbound_messages:2,delta_imported_conversations:1,
+   source:"local_eml_only",platform_inbox_complete:false}};
+function render(data){return vm.runInNewContext(code+";portfolioImportedTrendText(data)",{data});}
+const label=render(value);
+assert.match(label,/2026-10-13 bis 2026-10-19/);
+assert.match(label,/Änderung \+2/);
+assert.match(label,/Änderung \+1/);
+assert.match(label,/beweisen keine ausbleibende Plattformnachfrage/);
+const prior=value.imported_previous_window;
+for(const bad of [
+ {...prior,delta_imported_inbound_messages:3},
+ {...prior,imported_inbound_messages:-2},
+ {...prior,imported_conversations:"1"},
+ {...prior,source:"platform_inbox"},
+ {...prior,platform_inbox_complete:true},
+ {...prior,end_day_utc:"2026-10-20"},
+ {...prior,start_day_utc:"=HYPERLINK"},
+]) {
+ assert.throws(()=>render({...value,imported_previous_window:bad}),
+   /Ungültiger|Widersprüchlicher/);
+}
+assert.throws(()=>render({...value,imported_previous_window:null}),/Ungültiger/);
+const empty={...value,imported_inbound_messages_window:0,imported_conversations_window:0,
+ imported_previous_window:{...prior,imported_inbound_messages:0,imported_conversations:0,
+ delta_imported_inbound_messages:0,delta_imported_conversations:0}};
+assert.match(render(empty),/fehlende E-Mails/);
+"""
+        proc=subprocess.run([shutil.which("node") or "node","-e",script],
+            input=_DASHBOARD_JS,text=True,encoding="utf-8",
+            capture_output=True,timeout=30)
+        self.assertEqual(proc.returncode,0,proc.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node runtime needed")
     def test_cost_summary_separates_checked_unknown_and_rejects_inconsistent_totals(self):
         script=r"""
 const vm=require("node:vm"),fs=require("node:fs"),assert=require("node:assert/strict");
