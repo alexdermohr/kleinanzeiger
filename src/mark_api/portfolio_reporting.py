@@ -70,6 +70,8 @@ def report(store: SnapshotStore, *, days: int=7,
     start=end-timedelta(days=days-1)
     start_day=start.isoformat()
     end_day=end.isoformat()
+    previous_start=start-timedelta(days=days)
+    previous_end=start-timedelta(days=1)
     sources=OWN_INVENTORY_SOURCES
     placeholders=",".join("?" for _ in sources)
     where=(
@@ -101,6 +103,29 @@ def report(store: SnapshotStore, *, days: int=7,
             "FROM inbound_message_events e "+filt+
             " GROUP BY e.ad_id,e.conversation_id)",params,
         ).fetchone()[0])
+        # Compare two adjacent, equal UTC windows using the SAME read
+        # transaction and ownership filter. Imported EML counts are not a
+        # complete platform inbox, and deltas do not establish causality.
+        previous_params=(*sources,previous_start.isoformat(),previous_end.isoformat())
+        previous_messages=int(conn.execute(
+            "SELECT COUNT(*) FROM inbound_message_events e "+filt,
+            previous_params,
+        ).fetchone()[0])
+        previous_conversations=int(conn.execute(
+            "SELECT COUNT(*) FROM (SELECT e.ad_id,e.conversation_id "
+            "FROM inbound_message_events e "+filt+
+            " GROUP BY e.ad_id,e.conversation_id)",previous_params,
+        ).fetchone()[0])
+        previous_comparison={
+            "start_day_utc":previous_start.isoformat(),
+            "end_day_utc":previous_end.isoformat(),
+            "imported_inbound_messages":previous_messages,
+            "imported_conversations":previous_conversations,
+            "delta_imported_inbound_messages":messages-previous_messages,
+            "delta_imported_conversations":conversations-previous_conversations,
+            "source":"local_eml_only",
+            "platform_inbox_complete":False,
+        }
         # Rank only confirmed own ads by distinct imported conversations,
         # never by an unverified buyer count or incomplete platform inbox.
         top_rows=conn.execute(
@@ -206,6 +231,7 @@ def report(store: SnapshotStore, *, days: int=7,
         "own_ads_with_inventory_history":ads,
         "imported_inbound_messages_window":messages,
         "imported_conversations_window":conversations,
+        "imported_previous_window":previous_comparison,
         "imported_top_ads_window":top_ads,
         # Local EML data hold conversation IDs, NOT a verified buyer ID.
         # Unknown differs from zero and must not be derived from a

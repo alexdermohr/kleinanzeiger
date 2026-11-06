@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -209,6 +209,45 @@ class AccountMessageContractTests(unittest.TestCase):
                                   "4711", "Antwort", confirmed=True, client=self.client)
         self.assertEqual(len(self.transport.requests), 0)
 
+    def test_stale_and_conflicting_owner_records_never_authorize_paid_chat(self):
+        # A historical own listing is not permission to read or message today.
+        now = datetime(2026, 11, 6, 12, tzinfo=timezone.utc)
+        plus_two = timezone(timedelta(hours=2))
+        with TemporaryDirectory() as folder:
+            store = SnapshotStore(Path(folder) / "ads.sqlite", create_if_missing=True)
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="4711", observed_at=now - timedelta(hours=49),
+                source="kleinanzeigen-management", lifecycle_state=LifecycleState.ACTIVE))
+            with self.assertRaisesRegex(MessagingError, "stale_local_owner"):
+                require_locally_owned(store, "4711", now=now)
+            # Lexical offset ordering must not override the true latest state.
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="4711",
+                observed_at=(now - timedelta(hours=1)).astimezone(plus_two),
+                source="kleinanzeigen-management", lifecycle_state=LifecycleState.ACTIVE))
+            self.assertTrue(require_locally_owned(store, "4711", now=now)["local_owner_only"])
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="4711", observed_at=now - timedelta(minutes=30),
+                source="kleinanzeigen-management", lifecycle_state=LifecycleState.PAUSED))
+            self.assertTrue(require_locally_owned(store, "4711", now=now)["local_owner_only"])
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="4711", observed_at=now - timedelta(minutes=20),
+                source="foreign-test-source", lifecycle_state=LifecycleState.ACTIVE))
+            with self.assertRaisesRegex(MessagingError, "no_confirmed_local_owner"):
+                require_locally_owned(store, "4711", now=now)
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="4711", observed_at=now - timedelta(minutes=10),
+                source="kleinanzeigen-management", lifecycle_state=LifecycleState.ABSENT))
+            with self.assertRaisesRegex(MessagingError, "no_confirmed_local_owner"):
+                require_locally_owned(store, "4711", now=now)
+            store.append_ad_snapshot(AdSnapshot(
+                ad_id="4711", observed_at=now + timedelta(minutes=1),
+                source="kleinanzeigen-management", lifecycle_state=LifecycleState.ACTIVE))
+            with self.assertRaisesRegex(MessagingError, "stale_local_owner"):
+                require_locally_owned(store, "4711", now=now)
+            with self.assertRaisesRegex(MessagingError, "invalid_owner_check_clock"):
+                require_locally_owned(store, "4711", now=datetime(2026, 11, 6))
+
     def test_local_owner_observation_required_for_send(self):
         with TemporaryDirectory() as folder:
             store = SnapshotStore(Path(folder) / "ads.sqlite", create_if_missing=True)
@@ -311,6 +350,18 @@ class InboxServerTests(unittest.TestCase):
         self.assertEqual(self.call("POST","/api/send",{**packet,"confirmed":True})[0],409)
         self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),1)
         self.assertEqual(self.call("GET","/api/outbox?request_id="+intent["request_id"])[1]["state"],"sent")
+    def test_paid_open_denied_when_owner_becomes_unverified_after_list(self):
+        self.assertEqual(self.call("GET","/api/conversations?page=0&size=25")[0],200)
+        before=len(self.calls)
+        self.store.append_ad_snapshot(AdSnapshot(
+            ad_id="4711", observed_at=datetime.now(timezone.utc),
+            source="imported-local-only", lifecycle_state=LifecycleState.ACTIVE,
+            title="No longer a current owner observation"))
+        status, body=self.call("POST","/api/open",{
+            "conversation_id":"a:b","ad_id":"4711","confirm_mark_read":True})
+        self.assertEqual((status,body["error"]), (403,"no_confirmed_local_owner"))
+        self.assertEqual(len(self.calls),before,"no billable provider open after ownership changed")
+
     def test_full_utf8_reply_and_send_metadata_are_accepted(self):
         # Codex P2: an 8 KiB cap admitted the preparation of 2700 CJK
         # characters but rejected the same message on /api/send because

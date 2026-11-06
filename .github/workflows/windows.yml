@@ -86,6 +86,10 @@ jobs:
               "test_portfolio_owner_price_rules.py",
               "test_portfolio_owner_price_http.py",
               "test_portfolio_owner_price_ui.py",
+              "test_platform_messages.py",
+              "test_portfolio_reporting.py",
+              "test_portfolio_reporting_http.py",
+              "test_portfolio_reporting_ui.py",
               "test_portfolio_insights_http.py",
               "test_portfolio_insights_ui.py",
               "test_offline_browser_e2e.py",
@@ -150,8 +154,8 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $diagnostics -notcontains 'Paketpruefsumme: ok') {
             throw 'Read-only Windows customer diagnostics did not verify the staged wheel'
           }
-          Compress-Archive -Path "$staging\*" -DestinationPath 'Kleinanzeiger-v0.1.45-Windows.zip'
-          $zipHash = (Get-FileHash 'Kleinanzeiger-v0.1.45-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Compress-Archive -Path "$staging\*" -DestinationPath 'Kleinanzeiger-v0.1.46-Windows.zip'
+          $zipHash = (Get-FileHash 'Kleinanzeiger-v0.1.46-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Output "Windows Wheel SHA256 $digest"
           Write-Output "Windows customer ZIP SHA256 $zipHash"
       - name: Verify customer install script against packaged and hashed wheel
@@ -167,12 +171,12 @@ jobs:
           if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
             throw 'Customer installation did not produce the venv Python executable'
           }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.45'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.46'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Exercise the real Windows PowerShell 5.1 native-argument path after install.
-          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-center.ps1') -SelfTest -ExpectedInstalledVersion '0.1.45'
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-center.ps1') -SelfTest -ExpectedInstalledVersion '0.1.46'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -SelfTest -ExpectedInstalledVersion '0.1.45'
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -SelfTest -ExpectedInstalledVersion '0.1.46'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Prove the optional inbox module works from the actually installed Wheel; no provider call.
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-messages.ps1') -SelfTest
@@ -189,16 +193,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $saved = @(Get-ChildItem -LiteralPath $state -Directory -Filter '.venv-rollback-*')
           if ($saved.Count -lt 1) { throw 'No previous Windows environment was retained' }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.45'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.46'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Valid local checksum but invalid Wheel: installation must fail before activation.
           $broken = Join-Path $env:RUNNER_TEMP ('kleinanzeiger-broken-' + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $broken -Force | Out-Null
           Copy-Item (Join-Path $staging 'windows-install.ps1') $broken
-          $badWheel = Join-Path $broken 'kleinanzeiger-0.1.45-py3-none-any.whl'
+          $badWheel = Join-Path $broken 'kleinanzeiger-0.1.46-py3-none-any.whl'
           [IO.File]::WriteAllText($badWheel, 'invalid wheel archive')
           $sha = (Get-FileHash -LiteralPath $badWheel -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha  kleinanzeiger-0.1.45-py3-none-any.whl" | Set-Content -Path (Join-Path $broken 'SHA256SUMS.txt') -Encoding ascii
+          "$sha  kleinanzeiger-0.1.46-py3-none-any.whl" | Set-Content -Path (Join-Path $broken 'SHA256SUMS.txt') -Encoding ascii
           $before = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash
           $failed = $false
           try { & (Join-Path $broken 'windows-install.ps1') | Out-Null } catch { $failed = $true }
@@ -206,7 +210,7 @@ jobs:
           if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $before) {
             throw 'Existing interpreter changed during failed staged install'
           }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.45'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.46'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Native Windows manual rollback and untrusted path rejection
         if: matrix.python-version == '3.12'
@@ -227,7 +231,7 @@ jobs:
           }
           $retained = @(Get-ChildItem -LiteralPath $state -Directory -Filter '.venv-rollback-*')
           if ($retained.Count -lt 1) { throw 'Previously active environment was not retained' }
-          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.45'"
+          & $installed -c "from importlib.metadata import version; assert version('kleinanzeiger') == '0.1.46'"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $fingerprint = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash
           $rejected = $false
@@ -245,12 +249,12 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kleinanzeiger-windows-${{ github.sha }}
-          path: Kleinanzeiger-v0.1.45-Windows.zip
+          path: Kleinanzeiger-v0.1.46-Windows.zip
           if-no-files-found: error
           retention-days: 30
 
   publish-windows-release:
-    name: publish-windows-v0.1.45
+    name: publish-windows-v0.1.46
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: native-windows
     runs-on: ubuntu-latest
@@ -265,24 +269,24 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF_NAME" = 'main'
-          release_tag='v0.1.45'
+          release_tag='v0.1.46'
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo 'v0.1.45 already published; leaving unchanged'
+            echo 'v0.1.46 already published; leaving unchanged'
             exit 0
           fi
           if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" >/dev/null 2>&1; then
-            echo 'v0.1.45 tag exists without a release; refusing to replace'
+            echo 'v0.1.46 tag exists without a release; refusing to replace'
             exit 1
           fi
-          stage="$RUNNER_TEMP/kleinanzeiger-release-v0.1.45"
+          stage="$RUNNER_TEMP/kleinanzeiger-release-v0.1.46"
           mkdir -p "$stage" "$stage/unpacked"
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "kleinanzeiger-windows-$GITHUB_SHA" --dir "$stage"
-          zip="$stage/Kleinanzeiger-v0.1.45-Windows.zip"
+          zip="$stage/Kleinanzeiger-v0.1.46-Windows.zip"
           test -s "$zip"
           unzip -t "$zip"
           unzip -q "$zip" -d "$stage/unpacked"
           (cd "$stage/unpacked" && sha256sum -c SHA256SUMS.txt)
-          test -s "$stage/unpacked/kleinanzeiger-0.1.45-py3-none-any.whl"
+          test -s "$stage/unpacked/kleinanzeiger-0.1.46-py3-none-any.whl"
           test -s "$stage/unpacked/Windows-Installation.md"
           test -s "$stage/unpacked/Kleinanzeiger-Handbuch.html"
           test -s "$stage/unpacked/Kleinanzeiger-Funktionen.html"
@@ -295,17 +299,18 @@ jobs:
           test -s "$stage/unpacked/Kleinanzeiger-Diagnose.cmd"
           test -s "$stage/unpacked/windows-offline-compat.py"
           zip_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
-          printf '%s  %s\n' "$zip_sha" "Kleinanzeiger-v0.1.45-Windows.zip" > "$stage/Kleinanzeiger-v0.1.45-Windows.sha256"
-          wheel="$stage/unpacked/kleinanzeiger-0.1.45-py3-none-any.whl"
+          printf '%s  %s\n' "$zip_sha" "Kleinanzeiger-v0.1.46-Windows.zip" > "$stage/Kleinanzeiger-v0.1.46-Windows.sha256"
+          wheel="$stage/unpacked/kleinanzeiger-0.1.46-py3-none-any.whl"
           wheel_sha="$(sha256sum "$wheel" | cut -d' ' -f1)"
           zip_bytes="$(stat -c%s "$zip")"
           wheel_bytes="$(stat -c%s "$wheel")"
-          printf '{"version":"0.1.45","tag":"%s","source_commit":"%s","workflow_run_id":"%s","windows_zip":{"filename":"Kleinanzeiger-v0.1.45-Windows.zip","bytes":%s,"sha256":"%s"},"wheel":{"filename":"kleinanzeiger-0.1.45-py3-none-any.whl","bytes":%s,"sha256":"%s"}}\n' \
-            "$release_tag" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$zip_bytes" "$zip_sha" "$wheel_bytes" "$wheel_sha" > "$stage/Kleinanzeiger-v0.1.45-Release-Manifest.json"
-          jq -e '.version == "0.1.45" and (.source_commit | length == 40)' "$stage/Kleinanzeiger-v0.1.45-Release-Manifest.json" >/dev/null
-          cat > "$stage/Kleinanzeiger-v0.1.45-Release-Notes.md" <<'EOF'
-          # Kleinanzeiger v0.1.45 – Windows
-          - **Neu in v0.1.45 (lokaler Preisplan für bestätigte Eigenanzeigen):** Für zuletzt aktive eigene veröffentlichte Anzeigen ist unter Weitere Bereiche -> Preisregeln eine manuelle Preisplanung verfügbar. Den aktuellen Ausgangspreis selbst bei Kleinanzeigen ablesen, Mindestpreis, Schritt und Wartezeit in Euro bzw. Tagen bestimmen und lokale Vorschläge in 50er-Seiten prüfen. Bestandsbelege verschiedener Zeitzonen werden chronologisch geordnet und die 10.000er-Regelgrenze gilt auch nach Wiederherstellung. Kein automatischer Plattformpreis-Abruf, keine Preisänderung, keine KI-Kosten und kein Nachrichtenversand (PR #341).
+          printf '{"version":"0.1.46","tag":"%s","source_commit":"%s","workflow_run_id":"%s","windows_zip":{"filename":"Kleinanzeiger-v0.1.46-Windows.zip","bytes":%s,"sha256":"%s"},"wheel":{"filename":"kleinanzeiger-0.1.46-py3-none-any.whl","bytes":%s,"sha256":"%s"}}\n' \
+            "$release_tag" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$zip_bytes" "$zip_sha" "$wheel_bytes" "$wheel_sha" > "$stage/Kleinanzeiger-v0.1.46-Release-Manifest.json"
+          jq -e '.version == "0.1.46" and (.source_commit | length == 40)' "$stage/Kleinanzeiger-v0.1.46-Release-Manifest.json" >/dev/null
+          cat > "$stage/Kleinanzeiger-v0.1.46-Release-Notes.md" <<'EOF'
+          # Kleinanzeiger v0.1.46 – Windows
+          - **Neu in v0.1.46 (frische Chat-Eigentumsbelege und EML-Trends):** Vor kostenpflichtigem Chat-Oeffnen oder Senden maximal 48 Stunden alter aktuell bestaetigter Eigenanzeigenbeleg. Controlling zeigt die lokale importierte EML-Nachfrage der letzten 7/30/90 Tage gegen den unmittelbar vorigen gleich langen Zeitraum mit belastbaren UTC-Grenzen und Delta. Nicht mit kompletter Plattform-Inbox, echten Kaeufern oder kausalen Verkaeufen verwechseln. P5: 10.000 eigene synthetische Anzeigen, EML und Preisregeln sowie A6 mit 12.000er-Grenze auf heim-pc mit P95/RAM geprueft. Keine automatischen Plattformwrites, Nachrichten oder KI-Kosten. Echtkonto-Abnahme weiterhin offen.
+          - **Bereits in v0.1.45 (lokaler Preisplan für bestätigte Eigenanzeigen):** Für zuletzt aktive eigene veröffentlichte Anzeigen ist unter Weitere Bereiche -> Preisregeln eine manuelle Preisplanung verfügbar. Den aktuellen Ausgangspreis selbst bei Kleinanzeigen ablesen, Mindestpreis, Schritt und Wartezeit in Euro bzw. Tagen bestimmen und lokale Vorschläge in 50er-Seiten prüfen. Bestandsbelege verschiedener Zeitzonen werden chronologisch geordnet und die 10.000er-Regelgrenze gilt auch nach Wiederherstellung. Kein automatischer Plattformpreis-Abruf, keine Preisänderung, keine KI-Kosten und kein Nachrichtenversand (PR #341).
           - **Bereits in v0.1.44 (zeitlich budgetierte KI-Aufträge):** Mark kann bei ausdruecklich budgetierten KI-Pruefauftraegen fuer eigene Anzeigen zwischen sofort und 1/5/15/60/1440 Minuten Mindestabstand zwischen moeglicherweise kostenpflichtigen KI-Aufrufen waehlen. Das Anfragelimit und der USD-Kostenrahmen bleiben unveraendert; die Wartezeit wird vor Anbieter-Kontakt gespeichert und nach Neustart eingehalten. Unklare Provider-Ergebnisse werden nicht blind wiederholt. Nur lokale Vorschlaege, keine automatischen Anzeigen-Aenderungen oder Nachrichten (PR #339).
           - **Bereits in v0.1.43 (Fehlstartdiagnose):** Nach Fehlstart nur Version, Datenspeicher- und Prozessstatus sowie grobe Fehlerkategorie ausdrücklich kopieren; keine Rohlogs, Pfade, Kontodaten oder Schlüssel. Fehlertext und technische Details bleiben sichtbar (PR #337).
           - **Bereits in v0.1.42 (budgetierter KI-Hintergrundworker):** Nach ausdruecklicher Kostenfreigabe und einem USD-Gesamtbudget kann der lokale KI-Hintergrundworker bestaetigte eigene Anzeigen in einem bestehenden KI-Auftrag Schritt fuer Schritt pruefen. Die erlaubten kostenpflichtigen Aufrufe sind begrenzt und werden vor jedem Aufruf persistent verbucht. Fortschritt, Kosten und Stop-Grund bleiben nach Neustarts erhalten. Bei Offline-Betrieb, unklarem Providerergebnis (UNKNOWN), Erschoepfung der Freigabe oder fehlendem Budget erfolgen keine weiteren automatischen Aufrufe. Bereits gespeicherte letzte Vorschlaege werden ohne erneuten Provideraufruf abgeschlossen; UNKNOWN erfordert ausdrueckliche manuelle Kostenklaerung und eine neue Freigabe. Vorschlaege bleiben lokal und muessen vor einer Anzeigeaenderung einzeln geprueft werden. Keine automatischen Plattformwrites und kein Nachrichtenversand (PR #335).
@@ -393,15 +398,15 @@ jobs:
           während der synthetischen technischen Abnahme ausgelöst.
           EOF
           gh release create "$release_tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title 'Kleinanzeiger v0.1.45 – Windows' \
-            --notes-file "$stage/Kleinanzeiger-v0.1.45-Release-Notes.md" \
+            --title 'Kleinanzeiger v0.1.46 – Windows' \
+            --notes-file "$stage/Kleinanzeiger-v0.1.46-Release-Notes.md" \
             "$zip" \
-            "$stage/Kleinanzeiger-v0.1.45-Windows.sha256" \
-            "$stage/Kleinanzeiger-v0.1.45-Release-Manifest.json" \
-            "$stage/Kleinanzeiger-v0.1.45-Release-Notes.md" \
+            "$stage/Kleinanzeiger-v0.1.46-Windows.sha256" \
+            "$stage/Kleinanzeiger-v0.1.46-Release-Manifest.json" \
+            "$stage/Kleinanzeiger-v0.1.46-Release-Notes.md" \
             "$stage/unpacked/Windows-Installation.md" \
             "$stage/unpacked/Kleinanzeiger-Handbuch.html" \
             "$stage/unpacked/Kleinanzeiger-Funktionen.html" \
             "$stage/unpacked/Konto-Nachrichten.md" \
             "$stage/unpacked/SHA256SUMS.txt" \
-            "$stage/unpacked/kleinanzeiger-0.1.45-py3-none-any.whl"
+            "$stage/unpacked/kleinanzeiger-0.1.46-py3-none-any.whl"
