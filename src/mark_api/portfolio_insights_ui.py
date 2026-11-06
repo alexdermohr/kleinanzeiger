@@ -61,6 +61,30 @@ INSIGHTS_HTML = """
         <tbody id="price-rule-body"></tbody>
       </table></div>
       <button id="price-rule-next" type="button" disabled>Nächste 50 Regeln</button>
+
+      <h3>Preisplanung für meine veröffentlichten Anzeigen</h3>
+      <p>Nur für zuletzt bestätigte aktive Eigenanzeigen. Den Ausgangspreis selbst von Kleinanzeigen ablesen und hier eintragen: Im lokalen Bestand wird derzeit <strong>kein Plattformpreis gespeichert</strong>. Die Vorschau ist eine manuelle Rechenhilfe, keine behauptete aktuelle Marktpreis-Messung. Vor einer echten Änderung die Anzeige und den dortigen Preis erneut prüfen. Kein automatischer Preis-Write und keine KI-Kosten.</p>
+      <div class="catalog-toolbar">
+        <label>Eigene Anzeigen-ID <input id="owner-price-ad-id" maxlength="32" inputmode="numeric" autocomplete="off"></label>
+        <button id="owner-price-open" type="button">Eigenanzeige laden</button>
+        <button id="owner-price-list" type="button">Meine gespeicherten Regeln</button>
+      </div>
+      <p id="owner-price-original" role="status" aria-live="polite">Zuerst bestätigte Anzeigen-ID laden.</p>
+      <div class="catalog-toolbar">
+        <label>Manuell von Kleinanzeigen abgelesener Ausgangspreis (€) <input id="owner-price-manual" type="number" min="1" max="99999999" step="1"></label>
+        <label>Mein Mindestpreis (€) <input id="owner-price-min" type="number" min="1" max="99999999" step="1"></label>
+        <label>Preisschritt (€) <input id="owner-price-step" type="number" min="1" max="99999999" step="1"></label>
+        <label>Wartezeit ab Speichern (Tage) <input id="owner-price-wait" type="number" min="0" max="3650" step="1"></label>
+      </div>
+      <p id="owner-price-preview" role="status" aria-live="polite">Keine Preisänderung freigegeben.</p>
+      <button id="owner-price-save" type="button" disabled>Preisplan lokal speichern</button>
+      <button id="owner-price-delete" type="button" disabled>Preisplan entfernen</button>
+      <p id="owner-price-status" role="status" aria-live="polite"></p>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Eigene Anzeige</th><th>Manueller Preis</th><th>Mindestpreis</th><th>Schritt</th><th>Wartezeit</th><th>Lokaler Vorschlag / Beleg</th><th>Aktion</th></tr></thead>
+        <tbody id="owner-price-body"></tbody>
+      </table></div>
+      <button id="owner-price-next" type="button" disabled>Nächste 50 eigene Preispläne</button>
     </section>
 """
 
@@ -75,6 +99,11 @@ let priceRuleTarget = null;
 let priceRuleBusy = false;
 let priceRuleListBusy = false;
 let priceRuleLoadSerial = 0;
+let ownerPriceTarget = null;
+let ownerPriceLoadSerial = 0;
+let ownerPriceBusy = false;
+let ownerPriceListBusy = false;
+let ownerPriceCursor = null;
 let autopilotNextOffset = null;
 let autopilotBusy = false;
 let autopilotOpeningTask = false;
@@ -515,14 +544,188 @@ async function mutatePriceRule(action) {
   }
 }
 
+
+function previewOwnerPriceRule() {
+  const target = ownerPriceTarget;
+  const writable = !!target && !!target.owner && target.owner.confirmed === true
+    && target.ad_id === byId("owner-price-ad-id").value.trim()
+    && jobsAvailable && localUiReady() && !ownerPriceBusy;
+  byId("owner-price-save").disabled = true;
+  byId("owner-price-delete").disabled = !target || !target.rule || !localUiReady() || ownerPriceBusy;
+  if (!writable) {
+    byId("owner-price-preview").textContent = "Nur aktuell bestätigte aktive Eigenanzeigen können neue lokale Preispläne erhalten; kein Plattformpreis wird automatisch ermittelt.";
+    return;
+  }
+  try {
+    const price = priceRuleNumber("owner-price-manual", 1, 99999999);
+    const floor = priceRuleNumber("owner-price-min", 1, 99999999);
+    const step = priceRuleNumber("owner-price-step", 1, 99999999);
+    const wait = priceRuleNumber("owner-price-wait", 0, 3650);
+    if (floor > price) throw new Error("Mindestpreis darf nicht über dem manuell notierten Preis liegen.");
+    const proposed = Math.max(floor, price - step);
+    byId("owner-price-preview").textContent = "Lokale Vorschau: " + price + " € → "
+      + proposed + " €; frühestens " + wait + " Tage nach Speichern. "
+      + "Ausgangspreis von Ihnen eingegeben, nicht von der Plattform verifiziert. "
+      + "Vor einer tatsächlichen Preisänderung die eigene Anzeige erneut prüfen; keine automatische Plattformaktion.";
+    byId("owner-price-save").disabled = false;
+  } catch (error) {
+    byId("owner-price-preview").textContent = error.message;
+  }
+}
+
+async function loadOwnerPriceRule(adId) {
+  if (!jobsAvailable || !localUiReady() || ownerPriceBusy) return false;
+  const selected = String(adId).trim();
+  const serial = ++ownerPriceLoadSerial;
+  ownerPriceTarget = null;
+  byId("owner-price-ad-id").value = selected;
+  previewOwnerPriceRule();
+  byId("owner-price-status").textContent = "Lade aktuellen lokalen Eigenbestand und Preisplan …";
+  try {
+    const data = await readInsight("/api/portfolio/owner-price-rules/detail?ad_id=" + encodeURIComponent(selected));
+    if (serial !== ownerPriceLoadSerial || byId("owner-price-ad-id").value.trim() !== selected) return false;
+    if (!data || data.ad_id !== selected || !data.owner ||
+        typeof data.owner.confirmed !== "boolean" || data.platform_writes !== 0) {
+      throw new Error("Keine verlässliche lokale Anzeigen-Zuordnung.");
+    }
+    ownerPriceTarget = data;
+    const rule = data.rule;
+    byId("owner-price-original").textContent = "Anzeige " + selected
+      + (data.owner.confirmed ? ": aktuell lokal als eigene aktive Anzeige bestätigt" :
+        ": nicht aktuell als eigene aktive Anzeige bestätigt")
+      + (data.owner.observed_at ? " (letzte Beobachtung " + data.owner.observed_at + ")" : "")
+      + ". Der tatsächliche Plattformpreis ist unbekannt und muss manuell geprüft werden.";
+    byId("owner-price-manual").value = rule ? String(rule.manual_price_eur) : "";
+    byId("owner-price-min").value = rule ? String(rule.minimum_price_eur) : "";
+    byId("owner-price-step").value = rule ? String(rule.reduction_step_eur) : "1";
+    byId("owner-price-wait").value = rule ? String(rule.wait_days) : "7";
+    byId("owner-price-status").textContent = rule
+      ? rule.reason + " Vorschlag frühestens " + rule.eligible_at
+      : "Noch kein Preisplan gespeichert. Bitte aktuellen Anzeigenpreis selbst ablesen.";
+    previewOwnerPriceRule();
+    return true;
+  } catch (error) {
+    if (serial === ownerPriceLoadSerial) {
+      ownerPriceTarget = null;
+      byId("owner-price-status").textContent = error.message;
+      previewOwnerPriceRule();
+    }
+    return false;
+  }
+}
+
+async function loadOwnerPriceRules(next = false) {
+  if (!jobsAvailable || !localUiReady() || ownerPriceListBusy || (next && !ownerPriceCursor)) return false;
+  ownerPriceListBusy = true;
+  byId("owner-price-list").disabled = true;
+  byId("owner-price-next").disabled = true;
+  try {
+    const query = new URLSearchParams({limit: "50"});
+    if (next) query.set("after", ownerPriceCursor);
+    const page = await readInsight("/api/portfolio/owner-price-rules?" + query.toString());
+    if (!page || !Array.isArray(page.rules) || page.platform_writes !== 0 ||
+        typeof page.has_more !== "boolean" ||
+        (page.has_more && !/^[0-9]{1,32}$/.test(page.next_after || ""))) {
+      throw new Error("Ungültige Eigenpreispläne. Bitte erneut laden.");
+    }
+    const table = byId("owner-price-body");
+    const rows = [];
+    for (const rule of page.rules) {
+      if (!rule || !/^[0-9]{1,32}$/.test(rule.ad_id || "") ||
+          rule.price_source !== "manually_entered_not_platform_verified" ||
+          rule.platform_writes !== 0) throw new Error("Unzuverlässige lokale Preisplan-Zeile.");
+      const row = document.createElement("tr");
+      for (const value of [rule.ad_id, rule.manual_price_eur, rule.minimum_price_eur,
+          rule.reduction_step_eur, rule.wait_days + " Tage"]) insightCell(row, value);
+      insightCell(row, (rule.suggested_price_eur === null ? "Kein freigegebener Rechenvorschlag" :
+        rule.suggested_price_eur + " €") + ": " + rule.reason + " Quelle: manuelle Preisangabe.");
+      const cell = insightCell(row, "");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Eigenanzeige laden";
+      button.addEventListener("click", () => loadOwnerPriceRule(rule.ad_id));
+      cell.appendChild(button);
+      rows.push(row);
+    }
+    table.replaceChildren(...rows);
+    ownerPriceCursor = page.has_more ? page.next_after : null;
+    byId("owner-price-status").textContent = rows.length ? page.total + " lokale Eigenpreispläne." :
+      "Keine lokalen Eigenpreispläne auf dieser Seite.";
+    return true;
+  } catch (error) {
+    ownerPriceCursor = null;
+    byId("owner-price-status").textContent = error.message +
+      " Keine automatische Preisänderung; bitte Daten erneut laden.";
+    return false;
+  } finally {
+    ownerPriceListBusy = false;
+    byId("owner-price-list").disabled = !localUiReady();
+    byId("owner-price-next").disabled = !ownerPriceCursor || !localUiReady();
+  }
+}
+
+async function mutateOwnerPriceRule(action) {
+  if (!jobsAvailable || !localUiReady() || ownerPriceBusy || !ownerPriceTarget) return false;
+  const target = ownerPriceTarget;
+  if (target.ad_id !== byId("owner-price-ad-id").value.trim()) return false;
+  const payload = {
+    action, ad_id: target.ad_id,
+    expected_revision: target.rule ? target.rule.revision : 0,
+    request_key: _newJobRequestKey(),
+  };
+  try {
+    if (action === "set") {
+      if (!target.owner || !target.owner.confirmed) throw new Error("Eigenbestand nicht bestätigt.");
+      payload.manual_price_eur = priceRuleNumber("owner-price-manual", 1, 99999999);
+      payload.minimum_price_eur = priceRuleNumber("owner-price-min", 1, 99999999);
+      payload.reduction_step_eur = priceRuleNumber("owner-price-step", 1, 99999999);
+      payload.wait_days = priceRuleNumber("owner-price-wait", 0, 3650);
+      if (payload.minimum_price_eur > payload.manual_price_eur) {
+        throw new Error("Mindestpreis liegt über Ihrem Ausgangspreis.");
+      }
+    } else if (action !== "delete" || !target.rule) { return false; }
+  } catch (error) {
+    byId("owner-price-status").textContent = error.message;
+    return false;
+  }
+  ownerPriceBusy = true;
+  previewOwnerPriceRule();
+  try {
+    const response = await fetch("/api/portfolio/owner-price-rules/mutate", {
+      method: "POST", cache: "no-store",
+      headers: {..._jobHeaders(), "Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error("Preisplan nicht bestätigt. Eigenanzeige neu laden; unklare Änderungen nicht blind wiederholen.");
+    const result = await response.json();
+    if (!result || result.ad_id !== target.ad_id || result.platform_writes !== 0 ||
+        result.provider_requests !== 0) throw new Error("Speicherergebnis unklar; Preisplan neu laden.");
+    ownerPriceTarget = null;
+    byId("owner-price-status").textContent =
+      "Lokaler Preisplan gespeichert. Kein Plattformpreis geändert und keine kostenpflichtige KI-Anfrage gestartet.";
+    await loadOwnerPriceRules();
+    return true;
+  } catch (error) {
+    ownerPriceTarget = null;
+    byId("owner-price-status").textContent = error.message;
+    return false;
+  } finally {
+    ownerPriceBusy = false;
+    previewOwnerPriceRule();
+  }
+}
+
 for (const [id, handler] of [
   ["inventory-diff-load", () => loadInventoryDiff()], ["inventory-diff-next", () => loadInventoryDiff(true)],
   ["autopilot-load", () => loadAutopilotAttention()], ["autopilot-next", () => loadAutopilotAttention(true)],
   ["nav-autopilot", () => loadAutopilotAttention()],
-  ["nav-inventory-diff", () => loadInventoryDiff()], ["nav-price-rules", () => loadPriceRules()],
+  ["nav-inventory-diff", () => loadInventoryDiff()], ["nav-price-rules", () => { loadPriceRules(); loadOwnerPriceRules(); }],
   ["price-rule-open", () => loadPriceRule(byId("price-rule-sku").value)],
   ["price-rule-list", () => loadPriceRules()], ["price-rule-next", () => loadPriceRules(true)],
   ["price-rule-save", () => mutatePriceRule("set")], ["price-rule-delete", () => mutatePriceRule("delete")],
+  ["owner-price-open", () => loadOwnerPriceRule(byId("owner-price-ad-id").value)],
+  ["owner-price-list", () => loadOwnerPriceRules()], ["owner-price-next", () => loadOwnerPriceRules(true)],
+  ["owner-price-save", () => mutateOwnerPriceRule("set")], ["owner-price-delete", () => mutateOwnerPriceRule("delete")],
 ]) {
   const element = optionalById(id);
   if (element) element.addEventListener("click", handler);
@@ -549,5 +752,15 @@ if (priceRuleSku) priceRuleSku.addEventListener("input", () => {
   priceRuleLoadSerial += 1;
   priceRuleTarget = null;
   previewPriceRule();
+});
+for (const id of ["owner-price-manual", "owner-price-min", "owner-price-step", "owner-price-wait"]) {
+  const element = optionalById(id);
+  if (element) element.addEventListener("input", previewOwnerPriceRule);
+}
+const ownerPriceId = optionalById("owner-price-ad-id");
+if (ownerPriceId) ownerPriceId.addEventListener("input", () => {
+  ownerPriceLoadSerial += 1;
+  ownerPriceTarget = null;
+  previewOwnerPriceRule();
 });
 """
