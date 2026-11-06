@@ -848,8 +848,13 @@ function Show-WeeklyReportDialog {
     $button.Text=[string]$spec[0]
     $button.SetBounds([int]$spec[2],103,180,44)
     $dialog.Controls.Add($button)
-    $chosen=[string]$spec[1]
-    $button.Add_Click({ $dialog.Close(); try { Start-Worker $chosen } catch { Set-Status $_.Exception.Message $true } }.GetNewClosure())
+    $button.Tag=[string]$spec[1]
+    $button.Add_Click({
+      param($sender, $eventArgs)
+      $selectedAction=[string]$sender.Tag
+      $sender.FindForm().Close()
+      try { Start-Worker $selectedAction } catch { Set-Status $_.Exception.Message $true }
+    })
   }
   [void]$dialog.ShowDialog($form)
   $dialog.Dispose()

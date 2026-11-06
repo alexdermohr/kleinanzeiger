@@ -61,6 +61,18 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertNotIn("function Open-Kleinanzeigen {\\n  . (Join-Path", gui)
         self.assertIn("Get-Command -Name Find-KleinanzeigerChrome", gui)
 
+    def test_weekly_report_buttons_keep_script_scope_and_button_actions(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        callback = gui.split("function Show-WeeklyReportDialog {", 1)[1].split(
+            "$weekly.Add_Click({", 1
+        )[0]
+        self.assertIn("$button.Tag=[string]$spec[1]", callback)
+        self.assertIn("param($sender, $eventArgs)", callback)
+        self.assertIn("$selectedAction=[string]$sender.Tag", callback)
+        self.assertIn("Start-Worker $selectedAction", callback)
+        self.assertIn("$sender.FindForm().Close()", callback)
+        self.assertNotIn("GetNewClosure()", callback)
+
     def test_powershell_51_version_and_update_regressions(self) -> None:
         gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
