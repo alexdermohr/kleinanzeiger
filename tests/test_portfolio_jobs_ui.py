@@ -5,10 +5,44 @@ import shutil
 import subprocess
 import unittest
 
-from mark_api.dashboard import _DASHBOARD_JS
+from mark_api.dashboard import _DASHBOARD_JS, _DASHBOARD_HTML
 
 
 class PortfolioJobsUiTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node required for JS interaction")
+    def test_usd_budget_validation_matches_form_and_cents(self) -> None:
+        """The UI must not call USD provider budgets Euro, even on invalid inputs."""
+        self.assertIn("Reserviertes Gesamtbudget (USD)", _DASHBOARD_HTML)
+        self.assertIn("Budgetreserve je möglicher KI-Anfrage (USD)", _DASHBOARD_HTML)
+        harness = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const source = fs.readFileSync(0, "utf8");
+const begin = source.indexOf("function _jobEuros(");
+const end = source.indexOf("\nfunction _newJobRequestKey()", begin);
+assert.ok(begin >= 0 && end > begin, "bound to actual budget-validation function");
+const fields = {
+  "job-budget-eur": {value: "2.00"},
+  "job-estimate-eur": {value: "0.20"}
+};
+const validate = new Function("byId", source.slice(begin, end) +
+  "\nreturn _jobEuros;")(id => fields[id]);
+assert.equal(validate("job-budget-eur", true), 200);
+assert.equal(validate("job-estimate-eur", false), 20);
+fields["job-budget-eur"].value = "2.001";
+assert.throws(() => validate("job-budget-eur", true), /KI-Budget in USD/);
+fields["job-budget-eur"].value = "2,50";
+assert.equal(validate("job-budget-eur", true), 250);
+fields["job-estimate-eur"].value = "0";
+assert.throws(() => validate("job-estimate-eur", false), /Ungültiger Kostenbetrag/);
+"""
+        result = subprocess.run(
+            [shutil.which("node") or "node", "-e", harness],
+            input=_DASHBOARD_JS, text=True, encoding="utf-8",
+            capture_output=True, check=False, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node required for JS interaction")
     def test_selection_idempotence_review_and_local_apply(self) -> None:
         harness = r"""
