@@ -73,6 +73,23 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("$sender.FindForm().Close()", callback)
         self.assertNotIn("GetNewClosure()", callback)
 
+    def test_weekly_report_latest_file_opens_only_on_explicit_click(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        callback = gui.split("function Show-WeeklyReportDialog {", 1)[1].split(
+            "$weekly.Add_Click({", 1
+        )[0]
+        self.assertIn("'Letzten Bericht öffnen','ReportOpen'", callback)
+        self.assertIn("if ($selectedAction -eq 'ReportOpen')", callback)
+        self.assertIn("Join-Path $state 'Berichte'", callback)
+        self.assertIn("'Kleinanzeiger-Wochenbericht-*.html'", callback)
+        self.assertIn("Sort-Object Name -Descending", callback)
+        self.assertIn("Select-Object -First 1", callback)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", callback)
+        self.assertIn("Start-Process -FilePath $last[0].FullName", callback)
+        self.assertIn("Noch kein Wochenbericht vorhanden.", callback)
+        self.assertIn("} else {\n          Start-Worker $selectedAction", callback)
+        self.assertNotIn("Start-Worker 'ReportOpen'", callback)
+
     def test_powershell_51_version_and_update_regressions(self) -> None:
         gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
