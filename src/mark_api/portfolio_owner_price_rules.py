@@ -87,26 +87,32 @@ def _owner_observation(
     conn: sqlite3.Connection, ad_id: str, instant: datetime,
 ) -> dict[str, object]:
     """Most recent local observation: never infer ownership from older rows."""
-    row = conn.execute(
-        "SELECT source,lifecycle_state,observed_at FROM ad_snapshots "
-        "WHERE ad_id=? COLLATE BINARY ORDER BY observed_at DESC,id DESC LIMIT 1",
-        (ad_id,),
-    ).fetchone()
-    if row is None:
+    # Stored ISO offsets are not lexicographically UTC-ordered. Compare
+    # real instants, with the insertion ID as the equal-instant tie breaker.
+    latest: tuple[datetime, int, str, str] | None = None
+    for row in conn.execute(
+        "SELECT id,source,lifecycle_state,observed_at FROM ad_snapshots "
+        "WHERE ad_id=? COLLATE BINARY", (ad_id,),
+    ):
+        source, state, raw_time = row["source"], row["lifecycle_state"], row["observed_at"]
+        if (type(row["id"]) is not int or type(source) is not str
+                or type(state) is not str
+                or state not in {"active", "paused", "absent", "unknown", "pending"}
+                or type(raw_time) is not str):
+            raise sqlite3.DatabaseError("invalid own listing observation")
+        try:
+            observed = datetime.fromisoformat(raw_time)
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                raise ValueError("timezone missing")
+            observed = observed.astimezone(timezone.utc)
+        except (ValueError, OverflowError):
+            raise sqlite3.DatabaseError("invalid own listing timestamp") from None
+        if latest is None or (observed, row["id"]) > latest[:2]:
+            latest = (observed, row["id"], source, state)
+    if latest is None:
         return {"confirmed": False, "state": "not_observed", "observed_at": None,
                 "source": None}
-    source, state, raw_time = row["source"], row["lifecycle_state"], row["observed_at"]
-    if (type(source) is not str or type(state) is not str
-            or state not in {"active", "paused", "absent", "unknown", "pending"}
-            or type(raw_time) is not str):
-        raise sqlite3.DatabaseError("invalid own listing observation")
-    try:
-        timestamp = datetime.fromisoformat(raw_time)
-        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            raise ValueError("timezone missing")
-        timestamp = timestamp.astimezone(timezone.utc)
-    except (ValueError, OverflowError):
-        raise sqlite3.DatabaseError("invalid own listing timestamp") from None
+    timestamp, _, source, state = latest
     age = instant - timestamp
     confirmed = (state == "active" and source in OWN_INVENTORY_SOURCES
                  and timedelta(0) <= age <= _FRESHNESS)
@@ -231,6 +237,10 @@ def set_owner_price_rule(
                     or previous["deleted"] not in (0, 1)
                     or revision != (old_revision if previous["deleted"] == 0 else 0)):
                 raise OwnerPriceRuleError("Preisregel wurde geaendert; neu laden.")
+            if previous["deleted"] == 1 and conn.execute(
+                "SELECT COUNT(*) FROM portfolio_owner_price_rules WHERE deleted=0"
+            ).fetchone()[0] >= _MAX_RULES:
+                raise OwnerPriceRuleError("Maximal 10000 lokale Preisregeln.")
             next_revision = old_revision + 1
             conn.execute(
                 "UPDATE portfolio_owner_price_rules SET manual_price_eur=?,"

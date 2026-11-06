@@ -195,5 +195,44 @@ class OwnListingPricePlans(unittest.TestCase):
         self.assertIsNone(detail["rule"]["suggested_price_eur"])
 
 
+    def test_chronological_ownership_across_offsets_and_equal_instant(self):
+        plus_two = timezone(timedelta(hours=2))
+        earlier_active = (NOW - timedelta(hours=1)).astimezone(plus_two)
+        self.observed(time=earlier_active)
+        self.observed(time=NOW, state=LifecycleState.PAUSED)
+        with self.assertRaises(OwnerPriceRuleError):
+            self.save(now=NOW + timedelta(seconds=1))
+        detail = owner_price_rule_detail(
+            self.store, ad_id="101", now=NOW + timedelta(seconds=1))
+        self.assertEqual(detail["owner"]["state"], "paused")
+        self.assertEqual(detail["owner"]["observed_at"], NOW.isoformat())
+        # Equal instants must use the latest insertion ID, not the stored
+        # timezone offset's lexical ordering.
+        self.observed(time=NOW.astimezone(plus_two), state=LifecycleState.ACTIVE)
+        self.assertTrue(owner_price_rule_detail(
+            self.store, ad_id="101", now=NOW + timedelta(seconds=1)
+        )["owner"]["confirmed"])
+        self.save(now=NOW + timedelta(seconds=1))
+
+    def test_reactivating_deleted_rule_still_obeys_active_limit(self):
+        from unittest.mock import patch
+
+        for ad in ("101", "102", "103"):
+            self.observed(ad=ad)
+        with patch("mark_api.portfolio_owner_price_rules._MAX_RULES", 2):
+            self.save(ad="101")
+            self.save(ad="102", key="b" * 64)
+            delete_owner_price_rule(
+                self.store, ad_id="101", expected_revision=1,
+                request_key="c" * 64)
+            self.save(ad="103", key="d" * 64)
+            with self.assertRaises(OwnerPriceRuleError):
+                self.save(ad="101", key="e" * 64)
+            page = owner_price_suggestions_page(self.store, now=NOW)
+            self.assertEqual((page["total"], len(page["rules"])), (2, 2))
+            self.assertEqual(
+                {rule["ad_id"] for rule in page["rules"]}, {"102", "103"})
+
+
 if __name__ == "__main__":
     unittest.main()
