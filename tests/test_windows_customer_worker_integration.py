@@ -15,6 +15,7 @@ from email import policy
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import unittest
 
@@ -37,8 +38,26 @@ class NativeWindowsCustomerWorkerTests(unittest.TestCase):
         db = state / "anzeigen.sqlite"
         venv = state / ".venv" / "Scripts" / "python.exe"
         self.assertTrue(venv.is_file(), "customer-installed wheel required")
-        # Only ephemeral CI runner is in scope. Refuse replacing any prior DB.
-        self.assertFalse(db.exists(), "unexpected existing customer DB on runner")
+        # The installed weekly-report CI step may already have seeded exactly
+        # one synthetic fixture in this disposable runner. Preserve that DB,
+        # but never modify an unexpected pre-existing customer database.
+        had_weekly_fixture = db.exists()
+        if had_weekly_fixture:
+            with sqlite3.connect(db.as_uri() + "?mode=ro", uri=True) as existing:
+                self.assertEqual(
+                    existing.execute("SELECT ad_id FROM ad_snapshots").fetchall(),
+                    [("synthetic-report-ad",)],
+                    "unexpected existing customer ads on CI runner",
+                )
+                self.assertEqual(
+                    existing.execute(
+                        "SELECT ad_id, conversation_id, provider_message_id "
+                        "FROM inbound_message_events"
+                    ).fetchall(),
+                    [("synthetic-report-ad", "synthetic-report-conversation",
+                      "synthetic-report-message")],
+                    "unexpected existing customer messages on CI runner",
+                )
         store = SnapshotStore(db)
         store.append_ad_snapshot(
             AdSnapshot(
@@ -114,7 +133,10 @@ class NativeWindowsCustomerWorkerTests(unittest.TestCase):
         imported = worker("ImportMail", {"paths": [str(notification)]})
         self.assertEqual(imported.returncode, 0, imported.stderr + imported.stdout)
         self.assertIn("MAIL_IMPORT_OK", imported.stdout)
-        reactions = MarkQueryService(store).email_reactions()
+        reactions = [
+            event for event in MarkQueryService(store).email_reactions()
+            if event.ad_id == "1234567890"
+        ]
         self.assertEqual(len(reactions), 1)
         self.assertEqual(reactions[0].ad_id, "1234567890")
         backups = state / "Backups"
@@ -156,7 +178,10 @@ class NativeWindowsCustomerWorkerTests(unittest.TestCase):
         self.assertIn("PRODUCT_EXPORT_OK", exported_products.stdout)
         self.assertTrue(exported_csv.is_file())
         self.assertEqual(drafts_page(store)["total"], 1000)
-        self.assertEqual(store.tracked_ad_ids(), ("1234567890", "9876543210"))
+        expected_ids = {"1234567890", "9876543210"}
+        if had_weekly_fixture:
+            expected_ids.add("synthetic-report-ad")
+        self.assertEqual(set(store.tracked_ad_ids()), expected_ids)
 
 if __name__ == "__main__":
     unittest.main()
