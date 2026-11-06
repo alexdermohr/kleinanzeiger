@@ -121,6 +121,7 @@ $productsExport = Add-Button 'Entwürfe exportieren' 28 449 282 43
 $restore = Add-Button 'Sicherung wiederherstellen …' 330 449 282 43
 $messages = Add-Button 'Nachrichten verwalten' 28 508 282 43
 $rollback = Add-Button 'Vorherige Programmversion verwenden …' 330 508 282 43
+$weekly = Add-Button 'Wochenbericht …' 28 568 584 43
 $rollback.AutoEllipsis = $true
 $statusLabel = Add-Label 'Bereit.' 28 397 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
@@ -178,14 +179,14 @@ $detailsLink.Add_Click({
 $script:advancedExpanded = $false
 function Set-AdvancedLayout([bool]$expanded) {
   $script:advancedExpanded = $expanded
-  foreach ($control in @($mail,$labels,$productsExport,$restore,$messages,$rollback)) {
+  foreach ($control in @($mail,$labels,$productsExport,$restore,$messages,$rollback,$weekly)) {
     $control.Visible = $expanded
   }
   $advanced.Text = $(if($expanded){'Weniger anzeigen'}else{'Weitere Aktionen'})
-  $statusLabel.SetBounds(28,$(if($expanded){567}else{397}),584,44)
-  $detailsLink.SetBounds(28,$(if($expanded){626}else{453}),240,26)
-  $copyDiagnostics.SetBounds(310,$(if($expanded){626}else{453}),220,26)
-  $form.ClientSize = [System.Drawing.Size]::new(640,$(if($expanded){682}else{510}))
+  $statusLabel.SetBounds(28,$(if($expanded){630}else{397}),584,44)
+  $detailsLink.SetBounds(28,$(if($expanded){694}else{453}),240,26)
+  $copyDiagnostics.SetBounds(310,$(if($expanded){694}else{453}),220,26)
+  $form.ClientSize = [System.Drawing.Size]::new(640,$(if($expanded){744}else{510}))
 }
 Set-AdvancedLayout $false
 $help = [System.Windows.Forms.LinkLabel]::new()
@@ -229,6 +230,7 @@ function Refresh-Controls {
   $backup.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $ai.Enabled = !$busy
   $messages.Enabled = !$busy -and (Test-Path -LiteralPath $db) -and (Test-Path -LiteralPath $python -PathType Leaf)
+  $weekly.Enabled = !$busy -and (Test-Path -LiteralPath $db) -and (Test-Path -LiteralPath $python -PathType Leaf)
   $mail.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $labels.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $products.Enabled = !$busy -and (Test-Path -LiteralPath $db)
@@ -561,6 +563,9 @@ function Start-Worker([string]$action,[bool]$launchAfter=$false,[string]$backupN
     'Classify' {'Speichere Vergleichslabels …'}
     'ImportProducts' {'Pruefe und importiere Artikelentwuerfe …'}
     'ExportProducts' {'Exportiere Artikelentwuerfe …'}
+    'ReportNow' {'Erstelle lokalen Wochenbericht …'}
+    'ReportEnable' {'Aktiviere woechentlichen Bericht …'}
+    'ReportDisable' {'Deaktiviere Automatik …'}
   })
   Start-PipedProcess $info $action
   if ($null -ne $payload) {
@@ -741,6 +746,9 @@ function Finish-Process {
       'Classify' {'Vergleichslabels gespeichert. Auswertungen beim naechsten Start neu laden.'}
       'ImportProducts' {'Artikelentwuerfe gespeichert. Im Dashboard nach dem Start ansehen.'}
       'ExportProducts' {'Artikelentwuerfe exportiert. Grosse Bestaende liegen als CSV-Teile (-part002.csv usw.) im selben Ordner.'}
+      'ReportNow' {'Wochenbericht unter %LOCALAPPDATA%\Kleinanzeiger\Berichte erstellt.'}
+      'ReportEnable' {'Wochenbericht aktiviert: montags 09:00 bei Anmeldung.'}
+      'ReportDisable' {'Wochenautomatik deaktiviert.'}
     })
   }
   if ($script:nextLaunch) {
@@ -824,6 +832,34 @@ $account.Add_Click({
   catch { Set-Status $_.Exception.Message $true }
 })
 $ai.Add_Click({ if (!$script:process) { Show-KiDialog } })
+function Show-WeeklyReportDialog {
+  $dialog=[Windows.Forms.Form]::new()
+  $dialog.Text='Wochenbericht'
+  $dialog.ClientSize=[Drawing.Size]::new(570,185)
+  $dialog.FormBorderStyle='FixedDialog'
+  $dialog.MaximizeBox=$false
+  $dialog.StartPosition='CenterParent'
+  $note=[Windows.Forms.Label]::new()
+  $note.Text='Nur lokale E-Mails und Bestandsbelege, kein Kontoabruf und keine KI-Kosten. Automatik nur auf ausdruecklichen Klick: montags 09:00 bei Anmeldung.'
+  $note.SetBounds(15,12,540,73)
+  $dialog.Controls.Add($note)
+  foreach($spec in @(@('Jetzt erstellen','ReportNow',10),@('Automatik an','ReportEnable',195),@('Automatik aus','ReportDisable',380))) {
+    $button=[Windows.Forms.Button]::new()
+    $button.Text=[string]$spec[0]
+    $button.SetBounds([int]$spec[2],103,180,44)
+    $dialog.Controls.Add($button)
+    $button.Tag=[string]$spec[1]
+    $button.Add_Click({
+      param($sender, $eventArgs)
+      $selectedAction=[string]$sender.Tag
+      $sender.FindForm().Close()
+      try { Start-Worker $selectedAction } catch { Set-Status $_.Exception.Message $true }
+    })
+  }
+  [void]$dialog.ShowDialog($form)
+  $dialog.Dispose()
+}
+$weekly.Add_Click({ if (!$script:process) { try { Show-WeeklyReportDialog } catch { Set-Status $_.Exception.Message $true } } })
 $advanced.Add_Click({ Set-AdvancedLayout (!$script:advancedExpanded) })
 $rollback.Add_Click({
   try {
@@ -991,9 +1027,9 @@ if ($SelfTest) {
   Set-AdvancedLayout $true
   # Controls inherit Form.Visible; the headless SelfTest cannot assert
   # effective child Visible without showing a customer window.
-  if (!$script:advancedExpanded -or $form.ClientSize.Height -ne 682 -or
-      $advanced.Text -ne 'Weniger anzeigen' -or $statusLabel.Top -ne 567 -or
-      $detailsLink.Top -ne 626 -or $copyDiagnostics.Top -ne 626 -or $rollback.Top -ne 508 -or
+  if (!$script:advancedExpanded -or $form.ClientSize.Height -ne 744 -or
+      $advanced.Text -ne 'Weniger anzeigen' -or $statusLabel.Top -ne 630 -or
+      $detailsLink.Top -ne 694 -or $copyDiagnostics.Top -ne 694 -or $rollback.Top -ne 508 -or
       $mail.Top -ne 390 -or $productsExport.Top -ne 449) {
     throw 'Erweiterte Kundenaktionen sind nicht vollstaendig erreichbar.'
   }
@@ -1017,7 +1053,7 @@ if ($SelfTest) {
   Set-Status 'Bereit.'
   if ($form.Controls.Count -lt 12 -or $primary.Text -ne 'Kleinanzeiger starten' -or
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $copyDiagnostics -or $null -eq $restore -or
-      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $messages -or $null -eq $rollback -or $null -eq $help -or $null -eq $features) {
+      $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $messages -or $null -eq $rollback -or $null -eq $weekly -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
   }
   $timer.Dispose()

@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Install','OnlineUpdate','Backup','Restore','Rollback','ImportMail','Classify','ImportProducts','ExportProducts')][string]$Action = 'Install',
+  [ValidateSet('Install','OnlineUpdate','Backup','Restore','Rollback','ImportMail','Classify','ImportProducts','ExportProducts','ReportNow','ReportEnable','ReportDisable')][string]$Action = 'Install',
   [string]$PackageDirectory = $PSScriptRoot,
   [string]$BackupName = '',
   [switch]$SelfTest,
@@ -50,7 +50,7 @@ function Get-VerifiedPackage([string]$folder) {
   if (!(Test-Path -LiteralPath $wheel -PathType Leaf)) { throw 'Wheel fehlt.' }
   $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actual -ne $matched.Groups['digest'].Value.ToLowerInvariant()) { throw 'Wheel-Pruefsumme ungueltig.' }
-  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-messages.ps1','windows-offline-compat.py',
+  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-messages.ps1','windows-weekly-report.ps1','windows-offline-compat.py',
        'Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html',
        'windows-install.ps1','windows-start.ps1','windows-chrome.ps1',
        'windows-ki-einrichten.ps1','windows-backup.ps1','windows-restore.ps1','windows-diagnostics.ps1','Kleinanzeiger-Diagnose.cmd')) {
@@ -369,10 +369,10 @@ function Invoke-PortfolioWorker([string]$mode) {
 
 if ($SelfTest) {
   if (!(Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue)) { throw 'SHA-256 nicht verfuegbar.' }
-  $names = @(Get-ReleaseAssetNames '0.1.46')
-  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.46-Windows.zip' -or
-      $names[1] -ne 'Kleinanzeiger-v0.1.46-Windows.sha256' -or
-      $names[2] -ne 'Kleinanzeiger-v0.1.46-Release-Manifest.json') {
+  $names = @(Get-ReleaseAssetNames '0.1.47')
+  if ($names.Count -ne 3 -or $names[0] -ne 'Kleinanzeiger-v0.1.47-Windows.zip' -or
+      $names[1] -ne 'Kleinanzeiger-v0.1.47-Windows.sha256' -or
+      $names[2] -ne 'Kleinanzeiger-v0.1.47-Release-Manifest.json') {
     throw 'Release-Dateinamen sind nicht eindeutig.'
   }
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
@@ -381,7 +381,15 @@ if ($SelfTest) {
   Write-Output 'WINDOWS_WORKER_SELFTEST_OK'
   return
 }
+function Invoke-Weekly([string]$mode) {
+  $helper=Join-Path $PackageDirectory 'windows-weekly-report.ps1'
+  if (!(Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'Wochenbericht fehlt im installierten Paket.' }
+  & $helper -Action $mode
+}
 switch ($Action) {
+  'ReportNow' { Invoke-Weekly 'Run' }
+  'ReportEnable' { Invoke-Weekly 'Enable' }
+  'ReportDisable' { Invoke-Weekly 'Disable' }
   'Backup' { Save-Backup }
   'ImportMail' { Import-CustomerMail }
   'Classify' { Update-CustomerLabels }
