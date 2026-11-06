@@ -182,6 +182,46 @@ jobs:
           # Prove the optional inbox module works from the actually installed Wheel; no provider call.
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-messages.ps1') -SelfTest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native Windows installed weekly report and opt-in scheduling
+        if: matrix.python-version == '3.12'
+        shell: pwsh
+        run: |
+          $state = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
+          $app = Join-Path $state 'App'
+          $db = Join-Path $state 'anzeigen.sqlite'
+          $python = Join-Path $state '.venv\Scripts\python.exe'
+          $worker = Join-Path $app 'windows-worker.ps1'
+          $weekly = Join-Path $app 'windows-weekly-report.ps1'
+          if (!(Test-Path -LiteralPath $worker -PathType Leaf) -or !(Test-Path -LiteralPath $weekly -PathType Leaf)) {
+            throw 'Weekly report scripts were not installed'
+          }
+          $env:KLEINANZEIGER_WEEKLY_CI_DB = $db
+          & $python -c "import os; from pathlib import Path; from datetime import datetime,timezone; from mark_api.storage import SnapshotStore; from mark_api.domain import AdSnapshot,InboundMessageEvent,LifecycleState; t=datetime.now(timezone.utc); s=SnapshotStore(Path(os.environ['KLEINANZEIGER_WEEKLY_CI_DB']),create_if_missing=True); s.append_ad_snapshot(AdSnapshot(ad_id='synthetic-report-ad',title='synthetic-private-title',lifecycle_state=LifecycleState.ACTIVE,observed_at=t,source='private-web-product-launcher')); s.append_inbound_message_events([InboundMessageEvent(ad_id='synthetic-report-ad',conversation_id='synthetic-report-conversation',provider_message_id='synthetic-report-message',observed_at=t,source='test-synthetic-email')])"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot seed synthetic weekly-report database' }
+          $run = @(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $worker -Action ReportNow -PackageDirectory $app)
+          if ($LASTEXITCODE -ne 0 -or $run -notcontains 'WEEKLY_REPORT_RUN_OK') { throw 'Installed Windows weekly report failed' }
+          $reportDir = Join-Path $state 'Berichte'
+          $reports = @(Get-ChildItem -LiteralPath $reportDir -File -Filter 'Kleinanzeiger-Wochenbericht-*.html')
+          if ($reports.Count -ne 1) { throw 'Expected exactly one weekly HTML report' }
+          $html = Get-Content -LiteralPath $reports[0].FullName -Raw -Encoding UTF8
+          if (!$html.Contains('Importierte Nachrichten</td><td>1</td><td>0</td>') -or $html.Contains('synthetic-report-')) {
+            throw 'Weekly report aggregates are incorrect or reveal customer identifiers'
+          }
+          $run = @(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $worker -Action ReportNow -PackageDirectory $app)
+          if ($LASTEXITCODE -ne 0 -or $run -notcontains 'WEEKLY_REPORT_RUN_OK' -or @(Get-ChildItem -LiteralPath $reportDir -File -Filter 'Kleinanzeiger-Wochenbericht-*.html').Count -ne 1) {
+            throw 'Weekly report rerun was not idempotent'
+          }
+          try {
+            $enabled = @(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $worker -Action ReportEnable -PackageDirectory $app)
+            if ($LASTEXITCODE -ne 0 -or $enabled -notcontains 'WEEKLY_ENABLED') { throw 'Opt-in weekly scheduler activation failed' }
+            $status = @(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $weekly -Action Status)
+            if ($LASTEXITCODE -ne 0 -or $status -notcontains 'WEEKLY_ENABLED') { throw 'Opt-in weekly scheduler state missing' }
+          } finally {
+            $disabled = @(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $worker -Action ReportDisable -PackageDirectory $app)
+            if ($LASTEXITCODE -ne 0 -or $disabled -notcontains 'WEEKLY_DISABLED') { throw 'Opt-in weekly scheduler cleanup failed' }
+          }
+          $status = @(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $weekly -Action Status)
+          if ($LASTEXITCODE -ne 0 -or $status -notcontains 'WEEKLY_DISABLED') { throw 'Weekly scheduler was not removed' }
       - name: Verify Windows upgrade rollback and non-destructive failed staging
         if: matrix.python-version == '3.12'
         shell: pwsh
