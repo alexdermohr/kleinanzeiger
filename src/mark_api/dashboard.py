@@ -5359,7 +5359,7 @@ function renderJobSelection() {
 function _jobEuros(id, allowZero) {
   const raw = byId(id).value.trim();
   if (!/^[0-9]{1,7}(?:[.,][0-9]{1,2})?$/.test(raw)) {
-    throw new Error("Budget in Euro mit höchstens zwei Nachkommastellen eingeben.");
+    throw new Error("KI-Budget in USD mit höchstens zwei Nachkommastellen eingeben.");
   }
   const cents = Math.round(Number(raw.replace(",", ".")) * 100);
   if (!Number.isSafeInteger(cents) || cents > 100000000
