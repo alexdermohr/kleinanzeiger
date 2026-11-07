@@ -224,7 +224,7 @@ function Get-OfficialReleaseVersion([string]$responseText) {
     if ($tag -cnotmatch '^v(?<version>(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$') {
       return $null
     }
-    $version = [string]$Matches['version']
+    $version = $tag.Substring(1)
     if ([string]$release.target_commitish -cnotmatch '^[0-9a-f]{40}$') { return $null }
     $prefix = 'Kleinanzeiger-v' + $version + '-'
     $rootUrl = 'https://github.com/alexdermohr/kleinanzeiger/releases/download/v' + $version + '/'

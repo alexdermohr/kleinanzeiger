@@ -122,6 +122,8 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("$release.draft -or $release.prerelease", gui)
         self.assertIn("Windows.sha256", gui)
         self.assertIn("Release-Manifest.json", gui)
+        self.assertIn("$tag.Substring(1)", gui)
+        self.assertNotIn("$Matches['version']", gui.split("function Get-OfficialReleaseVersion", 1)[1].split("function Start-ReleaseCheck", 1)[0])
         self.assertIn("Get-UpdateAction $installed $script:packageVersion $script:latestStableVersion", gui)
         # The UI still delegates the only installation to the existing verified worker.
         self.assertIn("Start-Worker $action", gui)
