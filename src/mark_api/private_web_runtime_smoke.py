@@ -12,6 +12,7 @@ from typing import Callable, Protocol
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from .adapters import _legacy_admission
 from .container_draft import container_draft_denied
 from .dashboard import create_server
 from .domain import AdSnapshot, LifecycleState
@@ -158,7 +159,7 @@ def run_private_web_runtime_smoke(
     cdp_port: int,
     *,
     timeout_seconds: float = 5.0,
-    runtime_factory: _RuntimeFactory = build_private_web_inventory_runtime,
+    runtime_factory: _RuntimeFactory | None = None,
 ) -> PrivateWebRuntimeSmokeReport:
     """Exercise PrivateWeb owner-read -> SQLite -> loopback dashboard/analytics.
 
@@ -179,6 +180,12 @@ def run_private_web_runtime_smoke(
         or timeout_seconds <= 0
     ):
         raise ValueError("timeout_seconds must be positive")
+
+    # Deny the real default before CDP, SQLite or loopback HTTP setup.
+    # Explicit synthetic factories remain available for offline regression tests.
+    if runtime_factory is None or runtime_factory is build_private_web_inventory_runtime:
+        _legacy_admission.require_legacy_platform_authority()
+        runtime_factory = build_private_web_inventory_runtime
 
     runtime = runtime_factory(
         cdp_port=cdp_port,

@@ -1931,6 +1931,7 @@ class PrivateWebMediaCreateRuntimeTests(unittest.TestCase):
             runtime.reconcile_media_submit()
         self.assertEqual(page_calls, 0)
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_uses_media_page_factory_only(self) -> None:
         events: list[tuple] = []
         page = MediaCreatePage(events)
@@ -2538,6 +2539,7 @@ class PrivateWebContentRuntimeTests(unittest.TestCase):
         ):
             require_private_web_runtime_dependency()
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_rejects_cookie_bearing_management_overrides(self) -> None:
         with self.assertRaises(TypeError):
             build_private_web_content_runtime(
@@ -2579,6 +2581,7 @@ class PrivateWebContentRuntimeTests(unittest.TestCase):
             _RejectManagementRedirectHandler,
         )
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_inventory_builder_has_no_writer_surface_or_page_factory(self) -> None:
         owner_reader = OwnerReader(ReadResult.success_nonempty((owner_snapshot(),)))
         closed = []
@@ -2615,6 +2618,7 @@ class PrivateWebContentRuntimeTests(unittest.TestCase):
         runtime.close()
         self.assertEqual(len(closed), 1)
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_consumes_existing_cdp_port_without_opening_page_eagerly(self) -> None:
         owner_reader = OwnerReader(ReadResult.success_empty(()))
         closed = []
@@ -2832,6 +2836,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 runtime.close()
             self.assertEqual(close_events, ["content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_preserves_witness_without_enabling_new_write_flags(self) -> None:
         class RefusingWitness:
             def started(self, *, key: str, sha: str, action: str) -> None:
@@ -3084,6 +3089,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
             content_runtime.close()
             self.assertEqual(close_events, ["content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_rejects_media_mismatch_before_browser_runtime(self) -> None:
         source = PrivateWebMediaSource("/tmp/runtime-test-photo.jpg")
         cases = (
@@ -3158,6 +3164,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 frozenset({"media_one", "media_two"}),
             )
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_restores_pending_media_handle_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -3247,6 +3254,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 second.close()
             self.assertEqual(second_close_events, ["content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_creates_product_media_stager_without_caller_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -3301,6 +3309,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 runtime.close()
             self.assertEqual(close_events, ["content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_auto_composes_default_media_persistence_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -3352,6 +3361,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 default_verifier,
             )
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_passes_explicit_media_persistence_verifier_to_composition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -3405,6 +3415,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 explicit_verifier,
             )
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_composes_default_media_persistence_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -3455,6 +3466,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 runtime.close()
             self.assertEqual(close_events, ["content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_preserves_explicit_media_persistence_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -3507,6 +3519,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 runtime.close()
             self.assertEqual(close_events, ["content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_accepts_empty_media_bindings_without_media_capability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -3551,6 +3564,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 runtime.close()
             self.assertEqual(close_events, ["content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_closes_content_runtime_if_media_builder_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")
@@ -5028,6 +5042,7 @@ class PrivateWebWriteApiRuntimeCompositionTests(unittest.TestCase):
                 runtime.close()
             self.assertEqual(close_events, ["confirmation", "content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_preserves_setup_error_when_cleanup_also_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "runtime.sqlite")

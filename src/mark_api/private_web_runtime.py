@@ -1907,6 +1907,8 @@ def build_private_web_write_api_runtime(
     requires the separate target-bound content/detail read.
     """
 
+    _legacy_admission.require_legacy_platform_authority()
+
     if not isinstance(access, WriteApiAccess):
         raise TypeError("access must be WriteApiAccess")
     if (
@@ -2115,6 +2117,8 @@ def build_private_web_media_create_runtime(
     change the media-free AdCreateRequest, MarkService, or loopback Write API.
     """
 
+    _legacy_admission.require_legacy_platform_authority()
+
     require_private_web_runtime_dependency()
 
     if cdp_session is not None:
@@ -2147,6 +2151,8 @@ def build_private_web_inventory_runtime(
 ) -> PrivateWebInventoryRuntime:
     """Build only the owner-inventory read surface for an existing CDP worker."""
 
+    _legacy_admission.require_legacy_platform_authority()
+
     require_private_web_runtime_dependency()
     owner_reader, cookie_provider = _build_private_web_owner_reader(
         cdp_port=cdp_port,
@@ -2173,6 +2179,8 @@ def build_private_web_content_runtime(
     browser. Login/MFA/CAPTCHA/security-challenge handling remains in the
     already-authenticated user browser session and the fail-closed page driver.
     """
+
+    _legacy_admission.require_legacy_platform_authority()
 
     require_private_web_runtime_dependency()
     # The protected actor already has the exact single native CDP claim +
