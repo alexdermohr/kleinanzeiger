@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.4] - 2026-11-07
+
+### Verbessert
+- Die Änderungsanzeige passt ihre Kurzbeschreibung automatisch an die verfügbare Breite an. „Alle Änderungen“ bleibt auch bei längeren Versionshinweisen gut lesbar und anklickbar.
+- Die vollständige Liste der Änderungen ist weiterhin vor und nach einem Update erreichbar.
+
 ## [1.0.3] - 2026-11-07
 
 ### Neu

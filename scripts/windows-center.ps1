@@ -301,6 +301,23 @@ function Get-ReleaseSummary([string]$notes) {
   }
   return 'Alle Änderungen ansehen'
 }
+# Keep the actionable suffix readable at any supported DPI and font scale.
+# TextRenderer uses actual WinForms pixel metrics instead of guessing characters.
+function Get-FittingReleaseCaption([string]$version,[string]$summary,
+                                   [System.Drawing.Font]$useFont,[int]$maxWidth) {
+  $prefix = "Neu in ${version}: "
+  if (!$summary) { return $prefix + 'Alle Änderungen' }
+  $suffix = '  ·  Alle Änderungen'
+  for ($count = $summary.Length; $count -gt 0; $count--) {
+    $part = $summary.Substring(0,$count)
+    if ($count -lt $summary.Length) { $part = $part.TrimEnd() + '…' }
+    $caption = $prefix + $part + $suffix
+    if ([System.Windows.Forms.TextRenderer]::MeasureText($caption,$useFont).Width -le $maxWidth) {
+      return $caption
+    }
+  }
+  return $prefix + 'Alle Änderungen'
+}
 function Show-ReleaseNotes([string]$version) {
   if (!$version) { return }
   $notes = Get-ReleaseNotesForVersion $version
@@ -417,7 +434,7 @@ function Refresh-Controls {
     }
     if ($script:displayNotesVersion) {
       $noteSummary = Get-ReleaseSummary (Get-ReleaseNotesForVersion $script:displayNotesVersion)
-      $releaseNotesLink.Text = "Neu in $($script:displayNotesVersion): $noteSummary  ·  Alle Änderungen"
+      $releaseNotesLink.Text = Get-FittingReleaseCaption $script:displayNotesVersion $noteSummary $releaseNotesLink.Font $releaseNotesLink.Width
       $releaseNotesLink.Visible = $true
     }
   } else {
@@ -1286,6 +1303,13 @@ if ($SelfTest) {
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $copyDiagnostics -or $null -eq $restore -or
       $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $messages -or $null -eq $rollback -or $null -eq $weekly -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
+  }
+  # Ensure the clickable action is never cut off at real Windows DPI/font metrics.
+  $longSummary = 'Die neue Version zeigt sämtliche nachprüfbaren Änderungen inklusive längerer Beschreibungen im Kontrollfenster an.'
+  $caption = Get-FittingReleaseCaption '1.0.3' $longSummary $releaseNotesLink.Font $releaseNotesLink.Width
+  if (!$caption.EndsWith('Alle Änderungen') -or
+      [Windows.Forms.TextRenderer]::MeasureText($caption,$releaseNotesLink.Font).Width -gt $releaseNotesLink.Width) {
+    throw 'Release notes link is clipped instead of fitting into the customer window.'
   }
   # Synthetic stable/preview/missing-asset cases: no network and no installation.
   $testVersion = '1.0.1'
