@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 import sqlite3
+from contextlib import closing
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -208,7 +209,7 @@ class InventoryScaleTests(unittest.TestCase):
 
             self.assertEqual(len(store.tracked_ad_ids()), 10_000)
             self.assertEqual(len(store.ad_history("1000000000")), 4)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 before = connection.execute(
                     "SELECT COUNT(*) FROM ad_snapshots"
                 ).fetchone()[0]
@@ -227,7 +228,7 @@ class InventoryScaleTests(unittest.TestCase):
             self.assertEqual(store.append_inventory_result(
                 failed, observed_at=NOW, source="private-web-product-launcher",
             ), 0)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 after = connection.execute(
                     "SELECT COUNT(*) FROM ad_snapshots"
                 ).fetchone()[0]
