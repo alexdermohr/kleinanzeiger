@@ -182,6 +182,12 @@ jobs:
             python -c 'from mark_api.dashboard import _DASHBOARD_JS; print(_DASHBOARD_JS)' | node --check -
           fi
 
+      - name: Verify SemVer release contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/version_policy.py check
+
       - name: Determine diff base
         id: diff-base
         shell: bash

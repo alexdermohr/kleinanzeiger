@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
+import tomllib
 
 from mark_api.classification_cli import update_classification
 from mark_api.domain import AdSnapshot, InboundMessageEvent, LifecycleState
@@ -17,6 +18,7 @@ from mark_api.storage import SnapshotStore
 from mark_api.windows_customer_choices import apply_customer_labels, list_customer_choices, main
 
 ROOT = Path(__file__).resolve().parents[1]
+VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 SCRIPTS = ROOT / "scripts"
 NOW = datetime(2026, 10, 26, 8, tzinfo=timezone.utc)
 
@@ -134,8 +136,8 @@ class CustomerHubTests(unittest.TestCase):
         self.assertIn("ConvertFrom-SecureString", script)
         self.assertIn("KLAZ_API_KEY", script)
         self.assertIn("Nachrichten verwalten", hub)
-        self.assertIn("'1.0.2'", workflow)
-        self.assertIn("1.0.2", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertIn(f"'{VERSION}'", workflow)
+        self.assertIn(f"{VERSION}", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(
             email_parser().parse_args(["--db", "ads.sqlite", "x.eml"]).emails,
             [Path("x.eml")],
