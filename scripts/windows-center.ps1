@@ -104,7 +104,7 @@ function Add-Button([string]$value,[int]$left,[int]$top,[int]$width,[int]$height
 }
 $headingFont = [System.Drawing.Font]::new('Segoe UI',22,[Drawing.FontStyle]::Bold)
 $title = Add-Label 'Kleinanzeiger' 26 20 420 43 $headingFont
-$intro = Add-Label 'Deine Anzeigen verwalten – alles an einem Ort.' 28 66 585 28 $font $muted
+$intro = Add-Label 'Einrichten · Konto öffnen · Anzeigen verwalten.' 28 66 585 28 $font $muted
 $versionLabel = Add-Label 'Prüfe Installation …' 28 105 575 26 $font $muted
 # The primary workflow fits on one compact page; secondary maintenance
 # remains in this window but is hidden until deliberately requested.
