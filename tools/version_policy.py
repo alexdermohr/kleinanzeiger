@@ -20,6 +20,11 @@ import sys
 import tomllib
 from pathlib import Path
 
+if __package__:
+    from .release_notes import ReleaseNotesError, release_notes
+else:
+    from release_notes import ReleaseNotesError, release_notes
+
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 NUM = r"(?P<version>[0-9]+\.[0-9]+\.[0-9]+)"
@@ -167,7 +172,8 @@ def require_bump_for_customer_changes(
 
 
 def check(
-    root: Path = ROOT, *, require_customer_bump: bool = True
+    root: Path = ROOT, *, require_customer_bump: bool = True,
+    require_release_notes: bool = True,
 ) -> tuple[int, int, int]:
     current = canonical_version(root)
     reference_count = check_references(root, current)
@@ -175,6 +181,11 @@ def check(
     validate_successor(current, previous)
     if require_customer_bump:
         require_bump_for_customer_changes(root, current, previous)
+    if require_release_notes:
+        try:
+            release_notes(version_string(current), root)
+        except (ReleaseNotesError, OSError) as exc:
+            raise VersionPolicyError(f"Missing release notes: {exc}") from exc
     print(
         f"SemVer OK: {version_string(current)}; "
         f"{reference_count} release references; "
@@ -184,7 +195,7 @@ def check(
 
 
 def bump(root: Path, kind: str) -> tuple[int, int, int]:
-    current = check(root, require_customer_bump=False)
+    current = check(root, require_customer_bump=False, require_release_notes=False)
     previous = latest_tag(root)
     if previous is not None and current != previous:
         raise VersionPolicyError(
@@ -203,8 +214,8 @@ def bump(root: Path, kind: str) -> tuple[int, int, int]:
         replacements[path] = new
     for path, new in replacements.items():
         path.write_text(new, encoding="utf-8")
-    check(root)
-    print(f"Version bumped {old_text} -> {new_text} ({kind}). Review release notes before merge.")
+    check(root, require_release_notes=False)
+    print(f"Version bumped {old_text} -> {new_text} ({kind}). Add CHANGELOG.md notes before merge.")
     return following
 
 
