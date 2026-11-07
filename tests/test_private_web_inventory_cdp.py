@@ -347,6 +347,7 @@ class BrowserInventoryTests(unittest.TestCase):
         fake = FakeClient([payload([])])
         with (
             patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority"),
             patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient",
                   return_value=fake) as native_factory,
         ):
@@ -487,6 +488,7 @@ class BrowserInventoryTests(unittest.TestCase):
         client = FakeClient([payload([{"id": "1234567890", "state": "active"}])])
         with (
             patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority"),
             patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient", return_value=client) as cdp,
             patch("mark_api.private_web_runtime.ManagementReadAdapter",
                   side_effect=AssertionError("legacy manager must stay denied")) as legacy,
@@ -536,6 +538,7 @@ class BrowserInventoryTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority"),
             patch("mark_api.launcher._require_private_web_cdp_authority"),
             patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient",
                   return_value=client),
@@ -578,6 +581,7 @@ class BrowserInventoryTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority"),
             patch("mark_api.launcher._require_private_web_cdp_authority"),
             patch("mark_api.private_web_inventory_cdp._LoopbackCdpClient",
                   return_value=client),

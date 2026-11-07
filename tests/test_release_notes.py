@@ -18,7 +18,7 @@ class ReleaseNotesTests(unittest.TestCase):
         version = current_version(ROOT)
         body = release_notes(version, ROOT)
         self.assertTrue(body.startswith(f"# Kleinanzeiger {version} – Windows 11"))
-        self.assertIn("### Neu", body)
+        self.assertRegex(body, r"(?m)^### (?:Neu|Verbessert|Korrigiert|Erste Kundenversion)$")
         self.assertIn("- ", body)
         self.assertNotIn("## [1.0.2]", body)
 

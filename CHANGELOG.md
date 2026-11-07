@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.4] - 2026-11-07
+
+### Korrigiert
+- Nicht freigegebene direkte Browser-Schnittstellen werden auch bei separatem technischen Aufruf vor einem Plattformzugriff abgewiesen.
+- Die Diagnose startet ohne entsprechende Berechtigung keine echte Plattformverbindung; lokale Offline-Funktionen und synthetische Tests bleiben nutzbar.
+
 ## [1.0.3] - 2026-11-07
 
 ### Neu
