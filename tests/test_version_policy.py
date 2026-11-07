@@ -9,8 +9,10 @@ from tools.version_policy import (
     VersionPolicyError,
     bump,
     canonical_version,
+    check,
     check_references,
     next_version,
+    require_bump_for_customer_changes,
     parse_version,
     validate_successor,
 )
@@ -112,6 +114,55 @@ class VersionPolicyTests(unittest.TestCase):
                 content = (root / filename).read_text(encoding="utf-8")
                 self.assertIn("VERSION = tomllib.loads(", content)
                 self.assertNotIn(version, content)
+
+
+    def test_shipping_change_requires_bump_but_docs_only_do_not(self):
+        root = Path(__file__).resolve().parents[1]
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp)
+            for filename in ("pyproject.toml", *RELEASE_REFERENCES):
+                target = copy / filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((root / filename).read_bytes())
+            source = copy / "src/kleinanzeiger/example.py"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-c", "user.name=Release Test",
+                     "-c", "user.email=test@example.invalid", *args],
+                    cwd=copy, check=True, capture_output=True, text=True,
+                )
+
+            git("init", "-q")
+            git("add", ".")
+            git("commit", "-qm", "released customer baseline")
+            version = canonical_version(copy)
+            git("tag", "v" + ".".join(map(str, version)))
+            # README-only maintenance must not trigger an unnecessary ZIP.
+            readme = copy / "README.md"
+            readme.write_text(
+                readme.read_text(encoding="utf-8") + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(check(copy), version)
+
+            # A functional change with the same version must not be merged.
+            source.write_text("VALUE = 2\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-qm", "change runtime without version")
+            with self.assertRaisesRegex(VersionPolicyError, "without a new version"):
+                require_bump_for_customer_changes(copy, version, version)
+            with self.assertRaisesRegex(VersionPolicyError, "without a new version"):
+                check(copy)
+
+            # The official bump command must fix the failure, not deadlock.
+            patched = next_version(version, "patch")
+            self.assertEqual(bump(copy, "patch"), patched)
+            self.assertEqual(check(copy), patched)
 
 
 if __name__ == "__main__":

@@ -137,11 +137,44 @@ def check_references(root: Path, expected: tuple[int, int, int]) -> int:
     return matched
 
 
-def check(root: Path = ROOT) -> tuple[int, int, int]:
+def require_bump_for_customer_changes(
+    root: Path,
+    current: tuple[int, int, int],
+    latest: tuple[int, int, int] | None,
+) -> None:
+    """Do not silently skip a Windows release when shipping files changed.
+
+    Documentation, tests and CI maintenance may be merged without publishing a
+    new customer ZIP. Runtime, installer and package metadata changes may not.
+    CI checks out complete history and tags, so the comparison is reproducible.
+    """
+    if latest is None or current != latest:
+        return
+    tag = "v" + version_string(latest)
+    changed = subprocess.check_output(
+        [
+            "git", "diff", "--name-only", "--diff-filter=ACDMRT",
+            tag, "--", "src/", "scripts/", "pyproject.toml",
+        ],
+        cwd=root, text=True,
+    ).splitlines()
+    if changed:
+        raise VersionPolicyError(
+            f"Customer files changed since {tag} without a new version: "
+            + ", ".join(changed[:8])
+            + ". Run python tools/version_policy.py bump patch|minor|major."
+        )
+
+
+def check(
+    root: Path = ROOT, *, require_customer_bump: bool = True
+) -> tuple[int, int, int]:
     current = canonical_version(root)
     reference_count = check_references(root, current)
     previous = latest_tag(root)
     validate_successor(current, previous)
+    if require_customer_bump:
+        require_bump_for_customer_changes(root, current, previous)
     print(
         f"SemVer OK: {version_string(current)}; "
         f"{reference_count} release references; "
@@ -151,7 +184,7 @@ def check(root: Path = ROOT) -> tuple[int, int, int]:
 
 
 def bump(root: Path, kind: str) -> tuple[int, int, int]:
-    current = check(root)
+    current = check(root, require_customer_bump=False)
     previous = latest_tag(root)
     if previous is not None and current != previous:
         raise VersionPolicyError(
