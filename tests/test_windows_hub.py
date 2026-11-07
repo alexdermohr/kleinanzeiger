@@ -104,7 +104,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertLess(worker.index("if ($null -eq $download)"),
                         worker.index("Write-Output 'ALREADY_CURRENT'"))
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn("-SelfTest -ExpectedInstalledVersion '1.0.1'", workflow)
+        self.assertIn("-SelfTest -ExpectedInstalledVersion '1.0.2'", workflow)
 
     def test_official_update_notice_is_async_and_user_confirmed(self) -> None:
         gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
@@ -313,10 +313,10 @@ except KeyboardInterrupt:
         meta = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn('version = "1.0.1"', meta)
-        self.assertIn("kleinanzeiger-1.0.1-py3-none-any.whl", script)
-        self.assertIn("Kleinanzeiger-v1.0.1-Windows.zip", workflow)
-        self.assertIn("publish-windows-v1.0.1", workflow)
+        self.assertIn('version = "1.0.2"', meta)
+        self.assertIn("kleinanzeiger-1.0.2-py3-none-any.whl", script)
+        self.assertIn("Kleinanzeiger-v1.0.2-Windows.zip", workflow)
+        self.assertIn("publish-windows-v1.0.2", workflow)
 
 
 if __name__ == "__main__":
