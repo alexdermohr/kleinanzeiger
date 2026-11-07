@@ -35,6 +35,7 @@ RELEASE_REFERENCES = {
         rf"version\('kleinanzeiger'\)\s*==\s*'{NUM}'",
         rf"-ExpectedInstalledVersion\s+'{NUM}'",
         rf'"version":"{NUM}"',
+        rf'\.version\s*==\s*"{NUM}"',
         rf"Kleinanzeiger {NUM} – Windows",
     ),
     "scripts/windows-install.ps1": (

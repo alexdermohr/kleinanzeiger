@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
+import tomllib
 import subprocess
 import sys
 import unittest
@@ -12,6 +13,7 @@ from mark_api.launcher import _watch_local_stop_stdin
 
 
 ROOT = Path(__file__).resolve().parents[1]
+VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 SCRIPTS = ROOT / "scripts"
 
 
@@ -104,7 +106,7 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertLess(worker.index("if ($null -eq $download)"),
                         worker.index("Write-Output 'ALREADY_CURRENT'"))
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn("-SelfTest -ExpectedInstalledVersion '1.0.2'", workflow)
+        self.assertIn(f"-SelfTest -ExpectedInstalledVersion '{VERSION}'", workflow)
 
     def test_official_update_notice_is_async_and_user_confirmed(self) -> None:
         gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
@@ -313,10 +315,10 @@ except KeyboardInterrupt:
         meta = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn('version = "1.0.2"', meta)
-        self.assertIn("kleinanzeiger-1.0.2-py3-none-any.whl", script)
-        self.assertIn("Kleinanzeiger-v1.0.2-Windows.zip", workflow)
-        self.assertIn("publish-windows-v1.0.2", workflow)
+        self.assertIn(f'version = "{VERSION}"', meta)
+        self.assertIn(f"kleinanzeiger-{VERSION}-py3-none-any.whl", script)
+        self.assertIn(f"Kleinanzeiger-v{VERSION}-Windows.zip", workflow)
+        self.assertIn(f"publish-windows-v{VERSION}", workflow)
 
 
 if __name__ == "__main__":

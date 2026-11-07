@@ -82,5 +82,37 @@ class VersionPolicyTests(unittest.TestCase):
             self.assertGreater(check_references(copy, expected), 20)
 
 
+    def test_manifest_version_assertion_mismatch_is_rejected(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp)
+            for filename in ("pyproject.toml", *RELEASE_REFERENCES):
+                target = copy / filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((root / filename).read_bytes())
+            workflow = copy / ".github/workflows/windows.yml"
+            expected = ".".join(map(str, canonical_version(root)))
+            before = workflow.read_text(encoding="utf-8")
+            old = f'.version == "{expected}"'
+            self.assertIn(old, before)
+            workflow.write_text(before.replace(old, '.version == "0.0.0"'), encoding="utf-8")
+            with self.assertRaises(VersionPolicyError):
+                check_references(copy, canonical_version(copy))
+
+    def test_current_release_assertions_follow_canonical_version(self):
+        root = Path(__file__).resolve().parents[1]
+        version = ".".join(map(str, canonical_version(root)))
+        for filename in (
+            "tests/test_customer_release_docs.py",
+            "tests/test_windows_customer_hub.py",
+            "tests/test_windows_hub.py",
+            "tests/test_windows_installer_scripts.py",
+        ):
+            with self.subTest(filename=filename):
+                content = (root / filename).read_text(encoding="utf-8")
+                self.assertIn("VERSION = tomllib.loads(", content)
+                self.assertNotIn(version, content)
+
+
 if __name__ == "__main__":
     unittest.main()
