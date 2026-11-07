@@ -1,12 +1,12 @@
 # Kleinanzeiger
 
-**Version 1.0.0 · Windows 11 (64 Bit)**
+**Version 1.0.1 · Windows 11 (64 Bit)**
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
 ## In drei Schritten starten
 
-1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.0.0) und das ZIP **vollständig entpacken**.
+1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.0.1) und das ZIP **vollständig entpacken**.
 2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken. **Einrichten und starten** wählen; beim ersten Mal ist dafür Internet nötig.
 3. **Kleinanzeigen-Konto öffnen**, im eigenen Kleinanzeiger-Chrome anmelden und gegebenenfalls bestätigen. Dann Kleinanzeiger starten und im Dashboard **Mit Kleinanzeigen abgleichen** wählen.
 
@@ -20,6 +20,8 @@ Die Kontoanmeldung erfolgt nur im Browser. Kleinanzeiger fragt nicht nach deinem
 - **Organisation:** Wiedervorlagen, lokale Preispläne, Verkäufe, Lagervermerke, Sicherung und Wiederherstellung.
 
 KI benötigt einen eigenen Anbieterzugang und eine ausdrückliche Kostenfreigabe. Das optionale Live-Nachrichtenfenster benötigt einen **separaten, gegebenenfalls kostenpflichtigen Drittanbieterzugang**. Lokale E-Mail-Auswertungen sind kein Live-Postfach. Unbeaufsichtigte Massenveröffentlichungen und automatischer Nachrichtenversand sind nicht enthalten.
+
+**Neue Versionen:** Das Kontrollfenster prüft beim Öffnen im Hintergrund, ob ein offizielles Update verfügbar ist. Ein Update wird erst nach deinem Klick installiert; ohne Internet läuft Kleinanzeiger wie gewohnt.
 
 ## Hilfe
 

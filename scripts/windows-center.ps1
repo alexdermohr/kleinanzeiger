@@ -61,6 +61,10 @@ $script:stopRequested = $false
 $script:closeAfterStop = $false
 $script:details = ''
 $script:packageVersion = Get-PackageVersion
+$script:latestStableVersion = $null
+$script:releaseCheckClient = $null
+$script:releaseCheckTask = $null
+$script:nextReleaseCheckUtc = [DateTime]::UtcNow
 $ink = [Drawing.Color]::FromArgb(28,46,58)
 $muted = [Drawing.Color]::FromArgb(93,113,124)
 $accent = [Drawing.Color]::FromArgb(17,103,122)
@@ -209,14 +213,96 @@ function Set-Status([string]$message,[bool]$failure=$false) {
   $copyDiagnostics.Visible = $failure
   if ($failure) { $copyDiagnostics.Text = 'Diagnose kopieren' }
 }
+# Only official stable releases with the three files required by the existing
+# verified installer may be advertised. This never authorizes an installation.
+function Get-OfficialReleaseVersion([string]$responseText) {
+  if (!$responseText -or $responseText.Length -gt 262144) { return $null }
+  try {
+    $release = ConvertFrom-Json -InputObject $responseText
+    if ($null -eq $release -or $release.draft -or $release.prerelease) { return $null }
+    $tag = [string]$release.tag_name
+    if ($tag -cnotmatch '^v(?<version>(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$') {
+      return $null
+    }
+    $version = [string]$Matches['version']
+    if ([string]$release.target_commitish -cnotmatch '^[0-9a-f]{40}$') { return $null }
+    $prefix = 'Kleinanzeiger-v' + $version + '-'
+    $rootUrl = 'https://github.com/alexdermohr/kleinanzeiger/releases/download/v' + $version + '/'
+    foreach ($name in @($prefix + 'Windows.zip', $prefix + 'Windows.sha256',
+                        $prefix + 'Release-Manifest.json')) {
+      $matching = @($release.assets | Where-Object {
+        $_.name -ceq $name -and $_.browser_download_url -ceq ($rootUrl + $name)
+      })
+      if ($matching.Count -ne 1) { return $null }
+    }
+    return $version
+  } catch { return $null }
+}
+function Start-ReleaseCheck {
+  if ($null -ne $script:releaseCheckTask) { return }
+  # A failed connection is not an application error. Retry only after six hours.
+  $script:nextReleaseCheckUtc = [DateTime]::UtcNow.AddHours(6)
+  $client = $null
+  try {
+    Add-Type -AssemblyName System.Net.Http
+    $client = [System.Net.Http.HttpClient]::new()
+    $client.Timeout = [TimeSpan]::FromSeconds(8)
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd('Kleinanzeiger-Windows/1.0')
+    $client.DefaultRequestHeaders.Accept.ParseAdd('application/vnd.github+json')
+    $script:releaseCheckClient = $client
+    $script:releaseCheckTask = $client.GetStringAsync(
+      'https://api.github.com/repos/alexdermohr/kleinanzeiger/releases/latest')
+  } catch {
+    if ($client) { $client.Dispose() }
+    $script:releaseCheckClient = $null
+    $script:releaseCheckTask = $null
+  }
+}
+function Receive-ReleaseCheck {
+  $task = $script:releaseCheckTask
+  if ($null -eq $task -or !$task.IsCompleted) { return }
+  try {
+    if (!$task.IsFaulted -and !$task.IsCanceled) {
+      $newVersion = Get-OfficialReleaseVersion ([string]$task.GetAwaiter().GetResult())
+      if ($newVersion) {
+        $script:latestStableVersion = $newVersion
+        Refresh-Controls
+      }
+    }
+  } catch {
+    # Offline/network errors must not stop or distract from the customer app.
+  } finally {
+    $script:releaseCheckTask = $null
+    if ($script:releaseCheckClient) { $script:releaseCheckClient.Dispose() }
+    $script:releaseCheckClient = $null
+  }
+}
+function Get-UpdateAction([string]$installed,[string]$package,[string]$online) {
+  if ($installed -and $online -and [version]$online -gt [version]$installed -and
+      (!$package -or [version]$online -gt [version]$package)) { return 'OnlineUpdate' }
+  if ($package -and (!$installed -or [version]$package -gt [version]$installed)) {
+    return 'Install'
+  }
+  return 'OnlineUpdate'
+}
+
 function Refresh-Controls {
   $busy = $script:process -and !$script:process.HasExited
   $product = $script:mode -eq 'product' -and $busy
   $installed = Get-InstalledVersion
+  $update.Text = 'Installieren / aktualisieren'
   if ($installed) {
     $versionLabel.Text = "Installiert: Version $installed"
-    if ($script:packageVersion -and [version]$installed -lt [version]$script:packageVersion) {
-      $versionLabel.Text += "   |   Bereit: $($script:packageVersion)"
+    $available = $null
+    foreach ($candidate in @($script:packageVersion, $script:latestStableVersion)) {
+      if ($candidate -and [version]$candidate -gt [version]$installed -and
+          (!$available -or [version]$candidate -gt [version]$available)) {
+        $available = $candidate
+      }
+    }
+    if ($available) {
+      $versionLabel.Text += "   |   Version $available verfügbar"
+      $update.Text = "Update auf $available"
     }
   } else {
     $versionLabel.Text = 'Noch nicht eingerichtet – ein Klick genügt.'
@@ -760,6 +846,12 @@ function Finish-Process {
 $timer = [System.Windows.Forms.Timer]::new()
 $timer.Interval = 250
 $timer.Add_Tick({
+  # Poll only completed .NET tasks; never block WinForms with network I/O.
+  Receive-ReleaseCheck
+  if ($null -eq $script:releaseCheckTask -and
+      [DateTime]::UtcNow -ge $script:nextReleaseCheckUtc) {
+    Start-ReleaseCheck
+  }
   if (!$script:process) { return }
   try {
     Drain-Stream 'out'
@@ -796,12 +888,8 @@ $update.Add_Click({
       return
     }
     $installed = Get-InstalledVersion
-    if ($script:packageVersion -and
-        (!$installed -or ([version]$installed -lt [version]$script:packageVersion))) {
-      Start-Worker 'Install'
-    } else {
-      Start-Worker 'OnlineUpdate'
-    }
+    $action = Get-UpdateAction $installed $script:packageVersion $script:latestStableVersion
+    Start-Worker $action
   } catch { Set-Status $_.Exception.Message $true }
 })
 $backup.Add_Click({ try { Start-Worker 'Backup' } catch { Set-Status $_.Exception.Message $true } })
@@ -978,6 +1066,9 @@ $restore.Add_Click({
   }
 })
 $form.Add_FormClosed({
+  if ($script:releaseCheckClient) { $script:releaseCheckClient.Dispose() }
+  $script:releaseCheckTask = $null
+  $script:releaseCheckClient = $null
   if ($script:singleInstanceMutex) {
     try { $script:singleInstanceMutex.ReleaseMutex() } catch { }
     $script:singleInstanceMutex.Dispose()
@@ -1001,6 +1092,7 @@ $form.Add_FormClosing({
   }
 })
 $form.Add_Shown({
+  Start-ReleaseCheck
   Refresh-Controls
   if (Test-ActiveProduct) {
     Set-Status 'Kleinanzeiger ist noch geöffnet. Für ein Update zuerst dort beenden.'
@@ -1075,6 +1167,36 @@ if ($SelfTest) {
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $copyDiagnostics -or $null -eq $restore -or
       $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $messages -or $null -eq $rollback -or $null -eq $weekly -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
+  }
+  # Synthetic stable/preview/missing-asset cases: no network and no installation.
+  $testVersion = '1.0.1'
+  $rootUrl = 'https://github.com/alexdermohr/kleinanzeiger/releases/download/v' + $testVersion + '/'
+  $testRelease = @{
+    tag_name='v1.0.1'; draft=$false; prerelease=$false
+    target_commitish=('a' * 40)
+    assets=@(
+      @{name='Kleinanzeiger-v1.0.1-Windows.zip';browser_download_url=($rootUrl+'Kleinanzeiger-v1.0.1-Windows.zip')},
+      @{name='Kleinanzeiger-v1.0.1-Windows.sha256';browser_download_url=($rootUrl+'Kleinanzeiger-v1.0.1-Windows.sha256')},
+      @{name='Kleinanzeiger-v1.0.1-Release-Manifest.json';browser_download_url=($rootUrl+'Kleinanzeiger-v1.0.1-Release-Manifest.json')}
+    )
+  }
+  if ((Get-OfficialReleaseVersion (ConvertTo-Json $testRelease -Depth 5)) -ne $testVersion) {
+    throw 'Stable complete release was not detected.'
+  }
+  $testRelease.prerelease = $true
+  if (Get-OfficialReleaseVersion (ConvertTo-Json $testRelease -Depth 5)) {
+    throw 'A preview release was offered to the customer.'
+  }
+  $testRelease.prerelease = $false
+  $testRelease.assets = @($testRelease.assets | Select-Object -First 2)
+  if (Get-OfficialReleaseVersion (ConvertTo-Json $testRelease -Depth 5)) {
+    throw 'An incomplete release was offered to the customer.'
+  }
+  if ((Get-UpdateAction '1.0.0' '1.0.0' '1.0.1') -ne 'OnlineUpdate' -or
+      (Get-UpdateAction '0.1.49' '1.0.0' '1.0.1') -ne 'OnlineUpdate' -or
+      (Get-UpdateAction '0.1.49' '1.0.0' $null) -ne 'Install' -or
+      (Get-UpdateAction $null '1.0.0' $null) -ne 'Install') {
+    throw 'Update action did not choose the newest available source.'
   }
   $timer.Dispose()
   $form.Dispose()
