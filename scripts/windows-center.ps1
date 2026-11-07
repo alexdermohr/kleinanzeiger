@@ -62,6 +62,8 @@ $script:closeAfterStop = $false
 $script:details = ''
 $script:packageVersion = Get-PackageVersion
 $script:latestStableVersion = $null
+$script:latestStableNotes = $null
+$script:displayNotesVersion = $null
 $script:releaseCheckClient = $null
 $script:releaseCheckTask = $null
 $script:nextReleaseCheckUtc = [DateTime]::UtcNow
@@ -109,7 +111,14 @@ function Add-Button([string]$value,[int]$left,[int]$top,[int]$width,[int]$height
 $headingFont = [System.Drawing.Font]::new('Segoe UI',22,[Drawing.FontStyle]::Bold)
 $title = Add-Label 'Kleinanzeiger' 26 20 420 43 $headingFont
 $intro = Add-Label 'Einrichten · Konto öffnen · Anzeigen verwalten.' 28 66 585 28 $font $muted
-$versionLabel = Add-Label 'Prüfe Installation …' 28 105 575 26 $font $muted
+$versionLabel = Add-Label 'Prüfe Installation …' 28 98 575 24 $font $muted
+$releaseNotesLink = [System.Windows.Forms.LinkLabel]::new()
+$releaseNotesLink.Text = 'Alle Änderungen ansehen'
+$releaseNotesLink.SetBounds(28,124,584,20)
+$releaseNotesLink.LinkColor = $accent
+$releaseNotesLink.AutoEllipsis = $true
+$releaseNotesLink.Visible = $false
+$form.Controls.Add($releaseNotesLink)
 # The primary workflow fits on one compact page; secondary maintenance
 # remains in this window but is hidden until deliberately requested.
 $primary = Add-Button 'Kleinanzeiger starten' 28 145 584 55 $true
@@ -241,6 +250,94 @@ function Get-OfficialReleaseVersion([string]$responseText) {
     return $version
   } catch { return $null }
 }
+# Release notes belong to the same validated official release as the update.
+# Treat upstream Markdown as text; never render HTML or open untrusted URLs.
+function Get-OfficialReleaseNotes([string]$responseText,[string]$version) {
+  if (!$version -or (Get-OfficialReleaseVersion $responseText) -cne $version) { return $null }
+  try {
+    $release = ConvertFrom-Json -InputObject $responseText
+    $body = [string]$release.body
+    if (!$body -or $body.Trim().Length -lt 20 -or $body.Length -gt 16000 -or
+        $body -match '[\x00-\x08\x0B\x0C\x0E-\x1F]') { return $null }
+    return $body.Trim()
+  } catch { return $null }
+}
+function Get-LocalReleaseNotes([string]$version) {
+  if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { return $null }
+  $path = Join-Path $base 'CHANGELOG.md'
+  if (!(Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+  try {
+    $file = Get-Item -LiteralPath $path
+    if ($file.Length -gt 100000) { return $null }
+    $source = Get-Content -LiteralPath $path -Encoding UTF8 -Raw
+    $matches = [regex]::Matches($source,'(?m)^## \[(?<version>[0-9]+\.[0-9]+\.[0-9]+)\](?: - \d{4}-\d{2}-\d{2})?\r?$')
+    $found = @($matches | Where-Object { $_.Groups['version'].Value -ceq $version })
+    if ($found.Count -ne 1) { return $null }
+    $entry = $found[0]
+    $start = $entry.Index + $entry.Length
+    $end = $source.Length
+    foreach ($candidate in $matches) {
+      if ($candidate.Index -gt $entry.Index) { $end = $candidate.Index; break }
+    }
+    $notes = $source.Substring($start,$end-$start).Trim()
+    if ($notes.Length -lt 20 -or $notes.Length -gt 16000) { return $null }
+    return $notes
+  } catch { return $null }
+}
+function Get-ReleaseNotesForVersion([string]$version) {
+  if ($version -and $version -ceq $script:latestStableVersion -and $script:latestStableNotes) {
+    return $script:latestStableNotes
+  }
+  return Get-LocalReleaseNotes $version
+}
+function Get-ReleaseSummary([string]$notes) {
+  if (!$notes) { return 'Alle Änderungen ansehen' }
+  foreach ($line in ($notes -split '\r?\n')) {
+    if ($line -match '^\s*-\s+(.+)$') {
+      $summary = $Matches[1].Trim()
+      if ($summary.Length -gt 58) { return $summary.Substring(0,55) + '…' }
+      return $summary
+    }
+  }
+  return 'Alle Änderungen ansehen'
+}
+function Show-ReleaseNotes([string]$version) {
+  if (!$version) { return }
+  $notes = Get-ReleaseNotesForVersion $version
+  if (!$notes) {
+    $notes = 'Für diese Version liegen derzeit keine lesbaren Änderungsnotizen vor. Die offizielle Versionsseite ist unter github.com/alexdermohr/kleinanzeiger/releases/tag/v' + $version + ' zu finden.'
+  }
+  $dialog = [System.Windows.Forms.Form]::new()
+  $dialog.Text = 'Kleinanzeiger ' + $version + ' – Was ist neu?'
+  $dialog.ClientSize = [System.Drawing.Size]::new(600,430)
+  $dialog.FormBorderStyle = 'FixedDialog'
+  $dialog.MaximizeBox = $false
+  $dialog.MinimizeBox = $false
+  $dialog.StartPosition = 'CenterParent'
+  $dialog.Font = $font
+  $titleLabel = [System.Windows.Forms.Label]::new()
+  $titleLabel.Text = 'Änderungen in Version ' + $version
+  $titleLabel.SetBounds(20,15,555,28)
+  $titleLabel.Font = $fontBold
+  $dialog.Controls.Add($titleLabel)
+  $content = [System.Windows.Forms.TextBox]::new()
+  $content.Multiline = $true
+  $content.ReadOnly = $true
+  $content.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+  $content.WordWrap = $true
+  $content.BackColor = [System.Drawing.Color]::White
+  $content.SetBounds(20,52,560,313)
+  $content.Text = $notes
+  $dialog.Controls.Add($content)
+  $close = [System.Windows.Forms.Button]::new()
+  $close.Text = 'Schließen'
+  $close.SetBounds(440,378,140,35)
+  $close.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $dialog.AcceptButton = $close
+  $dialog.Controls.Add($close)
+  try { $dialog.ShowDialog($form) | Out-Null }
+  finally { $dialog.Dispose() }
+}
 function Start-ReleaseCheck {
   if ($null -ne $script:releaseCheckTask) { return }
   # A failed connection is not an application error. Retry only after six hours.
@@ -266,9 +363,11 @@ function Receive-ReleaseCheck {
   if ($null -eq $task -or !$task.IsCompleted) { return }
   try {
     if (!$task.IsFaulted -and !$task.IsCanceled) {
-      $newVersion = Get-OfficialReleaseVersion ([string]$task.GetAwaiter().GetResult())
+      $response = [string]$task.GetAwaiter().GetResult()
+      $newVersion = Get-OfficialReleaseVersion $response
       if ($newVersion) {
         $script:latestStableVersion = $newVersion
+        $script:latestStableNotes = Get-OfficialReleaseNotes $response $newVersion
         Refresh-Controls
       }
     }
@@ -294,6 +393,8 @@ function Refresh-Controls {
   $product = $script:mode -eq 'product' -and $busy
   $installed = Get-InstalledVersion
   $update.Text = 'Installieren / aktualisieren'
+  $script:displayNotesVersion = $null
+  $releaseNotesLink.Visible = $false
   if ($installed) {
     $versionLabel.Text = "Installiert: Version $installed"
     $available = $null
@@ -306,6 +407,18 @@ function Refresh-Controls {
     if ($available) {
       $versionLabel.Text += "   |   Version $available verfügbar"
       $update.Text = "Update auf $available"
+      $script:displayNotesVersion = $available
+    } elseif ($script:latestStableVersion -and [version]$script:latestStableVersion -eq [version]$installed) {
+      # Keep the just-installed version's changes accessible afterwards.
+      $script:displayNotesVersion = $installed
+    } elseif (Get-LocalReleaseNotes $installed) {
+      # Also work on the next offline launch, with the bundled changelog.
+      $script:displayNotesVersion = $installed
+    }
+    if ($script:displayNotesVersion) {
+      $noteSummary = Get-ReleaseSummary (Get-ReleaseNotesForVersion $script:displayNotesVersion)
+      $releaseNotesLink.Text = "Neu in $($script:displayNotesVersion): $noteSummary  ·  Alle Änderungen"
+      $releaseNotesLink.Visible = $true
     }
   } else {
     $versionLabel.Text = 'Noch nicht eingerichtet – ein Klick genügt.'
@@ -884,6 +997,9 @@ $primary.Add_Click({
     }
   } catch { Set-Status $_.Exception.Message $true }
 })
+$releaseNotesLink.Add_Click({
+  if ($script:displayNotesVersion) { Show-ReleaseNotes $script:displayNotesVersion }
+})
 $update.Add_Click({
   try {
     if (Test-ActiveProduct) {
@@ -1177,6 +1293,7 @@ if ($SelfTest) {
   $testRelease = @{
     tag_name='v1.0.1'; draft=$false; prerelease=$false
     target_commitish=('a' * 40)
+    body="### Neu`n- Ein Update zeigt jetzt die Änderungen an."
     assets=@(
       @{name='Kleinanzeiger-v1.0.1-Windows.zip';browser_download_url=($rootUrl+'Kleinanzeiger-v1.0.1-Windows.zip')},
       @{name='Kleinanzeiger-v1.0.1-Windows.sha256';browser_download_url=($rootUrl+'Kleinanzeiger-v1.0.1-Windows.sha256')},
@@ -1186,6 +1303,22 @@ if ($SelfTest) {
   if ((Get-OfficialReleaseVersion (ConvertTo-Json $testRelease -Depth 5)) -ne $testVersion) {
     throw 'Stable complete release was not detected.'
   }
+  if ((Get-OfficialReleaseNotes (ConvertTo-Json $testRelease -Depth 5) $testVersion) -notmatch 'Ein Update zeigt') {
+    throw 'Release notes for validated stable releases were lost.'
+  }
+  $testRelease.body = ''
+  if (Get-OfficialReleaseNotes (ConvertTo-Json $testRelease -Depth 5) $testVersion) {
+    throw 'Empty release notes were shown.'
+  }
+  $testRelease.body = '### Neu' + "`n" + '- Validierter Versionshinweis.'
+  if (Get-OfficialReleaseNotes (ConvertTo-Json $testRelease -Depth 5) '9.9.9') {
+    throw 'Release notes were shown for a different version.'
+  }
+  $testRelease.body = ('N' * 16001)
+  if (Get-OfficialReleaseNotes (ConvertTo-Json $testRelease -Depth 5) $testVersion) {
+    throw 'Oversized release notes were shown.'
+  }
+  $testRelease.body = '### Neu' + "`n" + '- Validierter Versionshinweis.'
   $testRelease.prerelease = $true
   if (Get-OfficialReleaseVersion (ConvertTo-Json $testRelease -Depth 5)) {
     throw 'A preview release was offered to the customer.'

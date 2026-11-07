@@ -45,15 +45,24 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("if ($mayDisposeStage", script)
         self.assertIn(f"m.version('kleinanzeiger') == '{VERSION}'", script)
 
-    def test_release_notes_match_ai_100_and_checked_unknown_contract(self):
+    def test_release_notes_are_version_bound_and_not_a_feature_roadmap(self):
+        from tools.release_notes import release_notes
+
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        notes = workflow.split("<<\'EOF\'", 1)[1].split("\\n          EOF", 1)[0]
-        self.assertIn("Bis zu 10.000 verifizierte eigene veröffentlichte Anzeigen", notes)
-        self.assertIn("bis zu 100 einzelne KI-Anfragen", notes)
-        self.assertIn("bis zu zehn sequenzielle KI-Anfragen für lokale Entwurfsaufträge", notes)
-        self.assertIn("manuell geprüfte UNKNOWN-Beträge", notes)
-        self.assertIn("wiederkehrende autonome Autopilot-Regeln", notes)
+        notes = release_notes(VERSION, ROOT)
+        self.assertIn(f"# Kleinanzeiger {VERSION} – Windows 11", notes)
+        self.assertIn("Alle Änderungen ansehen", notes)
+        self.assertIn("ohne automatische Installation", notes)
+        self.assertIn("python3 tools/release_notes.py --current", workflow)
+        self.assertIn("--notes-file", workflow)
+        self.assertNotIn("<<'EOF'", workflow)
         self.assertNotIn("Massenpreisänderungen, Autopilot,", notes)
+        features = (ROOT / "docs/Kleinanzeiger-Funktionen.html").read_text(encoding="utf-8")
+        self.assertIn("bis zu 10.000 Anzeigen", features)
+        self.assertIn("KI-Stapelaufträge", features)
+        self.assertIn("Kostenfreigabe", features)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Unbeaufsichtigte Massenveröffentlichungen", readme)
 
     def test_no_powershell_home_reserved_variable_write(self):
         for filename in ("windows-install.ps1", "windows-chrome.ps1"):
