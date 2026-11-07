@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -190,6 +191,49 @@ class InventoryScaleTests(unittest.TestCase):
             )
             self.assertEqual(committed, 0)
             self.assertEqual(store.tracked_ad_ids(), ())
+
+    def test_repeated_10000_success_then_late_failure_preserves_history(self):
+        # Repeating a large successful owner read must not replace older rows.
+        # A later page-200 failure must not truncate the last good inventory.
+        with TemporaryDirectory() as temp:
+            database = Path(temp) / "customer-scale.sqlite"
+            store = SnapshotStore(database, create_if_missing=True)
+            for _round in range(4):
+                client, read = self.cdp(make_pages())
+                self.assertTrue(client.closed)
+                self.assertEqual(read.status, ReadStatus.SUCCESS_NONEMPTY)
+                self.assertEqual(store.append_inventory_result(
+                    read, observed_at=NOW, source="private-web-product-launcher",
+                ), 10_000)
+
+            self.assertEqual(len(store.tracked_ad_ids()), 10_000)
+            self.assertEqual(len(store.ad_history("1000000000")), 4)
+            with sqlite3.connect(database) as connection:
+                before = connection.execute(
+                    "SELECT COUNT(*) FROM ad_snapshots"
+                ).fetchone()[0]
+            self.assertEqual(before, 40_000)
+
+            broken_pages = make_pages()
+            broken_pages[-1]["paging"]["last"] += 1
+            client, failed = self.cdp(broken_pages)
+            self.assertTrue(client.closed)
+            self.assertEqual(failed.status, ReadStatus.PARSE_ERROR)
+            self.assertIsNone(failed.value)
+            self.assertEqual(
+                sum(bool(params and params.get("awaitPromise"))
+                    for _, params in client.calls), 200,
+            )
+            self.assertEqual(store.append_inventory_result(
+                failed, observed_at=NOW, source="private-web-product-launcher",
+            ), 0)
+            with sqlite3.connect(database) as connection:
+                after = connection.execute(
+                    "SELECT COUNT(*) FROM ad_snapshots"
+                ).fetchone()[0]
+            self.assertEqual(after, before)
+            self.assertEqual(len(store.tracked_ad_ids()), 10_000)
+            self.assertEqual(len(store.ad_history("1000009999")), 4)
 
 
 if __name__ == "__main__":
