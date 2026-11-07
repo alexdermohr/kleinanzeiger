@@ -18,7 +18,7 @@ class ReleaseNotesTests(unittest.TestCase):
         version = current_version(ROOT)
         body = release_notes(version, ROOT)
         self.assertTrue(body.startswith(f"# Kleinanzeiger {version} – Windows 11"))
-        self.assertIn("### Neu", body)
+        self.assertRegex(body, r"(?m)^### (Neu|Verbessert|Behoben|Sicherheit|Erste Kundenversion)$")
         self.assertIn("- ", body)
         self.assertNotIn("## [1.0.2]", body)
 
@@ -71,7 +71,8 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertIn("function Show-ReleaseNotes", ui)
         self.assertIn("$content.ReadOnly = $true", ui)
         self.assertIn("$releaseNotesLink.Visible = $true", ui)
-        self.assertIn("Neu in $($script:displayNotesVersion)", ui)
+        self.assertIn("Get-FittingReleaseCaption $script:displayNotesVersion", ui)
+        self.assertIn("return $prefix + 'Alle Änderungen'", ui)
         self.assertIn("elseif (Get-LocalReleaseNotes $installed)", ui)
         self.assertIn("Show-ReleaseNotes $script:displayNotesVersion", ui)
         self.assertIn("Start-Worker $action", ui)
