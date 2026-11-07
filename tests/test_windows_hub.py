@@ -104,7 +104,37 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertLess(worker.index("if ($null -eq $download)"),
                         worker.index("Write-Output 'ALREADY_CURRENT'"))
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn("-SelfTest -ExpectedInstalledVersion '1.0.0'", workflow)
+        self.assertIn("-SelfTest -ExpectedInstalledVersion '1.0.1'", workflow)
+
+    def test_official_update_notice_is_async_and_user_confirmed(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("function Get-OfficialReleaseVersion", gui)
+        self.assertIn("function Start-ReleaseCheck", gui)
+        self.assertIn("function Receive-ReleaseCheck", gui)
+        self.assertIn("function Get-UpdateAction", gui)
+        self.assertIn("api.github.com/repos/alexdermohr/kleinanzeiger/releases/latest", gui)
+        self.assertIn("$client.GetStringAsync(", gui)
+        self.assertIn("if ($null -eq $task -or !$task.IsCompleted) { return }", gui)
+        self.assertIn("Version $available verfügbar", gui)
+        self.assertIn('"Update auf $available"', gui)
+        self.assertIn("[TimeSpan]::FromSeconds(8)", gui)
+        self.assertIn("AddHours(6)", gui)
+        self.assertIn("$release.draft -or $release.prerelease", gui)
+        self.assertIn("Windows.sha256", gui)
+        self.assertIn("Release-Manifest.json", gui)
+        self.assertIn("($prefix + 'Windows.zip')", gui)
+        self.assertIn("($prefix + 'Windows.sha256')", gui)
+        self.assertIn("($prefix + 'Release-Manifest.json')", gui)
+        self.assertNotIn("@($prefix + 'Windows.zip',", gui)
+        self.assertIn("$tag.Substring(1)", gui)
+        self.assertNotIn("$Matches['version']", gui.split("function Get-OfficialReleaseVersion", 1)[1].split("function Start-ReleaseCheck", 1)[0])
+        self.assertIn("Get-UpdateAction $installed $script:packageVersion $script:latestStableVersion", gui)
+        # The UI still delegates the only installation to the existing verified worker.
+        self.assertIn("Start-Worker $action", gui)
+        worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
+        self.assertIn("Download-VerifiedRelease", worker)
+        self.assertIn("Get-FileHash", worker)
+        self.assertNotIn("Download-VerifiedRelease", gui)
 
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
@@ -283,10 +313,10 @@ except KeyboardInterrupt:
         meta = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         script = (SCRIPTS / "windows-install.ps1").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
-        self.assertIn('version = "1.0.0"', meta)
-        self.assertIn("kleinanzeiger-1.0.0-py3-none-any.whl", script)
-        self.assertIn("Kleinanzeiger-v1.0.0-Windows.zip", workflow)
-        self.assertIn("publish-windows-v1.0.0", workflow)
+        self.assertIn('version = "1.0.1"', meta)
+        self.assertIn("kleinanzeiger-1.0.1-py3-none-any.whl", script)
+        self.assertIn("Kleinanzeiger-v1.0.1-Windows.zip", workflow)
+        self.assertIn("publish-windows-v1.0.1", workflow)
 
 
 if __name__ == "__main__":
