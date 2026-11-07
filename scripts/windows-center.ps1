@@ -228,8 +228,11 @@ function Get-OfficialReleaseVersion([string]$responseText) {
     if ([string]$release.target_commitish -cnotmatch '^[0-9a-f]{40}$') { return $null }
     $prefix = 'Kleinanzeiger-v' + $version + '-'
     $rootUrl = 'https://github.com/alexdermohr/kleinanzeiger/releases/download/v' + $version + '/'
-    foreach ($name in @($prefix + 'Windows.zip', $prefix + 'Windows.sha256',
-                        $prefix + 'Release-Manifest.json')) {
+    foreach ($name in @(
+      ($prefix + 'Windows.zip')
+      ($prefix + 'Windows.sha256')
+      ($prefix + 'Release-Manifest.json')
+    )) {
       $matching = @($release.assets | Where-Object {
         $_.name -ceq $name -and $_.browser_download_url -ceq ($rootUrl + $name)
       })
