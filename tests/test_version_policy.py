@@ -16,6 +16,18 @@ from tools.version_policy import (
     parse_version,
     validate_successor,
 )
+from tools.release_notes import release_notes, ReleaseNotesError
+
+
+def add_customer_note(root: Path, version: tuple[int, int, int]) -> None:
+    target = root / "CHANGELOG.md"
+    header = "## [" + ".".join(map(str, version)) + "] - 2099-01-01"
+    old = target.read_text(encoding="utf-8")
+    target.write_text(
+        header + "\n\n### Neu\n- Kunden erhalten eine sichtbare Änderungsübersicht für diese Version.\n\n" + old,
+        encoding="utf-8",
+    )
+
 
 
 class VersionPolicyTests(unittest.TestCase):
@@ -38,6 +50,13 @@ class VersionPolicyTests(unittest.TestCase):
         for invalid in ((0, 1, 49), (1, 0, 3), (1, 2, 0), (2, 1, 0)):
             with self.subTest(invalid=invalid), self.assertRaises(VersionPolicyError):
                 validate_successor(invalid, (1, 0, 1))
+
+    def test_current_version_has_customer_release_notes(self):
+        root = Path(__file__).resolve().parents[1]
+        current = ".".join(map(str, canonical_version(root)))
+        self.assertIn("Kleinanzeiger " + current, release_notes(current, root))
+        with self.assertRaises(ReleaseNotesError):
+            release_notes("99.99.99", root)
 
     def test_customer_release_references_match_project_version(self):
         root = Path(__file__).resolve().parents[1]
@@ -70,7 +89,7 @@ class VersionPolicyTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp)
-            for filename in ("pyproject.toml", *RELEASE_REFERENCES):
+            for filename in ("pyproject.toml", "CHANGELOG.md", *RELEASE_REFERENCES):
                 target = copy / filename
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes((root / filename).read_bytes())
@@ -82,6 +101,10 @@ class VersionPolicyTests(unittest.TestCase):
             self.assertEqual(bump(copy, "minor"), expected)
             self.assertEqual(canonical_version(copy), expected)
             self.assertGreater(check_references(copy, expected), 20)
+            with self.assertRaisesRegex(VersionPolicyError, "Missing release notes"):
+                check(copy)
+            add_customer_note(copy, expected)
+            self.assertEqual(check(copy), expected)
 
 
     def test_manifest_version_assertion_mismatch_is_rejected(self):
@@ -122,7 +145,7 @@ class VersionPolicyTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp)
-            for filename in ("pyproject.toml", *RELEASE_REFERENCES):
+            for filename in ("pyproject.toml", "CHANGELOG.md", *RELEASE_REFERENCES):
                 target = copy / filename
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes((root / filename).read_bytes())
@@ -162,6 +185,9 @@ class VersionPolicyTests(unittest.TestCase):
             # The official bump command must fix the failure, not deadlock.
             patched = next_version(version, "patch")
             self.assertEqual(bump(copy, "patch"), patched)
+            with self.assertRaisesRegex(VersionPolicyError, "Missing release notes"):
+                check(copy)
+            add_customer_note(copy, patched)
             self.assertEqual(check(copy), patched)
 
 
