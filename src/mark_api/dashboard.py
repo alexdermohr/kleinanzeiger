@@ -390,9 +390,9 @@ _DASHBOARD_HTML = """<!doctype html>
   <main id="top">
     <header class="app-header">
       <div class="brand">
-        <span class="eyebrow">DEIN ANZEIGEN-COCKPIT</span>
+        <span class="eyebrow">ANZEIGENVERWALTUNG</span>
         <h1>Kleinanzeiger</h1>
-        <p>Alle Anzeigen auf einen Blick. Einfach bearbeiten und auswerten.</p>
+        <p>Anzeigen, Kennzahlen und Aufgaben an einem Ort.</p>
       </div>
       <div class="header-actions">
         <button id="sync-now" class="reload-button" type="button" hidden>Mit Kleinanzeigen abgleichen</button>
@@ -539,7 +539,7 @@ _DASHBOARD_HTML = """<!doctype html>
           <tbody id="ads-body"></tbody>
         </table>
       </div>
-      <p id="empty" class="empty" hidden>Keine Anzeigenhistorie vorhanden.</p>
+      <p id="empty" class="empty" hidden>Noch keine Anzeigen gespeichert. Melde dich im Kleinanzeiger-Chrome an und wähle Mit Kleinanzeigen abgleichen.</p>
 
           <details class="compact-details">
             <summary>Woher kommen die Zahlen?</summary>
