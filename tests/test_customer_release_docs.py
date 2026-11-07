@@ -42,7 +42,7 @@ class FirstCustomerReleaseTests(unittest.TestCase):
                 self.assertNotIn("Bereits in v0", data)
                 self.assertNotIn("Im aktuellen Entwicklungsbranch", data)
                 self.assertNotIn("README-aktualisiert", data)
-        self.assertIn("Version 1.0.1", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("Version 1.0.2", (ROOT / "README.md").read_text(encoding="utf-8"))
         self.assertLess((ROOT / "README.md").stat().st_size, 5000)
         self.assertLess((ROOT / "docs/windows-installation.md").stat().st_size, 5000)
         self.assertLess((ROOT / "docs/Kleinanzeiger-Handbuch.html").stat().st_size, 16000)
@@ -90,16 +90,16 @@ class FirstCustomerReleaseTests(unittest.TestCase):
     def test_release_pipeline_provides_single_customer_zip_not_historical_docs(self) -> None:
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
         meta = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "1.0.1"', meta)
-        self.assertIn("release_tag='v1.0.1'", workflow)
+        self.assertIn('version = "1.0.2"', meta)
+        self.assertIn("release_tag='v1.0.2'", workflow)
         self.assertIn("Copy-Item docs\\START-HIER.html $staging", workflow)
         self.assertIn('test -s "$stage/unpacked/START-HIER.html"', workflow)
-        self.assertIn("Kleinanzeiger-v1.0.1-Windows.zip", workflow)
+        self.assertIn("Kleinanzeiger-v1.0.2-Windows.zip", workflow)
         self.assertNotIn("README-aktualisiert", workflow)
         release = workflow.split("          gh release create ", 1)[1]
         self.assertIn('            "$zip" \\', release)
-        self.assertIn('            "$stage/Kleinanzeiger-v1.0.1-Windows.sha256" \\', release)
-        self.assertIn('            "$stage/Kleinanzeiger-v1.0.1-Release-Manifest.json"', release)
+        self.assertIn('            "$stage/Kleinanzeiger-v1.0.2-Windows.sha256" \\', release)
+        self.assertIn('            "$stage/Kleinanzeiger-v1.0.2-Release-Manifest.json"', release)
         self.assertNotIn('"$stage/unpacked/Kleinanzeiger-Funktionen.html"', release)
 
 

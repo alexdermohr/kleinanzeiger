@@ -420,6 +420,8 @@ _DASHBOARD_HTML = """<!doctype html>
         </div>
       </details>
     </nav>
+    <p id="last-confirmed-sync" class="note" role="status" aria-live="polite">Letzter erfolgreicher Kontoabgleich: wird geladen …</p>
+    <section id="connection-help" class="status warning" role="status" hidden></section>
     <section id="offline-notice" class="status warning" role="status" hidden>
       Lokaler Arbeitsmodus: Der gespeicherte Bestand kann veraltet sein. Entwürfe, Aufträge
       und Auswertungen bleiben verfügbar. Änderungen auf Kleinanzeigen sind gesperrt.
@@ -1775,11 +1777,34 @@ function renderSyncStatus(sync, recovery) {
   const view = byId("sync-status");
   if (!sync || typeof sync !== "object") {
     view.textContent = "Sync-Status nicht verfügbar; Datenfrische unbekannt.";
+    const freshness = optionalById("last-confirmed-sync");
+    if (freshness) freshness.textContent = "Letzter erfolgreicher Kontoabgleich derzeit nicht abrufbar.";
     return;
   }
   const latest = sync.latest_attempt;
   const successful = sync.last_successful_attempt;
   const state = sync.state;
+  const freshness = optionalById("last-confirmed-sync");
+  if (freshness) {
+    const completed = successful && typeof successful.completed_at === "string"
+      ? successful.completed_at : null;
+    const moment = completed ? new Date(completed) : null;
+    const valid = moment && Number.isFinite(moment.getTime());
+    const observed = valid
+      ? new Intl.DateTimeFormat("de-DE", {dateStyle:"medium", timeStyle:"short"}).format(moment)
+      : null;
+    freshness.textContent = observed
+      ? "Letzter bestätigter Kontoabgleich: " + observed
+        + " (" + ageDescription(completed) + ")."
+      : "Noch kein erfolgreicher Kontoabgleich. Im Kleinanzeiger-Chrome anmelden und „Mit Kleinanzeigen abgleichen“ wählen.";
+    const open = recovery && typeof recovery === "object"
+      ? recovery.unresolved_count : null;
+    if (Number.isSafeInteger(open) && open > 0) {
+      freshness.textContent += " Offene Abgleichversuche prüfen; Daten können veraltet sein.";
+    } else if (state === "failed") {
+      freshness.textContent += " Der letzte Versuch ist fehlgeschlagen; gespeicherter Bestand kann veraltet sein.";
+    }
+  }
   let headline = "Noch kein Eigentümer-Sync protokolliert.";
   if (latest && typeof latest === "object") {
     const ago = ageDescription(latest.started_at);
@@ -4705,6 +4730,24 @@ const syncFailureHints = Object.freeze({
   owner_inventory_read_failed: "Die Anzeigenübersicht konnte nicht vollständig gelesen werden. Anzeigenübersicht im Kleinanzeiger-Chrome prüfen.",
 });
 
+const connectionHelpMessages = Object.freeze({
+  owner_inventory_login_required: "Anmeldung erforderlich: „Kleinanzeigen-Konto öffnen“ im Kleinanzeiger-Startfenster wählen, dort bei Kleinanzeigen anmelden und danach „Mit Kleinanzeigen abgleichen“ anklicken.",
+  owner_inventory_browser_unavailable: "Kleinanzeiger-Chrome nicht erreichbar: Das Startfenster öffnen, den Konto-Browser prüfen und Kleinanzeiger kontrolliert neu starten.",
+  owner_inventory_connection_unavailable: "Keine Verbindung zu Kleinanzeigen: Internet und Anmeldung im Kleinanzeiger-Chrome prüfen. Vorhandene Anzeigen bleiben gespeichert.",
+  write_session_required: "Diese Sitzung kann keine Plattformänderungen ausführen. Kleinanzeiger über Kleinanzeiger.cmd vollständig neu starten und den Eigenbestand erneut abgleichen.",
+  read_only: "Bearbeiten und Veröffentlichen sind in dieser reinen Ansicht nicht möglich. Kleinanzeiger über Kleinanzeiger.cmd normal starten.",
+  restart: "Anzeigen erfolgreich gelesen. Für Plattformänderungen Kleinanzeiger kontrolliert neu starten; beim Start wird der Eigenbestand erneut geprüft.",
+});
+function renderConnectionHelp(reason) {
+  if (typeof optionalById !== "function") return;
+  const notice = optionalById("connection-help");
+  if (!notice) return;
+  const message = Object.prototype.hasOwnProperty.call(connectionHelpMessages, reason)
+    ? connectionHelpMessages[reason] : null;
+  notice.hidden = !message;
+  if (message) notice.textContent = message;
+}
+
 async function syncNow() {
   if (!manualSyncAvailable || !localUiReady() || syncInFlight) return;
   syncInFlight = true;
@@ -4729,6 +4772,7 @@ async function syncNow() {
       if (result && typeof result.error === "string"
           && Object.prototype.hasOwnProperty.call(syncFailureHints, result.error)) {
         failureHint = syncFailureHints[result.error];
+        renderConnectionHelp(result.error);
       }
       throw new Error("Abgleich nicht bestätigt");
     }
@@ -4739,6 +4783,7 @@ async function syncNow() {
     }
     status.textContent = result.current_ads + " Anzeigen aus dem Kundenkonto abgeglichen. Lokale Anzeige aktualisiert."
       + (localWorkAvailable ? " Plattformänderungen bleiben bis zum kontrollierten Neustart mit erneut bestätigtem Eigenbestand gesperrt." : "");
+    renderConnectionHelp(localWorkAvailable ? "restart" : null);
   } catch (_error) {
     status.textContent = "Abgleich fehlgeschlagen. Vorhandene Anzeigen bleiben gespeichert. " + failureHint;
   } finally {
@@ -4788,6 +4833,8 @@ async function load() {
     }
     manualSyncAvailable = dashboardConfig.manual_sync_available === true;
     ownerContentAvailable = dashboardConfig.owner_content_available === true;
+    // Existing offline-notice already explains the local mode. Avoid two warnings.
+    renderConnectionHelp(!writeUiAvailable && !localWorkAvailable ? "read_only" : null);
     generationUiAvailable = dashboardConfig.generation_ui_available === true;
     jobsAvailable = false;
     renderJobsAvailability();
