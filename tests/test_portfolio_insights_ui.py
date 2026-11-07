@@ -33,7 +33,7 @@ const context={console,URLSearchParams,Number,document:{createElement:()=>new El
   _newJobRequestKey:()=>String(++key).padStart(64,"0"),
   fetch:async(path,options)=>{sent.push({path,options});return fetchImpl(path,options);}};
 vm.createContext(context);
-vm.runInContext("let jobsAvailable=true; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false, conversationBusy=false, followupBusy=false, catalogLoading=false, catalogBulkBusy=false, catalogRows=[], catalogGeneration=0, catalogPageIndex=0, catalogCursors=[''], catalogNextAfter=null, catalogFilters={search:'',status:'all'};\n"+source,context);
+vm.runInContext("let jobsAvailable=true; let localWorkAvailable=true; let writeUiAvailable=false; let existingAiActiveId='', existingAiDisplayedId='', existingAiBusy=false, existingAiBatchBusy=false, conversationBusy=false, followupBusy=false, catalogLoading=false, catalogBulkBusy=false, catalogRows=[], catalogGeneration=0, catalogPageIndex=0, catalogCursors=[''], catalogNextAfter=null, catalogFilters={search:'',status:'all'};\n"+source,context);
 const run = expression => vm.runInContext(expression,context);
 const success = value => ({ok:true,status:200,json:async()=>value});
 const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
@@ -44,6 +44,35 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(byId("price-rules-panel").hidden,false);
   assert.equal(byId("autopilot-panel").hidden,false);
   assert.equal(byId("nav-autopilot").hidden,false);
+  // The unrelated jobs-list health probe may fail: local panels must remain usable.
+  run("jobsAvailable=false; renderPortfolioInsights()");
+  assert.equal(byId("price-rules-panel").hidden,false);
+  assert.equal(byId("inventory-diff-panel").hidden,false);
+  assert.equal(byId("autopilot-panel").hidden,false);
+  // A real local price-rule GET still works even when job listing failed.
+  fetchImpl=async()=>success(detail("SKU-local-only"));
+  assert.equal(await run("loadPriceRule('SKU-local-only')"),true);
+  assert.match(sent.at(-1).path,/price-rules\/detail\?sku=SKU-local-only/);
+  sent.length=0;
+  run("localWorkAvailable=false; renderPortfolioInsights()");
+  assert.equal(byId("price-rules-panel").hidden,true);
+  assert.equal(byId("inventory-diff-panel").hidden,true);
+  assert.equal(await run("loadPriceRule('SKU-disabled')"),false);
+  assert.equal(sent.length,0);
+  // A write-enabled product session may have no separate local session token.
+  // It must still reach local price/portfolio panels despite a failed jobs probe.
+  run("writeUiAvailable=true; jobsAvailable=false; renderPortfolioInsights()");
+  assert.equal(byId("price-rules-panel").hidden,false);
+  assert.equal(byId("inventory-diff-panel").hidden,false);
+  assert.equal(byId("autopilot-panel").hidden,false);
+  fetchImpl=async()=>success(detail("SKU-write-only"));
+  assert.equal(await run("loadPriceRule('SKU-write-only')"),true);
+  assert.equal(sent.at(-1).path.includes("price-rules/detail?sku=SKU-write-only"),true);
+  run("writeUiAvailable=false; renderPortfolioInsights()");
+  assert.equal(byId("price-rules-panel").hidden,true);
+  assert.equal(byId("inventory-diff-panel").hidden,true);
+  sent.length=0;
+  run("localWorkAvailable=true; jobsAvailable=true; renderPortfolioInsights()");
   ready=false;run("renderPortfolioInsights()");
   assert.equal(byId("price-rules-panel").hidden,true);
   assert.equal(byId("autopilot-panel").hidden,true);
