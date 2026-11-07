@@ -539,7 +539,7 @@ _DASHBOARD_HTML = """<!doctype html>
           <tbody id="ads-body"></tbody>
         </table>
       </div>
-      <p id="empty" class="empty" hidden>Noch keine Anzeigen gespeichert. Melde dich im Kleinanzeiger-Chrome an und wähle Mit Kleinanzeigen abgleichen.</p>
+      <p id="empty" class="empty" hidden>Noch keine Anzeigen gespeichert. Melde dich im Kleinanzeiger-Chrome an und wähle „Mit Kleinanzeigen abgleichen“.</p>
 
           <details class="compact-details">
             <summary>Woher kommen die Zahlen?</summary>
@@ -555,7 +555,7 @@ _DASHBOARD_HTML = """<!doctype html>
             <p class="section-subtitle">Titel oder Beschreibung ändern und den Status verwalten.</p>
           </div>
         </div>
-        <p id="write-session-note" class="note" hidden>Zum Bearbeiten Kleinanzeiger über Starten.cmd öffnen.</p>
+        <p id="write-session-note" class="note" hidden>Zum Bearbeiten Kleinanzeiger über Kleinanzeiger.cmd öffnen.</p>
         <p id="write-status" class="status write-status" role="status" aria-live="polite"></p>
         <form id="manage-form" class="write-form">
           <h3 class="sr-only">Bestehende Anzeige</h3>
@@ -627,7 +627,7 @@ _DASHBOARD_HTML = """<!doctype html>
       </section>
       <section id="write-unavailable" class="panel read-only-panel" hidden>
         <h2>Nur Ansicht</h2>
-        <p class="muted">Zum Bearbeiten und Erstellen Kleinanzeiger normal über Starten.cmd starten.</p>
+        <p class="muted">Zum Bearbeiten und Erstellen die Anwendung über Kleinanzeiger.cmd starten.</p>
       </section>
     </div>
 

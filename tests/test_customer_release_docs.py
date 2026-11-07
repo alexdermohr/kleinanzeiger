@@ -82,6 +82,11 @@ class FirstCustomerReleaseTests(unittest.TestCase):
                 self.assertIn(term.casefold(), h.casefold())
         self.assertIn("unbeaufsichtigter nachrichtenversand", h.casefold())
 
+    def test_offline_ui_guides_to_real_windows_launcher(self) -> None:
+        html_source = (ROOT / "src/mark_api/dashboard.py").read_text(encoding="utf-8")
+        self.assertIn("Kleinanzeiger.cmd", html_source)
+        self.assertNotIn("Starten.cmd", html_source)
+
     def test_release_pipeline_provides_single_customer_zip_not_historical_docs(self) -> None:
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
         meta = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
