@@ -1,0 +1,280 @@
+"""Conservative, offline buyer-side price comparisons.
+
+This module never accesses Kleinanzeigen, user sessions or seller accounts. Input
+must come from a user-supplied export or an independently authorized data source.
+All reference prices are *asking prices*, never confirmed sale prices.
+"""
+from __future__ import annotations
+
+import csv
+import io
+import json
+import re
+import statistics
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from urllib.parse import urlencode, urlsplit
+
+MAX_INPUT_BYTES = 8_000_000
+MAX_OFFERS = 10_000
+MAX_PRICE = Decimal("10000000")
+_MODEL_WORDS = re.compile(r"[a-z0-9]+")
+_GENERATION = re.compile(r"\bgen(?:eration)?\s*(\d{1,2})\b", re.I)
+_DAMAGED = re.compile(
+    r"\b(defekt|kaputt|ersatzteil(?:e|spender)?|reparaturbedürftig|"
+    r"ohne\s+(?:funktion|display|akku)|suchanzeige|gesucht)\b", re.I
+)
+_ALLOWED_HOSTS = frozenset(("kleinanzeigen.de", "www.kleinanzeigen.de"))
+
+
+class DealInputError(ValueError):
+    """Invalid data, distinct from an inconclusive price estimate."""
+
+
+def euro(value: object, *, required: bool = False) -> Decimal | None:
+    """Parse EUR safely; reject booleans, NaN, free-text and negative prices."""
+    if value is None or value == "":
+        if required:
+            raise DealInputError("Preis fehlt")
+        return None
+    if isinstance(value, bool) or isinstance(value, (dict, list)):
+        raise DealInputError("Ungültiger Preis")
+    raw = str(value).strip().replace("\N{NO-BREAK SPACE}", " ")
+    if len(raw) > 50:
+        raise DealInputError("Preis zu lang")
+    raw = re.sub(r"\s*(?:€|EUR)\s*$", "", raw, flags=re.I).strip()
+    if not raw:
+        raise DealInputError("Ungültiger Preis")
+    if "," in raw:
+        if not re.fullmatch(r"\d{1,3}(?:\.\d{3})*,\d{1,2}|\d+,\d{1,2}", raw):
+            raise DealInputError("Ungültiger Dezimalpreis")
+        raw = raw.replace(".", "").replace(",", ".")
+    elif not re.fullmatch(r"\d+(?:\.\d{1,2})?", raw):
+        raise DealInputError("Ungültiger Preis")
+    try:
+        amount = Decimal(raw)
+    except InvalidOperation as exc:
+        raise DealInputError("Ungültiger Preis") from exc
+    if not amount.is_finite() or amount < 0 or amount > MAX_PRICE:
+        raise DealInputError("Preis außerhalb des Bereichs")
+    return amount.quantize(Decimal("0.01"))
+
+
+def safe_listing_url(raw: object) -> str:
+    value = str(raw or "").strip()
+    if len(value) > 1500:
+        raise DealInputError("URL zu lang")
+    if any(char in value for char in "\r\n\t"):
+        raise DealInputError("Ungültige Steuerzeichen in URL")
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme == "https" and parsed.hostname in _ALLOWED_HOSTS
+            and not parsed.username and not parsed.password
+            and parsed.port is None and parsed.path.startswith("/s-anzeige/")
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise DealInputError("Nur HTTPS-Kleinanzeigen-Inseratlinks zulässig")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class Offer:
+    uid: str
+    title: str
+    price_eur: Decimal | None
+    url: str
+    source: str
+    observed_at: str
+    shipping_eur: Decimal | None = None
+    condition: str = "unbekannt"
+
+    @property
+    def comparison_price(self) -> Decimal | None:
+        if self.price_eur is None:
+            return None
+        return self.price_eur + (self.shipping_eur or Decimal(0))
+
+
+def _string(value: object, *, name: str, size: int) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > size:
+        raise DealInputError(f"{name} fehlt oder ist zu lang")
+    return value.strip()
+
+
+def normalize_offer(row: dict, *, source: str = "Nutzerimport",
+                    observed_at: str = "nicht angegeben") -> Offer:
+    if not isinstance(row, dict):
+        raise DealInputError("Inserat muss ein Objekt sein")
+    identifier = row.get("id", row.get("ad_id", ""))
+    uid = str(identifier).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", uid):
+        raise DealInputError("Ungültige Inserat-ID")
+    title = _string(row.get("title"), name="Titel", size=350)
+    url = safe_listing_url(row.get("url", row.get("ad_url")))
+    amount = row.get("price_eur", row.get("priceEuros", row.get("price")))
+    if isinstance(amount, dict):
+        if amount.get("currency_code", "EUR") != "EUR":
+            raise DealInputError("Nur EUR-Preise zulässig")
+        amount = amount.get("amount")
+    raw_shipping = row.get("shipping_eur", None)
+    cond = str(row.get("condition") or "unbekannt").strip().casefold()
+    if len(cond) > 50:
+        raise DealInputError("Zustand zu lang")
+    source_value = _string(str(row.get("source") or source), name="Quelle", size=120)
+    time_value = _string(str(row.get("observed_at") or observed_at),
+                         name="Beobachtungszeit", size=80)
+    return Offer(uid, title, euro(amount), url, source_value, time_value,
+                 euro(raw_shipping), cond)
+
+
+def load_offers(path: str | Path) -> list[Offer]:
+    """Import user-provided CSV, plain JSON list or REST data.ads JSON.
+
+    No URL is fetched. The file limit prevents unbounded memory/HTML reports.
+    """
+    file = Path(path)
+    if file.suffix.casefold() not in (".csv", ".json"):
+        raise DealInputError("Nur .csv oder .json erlaubt")
+    if file.stat().st_size > MAX_INPUT_BYTES:
+        raise DealInputError("Datei ist zu groß")
+    try:
+        data = file.read_text(encoding="utf-8-sig")
+    except UnicodeError as exc:
+        raise DealInputError("UTF-8-Datei erforderlich") from exc
+    if file.suffix.casefold() == ".csv":
+        reader = csv.DictReader(io.StringIO(data), strict=True)
+        if not reader.fieldnames or len(reader.fieldnames) > 30:
+            raise DealInputError("Ungültiger CSV-Header")
+        rows = list(reader)
+    else:
+        try:
+            payload = json.loads(data)
+        except ValueError as exc:
+            raise DealInputError("Ungültiges JSON") from exc
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            container = payload.get("data", payload)
+            if not isinstance(container, dict):
+                raise DealInputError("Ungültige JSON-Antwort")
+            rows = container.get("ads", container.get("listings"))
+        else:
+            rows = None
+    if not isinstance(rows, list) or len(rows) > MAX_OFFERS:
+        raise DealInputError("Inseratliste fehlt oder ist zu groß")
+    deduplicated: dict[str, Offer] = {}
+    for number, row in enumerate(rows, start=1):
+        try:
+            offer = normalize_offer(row)
+        except DealInputError as exc:
+            raise DealInputError(f"Zeile {number}: {exc}") from exc
+        # Later observed records win only when their ISO text sorts later.
+        earlier = deduplicated.get(offer.uid)
+        if earlier is None or offer.observed_at >= earlier.observed_at:
+            deduplicated[offer.uid] = offer
+    return list(deduplicated.values())
+
+
+def _tokens(text: str) -> set[str]:
+    return set(_MODEL_WORDS.findall(text.casefold()))
+
+
+def matches_model(title: str, exact_model: str) -> bool:
+    """Fail conservatively on mismatched generations, editions and conditions."""
+    expected = _tokens(exact_model)
+    found = _tokens(title)
+    if not expected or len(expected) > 16 or not expected.issubset(found):
+        return False
+    requested_generation = _GENERATION.search(exact_model)
+    if requested_generation:
+        listing_generation = _GENERATION.search(title)
+        if not listing_generation or listing_generation.group(1) != requested_generation.group(1):
+            return False
+    if _DAMAGED.search(title):
+        return False
+    # iPhone suffixes are distinct models. Missing suffix in request excludes it.
+    if "iphone" in expected:
+        for suffix in ("pro", "max", "plus", "mini"):
+            if suffix in found and suffix not in expected:
+                return False
+    return True
+
+
+def _median_eur(prices: list[Decimal]) -> Decimal:
+    return Decimal(statistics.median(prices)).quantize(Decimal("0.01"))
+
+
+def assess_offers(offers: list[Offer], exact_model: str, *,
+                  min_peers: int = 4,
+                  discount_threshold: Decimal = Decimal("0.30")) -> list[dict]:
+    """Rank observed offer prices, without pretending these are sale prices.
+
+    Excludes the candidate from its own median and never uses a model mismatch.
+    Inconclusive rows are present but cannot be called bargains.
+    """
+    model = _string(exact_model, name="Exaktes Modell", size=160)
+    if not 3 <= min_peers <= 100 or not Decimal("0") < discount_threshold < Decimal("1"):
+        raise DealInputError("Ungültige Bewertungsgrenzen")
+    matching = [o for o in offers if matches_model(o.title, model)]
+    ranked: list[dict] = []
+    for offer in matching:
+        others = [
+            o.comparison_price for o in matching if o.uid != offer.uid
+            and (o.condition == offer.condition or
+                 o.condition == "unbekannt" or offer.condition == "unbekannt")
+            and o.comparison_price is not None and o.comparison_price > 0
+        ]
+        own = offer.comparison_price
+        reason = ""
+        median = None
+        discount = None
+        if own is None or own <= 0:
+            reason = "Kein belastbarer positiver Angebotspreis"
+        elif len(others) < min_peers:
+            reason = f"Nur {len(others)} vergleichbare Angebote; mindestens {min_peers} erforderlich"
+        else:
+            median = _median_eur(others)
+            if median > 0:
+                discount = ((median - own) / median * 100).quantize(Decimal("0.1"))
+        flags = []
+        if offer.shipping_eur is None:
+            flags.append("Versandkosten nicht belegt")
+        if offer.condition == "unbekannt":
+            flags.append("Zustand nicht belegt")
+        flags.append("Vergleich nur mit Angebotspreisen, nicht mit Verkaufspreisen")
+        ranked.append({
+            "id": offer.uid, "title": offer.title, "url": offer.url,
+            "source": offer.source, "observed_at": offer.observed_at,
+            "price_eur": str(offer.price_eur) if offer.price_eur is not None else None,
+            "shipping_eur": str(offer.shipping_eur) if offer.shipping_eur is not None else None,
+            "comparison_price_eur": str(own) if own is not None else None,
+            "peer_median_eur": str(median) if median is not None else None,
+            "peer_count": len(others), "discount_pct": str(discount) if discount is not None else None,
+            "classification": (
+                "auffällig günstig" if discount is not None
+                and discount >= discount_threshold * 100 else
+                "kein Preisschnäppchen" if discount is not None else "nicht bewertbar"
+            ), "reason": reason, "notes": flags,
+        })
+    ranked.sort(key=lambda r: (
+        r["classification"] != "auffällig günstig",
+        r["discount_pct"] is None,
+        -(Decimal(r["discount_pct"]) if r["discount_pct"] is not None else Decimal("-1000")),
+        r["id"],
+    ))
+    return ranked
+
+
+def search_url(query: str, *, maximum_eur: int | None = None) -> str:
+    """Create a regular search link; opening it is a human browser action."""
+    phrase = _string(query, name="Suchbegriff", size=160)
+    params = {"keywords": phrase}
+    if maximum_eur is not None:
+        if type(maximum_eur) is not int or not 1 <= maximum_eur <= 10_000_000:
+            raise DealInputError("Ungültige Preisobergrenze")
+        params["maxPrice"] = str(maximum_eur)
+    return "https://www.kleinanzeigen.de/s-suchanfrage.html?" + urlencode(params)
