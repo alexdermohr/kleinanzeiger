@@ -215,6 +215,7 @@ def _tokens(text: str) -> set[str]:
 
 _CPU = re.compile(r"\b(?:i[3579](?:[-\s]\d{3,5}[a-z0-9]{0,4})?|ryzen\s*[3579](?:[-\s]*\d{3,5}[a-z0-9]{0,4})?|core\s*ultra\s*[579](?:\s*\d{3}[a-z0-9]{0,4})?|m[1234](?:\s*(?:pro|max|ultra))?)\b", re.I)
 _RAM = re.compile(r"\b(\d{1,3})\s*(?:gb|gbyte)\s*(?:ram|arbeitsspeicher|ddr[345]|memory)\b", re.I)
+_RAM_LABEL_FIRST = re.compile(r"\b(?:ram|arbeitsspeicher|ddr[345]|memory)\s*(\d{1,3})\s*(?:gb|gbyte)\b", re.I)
 _STORAGE = re.compile(
     r"\b(\d{2,4})\s*gb\s*(?:ssd|hdd)\b|\b(\d{1,2})\s*tb\s*(?:ssd|hdd)\b", re.I
 )
@@ -227,7 +228,7 @@ _PHONE_CAPACITY = re.compile(r"\b(64|128|256|512|1024)\s*gb\b", re.I)
 def _variant_key(title: str, model: str) -> tuple[str, str, str]:
     """Only title-evidenced specs. Unknown is distinct from a known variant."""
     cpu = _CPU.search(title)
-    ram = _RAM.search(title)
+    ram = _RAM.search(title) or _RAM_LABEL_FIRST.search(title)
     storage = _STORAGE.search(title)
     reversed_storage = _STORAGE_MEDIUM_FIRST.search(title)
     phone = _PHONE_CAPACITY.search(title)

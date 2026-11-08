@@ -171,6 +171,26 @@ class DealEngineTests(unittest.TestCase):
         self.assertEqual(best["peer_count"], 4)
         self.assertEqual(best["peer_median_eur"], "200.00")
 
+    def test_ram_label_first_does_not_merge_8gb_and_32gb_devices(self):
+        model = "Lenovo ThinkPad T14 Gen 3"
+        candidate = "Lenovo ThinkPad T14 Gen 3 i5 RAM 8GB 512GB SSD"
+        peer = "Lenovo ThinkPad T14 Gen 3 i5 RAM 32GB 512GB SSD"
+        offers = [normalize_offer(row(0, 100, title=candidate))]
+        offers += [normalize_offer(row(i, 400, title=peer)) for i in range(1, 5)]
+        cheap = next(r for r in assess_offers(offers, model) if r["id"] == str(1234567800))
+        self.assertEqual(cheap["peer_count"], 0)
+        self.assertEqual(cheap["classification"], "nicht bewertbar")
+
+    def test_ram_label_first_and_capacity_first_are_comparable(self):
+        model = "Lenovo ThinkPad T14 Gen 3"
+        candidate = "Lenovo ThinkPad T14 Gen 3 i5 RAM 8GB 512GB SSD"
+        peer = "Lenovo ThinkPad T14 Gen 3 i5 8GB RAM 512GB SSD"
+        offers = [normalize_offer(row(0, 100, title=candidate))]
+        offers += [normalize_offer(row(i, 200, title=peer)) for i in range(1, 5)]
+        cheap = next(r for r in assess_offers(offers, model) if r["id"] == str(1234567800))
+        self.assertEqual(cheap["peer_count"], 4)
+        self.assertEqual(cheap["classification"], "auffällig günstig")
+
     def test_explicit_ram_and_storage_variants_are_separate(self):
         sample = [
             normalize_offer(row(0, 100,
