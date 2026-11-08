@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.6] - 2026-11-08
+
+### Verbessert
+- Im Bestandsvergleich führt „Anzeige prüfen“ direkt zur exakt zugehörigen Eigenanzeige, auch bei großen Beständen mit mehr als 50 Suchtreffern.
+- Veraltete oder mehrdeutige lokale Treffer werden nicht als passende Anzeige dargestellt; der Vergleich startet keine Konto-, Plattform- oder KI-Aktion.
+
 ## [1.0.5] - 2026-11-08
 
 ### Verbessert
