@@ -2,6 +2,21 @@
 $ErrorActionPreference = 'Stop'
 $state = Join-Path $env:LOCALAPPDATA 'Kleinanzeiger'
 $python = Join-Path $state '.venv\Scripts\python.exe'
+
+# PowerShell 5.1 treats a redirected native stderr line as an ErrorRecord
+# subject to ErrorActionPreference. Successful reports write a normal
+# 'Bericht gespeichert' message to stderr. Always inspect the exit code.
+function Invoke-DealsCli([string[]]$cliArgs) {
+  $savedPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    $lines = @(& $python -m mark_api.bargain_hunter_cli @cliArgs 2>&1)
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedPreference
+  }
+  return @{ Code = $code; Lines = $lines }
+}
 # All analysis happens inside the installed Wheel; no platform read or write.
 if ($SelfTest) {
   if ($ExpectedInstalledVersion) {
@@ -12,8 +27,9 @@ if ($SelfTest) {
       throw 'Schnäppchenjäger ist nicht in der erwarteten installierten Version.'
     }
     $model = 'Lenovo ThinkPad T14 Gen 3'
-    $search = @(& $python -m mark_api.bargain_hunter_cli --modell $model --suchlink 2>&1)
-    if ($LASTEXITCODE -ne 0 -or $search.Count -ne 1 -or
+    $searchCall = Invoke-DealsCli @('--modell',$model,'--suchlink')
+    $search = @($searchCall.Lines)
+    if ($searchCall.Code -ne 0 -or $search.Count -ne 1 -or
         !([string]$search[0]).StartsWith('https://www.kleinanzeigen.de/s-suchanfrage.html?')) {
       throw 'Schnäppchenjäger-Suchlink aus installiertem Wheel defekt.'
     }
@@ -29,8 +45,8 @@ if ($SelfTest) {
         $lines.Add("$n,Lenovo ThinkPad T14 Gen 3 i5 16GB RAM 512GB SSD,$amount,https://www.kleinanzeigen.de/s-anzeige/beispiel/$n,gebraucht,0,2026-11-08T08:00:00+01:00,Synthetischer Windows-Test")
       }
       [IO.File]::WriteAllLines($source,[string[]]$lines.ToArray(),[Text.UTF8Encoding]::new($false))
-      $result = @(& $python -m mark_api.bargain_hunter_cli --datei $source --modell $model --bericht $report 2>&1)
-      if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $report -PathType Leaf)) {
+      $reportCall = Invoke-DealsCli @('--datei',$source,'--modell',$model,'--bericht',$report)
+      if ($reportCall.Code -ne 0 -or !(Test-Path -LiteralPath $report -PathType Leaf)) {
         throw 'Schnäppchenjäger kann aus CSV keinen lokalen HTML-Bericht erstellen.'
       }
       $html = [IO.File]::ReadAllText($report,[Text.Encoding]::UTF8)
@@ -117,8 +133,9 @@ $choose.Add_Click({
 $searchButton.Add_Click({
   try {
     $model = Get-DealsModel
-    $result = @(& $python -m mark_api.bargain_hunter_cli --modell $model --suchlink 2>&1)
-    if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) {
+    $searchCall = Invoke-DealsCli @('--modell',$model,'--suchlink')
+    $result = @($searchCall.Lines)
+    if ($searchCall.Code -ne 0 -or $result.Count -ne 1) {
       throw 'Der Suchlink konnte nicht erstellt werden.'
     }
     $url = ([string]$result[0]).Trim()
@@ -147,8 +164,9 @@ $checkButton.Add_Click({
     New-Item -Path $reports -ItemType Directory -Force | Out-Null
     $name = 'Kleinanzeiger-Schnaeppchen-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.html'
     $report = Join-Path $reports $name
-    $out = @(& $python -m mark_api.bargain_hunter_cli --datei $source --modell $model --bericht $report 2>&1)
-    if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $report -PathType Leaf)) {
+    $reportCall = Invoke-DealsCli @('--datei',$source,'--modell',$model,'--bericht',$report)
+    $out = @($reportCall.Lines)
+    if ($reportCall.Code -ne 0 -or !(Test-Path -LiteralPath $report -PathType Leaf)) {
       $message = ($out | Select-Object -Last 2 | Out-String).Trim()
       if ($message.Length -gt 190) { $message = $message.Substring(0,190) + '…' }
       if (!$message) { $message = 'Ungültige Angebotsdatei oder fehlende Vergleichsdaten.' }
