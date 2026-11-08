@@ -191,6 +191,32 @@ class DealEngineTests(unittest.TestCase):
         self.assertEqual(cheap["peer_count"], 4)
         self.assertEqual(cheap["classification"], "auffällig günstig")
 
+    def test_bare_storage_size_does_not_reuse_ram_size(self):
+        model = "Lenovo ThinkPad P16 Gen 2"
+        for ram in ("64GB RAM", "RAM 64GB"):
+            with self.subTest(ram=ram):
+                cheap_title = f"Lenovo ThinkPad P16 Gen 2 i7 {ram} 512GB"
+                expensive_title = f"Lenovo ThinkPad P16 Gen 2 i7 {ram} 1024GB"
+                offers = [normalize_offer(row(0, 500, title=cheap_title))]
+                offers += [normalize_offer(row(i, 1500, title=expensive_title))
+                           for i in range(1, 5)]
+                cheap = next(r for r in assess_offers(offers, model)
+                             if r["id"] == str(1234567800))
+                self.assertEqual(cheap["peer_count"], 0)
+                self.assertEqual(cheap["classification"], "nicht bewertbar")
+
+    def test_same_bare_storage_size_with_ram_remains_comparable(self):
+        model = "Lenovo ThinkPad P16 Gen 2"
+        offers = [normalize_offer(row(0, 500, title=
+                 "Lenovo ThinkPad P16 Gen 2 i7 64GB RAM 512GB"))]
+        offers += [normalize_offer(row(i, 1500, title=
+                   "Lenovo ThinkPad P16 Gen 2 i7 RAM 64GB 512GB"))
+                   for i in range(1, 5)]
+        cheap = next(r for r in assess_offers(offers, model)
+                     if r["id"] == str(1234567800))
+        self.assertEqual(cheap["peer_count"], 4)
+        self.assertEqual(cheap["classification"], "auffällig günstig")
+
     def test_explicit_ram_and_storage_variants_are_separate(self):
         sample = [
             normalize_offer(row(0, 100,

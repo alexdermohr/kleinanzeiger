@@ -232,7 +232,9 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
     ram = _RAM.search(title) or _RAM_LABEL_FIRST.search(title)
     storage = _STORAGE.search(title)
     reversed_storage = _STORAGE_MEDIUM_FIRST.search(title)
-    phone = _PHONE_CAPACITY.search(title)
+    # An explicit RAM size is never a bare storage capacity.
+    phone = next((m for m in _PHONE_CAPACITY.finditer(title)
+                  if ram is None or m.end() <= ram.start() or m.start() >= ram.end()), None)
     bare_tb = _BARE_TERABYTE.search(title)
     size = ""
     if storage:
