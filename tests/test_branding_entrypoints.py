@@ -54,6 +54,7 @@ class KleinanzeigerBrandingTests(unittest.TestCase):
             "windows-weekly-report.ps1": ["-m mark_api.weekly_report"],
             "windows-restore.ps1": ["-m mark_api.windows_backup"],
             "windows-messages.ps1": ["-m mark_api.platform_messages"],
+            "windows-deals.ps1": ["-m mark_api.bargain_hunter_cli"],
             "windows-center.ps1": [
                 "-m mark_api.portfolio_import_cli",
                 "-m mark_api.windows_customer_choices",
