@@ -102,6 +102,7 @@ const check=(kind,word)=>{
 check("owner_inventory_login_required","anmelden");
 check("owner_inventory_connection_unavailable","Internet");
 check("owner_inventory_browser_unavailable","Chrome");
+check("owner_inventory_browser_wrong_tab","Meine Anzeigen");
 check("read_only","Kleinanzeiger.cmd");
 check("restart","erneut geprüft");
 ctx.renderConnectionHelp(null);assert.equal(help.hidden,true);

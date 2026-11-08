@@ -144,6 +144,7 @@ class OwnerInventorySyncFailure(PrivateWebRuntimeSetupError):
     _MESSAGES = {
         "busy": "owner inventory busy",
         "browser_unavailable": "pinned owner session unavailable",
+        "browser_wrong_tab": "pinned owner browser tab is not the management page",
         "recovery_required": "previous inventory outcome requires reconciliation",
         "storage_unavailable": "inventory recovery state unavailable",
         "login_required": "owner inventory login required",
@@ -1266,11 +1267,17 @@ class PrivateWebWriteApiRuntime:
             )
             result = sync.run_once()
             if not result.is_success:
-                # Expose only a trusted status enum, never cookies, paths or CDP text.
-                kind = {
-                    ReadStatus.UNAUTHENTICATED: "login_required",
-                    ReadStatus.TRANSPORT_ERROR: "connection_unavailable",
-                }.get(result.status, "read_failed")
+                # The reader produces a fixed, locally-authored target code.
+                # Distinguish a wrong pinned browser tab from connectivity
+                # failures without leaking arbitrary page or CDP diagnostics.
+                if (result.status is ReadStatus.TRANSPORT_ERROR
+                        and result.error == "cdp_inventory_wrong_target"):
+                    kind = "browser_wrong_tab"
+                else:
+                    kind = {
+                        ReadStatus.UNAUTHENTICATED: "login_required",
+                        ReadStatus.TRANSPORT_ERROR: "connection_unavailable",
+                    }.get(result.status, "read_failed")
                 raise OwnerInventorySyncFailure(kind)
             return len(result.value or ())
         finally:
