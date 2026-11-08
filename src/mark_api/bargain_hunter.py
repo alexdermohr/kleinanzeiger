@@ -10,7 +10,8 @@ import csv
 import io
 import json
 import re
-import statistics
+from bisect import bisect_right
+from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -24,6 +25,10 @@ _GENERATION = re.compile(r"\bgen(?:eration)?\s*(\d{1,2})\b", re.I)
 _DAMAGED = re.compile(
     r"\b(defekt|kaputt|ersatzteil(?:e|spender)?|reparaturbedürftig|"
     r"ohne\s+(?:funktion|display|akku)|suchanzeige|gesucht)\b", re.I
+)
+_ACCESSORY = re.compile(
+    r"\b(hülle|huelle|case|cover|schutzfolie|panzerglas|tasche|ladegerät|"
+    r"ladekabel|halterung|ersatzdisplay|displayglas|verpackung)\b", re.I
 )
 _ALLOWED_HOSTS = frozenset(("kleinanzeigen.de", "www.kleinanzeigen.de"))
 
@@ -200,7 +205,7 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
     cpu = _CPU.search(title)
     ram = _RAM.search(title)
     storage = _STORAGE.search(title)
-    phone = _PHONE_CAPACITY.search(title) if "iphone" in _tokens(model) else None
+    phone = _PHONE_CAPACITY.search(title)
     size = ""
     if storage:
         size = (str(int(storage.group(1))) + "gb" if storage.group(1)
@@ -225,18 +230,31 @@ def matches_model(title: str, exact_model: str) -> bool:
         listing_generation = _GENERATION.search(title)
         if not listing_generation or listing_generation.group(1) != requested_generation.group(1):
             return False
-    if _DAMAGED.search(title):
+    if _DAMAGED.search(title) or _ACCESSORY.search(title):
         return False
-    # iPhone suffixes are distinct models. Missing suffix in request excludes it.
-    if "iphone" in expected:
-        for suffix in ("pro", "max", "plus", "mini"):
+    # Phone editions are distinct models; an unspecified edition is not a match.
+    if expected & {"iphone", "samsung", "galaxy", "pixel", "redmi"}:
+        for suffix in ("pro", "max", "plus", "mini", "ultra", "fe", "xl"):
             if suffix in found and suffix not in expected:
                 return False
     return True
 
 
-def _median_eur(prices: list[Decimal]) -> Decimal:
-    return Decimal(statistics.median(prices)).quantize(Decimal("0.01"))
+def _peer_median(prices: list[Decimal], excluded: list[int]) -> Decimal:
+    """Median of a sorted group without this ID, without copying the group."""
+    count = len(prices) - len(excluded)
+
+    def at(rank: int) -> Decimal:
+        low, high = rank, rank + len(excluded)
+        while low < high:
+            middle = (low + high) // 2
+            if middle + 1 - bisect_right(excluded, middle) <= rank:
+                low = middle + 1
+            else:
+                high = middle
+        return prices[low]
+
+    return ((at((count - 1) // 2) + at(count // 2)) / 2).quantize(Decimal("0.01"))
 
 
 def assess_offers(offers: list[Offer], exact_model: str, *,
@@ -253,27 +271,37 @@ def assess_offers(offers: list[Offer], exact_model: str, *,
             or not discount_threshold.is_finite()
             or not Decimal("0") < discount_threshold < Decimal("1")):
         raise DealInputError("Ungültige Bewertungsgrenzen")
-    matching = [o for o in offers if matches_model(o.title, model)]
-    ranked: list[dict] = []
+    matching = [o for o in offers if matches_model(o.title, model)
+                and not _DAMAGED.search(o.condition)]
+    groups = defaultdict(list)
+    prepared = []
     for offer in matching:
-        variant = _variant_key(offer.title, model)
-        others = [
-            o.comparison_price for o in matching if o.uid != offer.uid
-            and _variant_key(o.title, model) == variant
-            and (o.condition == offer.condition or
-                 o.condition == "unbekannt" or offer.condition == "unbekannt")
-            and o.comparison_price is not None and o.comparison_price > 0
-        ]
+        key = (_variant_key(offer.title, model), offer.condition)
         own = offer.comparison_price
+        prepared.append((offer, key, own))
+        if own is not None and own > 0:
+            groups[key].append((own, offer.uid))
+    comparisons = {}
+    for key, entries in groups.items():
+        entries.sort()
+        positions = defaultdict(list)
+        for index, (_, uid) in enumerate(entries):
+            positions[uid].append(index)
+        comparisons[key] = ([price for price, _ in entries], positions)
+    ranked: list[dict] = []
+    for offer, key, own in prepared:
+        prices, positions = comparisons.get(key, ([], {}))
+        excluded = positions.get(offer.uid, [])
+        peer_count = len(prices) - len(excluded)
         reason = ""
         median = None
         discount = None
         if own is None or own <= 0:
             reason = "Kein belastbarer positiver Angebotspreis"
-        elif len(others) < min_peers:
-            reason = f"Nur {len(others)} vergleichbare Angebote; mindestens {min_peers} erforderlich"
+        elif peer_count < min_peers:
+            reason = f"Nur {peer_count} vergleichbare Angebote; mindestens {min_peers} erforderlich"
         else:
-            median = _median_eur(others)
+            median = _peer_median(prices, excluded)
             if median > 0:
                 discount = ((median - own) / median * 100).quantize(Decimal("0.1"))
         flags = []
@@ -290,7 +318,7 @@ def assess_offers(offers: list[Offer], exact_model: str, *,
             "shipping_eur": str(offer.shipping_eur) if offer.shipping_eur is not None else None,
             "comparison_price_eur": str(own) if own is not None else None,
             "peer_median_eur": str(median) if median is not None else None,
-            "peer_count": len(others), "discount_pct": str(discount) if discount is not None else None,
+            "peer_count": peer_count, "discount_pct": str(discount) if discount is not None else None,
             "classification": (
                 "auffällig günstig" if discount is not None
                 and discount >= discount_threshold * 100 else

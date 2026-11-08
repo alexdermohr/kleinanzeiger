@@ -7,9 +7,11 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from mark_api import bargain_hunter
 from mark_api.bargain_hunter import (
     DealInputError, assess_offers, euro, load_offers, matches_model,
     normalize_offer, safe_listing_url, search_url,
@@ -104,6 +106,93 @@ class DealEngineTests(unittest.TestCase):
         best = next(r for r in assess_offers(sample, MODEL) if r["id"] == str(1234567800))
         self.assertEqual(best["classification"], "nicht bewertbar")
         self.assertEqual(best["peer_count"], 0)
+
+    def test_accessories_are_neither_candidates_nor_peers(self):
+        offers = [normalize_offer(row(i, 500, title="iPhone 14 128GB"))
+                  for i in range(5)]
+        for i, title in enumerate(("Hülle für iPhone 14", "iPhone 14 Ladekabel",
+                                   "Panzerglas iPhone 14"), start=10):
+            offers.append(normalize_offer(row(i, 5, title=title)))
+        report = assess_offers(offers, "iPhone 14")
+        self.assertEqual(len(report), 5)
+        self.assertTrue(all(r["peer_count"] == 4 for r in report))
+
+    def test_device_with_ovp_remains_a_candidate_and_peer(self):
+        offers = [normalize_offer(row(i, 500, title="iPhone 14 128GB mit OVP"))
+                  for i in range(5)]
+        report = assess_offers(offers, "iPhone 14")
+        self.assertEqual(len(report), 5)
+        self.assertTrue(all(r["peer_count"] == 4 for r in report))
+        self.assertTrue(all(r["peer_median_eur"] == "500.00" for r in report))
+        self.assertFalse(matches_model("Hülle für iPhone 14", "iPhone 14"))
+
+    def test_pixel_and_redmi_editions_are_separate(self):
+        for model, edition in (("Pixel 9", "Pro"),
+                               ("Pixel 9 Pro", "XL"),
+                               ("Redmi Note 13", "Pro"),
+                               ("Redmi Note 13 Pro", "Plus")):
+            with self.subTest(model=model, edition=edition):
+                title = f"{model} {edition} 128GB"
+                self.assertTrue(matches_model(f"{model} 128GB", model))
+                self.assertFalse(matches_model(title, model))
+                self.assertTrue(matches_model(title, f"{model} {edition}"))
+
+    def test_defective_condition_is_excluded_and_conditions_stay_separate(self):
+        offers = [normalize_offer(row(0, 10, extra={"condition": "defekt"}))]
+        offers += [normalize_offer(row(i, 200, extra={"condition": "gebraucht"}))
+                   for i in range(1, 6)]
+        offers += [normalize_offer(row(6, 20)),
+                   normalize_offer(row(7, 1000, extra={"condition": "neu"}))]
+        report = {r["id"]: r for r in assess_offers(offers, MODEL)}
+        self.assertNotIn(str(1234567800), report)
+        self.assertEqual(report[str(1234567801)]["peer_count"], 4)
+        for i in (6, 7):
+            self.assertEqual(report[str(1234567800 + i)]["peer_count"], 0)
+            self.assertEqual(report[str(1234567800 + i)]["classification"], "nicht bewertbar")
+
+    def test_galaxy_editions_are_separate(self):
+        for suffix in ("Ultra", "Plus", "FE"):
+            with self.subTest(suffix=suffix):
+                self.assertFalse(matches_model(f"Samsung Galaxy S23 {suffix}", "Galaxy S23"))
+        self.assertTrue(matches_model("Samsung Galaxy S23 Ultra 128GB", "Galaxy S23 Ultra"))
+        offers = [normalize_offer(row(0, 100, title="Samsung Galaxy S23"))]
+        offers += [normalize_offer(row(i, 900, title="Samsung Galaxy S23 Ultra"))
+                   for i in range(1, 6)]
+        result = assess_offers(offers, "Galaxy S23")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["classification"], "nicht bewertbar")
+
+    def test_samsung_storage_variants_and_unknown_are_separate(self):
+        offers = [normalize_offer(row(0, 100, title="Samsung S23 128GB"))]
+        offers += [normalize_offer(row(i, 800, title="Samsung S23 512GB"))
+                   for i in range(1, 6)]
+        offers.append(normalize_offer(row(6, 900, title="Samsung S23")))
+        report = {r["id"]: r for r in assess_offers(offers, "Samsung S23")}
+        self.assertEqual(report[str(1234567800)]["peer_count"], 0)
+        self.assertEqual(report[str(1234567806)]["peer_count"], 0)
+        self.assertEqual(report[str(1234567801)]["peer_count"], 4)
+
+    def test_10k_offers_prepare_variants_once_and_exclude_own_price(self):
+        offers = [normalize_offer(row(i, i + 1)) for i in range(10_000)]
+        with patch.object(bargain_hunter, "_variant_key",
+                          wraps=bargain_hunter._variant_key) as variants:
+            report = {r["id"]: r for r in assess_offers(offers, MODEL)}
+        self.assertEqual(variants.call_count, 10_000)
+        self.assertEqual(report[str(1234567800)]["peer_count"], 9999)
+        self.assertEqual(report[str(1234567800)]["peer_median_eur"], "5001.00")
+        self.assertEqual(report[str(1234577799)]["peer_median_eur"], "5000.00")
+
+    def test_sorted_medians_match_reference_with_duplicate_ids_and_prices(self):
+        import statistics
+
+        offers = [normalize_offer(row(i // 2, price))
+                  for i, price in enumerate((1, 3, 3, 3, 7, 9, 10, 11))]
+        report = assess_offers(offers, MODEL)
+        for result in report:
+            peers = [o.comparison_price for o in offers if o.uid != result["id"]]
+            self.assertEqual(result["peer_count"], len(peers))
+            self.assertEqual(result["peer_median_eur"],
+                             str(statistics.median(peers).quantize(Decimal("0.01"))))
 
     def test_nonfinite_discount_threshold_fails_explicitly(self):
         with self.assertRaises(DealInputError):

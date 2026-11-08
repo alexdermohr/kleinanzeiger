@@ -41,10 +41,19 @@ Mindestens vier andere ausreichend vergleichbare Anzeigen sind erforderlich.
 Die Bewertung trennt anhand im Titel belegbarer Angaben zusätzlich Prozessor,
 Arbeitsspeicher und Speichergröße. Unbekannte Ausstattungen werden nicht als
 nachweislich identische Varianten angenommen; dadurch können Treffer bewusst
-unbewertet bleiben.
+unbewertet bleiben. Das gilt auch für Smartphone-Speichergrößen (z. B.
+Samsung S23 128GB gegenüber 512GB) und Editionen (z. B. S23 gegenüber Ultra,
+Pixel 9 gegenüber Pro oder Redmi Note 13 gegenüber Pro).
+Erkannte Zubehörangebote wie „Hülle für iPhone 14“ sowie Defekthinweise im
+Titel oder Zustandsfeld werden ausgeschlossen. Zustände werden nur bei
+identischer Angabe verglichen; „unbekannt“ bildet eine eigene Gruppe.
+Ein Geräteangebot mit OVP bleibt für den Vergleich zugelassen.
 Referenz ist der Median ihrer beobachteten **Angebotspreise**, nicht der
 erzielte Verkaufspreis. Jeder Kandidat wird aus seiner Vergleichsgruppe
-herausgenommen. Fehlende Versandkosten oder der Zustand werden markiert.
+herausgenommen (einschließlich weiterer Einträge derselben Inserat-ID).
+Varianten und Zustände werden einmal gruppiert und ihre Preise sortiert;
+der Median ohne eigenen Preis wird ohne erneuten Vollvergleich ermittelt,
+auch bei 10.000 Angeboten. Fehlende Versandkosten oder der Zustand werden markiert.
 Ein deutlich günstiger Preis bedeutet ausdrücklich weder einen echten
 Schnäppchenkauf noch einen sicheren Verkäufer.
 
