@@ -35,6 +35,20 @@ def row(index, price, *, title=None, extra=None):
 
 
 class DealEngineTests(unittest.TestCase):
+    def test_dedup_uses_utc_instants_not_iso_offset_text(self):
+        earlier = row(0, 100, extra={"observed_at": "2026-11-08T09:00:00+01:00"})
+        newer = row(0, 200, extra={"observed_at": "2026-11-08T08:30:00Z"})
+        unknown = row(0, 900, extra={"observed_at": "nicht angegeben"})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "offers.json"
+            for records in ((earlier, newer), (newer, earlier),
+                            (newer, unknown), (unknown, newer)):
+                with self.subTest(observations=[r["observed_at"] for r in records]):
+                    path.write_text(json.dumps(records), encoding="utf-8")
+                    self.assertEqual(load_offers(path)[0].price_eur, Decimal("200.00"))
+            path.write_text(json.dumps([unknown, earlier]), encoding="utf-8")
+            self.assertEqual(load_offers(path)[0].price_eur, Decimal("100.00"))
+
     def test_euro_parsing_and_missing(self):
         self.assertEqual(euro("1.299,50 €"), Decimal("1299.50"))
         self.assertEqual(euro("19.90 EUR"), Decimal("19.90"))
@@ -84,6 +98,23 @@ class DealEngineTests(unittest.TestCase):
         self.assertEqual(best["discount_pct"], "56.5")
         self.assertNotIn(str(1234567808), [r["id"] for r in report])
 
+
+    def test_cpu_editions_and_generations_do_not_inflate_price_medians(self):
+        cases = (
+            ("MacBook Pro 16", "MacBook Pro 16 M1 Pro 32GB RAM 1TB SSD",
+             "MacBook Pro 16 M1 Max 32GB RAM 1TB SSD"),
+            (MODEL, "Lenovo ThinkPad T14 Gen 3 i7-1165G7 16GB RAM 512GB SSD",
+             "Lenovo ThinkPad T14 Gen 3 i7-12700H 16GB RAM 512GB SSD"),
+        )
+        for model, candidate, expensive in cases:
+            with self.subTest(model=model):
+                offers = [normalize_offer(row(0, 1000, title=candidate))]
+                offers += [normalize_offer(row(i, 2000, title=expensive))
+                           for i in range(1, 5)]
+                result = assess_offers(offers, model)
+                cheap = next(r for r in result if r["id"] == str(1234567800))
+                self.assertEqual(cheap["peer_count"], 0)
+                self.assertEqual(cheap["classification"], "nicht bewertbar")
 
     def test_cpu_variant_mismatch_never_inflates_reference(self):
         offers = [normalize_offer(row(0, 100))]

@@ -13,6 +13,7 @@ import re
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -136,6 +137,17 @@ def normalize_offer(row: dict, *, source: str = "Nutzerimport",
                  euro(raw_shipping), cond)
 
 
+def _observation_instant(value: str) -> datetime | None:
+    """Timezone-aware ISO instants only. Unknown/naive timestamps are not dated."""
+    try:
+        date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if date.utcoffset() is None:
+        return None
+    return date.astimezone(timezone.utc)
+
+
 def load_offers(path: str | Path) -> list[Offer]:
     """Import user-provided CSV, plain JSON list or REST data.ads JSON.
 
@@ -181,9 +193,16 @@ def load_offers(path: str | Path) -> list[Offer]:
             offer = normalize_offer(row)
         except DealInputError as exc:
             raise DealInputError(f"Zeile {number}: {exc}") from exc
-        # Later observed records win only when their ISO text sorts later.
+        # Compare actual instants, not lexical offset strings.
+        # A dated record outranks an unknown/naive timestamp; when neither
+        # is dated, the last input row wins deterministically.
         earlier = deduplicated.get(offer.uid)
-        if earlier is None or offer.observed_at >= earlier.observed_at:
+        current_time = _observation_instant(offer.observed_at)
+        previous_time = _observation_instant(earlier.observed_at) if earlier else None
+        if (earlier is None or
+                (current_time is not None and
+                 (previous_time is None or current_time >= previous_time)) or
+                (current_time is None and previous_time is None)):
             deduplicated[offer.uid] = offer
     return list(deduplicated.values())
 
@@ -194,7 +213,7 @@ def _tokens(text: str) -> set[str]:
     return set(_MODEL_WORDS.findall(normalized))
 
 
-_CPU = re.compile(r"\b(?:i[3579]|ryzen\s*[3579]|core\s*ultra\s*[579]|m[1234])\b", re.I)
+_CPU = re.compile(r"\b(?:i[3579](?:[-\s]\d{3,5}[a-z]{0,3})?|ryzen\s*[3579](?:[-\s]*\d{3,5}[a-z]{0,3})?|core\s*ultra\s*[579](?:\s*\d{3}[a-z]{0,3})?|m[1234](?:\s*(?:pro|max|ultra))?)\b", re.I)
 _RAM = re.compile(r"\b(\d{1,3})\s*(?:gb|gbyte)\s*(?:ram|arbeitsspeicher|ddr[345]|memory)\b", re.I)
 _STORAGE = re.compile(
     r"\b(\d{2,4})\s*gb\s*(?:ssd|hdd)\b|\b(\d{1,2})\s*tb\s*(?:ssd|hdd)\b", re.I
@@ -215,7 +234,7 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
     elif phone:
         size = phone.group(1) + "gb"
     return (
-        re.sub(r"\s+", "", cpu.group().casefold()) if cpu else "",
+        re.sub(r"[\s-]+", "", cpu.group().casefold()) if cpu else "",
         (ram.group(1) if ram else ""),
         size,
     )
