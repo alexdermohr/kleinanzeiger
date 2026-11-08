@@ -1168,10 +1168,7 @@ $rollback.Add_Click({
   } catch { Set-Status $_.Exception.Message $true }
 })
 $restore.Add_Click({
-  if (Test-Path -LiteralPath $db) {
-    Set-Status 'Die Datenbank ist bereits vorhanden. Wiederherstellung gesperrt.' $true
-    return
-  }
+  $hasExistingData = Test-Path -LiteralPath $db -PathType Leaf
   $list = @(Get-ChildItem -LiteralPath (Join-Path $state 'Backups') -Filter '*.sqlite' -File -ErrorAction SilentlyContinue)
   if ($list.Count -eq 0) { Set-Status 'Noch keine Sicherungen vorhanden.'; return }
   $picker = [System.Windows.Forms.Form]::new()
@@ -1194,12 +1191,17 @@ $restore.Add_Click({
   $result = $picker.ShowDialog($form)
   $selected = [string]$select.SelectedItem
   $picker.Dispose()
-  if ($result -eq [Windows.Forms.DialogResult]::OK -and
-      [Windows.Forms.MessageBox]::Show("Sicherung $selected in die neue leere Datenbank einspielen?",'Kleinanzeiger',
-          [Windows.Forms.MessageBoxButtons]::YesNo) -eq [Windows.Forms.DialogResult]::Yes) {
-    try { Start-Worker 'Restore' $false $selected }
-    catch { Set-Status $_.Exception.Message $true }
-  }
+  if ($result -ne [Windows.Forms.DialogResult]::OK) { return }
+  $question = $(if ($hasExistingData) {
+    "Sicherung $selected wiederherstellen? Der aktuelle Bestand wird davor automatisch " +
+    "als eigene Sicherung aufbewahrt. Erst danach wird die gewählte Sicherung aktiviert."
+  } else {
+    "Sicherung $selected in die neue leere Datenbank einspielen?"
+  })
+  if ([Windows.Forms.MessageBox]::Show($question,'Kleinanzeiger – Sicherung wiederherstellen',
+        [Windows.Forms.MessageBoxButtons]::YesNo) -ne [Windows.Forms.DialogResult]::Yes) { return }
+  try { Start-Worker 'Restore' $false $selected }
+  catch { Set-Status $_.Exception.Message $true }
 })
 $form.Add_FormClosed({
   if ($script:releaseCheckClient) { $script:releaseCheckClient.Dispose() }
