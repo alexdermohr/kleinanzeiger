@@ -134,7 +134,8 @@ $productsExport = Add-Button 'Entwürfe exportieren' 28 449 282 43
 $restore = Add-Button 'Sicherung wiederherstellen …' 330 449 282 43
 $messages = Add-Button 'Nachrichten verwalten' 28 508 282 43
 $rollback = Add-Button 'Vorherige Programmversion verwenden …' 330 508 282 43
-$weekly = Add-Button 'Wochenbericht …' 28 568 584 43
+$weekly = Add-Button 'Wochenbericht …' 28 568 282 43
+$deals = Add-Button 'Schnäppchenjäger …' 330 568 282 43
 $rollback.AutoEllipsis = $true
 $statusLabel = Add-Label 'Bereit.' 28 397 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
@@ -192,7 +193,7 @@ $detailsLink.Add_Click({
 $script:advancedExpanded = $false
 function Set-AdvancedLayout([bool]$expanded) {
   $script:advancedExpanded = $expanded
-  foreach ($control in @($mail,$labels,$productsExport,$restore,$messages,$rollback,$weekly)) {
+  foreach ($control in @($mail,$labels,$productsExport,$restore,$messages,$rollback,$weekly,$deals)) {
     $control.Visible = $expanded
   }
   $advanced.Text = $(if($expanded){'Weniger anzeigen'}else{'Weitere Aktionen'})
@@ -450,6 +451,7 @@ function Refresh-Controls {
   $ai.Enabled = !$busy
   $messages.Enabled = !$busy -and (Test-Path -LiteralPath $db) -and (Test-Path -LiteralPath $python -PathType Leaf)
   $weekly.Enabled = !$busy -and (Test-Path -LiteralPath $db) -and (Test-Path -LiteralPath $python -PathType Leaf)
+  $deals.Enabled = !$busy -and (Test-Path -LiteralPath $python -PathType Leaf)
   $mail.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $labels.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $products.Enabled = !$busy -and (Test-Path -LiteralPath $db)
@@ -1045,6 +1047,21 @@ $messages.Add_Click({
     Set-Status 'Nachrichtenfenster gestartet. Jeder kostenpflichtige Aufruf braucht einen Klick.'
   } catch { Set-Status $_.Exception.Message $true }
 })
+$deals.Add_Click({
+  try {
+    if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
+      Set-Status 'Bitte zuerst Kleinanzeiger einrichten.' $true
+      return
+    }
+    $dealsScript = Join-Path $base 'windows-deals.ps1'
+    if (!(Test-Path -LiteralPath $dealsScript -PathType Leaf)) {
+      throw 'Schnäppchenjäger fehlt im installierten Paket. Bitte aktualisieren.'
+    }
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile',
+      '-STA','-ExecutionPolicy','Bypass','-File',('"' + $dealsScript + '"')) | Out-Null
+    Set-Status 'Schnäppchenjäger geöffnet. Nur eigene Angebotsdateien werden lokal ausgewertet.'
+  } catch { Set-Status $_.Exception.Message $true }
+})
 $mail.Add_Click({ try { Show-CustomerMailPicker } catch { Set-Status $_.Exception.Message $true } })
 $labels.Add_Click({ try { Show-CustomerLabels } catch { Set-Status $_.Exception.Message $true } })
 $products.Add_Click({ try { Show-ProductImport } catch { Set-Status $_.Exception.Message $true } })
@@ -1259,7 +1276,7 @@ if ($SelfTest) {
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
     throw 'Die installierte Version wurde vom Kontrollfenster nicht erkannt.'
   }
-  foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1','windows-messages.ps1')) {
+  foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1','windows-messages.ps1','windows-deals.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $base $file))) { throw "Fehlendes Skript: $file" }
   }
   foreach ($file in @('Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html')) {
@@ -1280,7 +1297,7 @@ if ($SelfTest) {
   if (!$script:advancedExpanded -or $form.ClientSize.Height -ne 744 -or
       $advanced.Text -ne 'Weniger anzeigen' -or $statusLabel.Top -ne 630 -or
       $detailsLink.Top -ne 694 -or $copyDiagnostics.Top -ne 694 -or $rollback.Top -ne 508 -or
-      $mail.Top -ne 390 -or $productsExport.Top -ne 449) {
+      $mail.Top -ne 390 -or $productsExport.Top -ne 449 -or $deals.Top -ne 568) {
     throw 'Erweiterte Kundenaktionen sind nicht vollstaendig erreichbar.'
   }
   Set-AdvancedLayout $false

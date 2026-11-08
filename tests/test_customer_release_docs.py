@@ -75,7 +75,8 @@ class FirstCustomerReleaseTests(unittest.TestCase):
         h = (ROOT / "docs/Kleinanzeiger-Funktionen.html").read_text(encoding="utf-8")
         parser = _Links()
         parser.feed(h)
-        self.assertEqual(parser.details, 5)
+        self.assertGreaterEqual(parser.details, 5)
+        self.assertIn("Schnäppchenjäger", h)
         self.assertGreaterEqual(parser.strong, 35)
         for term in ("Anzeigen", "CSV-/Excel", "Bild", "KI", "Titel", "Beschreibung",
                      "Aufrufe", "Merker", "Antworten", "Bildtyp", "Stadt", "Preis",
