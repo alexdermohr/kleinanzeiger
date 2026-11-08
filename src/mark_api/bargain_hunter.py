@@ -213,7 +213,7 @@ def _tokens(text: str) -> set[str]:
     return set(_MODEL_WORDS.findall(normalized))
 
 
-_CPU = re.compile(r"\b(?:i[3579](?:[-\s]\d{3,5}[a-z]{0,3})?|ryzen\s*[3579](?:[-\s]*\d{3,5}[a-z]{0,3})?|core\s*ultra\s*[579](?:\s*\d{3}[a-z]{0,3})?|m[1234](?:\s*(?:pro|max|ultra))?)\b", re.I)
+_CPU = re.compile(r"\b(?:i[3579](?:[-\s]\d{3,5}[a-z0-9]{0,4})?|ryzen\s*[3579](?:[-\s]*\d{3,5}[a-z0-9]{0,4})?|core\s*ultra\s*[579](?:\s*\d{3}[a-z0-9]{0,4})?|m[1234](?:\s*(?:pro|max|ultra))?)\b", re.I)
 _RAM = re.compile(r"\b(\d{1,3})\s*(?:gb|gbyte)\s*(?:ram|arbeitsspeicher|ddr[345]|memory)\b", re.I)
 _STORAGE = re.compile(
     r"\b(\d{2,4})\s*gb\s*(?:ssd|hdd)\b|\b(\d{1,2})\s*tb\s*(?:ssd|hdd)\b", re.I

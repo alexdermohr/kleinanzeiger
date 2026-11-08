@@ -104,7 +104,7 @@ class DealEngineTests(unittest.TestCase):
             ("MacBook Pro 16", "MacBook Pro 16 M1 Pro 32GB RAM 1TB SSD",
              "MacBook Pro 16 M1 Max 32GB RAM 1TB SSD"),
             (MODEL, "Lenovo ThinkPad T14 Gen 3 i7-1165G7 16GB RAM 512GB SSD",
-             "Lenovo ThinkPad T14 Gen 3 i7-12700H 16GB RAM 512GB SSD"),
+             "Lenovo ThinkPad T14 Gen 3 i7-1265G7 16GB RAM 512GB SSD"),
         )
         for model, candidate, expensive in cases:
             with self.subTest(model=model):
