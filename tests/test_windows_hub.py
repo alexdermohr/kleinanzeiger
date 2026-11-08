@@ -177,6 +177,11 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("Kleinanzeiger.lnk", worker)
         self.assertIn("App", worker)
         self.assertIn("Wiederherstellung nur bei nicht vorhandener Datenbank", worker)
+        self.assertIn("windows-restore-existing.py", worker)
+        self.assertIn("windows-restore-existing.py", (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8"))
+        self.assertIn("if (Test-Path -LiteralPath $db -PathType Leaf)", worker)
+        self.assertIn("mark_api.windows_backup --backup $source --db $db", worker)
+        self.assertIn("mark_api.windows_backup", (SCRIPTS / "windows-restore-existing.py").read_text(encoding="utf-8"))
         self.assertNotIn("Remove-Item -LiteralPath $db", worker)
 
     def test_compact_workflow_and_explicit_advanced_tools(self) -> None:

@@ -3,7 +3,7 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
-## [1.0.8] - 2026-11-08
+## [1.0.9] - 2026-11-08
 
 ### Neu
 - Eine lokale Schnäppchenanalyse vergleicht selbst bereitgestellte CSV-/JSON-Angebote ohne automatischen Marktplatzzugriff über die Kommandozeile und erstellt einen HTML-Bericht. Noch keine Integration in die grafische Windows-Oberfläche.
@@ -11,6 +11,12 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 ### Behoben
 - Zubehör, Defekte und abweichende Modell-, Editions- oder Speichervarianten werden nicht mehr als gleichwertige Preisvergleiche ausgegeben.
 - Die Auswertung großer Bestände ist schneller; unbekannte Zustandsangaben gelten nicht als belegte Übereinstimmung.
+
+## [1.0.8] - 2026-11-08
+
+### Verbessert
+- Im Windows-Kontrollfenster kann eine ausgewählte Sicherung auch bei vorhandenem Datenbestand wiederhergestellt werden.
+- Vor der Wiederherstellung wird der aktuelle Bestand automatisch als separate Sicherung mit Prüfnachweis aufbewahrt. Ein ungültiger Sicherungsstand wird vor dem Austausch abgewiesen.
 
 ## [1.0.7] - 2026-11-08
 
