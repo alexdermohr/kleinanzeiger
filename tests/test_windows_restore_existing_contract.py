@@ -34,6 +34,8 @@ class CustomerRestoreContractTests(unittest.TestCase):
         self.assertIn("[Windows.Forms.MessageBoxButtons]::YesNo", dialog)
         self.assertIn("Start-Worker 'Restore' $false $selected", dialog)
         self.assertNotIn("Die Datenbank ist bereits vorhanden. Wiederherstellung gesperrt.", dialog)
+        self.assertIn("$restore.Enabled = !$busy -and (Test-Path -LiteralPath $python -PathType Leaf)", hub)
+        self.assertNotIn("$restore.Enabled = !$busy -and !(Test-Path -LiteralPath $db)", hub)
         self.assertIn("& $venvPython -u $helper --backup $source --db $db", worker)
         self.assertIn("& $venvPython -m mark_api.windows_backup --backup $source --db $db", worker)
 

@@ -455,7 +455,7 @@ function Refresh-Controls {
   $products.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $productsExport.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $account.Enabled = !$busy
-  $restore.Enabled = !$busy -and !(Test-Path -LiteralPath $db)
+  $restore.Enabled = !$busy -and (Test-Path -LiteralPath $python -PathType Leaf)
   $rollback.Enabled = !$busy -and (Test-Path -LiteralPath $python -PathType Leaf) -and
     (@(Get-ChildItem -LiteralPath $state -Directory -Filter '.venv-rollback-*' -ErrorAction SilentlyContinue).Count -gt 0)
 }
