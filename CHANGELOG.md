@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.8] - 2026-11-08
+
+### Verbessert
+- Im Windows-Kontrollfenster kann eine ausgewählte Sicherung auch bei vorhandenem Datenbestand wiederhergestellt werden.
+- Vor der Wiederherstellung wird der aktuelle Bestand automatisch als separate Sicherung mit Prüfnachweis aufbewahrt. Ein ungültiger Sicherungsstand wird vor dem Austausch abgewiesen.
+
 ## [1.0.7] - 2026-11-08
 
 ### Behoben
