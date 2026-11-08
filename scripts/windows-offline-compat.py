@@ -34,8 +34,12 @@ def main() -> int:
         return server
 
     offline_launcher.create_server = controlled_server
-    # Pass through only legacy-compatible arguments (--db, --init-db, ...).
-    # Never append --stop-on-stdin: an older wheel rejects it at parse time.
+    # Older wheels have no local-work option; preserve their read-only fallback.
+    # Modern wheels opt in when launched by the Windows control hub.
+    if getattr(offline_launcher, "WINDOWS_LOCAL_WORK_SUPPORTED", False):
+        if "--local-work" not in sys.argv[1:]:
+            sys.argv.append("--local-work")
+    # Never append --stop-on-stdin: older wheels reject it at parse time.
     return offline_launcher.main()
 
 

@@ -53,7 +53,7 @@ class WindowsDealsUiContractTests(unittest.TestCase):
         self.assertIn("scripts\\windows-deals.ps1",workflow)
         self.assertIn("'windows-deals.ps1'",workflow)
         self.assertIn("test_windows_deals_ui.py",workflow)
-        self.assertIn("-SelfTest -ExpectedInstalledVersion '1.0.9'",workflow)
+        self.assertIn("-SelfTest -ExpectedInstalledVersion '1.0.10'",workflow)
         self.assertIn("Schnäppchenjäger", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
         self.assertIn("Schnäppchenjäger", (ROOT / "docs/START-HIER.html").read_text(encoding="utf-8"))
 

@@ -104,5 +104,25 @@ class WindowsOfflineCompatibilityTests(unittest.TestCase):
                 self.assertNotIn("unrecognized arguments", result.stderr)
 
 
+    def test_modern_gui_bridge_opt_in_is_visible_and_legacy_bridge_stays_compatible(self):
+        with tempfile.TemporaryDirectory(prefix="kleinanzeiger-modern-bridge-") as temp:
+            directory = Path(temp)
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(ROOT / "src")
+            environment["PYTHONNOUSERSITE"] = "1"
+            result = subprocess.run(
+                [sys.executable, str(COMPAT),
+                 "--db", str(directory / "seller.sqlite"),
+                 "--init-db", "--port", "0"],
+                input="STOP\n", capture_output=True, text=True,
+                env=environment, timeout=18,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Kleinanzeiger offline dashboard: http://127.0.0.1:", result.stdout)
+        self.assertIn("#write_token=", result.stdout)
+        self.assertIn("Platform sync and writes: disabled", result.stdout)
+        self.assertNotIn("unrecognized arguments", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
