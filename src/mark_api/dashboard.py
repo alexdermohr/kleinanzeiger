@@ -1796,7 +1796,9 @@ function renderSyncStatus(sync, recovery) {
     freshness.textContent = observed
       ? "Letzter bestätigter Kontoabgleich: " + observed
         + " (" + ageDescription(completed) + ")."
-      : "Noch kein erfolgreicher Kontoabgleich. Im Kleinanzeiger-Chrome anmelden und „Mit Kleinanzeigen abgleichen“ wählen.";
+      : "Noch kein erfolgreicher Kontoabgleich. " + (manualSyncAvailable && localUiReady()
+        ? "Im Kleinanzeiger-Chrome anmelden und „Mit Kleinanzeigen abgleichen“ wählen."
+        : "Der Kontoabgleich ist in dieser Sitzung nicht verfügbar. Gespeicherte lokale Daten bleiben lesbar; es erfolgt keine Live-Aktualisierung.");
     const open = recovery && typeof recovery === "object"
       ? recovery.unresolved_count : null;
     if (Number.isSafeInteger(open) && open > 0) {

@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.5] - 2026-11-08
+
+### Verbessert
+- Der Hinweis zum Kontoabgleich schlägt die Schaltfläche nur vor, wenn sie in der aktuellen Sitzung tatsächlich nutzbar ist.
+- Ohne Berechtigung für den Kontoabgleich erklärt das Kontrollfenster den lokalen Lesemodus. Gespeicherte Anzeigen bleiben verfügbar.
+
 ## [1.0.4] - 2026-11-07
 
 ### Verbessert
