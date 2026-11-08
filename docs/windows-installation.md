@@ -1,14 +1,14 @@
 # Kleinanzeiger – Windows 11
 
-**Version 1.0.9 · Windows 11 (64 Bit) · ohne WSL**
+**Version 1.0.10 · Windows 11 (64 Bit) · ohne WSL**
 
 ## Erste Einrichtung
 
-1. Das offizielle `Kleinanzeiger-v1.0.9-Windows.zip` von [GitHub Releases](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.0.9) herunterladen und **vollständig entpacken**.
+1. Das offizielle `Kleinanzeiger-v1.0.10-Windows.zip` von [GitHub Releases](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.0.10) herunterladen und **vollständig entpacken**.
 2. `Kleinanzeiger.cmd` doppelklicken. `START-HIER.html` bietet eine kurze Einführung.
-3. Im Kontrollfenster **Einrichten und starten** wählen. Wenn Python oder Chrome fehlt, braucht die Einrichtung Internet.
+3. Im Kontrollfenster **Installieren / aktualisieren** wählen. Zur Installation werden bei Bedarf Python, Chrome und Python-Paketabhängigkeiten über das Internet eingerichtet.
 4. **Kleinanzeigen-Konto öffnen**: Im eigens gestarteten Chrome anmelden und gegebenenfalls die Sicherheitsbestätigung durchführen.
-5. Kleinanzeiger starten, im Dashboard **Mit Kleinanzeigen abgleichen** anklicken und den Bestand prüfen.
+5. **Kleinanzeiger starten** wählen, den eigenen Bestand im Dashboard abgleichen und prüfen.
 
 Das Dashboard zeigt den **letzten bestätigten Abgleich mit Datum und Uhrzeit**. Bei fehlender Anmeldung oder Browser-/Internetverbindung stehen konkrete nächste Schritte direkt beim Status. Ein gescheiterter Versuch ersetzt den Zeitpunkt des letzten erfolgreichen Abgleichs nicht.
 
@@ -31,7 +31,7 @@ Kleinanzeiger zuerst beenden, dann **Installieren / aktualisieren** wählen. Das
 
 - **Browsersteuerung:** Prüfen, ob das **Kleinanzeiger-Chrome**, nicht nur dein normales Chrome, angemeldet ist.
 - **Keine Anzeigen sichtbar:** Anmeldung, Internetverbindung und Filter prüfen; einen erneuten kontrollierten Abgleich starten.
-- **Lokaler Arbeitsmodus:** Vorhandene Daten sind lesbar, Plattformänderungen gesperrt. Für Schreibaktionen nach bestätigtem Abgleich neu starten.
+- **Lokaler Arbeitsmodus:** Auch ohne Chrome oder Internet bleiben gespeicherte Anzeigen lesbar. Lokale Entwürfe, Verkaufsvermerke und KI-Aufträge können weiterbearbeitet werden. Plattformänderungen bleiben gesperrt; für sie zuerst die Verbindung und den Kontoabgleich wiederherstellen.
 - **Fehler nach einem Update:** Im Kontrollfenster **Fehlerdetails anzeigen** oder **Diagnose kopieren** wählen. Keine Passwörter, Tokens oder privaten Anzeigeninhalte weitergeben.
 - **Daten wiederherstellen:** Nur über **Sicherung wiederherstellen**, niemals laufende Datenbankdateien überschreiben. Profile, Datenbank oder Backups nicht löschen.
 

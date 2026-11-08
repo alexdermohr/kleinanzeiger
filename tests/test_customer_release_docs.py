@@ -53,7 +53,9 @@ class FirstCustomerReleaseTests(unittest.TestCase):
     def test_usable_first_start_page_and_local_help(self) -> None:
         start = (ROOT / "docs/START-HIER.html").read_text(encoding="utf-8")
         self.assertIn("Kleinanzeiger.cmd", start)
-        self.assertIn("Einrichten und starten", start)
+        self.assertIn("Installieren / aktualisieren", start)
+        self.assertIn("Kleinanzeiger starten", start)
+        self.assertNotIn("Einrichten und starten", start)
         self.assertIn("Mit Kleinanzeigen abgleichen", start)
         self.assertIn("Benutzerhandbuch", start)
         for name in ("START-HIER.html", "Kleinanzeiger-Handbuch.html", "Kleinanzeiger-Funktionen.html"):

@@ -15,6 +15,9 @@ from .email_import import import_kleinanzeigen_email_files
 from .local_catalog_import import import_local_catalog_files
 from .storage import SnapshotStore
 
+# New installed wheels expose token-bound local work to the stable Windows hub.
+WINDOWS_LOCAL_WORK_SUPPORTED = True
+
 
 def _watch_local_stop_stdin(stream: object, server: object) -> None:
     """Only a private owning Windows control pipe can request a clean shutdown."""
@@ -87,6 +90,10 @@ def _parser() -> argparse.ArgumentParser:
         "--stop-on-stdin", action="store_true",
         help="Allow the owning Windows control process to close this read-only dashboard cleanly.",
     )
+    parser.add_argument(
+        "--local-work", action="store_true",
+        help="Allow session-token-protected local seller work; never platform writes.",
+    )
     return parser
 
 
@@ -97,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     if not 0 <= args.port <= 65535:
         parser.error("--port must be an integer between 0 and 65535")
 
+    local_work_token = secrets.token_urlsafe(32) if args.local_work else None
     generation_access = None
     if args.enable_generation:
         if not os.environ.get("OPENAI_API_KEY"):
@@ -151,17 +159,27 @@ def main(argv: list[str] | None = None) -> int:
                 {"generation_access": generation_access}
                 if generation_access is not None else {}
             ),
+            **(
+                {"local_session_token": local_work_token, "offline_mode": True}
+                if local_work_token is not None else {}
+            ),
         )
     except (OSError, ValueError) as exc:
         parser.error(f"read-only dashboard could not start: {exc}")
 
     host, port = server.server_address
-    token_fragment = (
-        "#generation_token=" + quote(generation_access.ui_token, safe="")
-        if generation_access is not None else ""
-    )
+    fragments = []
+    if local_work_token is not None:
+        fragments.append("write_token=" + quote(local_work_token, safe=""))
+    if generation_access is not None:
+        fragments.append("generation_token=" + quote(generation_access.ui_token, safe=""))
+    token_fragment = "#" + "&".join(fragments) if fragments else ""
     print(f"Kleinanzeiger offline dashboard: http://{host}:{port}/{token_fragment}", flush=True)
-    print("Platform sync and writes: disabled (local files only).", flush=True)
+    print(
+        "Platform sync and writes: disabled; local work enabled."
+        if local_work_token is not None else
+        "Platform sync and writes: disabled (local files only).", flush=True,
+    )
     if generation_access is not None:
         print("Draft generation: opt-in, separate consent and possible provider costs per request.", flush=True)
     if catalog_report is not None:

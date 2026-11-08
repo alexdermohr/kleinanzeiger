@@ -67,6 +67,14 @@ class WindowsInstallerContractTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("Unbeaufsichtigte Massenveröffentlichungen", readme)
 
+    def test_customer_first_steps_use_real_installer_and_start_labels(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        intro = (ROOT / "docs/START-HIER.html").read_text(encoding="utf-8")
+        for document in (readme, intro):
+            self.assertNotIn("Einrichten und starten", document)
+            self.assertIn("Installieren / aktualisieren", document)
+            self.assertIn("Kleinanzeiger starten", document)
+
     def test_no_powershell_home_reserved_variable_write(self):
         for filename in ("windows-install.ps1", "windows-chrome.ps1"):
             code = (SCRIPTS / filename).read_text(encoding="utf-8")

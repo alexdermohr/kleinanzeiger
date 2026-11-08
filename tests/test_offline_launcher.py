@@ -409,5 +409,32 @@ class OfflineLauncherTests(unittest.TestCase):
             self.assertNotIn("not-a-date", error.getvalue())
             self.assertEqual(store.tracked_ad_ids(), ())
 
+    def test_explicit_local_work_enables_token_scoped_local_session_not_platform_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "seller.sqlite"
+            captured = {}
+
+            def factory(store, *, port, analytics_contract,
+                        local_session_token, offline_mode):
+                self.assertEqual(port, 0)
+                self.assertTrue(offline_mode)
+                self.assertGreaterEqual(len(local_session_token), 32)
+                self.assertIsNone(analytics_contract.objective_metric)
+                captured["token"] = local_session_token
+                captured["store"] = store
+                return ImmediateServer()
+
+            with (patch.object(offline, "create_server", side_effect=factory),
+                  redirect_stdout(io.StringIO()) as output):
+                result = offline.main([
+                    "--db", str(db), "--init-db", "--port", "0", "--local-work",
+                ])
+            self.assertEqual(result, 0)
+            self.assertIsInstance(captured["store"], SnapshotStore)
+            self.assertIn("#write_token=" + captured["token"], output.getvalue())
+            self.assertIn("Platform sync and writes: disabled", output.getvalue())
+            self.assertNotIn("generation_token=", output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
