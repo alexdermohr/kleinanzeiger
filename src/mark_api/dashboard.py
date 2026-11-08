@@ -4725,6 +4725,7 @@ const syncFailureHints = Object.freeze({
   write_session_required: "Die lokale Sitzung ist abgelaufen. Kleinanzeiger vollständig beenden und neu starten.",
   owner_inventory_busy: "Ein anderer Vorgang verwendet gerade den Browser. Danach erneut abgleichen.",
   owner_inventory_browser_unavailable: "Der von Kleinanzeiger verwendete Chrome ist nicht erreichbar. Kleinanzeiger neu starten.",
+  owner_inventory_browser_wrong_tab: "Der verwendete Chrome-Reiter zeigt nicht „Meine Anzeigen“. Dort „Meine Anzeigen“ öffnen und danach einmal erneut abgleichen.",
   owner_inventory_recovery_required: "Ein früherer Abgleich hat einen ungeklärten Zustand. Im Status nachsehen, nicht wiederholt auslösen.",
   owner_inventory_storage_unavailable: "Der lokale Abgleichstatus ist nicht lesbar. Kleinanzeiger neu starten und Diagnose prüfen.",
   owner_inventory_login_required: "Im von Kleinanzeiger geöffneten Chrome bei Kleinanzeigen anmelden, dann erneut abgleichen.",
@@ -4735,6 +4736,7 @@ const syncFailureHints = Object.freeze({
 const connectionHelpMessages = Object.freeze({
   owner_inventory_login_required: "Anmeldung erforderlich: „Kleinanzeigen-Konto öffnen“ im Kleinanzeiger-Startfenster wählen, dort bei Kleinanzeigen anmelden und danach „Mit Kleinanzeigen abgleichen“ anklicken.",
   owner_inventory_browser_unavailable: "Kleinanzeiger-Chrome nicht erreichbar: Das Startfenster öffnen, den Konto-Browser prüfen und Kleinanzeiger kontrolliert neu starten.",
+  owner_inventory_browser_wrong_tab: "Falscher Browser-Reiter: Im Kleinanzeiger-Chrome genau den verwendeten Reiter auf „Meine Anzeigen“ öffnen und danach den Kontoabgleich erneut starten. Gespeicherte Anzeigen bleiben erhalten.",
   owner_inventory_connection_unavailable: "Keine Verbindung zu Kleinanzeigen: Internet und Anmeldung im Kleinanzeiger-Chrome prüfen. Vorhandene Anzeigen bleiben gespeichert.",
   write_session_required: "Diese Sitzung kann keine Plattformänderungen ausführen. Kleinanzeiger über Kleinanzeiger.cmd vollständig neu starten und den Eigenbestand erneut abgleichen.",
   read_only: "Bearbeiten und Veröffentlichen sind in dieser reinen Ansicht nicht möglich. Kleinanzeiger über Kleinanzeiger.cmd normal starten.",

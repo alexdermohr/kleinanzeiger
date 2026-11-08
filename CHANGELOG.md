@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.7] - 2026-11-08
+
+### Korrigiert
+- Wenn beim Kontoabgleich der verwendete Chrome-Reiter nicht „Meine Anzeigen“ zeigt, erklärt Kleinanzeiger den gezielten nächsten Schritt statt fälschlich einen Internetausfall zu vermuten.
+- Der fehlgeschlagene Abgleich verändert vorhandene Anzeigen nicht und startet keine automatische Wiederholung.
+
 ## [1.0.6] - 2026-11-08
 
 ### Verbessert

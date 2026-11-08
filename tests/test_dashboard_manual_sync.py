@@ -75,7 +75,12 @@ const run = expression => vm.runInContext(expression, context);
   assert.equal(reloads,2);
   assert.match(status.textContent,/Abgleich fehlgeschlagen.*Vorhandene Anzeigen bleiben gespeichert/);
   assert.equal(run("writeUiReady()"),false);
-  assert.equal(requests.length,3);
+  // A different selected browser tab is not an Internet outage.
+  response={ok:false,json:async()=>({error:"owner_inventory_browser_wrong_tab"})};
+  await run("syncNow()");
+  assert.match(status.textContent,/Meine Anzeigen/);
+  assert.equal(reloads,2);
+  assert.equal(requests.length,4);
   assert.ok(requests.every(r=>r.path === "/api/dashboard/sync" && r.options.method === "POST"));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''
@@ -183,6 +188,7 @@ class DashboardManualSyncHttpTests(unittest.TestCase):
         for kind, expected_status in (
             ("busy", 409), ("recovery_required", 409),
             ("login_required", 503), ("browser_unavailable", 503),
+            ("browser_wrong_tab", 503),
             ("connection_unavailable", 503), ("storage_unavailable", 503),
             ("read_failed", 503),
         ):
@@ -319,6 +325,35 @@ class OwnerManualSyncRuntimeTests(unittest.TestCase):
             self.store.latest_sync_attempt().outcome,
             ("success_empty", "success_nonempty"),
         )
+
+    def test_wrong_management_tab_keeps_last_known_ads_and_has_actionable_reason(self):
+        old = AdSnapshot(
+            ad_id="12345678", title="Kein Datenverlust",
+            observed_at=datetime.now(timezone.utc),
+            source="synthetic-owner", lifecycle_state=LifecycleState.ACTIVE,
+        )
+        self.store.append_ad_snapshot(old)
+        runtime, reader = self.runtime(
+            ReadResult.failure(ReadStatus.TRANSPORT_ERROR,
+                               error="cdp_inventory_wrong_target"),
+        )
+        with self.assertRaises(OwnerInventorySyncFailure) as caught:
+            runtime.sync_owner_inventory()
+        self.assertEqual(caught.exception.kind, "browser_wrong_tab")
+        self.assertEqual(reader.calls, 1)
+        self.assertEqual(self.store.tracked_ad_ids(), ("12345678",))
+        self.assertEqual(self.store.latest_ad_snapshot("12345678").title, "Kein Datenverlust")
+        self.assertEqual(self.store.latest_sync_attempt().outcome, "failed")
+
+        # Never promote arbitrary browser-provided diagnostics to public UI codes.
+        runtime, reader = self.runtime(
+            ReadResult.failure(ReadStatus.TRANSPORT_ERROR,
+                               error="cookie-value-from-browser"),
+        )
+        with self.assertRaises(OwnerInventorySyncFailure) as caught:
+            runtime.sync_owner_inventory()
+        self.assertEqual(caught.exception.kind, "connection_unavailable")
+        self.assertEqual(reader.calls, 1)
 
     def test_unauthenticated_read_is_distinguished_from_transport_errors(self):
         runtime, reader = self.runtime(ReadResult.failure(ReadStatus.UNAUTHENTICATED))
