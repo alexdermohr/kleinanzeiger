@@ -218,6 +218,9 @@ _RAM = re.compile(r"\b(\d{1,3})\s*(?:gb|gbyte)\s*(?:ram|arbeitsspeicher|ddr[345]
 _STORAGE = re.compile(
     r"\b(\d{2,4})\s*gb\s*(?:ssd|hdd)\b|\b(\d{1,2})\s*tb\s*(?:ssd|hdd)\b", re.I
 )
+_STORAGE_MEDIUM_FIRST = re.compile(
+    r"\b(ssd|hdd)\s*(?:(\d{2,4})\s*gb|(\d{1,2})\s*tb)\b", re.I
+)
 _PHONE_CAPACITY = re.compile(r"\b(64|128|256|512|1024)\s*gb\b", re.I)
 
 
@@ -226,6 +229,7 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
     cpu = _CPU.search(title)
     ram = _RAM.search(title)
     storage = _STORAGE.search(title)
+    reversed_storage = _STORAGE_MEDIUM_FIRST.search(title)
     phone = _PHONE_CAPACITY.search(title)
     size = ""
     if storage:
@@ -233,6 +237,10 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
                     else str(int(storage.group(2)) * 1024))
         medium = "ssd" if storage.group().casefold().endswith("ssd") else "hdd"
         size = capacity + "gb:" + medium
+    elif reversed_storage:
+        capacity = (str(int(reversed_storage.group(2))) if reversed_storage.group(2)
+                    else str(int(reversed_storage.group(3)) * 1024))
+        size = capacity + "gb:" + reversed_storage.group(1).casefold()
     elif phone:
         size = phone.group(1) + "gb"
     return (

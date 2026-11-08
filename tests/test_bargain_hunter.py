@@ -141,6 +141,28 @@ class DealEngineTests(unittest.TestCase):
         self.assertIn("Versand: 80.00 €", html)
         self.assertIn("10.0 % unter dem Angebotsmedian", html)
 
+    def test_medium_first_storage_sizes_do_not_create_false_bargains(self):
+        model = "Dell Optiplex 7050"
+        candidate = "Dell Optiplex 7050 i5 16GB RAM SSD 1TB"
+        peer = "Dell Optiplex 7050 i5 16GB RAM SSD 2TB"
+        offers = [normalize_offer(row(0, 100, title=candidate))]
+        offers += [normalize_offer(row(i, 400, title=peer)) for i in range(1, 5)]
+        result = assess_offers(offers, model)
+        cheap = next(item for item in result if item["id"] == str(1234567800))
+        self.assertEqual(cheap["peer_count"], 0)
+        self.assertEqual(cheap["classification"], "nicht bewertbar")
+
+    def test_medium_first_and_capacity_first_matching_storage_are_comparable(self):
+        model = "Dell Optiplex 7050"
+        candidate = "Dell Optiplex 7050 i5 16GB RAM SSD 1TB"
+        peer = "Dell Optiplex 7050 i5 16GB RAM 1TB SSD"
+        offers = [normalize_offer(row(0, 100, title=candidate))]
+        offers += [normalize_offer(row(i, 200, title=peer)) for i in range(1, 5)]
+        result = assess_offers(offers, model)
+        cheap = next(item for item in result if item["id"] == str(1234567800))
+        self.assertEqual(cheap["peer_count"], 4)
+        self.assertEqual(cheap["classification"], "auffällig günstig")
+
     def test_cpu_variant_mismatch_never_inflates_reference(self):
         offers = [normalize_offer(row(0, 100))]
         offers += [normalize_offer(row(i, 200)) for i in range(1, 5)]
