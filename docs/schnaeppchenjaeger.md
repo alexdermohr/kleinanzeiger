@@ -38,6 +38,10 @@ Die Daten werden weder hochgeladen noch aus dem Internet nachgeladen.
 
 Eine Liste aus nur einem Angebot ergibt ausdrücklich **keine Bewertung**.
 Mindestens vier andere ausreichend vergleichbare Anzeigen sind erforderlich.
+Die Bewertung trennt anhand im Titel belegbarer Angaben zusätzlich Prozessor,
+Arbeitsspeicher und Speichergröße. Unbekannte Ausstattungen werden nicht als
+nachweislich identische Varianten angenommen; dadurch können Treffer bewusst
+unbewertet bleiben.
 Referenz ist der Median ihrer beobachteten **Angebotspreise**, nicht der
 erzielte Verkaufspreis. Jeder Kandidat wird aus seiner Vergleichsgruppe
 herausgenommen. Fehlende Versandkosten oder der Zustand werden markiert.

@@ -82,6 +82,33 @@ class DealEngineTests(unittest.TestCase):
         self.assertEqual(best["discount_pct"], "56.5")
         self.assertNotIn(str(1234567808), [r["id"] for r in report])
 
+
+    def test_cpu_variant_mismatch_never_inflates_reference(self):
+        offers = [normalize_offer(row(0, 100))]
+        offers += [normalize_offer(row(i, 200)) for i in range(1, 5)]
+        offers.append(normalize_offer(row(8, 9000, title="Lenovo ThinkPad T14 Gen 3 i7 16GB SSD")))
+        best = next(r for r in assess_offers(offers, MODEL) if r["id"] == str(1234567800))
+        self.assertEqual(best["peer_count"], 4)
+        self.assertEqual(best["peer_median_eur"], "200.00")
+
+    def test_explicit_ram_and_storage_variants_are_separate(self):
+        sample = [
+            normalize_offer(row(0, 100,
+                title="Lenovo ThinkPad T14 Gen 3 i5 16GB RAM 512GB SSD")),
+            *[
+                normalize_offer(row(i, 300,
+                    title=f"Lenovo ThinkPad T14 Gen 3 i5 32GB RAM 1TB SSD {i}"))
+                for i in range(1, 7)
+            ],
+        ]
+        best = next(r for r in assess_offers(sample, MODEL) if r["id"] == str(1234567800))
+        self.assertEqual(best["classification"], "nicht bewertbar")
+        self.assertEqual(best["peer_count"], 0)
+
+    def test_nonfinite_discount_threshold_fails_explicitly(self):
+        with self.assertRaises(DealInputError):
+            assess_offers([], MODEL, discount_threshold=Decimal("NaN"))
+
     def test_no_false_claim_when_peers_insufficient(self):
         offers = [normalize_offer(row(i, 100+i)) for i in range(3)]
         report = assess_offers(offers, MODEL)
@@ -139,6 +166,16 @@ class DealEngineTests(unittest.TestCase):
             file.write_bytes(b" " * 8_000_001)
             with self.assertRaises(DealInputError):
                 load_offers(file)
+
+
+    def test_malformed_csv_and_duplicate_columns_fail_cleanly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "invalid.csv"
+            for text in ('id,title,title,price,url\n1,A,B,3,x\n',
+                         'id,title,price,url\n1,"unterbrochener Titel,3,x'):
+                source.write_text(text, encoding="utf-8")
+                with self.assertRaises(DealInputError):
+                    load_offers(source)
 
     def test_html_escapes_untrusted_title_and_source(self):
         value = normalize_offer(row(1, 99, title="<script>alert(1)</script>",

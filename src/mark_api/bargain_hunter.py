@@ -146,10 +146,14 @@ def load_offers(path: str | Path) -> list[Offer]:
     except UnicodeError as exc:
         raise DealInputError("UTF-8-Datei erforderlich") from exc
     if file.suffix.casefold() == ".csv":
-        reader = csv.DictReader(io.StringIO(data), strict=True)
-        if not reader.fieldnames or len(reader.fieldnames) > 30:
-            raise DealInputError("Ungültiger CSV-Header")
-        rows = list(reader)
+        try:
+            reader = csv.DictReader(io.StringIO(data), strict=True)
+            if (not reader.fieldnames or len(reader.fieldnames) > 30
+                    or len(set(reader.fieldnames)) != len(reader.fieldnames)):
+                raise DealInputError("Ungültiger oder doppelter CSV-Header")
+            rows = list(reader)
+        except csv.Error as exc:
+            raise DealInputError("Beschädigte CSV-Datei") from exc
     else:
         try:
             payload = json.loads(data)
@@ -181,6 +185,33 @@ def load_offers(path: str | Path) -> list[Offer]:
 
 def _tokens(text: str) -> set[str]:
     return set(_MODEL_WORDS.findall(text.casefold()))
+
+
+_CPU = re.compile(r"\b(?:i[3579]|ryzen\s*[3579]|core\s*ultra\s*[579]|m[1234])\b", re.I)
+_RAM = re.compile(r"\b(\d{1,3})\s*(?:gb|gbyte)\s*(?:ram|arbeitsspeicher|ddr[345]|memory)\b", re.I)
+_STORAGE = re.compile(
+    r"\b(\d{2,4})\s*gb\s*(?:ssd|hdd)\b|\b(\d{1,2})\s*tb\s*(?:ssd|hdd)\b", re.I
+)
+_PHONE_CAPACITY = re.compile(r"\b(64|128|256|512|1024)\s*gb\b", re.I)
+
+
+def _variant_key(title: str, model: str) -> tuple[str, str, str]:
+    """Only title-evidenced specs. Unknown is distinct from a known variant."""
+    cpu = _CPU.search(title)
+    ram = _RAM.search(title)
+    storage = _STORAGE.search(title)
+    phone = _PHONE_CAPACITY.search(title) if "iphone" in _tokens(model) else None
+    size = ""
+    if storage:
+        size = (str(int(storage.group(1))) + "gb" if storage.group(1)
+                else str(int(storage.group(2)) * 1024) + "gb")
+    elif phone:
+        size = phone.group(1) + "gb"
+    return (
+        re.sub(r"\s+", "", cpu.group().casefold()) if cpu else "",
+        (ram.group(1) if ram else ""),
+        size,
+    )
 
 
 def matches_model(title: str, exact_model: str) -> bool:
@@ -217,13 +248,18 @@ def assess_offers(offers: list[Offer], exact_model: str, *,
     Inconclusive rows are present but cannot be called bargains.
     """
     model = _string(exact_model, name="Exaktes Modell", size=160)
-    if not 3 <= min_peers <= 100 or not Decimal("0") < discount_threshold < Decimal("1"):
+    if (type(min_peers) is not int or not 3 <= min_peers <= 100
+            or not isinstance(discount_threshold, Decimal)
+            or not discount_threshold.is_finite()
+            or not Decimal("0") < discount_threshold < Decimal("1")):
         raise DealInputError("Ungültige Bewertungsgrenzen")
     matching = [o for o in offers if matches_model(o.title, model)]
     ranked: list[dict] = []
     for offer in matching:
+        variant = _variant_key(offer.title, model)
         others = [
             o.comparison_price for o in matching if o.uid != offer.uid
+            and _variant_key(o.title, model) == variant
             and (o.condition == offer.condition or
                  o.condition == "unbekannt" or offer.condition == "unbekannt")
             and o.comparison_price is not None and o.comparison_price > 0
@@ -246,6 +282,7 @@ def assess_offers(offers: list[Offer], exact_model: str, *,
         if offer.condition == "unbekannt":
             flags.append("Zustand nicht belegt")
         flags.append("Vergleich nur mit Angebotspreisen, nicht mit Verkaufspreisen")
+        flags.append("Ausstattung nur anhand belegter Titelmerkmale verglichen")
         ranked.append({
             "id": offer.uid, "title": offer.title, "url": offer.url,
             "source": offer.source, "observed_at": offer.observed_at,
