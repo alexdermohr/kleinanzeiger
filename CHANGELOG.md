@@ -5,7 +5,7 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 
 ## [1.0.7] - 2026-11-08
 
-### Korrigiert
+### Behoben
 - Wenn beim Kontoabgleich der verwendete Chrome-Reiter nicht „Meine Anzeigen“ zeigt, erklärt Kleinanzeiger den gezielten nächsten Schritt statt fälschlich einen Internetausfall zu vermuten.
 - Der fehlgeschlagene Abgleich verändert vorhandene Anzeigen nicht und startet keine automatische Wiederholung.
 
