@@ -189,7 +189,9 @@ def load_offers(path: str | Path) -> list[Offer]:
 
 
 def _tokens(text: str) -> set[str]:
-    return set(_MODEL_WORDS.findall(text.casefold()))
+    # S23+ is the Plus edition; don't confuse it with plain S23.
+    normalized = re.sub(r"(?<=\d)\+(?!\w)", " plus", text.casefold())
+    return set(_MODEL_WORDS.findall(normalized))
 
 
 _CPU = re.compile(r"\b(?:i[3579]|ryzen\s*[3579]|core\s*ultra\s*[579]|m[1234])\b", re.I)
@@ -219,6 +221,22 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
     )
 
 
+def _accessory_only(title: str) -> bool:
+    """Reject accessory offers, not devices supplied with accessories.
+
+    A connector immediately before an accessory noun proves a bundle/absence.
+    A bare accessory noun, including one at the start, stays excluded.
+    """
+    for accessory in _ACCESSORY.finditer(title):
+        prefix = title[:accessory.start()]
+        if re.search(r"\b(?:mit|inkl(?:usive)?\.?|samt|und|ohne)\s*$", prefix, re.I):
+            continue
+        if re.search(r"\s\+\s*$", prefix):
+            continue
+        return True
+    return False
+
+
 def matches_model(title: str, exact_model: str) -> bool:
     """Fail conservatively on mismatched generations, editions and conditions."""
     expected = _tokens(exact_model)
@@ -230,7 +248,7 @@ def matches_model(title: str, exact_model: str) -> bool:
         listing_generation = _GENERATION.search(title)
         if not listing_generation or listing_generation.group(1) != requested_generation.group(1):
             return False
-    if _DAMAGED.search(title) or _ACCESSORY.search(title):
+    if _DAMAGED.search(title) or _accessory_only(title):
         return False
     # Phone editions are distinct models; an unspecified edition is not a match.
     if expected & {"iphone", "samsung", "galaxy", "pixel", "redmi"}:

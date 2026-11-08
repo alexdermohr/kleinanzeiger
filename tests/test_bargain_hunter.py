@@ -150,6 +150,37 @@ class DealEngineTests(unittest.TestCase):
             self.assertEqual(report[str(1234567800 + i)]["peer_count"], 0)
             self.assertEqual(report[str(1234567800 + i)]["classification"], "nicht bewertbar")
 
+    def test_accessory_bundles_are_devices_but_accessory_only_is_not(self):
+        model = "iPhone 14"
+        for title in ("Apple iPhone 14 128GB mit Hülle",
+                      "iPhone 14 128GB inkl. Ladekabel",
+                      "iPhone 14 128GB ohne Verpackung",
+                      "Apple iPhone 14 128GB mit OVP"):
+            with self.subTest(title=title):
+                self.assertTrue(matches_model(title, model))
+        for title in ("Hülle für iPhone 14", "iPhone 14 Hülle",
+                      "iPhone 14 Ladekabel", "iPhone 14 Panzerglas"):
+            with self.subTest(title=title):
+                self.assertFalse(matches_model(title, model))
+        offers = [normalize_offer(row(0, 100, title="iPhone 14 128GB mit Hülle"))]
+        offers += [normalize_offer(row(i, 400, title=f"iPhone 14 128GB {i}"))
+                   for i in range(1, 5)]
+        result = assess_offers(offers, model)
+        self.assertEqual(len(result), 5)
+        self.assertEqual(next(r for r in result if r["id"] == str(1234567800))["peer_count"], 4)
+
+    def test_symbolic_plus_editions_not_mixed_with_base(self):
+        self.assertTrue(matches_model("Samsung Galaxy S23+ 128GB", "Galaxy S23+"))
+        self.assertFalse(matches_model("Samsung Galaxy S23+ 128GB", "Galaxy S23"))
+        self.assertFalse(matches_model("Samsung Galaxy S23 128GB", "Galaxy S23+"))
+        self.assertTrue(matches_model("Samsung Galaxy S23 Plus 128GB", "Galaxy S23+"))
+        offers = [normalize_offer(row(0, 100, title="Samsung Galaxy S23 128GB"))]
+        offers += [normalize_offer(row(i, 400, title="Samsung Galaxy S23+ 128GB"))
+                   for i in range(1, 6)]
+        result = assess_offers(offers, "Galaxy S23")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["classification"], "nicht bewertbar")
+
     def test_galaxy_editions_are_separate(self):
         for suffix in ("Ultra", "Plus", "FE"):
             with self.subTest(suffix=suffix):
