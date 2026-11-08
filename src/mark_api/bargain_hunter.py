@@ -100,7 +100,7 @@ class Offer:
 
     @property
     def comparison_price(self) -> Decimal | None:
-        if self.price_eur is None:
+        if self.price_eur is None or self.price_eur <= 0:
             return None
         return self.price_eur + (self.shipping_eur or Decimal(0))
 
@@ -223,6 +223,7 @@ _STORAGE_MEDIUM_FIRST = re.compile(
     r"\b(ssd|hdd)\s*(?:(\d{2,4})\s*gb|(\d{1,2})\s*tb)\b", re.I
 )
 _PHONE_CAPACITY = re.compile(r"\b(64|128|256|512|1024)\s*gb\b", re.I)
+_BARE_TERABYTE = re.compile(r"\b(\d{1,2})\s*tb\b", re.I)
 
 
 def _variant_key(title: str, model: str) -> tuple[str, str, str]:
@@ -232,6 +233,7 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
     storage = _STORAGE.search(title)
     reversed_storage = _STORAGE_MEDIUM_FIRST.search(title)
     phone = _PHONE_CAPACITY.search(title)
+    bare_tb = _BARE_TERABYTE.search(title)
     size = ""
     if storage:
         capacity = (str(int(storage.group(1))) if storage.group(1)
@@ -242,6 +244,8 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
         capacity = (str(int(reversed_storage.group(2))) if reversed_storage.group(2)
                     else str(int(reversed_storage.group(3)) * 1024))
         size = capacity + "gb:" + reversed_storage.group(1).casefold()
+    elif bare_tb:
+        size = str(int(bare_tb.group(1)) * 1024) + "gb"
     elif phone:
         size = phone.group(1) + "gb"
     return (

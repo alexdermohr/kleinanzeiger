@@ -6,11 +6,11 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 ## [1.0.9] - 2026-11-08
 
 ### Neu
-- Eine lokale Schnäppchenanalyse vergleicht selbst bereitgestellte CSV-/JSON-Angebote ohne automatischen Marktplatzzugriff über die Kommandozeile und erstellt einen HTML-Bericht. Noch keine Integration in die grafische Windows-Oberfläche.
+- Im Windows-Kontrollfenster unter »Weitere Aktionen → Schnäppchenjäger« eigene CSV-/JSON-Angebote lokal bewerten und als HTML-Bericht öffnen oder eine reguläre Kleinanzeigen-Suche im Browser starten. Kein automatisches Einsammeln.
 
 ### Behoben
 - Zubehör, Defekte und abweichende Modell-, Editions- oder Speichervarianten werden nicht mehr als gleichwertige Preisvergleiche ausgegeben.
-- Die Auswertung großer Bestände ist schneller; unbekannte Zustandsangaben gelten nicht als belegte Übereinstimmung.
+- Die Auswertung großer Bestände ist schneller; unbekannte Zustandsangaben gelten nicht als belegte Übereinstimmung. Nullpreis-Angebote mit Versand und voneinander abweichende Terabyte-Speicher werden nicht mehr als Preisvergleich missverstanden.
 
 ## [1.0.8] - 2026-11-08
 

@@ -4,6 +4,10 @@
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
+**Schnäppchenjäger:** Über **Weitere Aktionen → Schnäppchenjäger** kann
+man selbst bereitgestellte Angebote (CSV/JSON) lokal bewerten und manuelle
+Kleinanzeigen-Suchen öffnen. Es werden keine Inserate automatisch abgerufen.
+
 ## In drei Schritten starten
 
 1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.0.9) und das ZIP **vollständig entpacken**.

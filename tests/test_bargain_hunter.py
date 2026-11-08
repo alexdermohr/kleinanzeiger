@@ -334,6 +334,37 @@ class DealEngineTests(unittest.TestCase):
         self.assertTrue(all(r["classification"] == "nicht bewertbar" for r in report))
         self.assertTrue(all(r["peer_median_eur"] is None for r in report))
 
+    def test_zero_item_price_with_shipping_does_not_enter_comparison_group(self):
+        offers = [normalize_offer(row(0, 0, extra={"shipping_eur": "7"}))]
+        offers += [normalize_offer(row(i, 200, extra={"shipping_eur": "0"}))
+                   for i in range(1, 5)]
+        results = {r["id"]: r for r in assess_offers(offers, MODEL)}
+        free = results[str(1234567800)]
+        self.assertEqual(free["classification"], "nicht bewertbar")
+        self.assertEqual(free["price_eur"], "0.00")
+        self.assertIsNone(free["comparison_price_eur"])
+        self.assertIsNone(free["discount_pct"])
+        self.assertIn("Kein belastbarer positiver", free["reason"])
+        self.assertEqual(free["peer_count"], 4)
+        self.assertEqual(results[str(1234567801)]["peer_count"], 3)
+
+    def test_unlabeled_terabyte_capacity_is_not_mixed_with_another_size(self):
+        model = "iPad Pro 13 M4"
+        small = "iPad Pro 13 M4 16GB RAM 1TB"
+        large = "iPad Pro 13 M4 16GB RAM 2TB"
+        offers = [normalize_offer(row(0, 500, title=small))]
+        offers += [normalize_offer(row(i, 1500, title=large))
+                   for i in range(1, 5)]
+        assessed = {r["id"]: r for r in assess_offers(offers, model)}
+        self.assertEqual(assessed[str(1234567800)]["peer_count"], 0)
+        self.assertEqual(assessed[str(1234567800)]["classification"], "nicht bewertbar")
+        offers = [normalize_offer(row(0, 500, title=small))]
+        offers += [normalize_offer(row(i, 1200, title="iPad Pro 13 M4 16GB RAM 1024GB"))
+                   for i in range(1, 5)]
+        assessed = {r["id"]: r for r in assess_offers(offers, model)}
+        self.assertEqual(assessed[str(1234567800)]["peer_count"], 4)
+        self.assertEqual(assessed[str(1234567800)]["classification"], "auffällig günstig")
+
     def test_missing_price_cannot_be_best_deal(self):
         offers = [normalize_offer(row(0, None))]
         offers += [normalize_offer(row(i, 300+i)) for i in range(1, 7)]

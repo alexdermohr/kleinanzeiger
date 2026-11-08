@@ -1,13 +1,26 @@
-# Schnäppchenjäger – lokale Bewertungsbasis (Entwicklungsstand)
+# Schnäppchenjäger – lokale Angebote vergleichen
 
 Der Kaufbereich ist unabhängig von der Verwaltung eigener Anzeigen. Die erste
 Stufe ist ein **lokales, read-only Analysewerkzeug** für vom Nutzer bereitgestellte
 Inseratdaten. Sie greift weder auf Kleinanzeigen noch auf das eigene Konto zu.
 
-**Status:** Modul und Kommandozeilenbericht implementiert. Die Integration in
-das normale Windows-Dashboard, die automatische Angebotszufuhr und eine
-Kundenabnahme sind **noch nicht implementiert**. Keine Versionserhöhung ohne
-funktionierenden Kundenweg.
+**Status:** Das Windows-Kontrollfenster öffnet unter **Weitere Aktionen → Schnäppchenjäger**
+eine eigene Oberfläche. Im eigentlichen Web-Dashboard und als automatische
+Angebotssuche ist die Funktion noch nicht integriert.
+
+## Direkt unter Windows
+
+1. Kleinanzeiger öffnen und **Weitere Aktionen → Schnäppchenjäger** wählen.
+2. Das exakte Modell eingeben und mit **Suche im Browser öffnen** eine normale
+   Kleinanzeigen-Suchseite öffnen. Der Browser überträgt keine Inserate zurück.
+3. Angebote aus einer selbst gewählten zulässigen Quelle als CSV oder JSON
+   speichern, **Datei wählen** und **Datei lokal auswerten** anklicken.
+4. Der Bericht öffnet sich im Browser. Er bleibt im Unterordner **Berichte** des
+   lokalen Kleinanzeiger-Anwendungsdatenordners erhalten. Ohne mindestens vier
+   weitere passende Vergleichsangebote bleibt die Bewertung unbestimmt.
+
+Dies benötigt keinen KI-Schlüssel. Es gibt keine automatisierte
+Marktplatzabfrage, keine Kontozugriffe, keinen Versand und keine Käufe.
 
 ## Ein Angebot vergleichen
 
@@ -55,7 +68,9 @@ Varianten und Zustände werden einmal gruppiert und ihre Preise sortiert;
 der Median ohne eigenen Preis wird ohne erneuten Vollvergleich ermittelt,
 auch bei 10.000 Angeboten. Fehlende Versandkosten oder der Zustand werden markiert.
 Ein deutlich günstiger Preis bedeutet ausdrücklich weder einen echten
-Schnäppchenkauf noch einen sicheren Verkäufer.
+Schnäppchenkauf noch einen sicheren Verkäufer. Ein Inserat mit 0 EUR wird
+auch bei positivem Versandpreis nicht als Vergleichspreis genutzt;
+explizit unterschiedliche Terabyte-Speichergrößen bleiben getrennt.
 
 Die Ausgabe ist ein lokaler HTML-Bericht mit verlinkten Angeboten, den
 beobachteten Quellen, dem Zeitpunkt, dem Median, der Stichprobengröße und

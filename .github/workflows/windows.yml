@@ -103,6 +103,7 @@ jobs:
               "test_portfolio_followups_http.py",
               "test_portfolio_followups_ui.py",
               "test_windows_customer_hub.py",
+              "test_windows_deals_ui.py",
               "test_windows_restore_existing.py",
               "test_windows_installer_scripts.py",
               "test_windows_hub.py",
@@ -122,7 +123,7 @@ jobs:
       - name: Parse customer PowerShell scripts
         shell: pwsh
         run: |
-          foreach ($script in @('windows-install.ps1', 'windows-start.ps1', 'windows-chrome.ps1', 'windows-ki-einrichten.ps1', 'windows-center.ps1', 'windows-worker.ps1', 'windows-messages.ps1', 'windows-weekly-report.ps1', 'windows-diagnostics.ps1')) {
+          foreach ($script in @('windows-install.ps1', 'windows-start.ps1', 'windows-chrome.ps1', 'windows-ki-einrichten.ps1', 'windows-center.ps1', 'windows-worker.ps1', 'windows-messages.ps1', 'windows-weekly-report.ps1', 'windows-deals.ps1', 'windows-diagnostics.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path (Join-Path scripts $script)).Path, [ref]$tokens, [ref]$errors) | Out-Null
@@ -132,6 +133,8 @@ jobs:
         shell: pwsh
         run: |
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File scripts/windows-center.ps1 -SelfTest
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File scripts/windows-deals.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows-weekly-report.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File scripts/windows-worker.ps1 -SelfTest
@@ -147,7 +150,7 @@ jobs:
           $wheel = @(Get-ChildItem -Path dist -Filter 'kleinanzeiger-*.whl')
           if ($wheel.Count -ne 1) { throw 'Expected exactly one Wheel' }
           Copy-Item $wheel[0].FullName $staging
-          Copy-Item scripts\Kleinanzeiger.cmd, scripts\windows-center.ps1, scripts\windows-worker.ps1, scripts\windows-messages.ps1, scripts\windows-weekly-report.ps1, scripts\windows-offline-compat.py, scripts\windows-restore-existing.py, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1, scripts\windows-chrome.ps1, scripts\windows-ki-einrichten.ps1, scripts\windows-diagnostics.ps1, scripts\Kleinanzeiger-Diagnose.cmd $staging
+          Copy-Item scripts\Kleinanzeiger.cmd, scripts\windows-center.ps1, scripts\windows-worker.ps1, scripts\windows-messages.ps1, scripts\windows-weekly-report.ps1, scripts\windows-deals.ps1, scripts\windows-offline-compat.py, scripts\windows-restore-existing.py, scripts\windows-install.ps1, scripts\windows-start.ps1, scripts\windows-backup.ps1, scripts\windows-restore.ps1, scripts\windows-chrome.ps1, scripts\windows-ki-einrichten.ps1, scripts\windows-diagnostics.ps1, scripts\Kleinanzeiger-Diagnose.cmd $staging
           Copy-Item docs\windows-installation.md (Join-Path $staging 'Windows-Installation.md')
           Copy-Item docs\platform-nachrichten.md (Join-Path $staging 'Konto-Nachrichten.md')
           Copy-Item docs\Kleinanzeiger-Handbuch.html, docs\Kleinanzeiger-Funktionen.html $staging
@@ -182,6 +185,8 @@ jobs:
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-center.ps1') -SelfTest -ExpectedInstalledVersion '1.0.9'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-worker.ps1') -SelfTest -ExpectedInstalledVersion '1.0.9'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-deals.ps1') -SelfTest -ExpectedInstalledVersion '1.0.9'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Prove the optional inbox module works from the actually installed Wheel; no provider call.
           powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $staging 'windows-messages.ps1') -SelfTest
