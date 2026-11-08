@@ -24,13 +24,19 @@ def render_report(model: str, offers: list[dict], *, generated_at: str) -> str:
         median = (r["peer_median_eur"] + " €"
                   if r["peer_median_eur"] is not None else "Nicht bestimmbar")
         price = (r["price_eur"] + " €" if r["price_eur"] is not None else "Unbekannt")
+        shipping = (r["shipping_eur"] + " €" if r["shipping_eur"] is not None
+                    else "Unbekannt (nicht eingerechnet)")
+        total = (r["comparison_price_eur"] + " €"
+                 if r["comparison_price_eur"] is not None else "Unbekannt")
         label = "Treffer prüfen" if status == "auffällig günstig" else "Angebot öffnen"
         rows.append(
             "<article class='offer'><header>"
             f"<span class='classification'>{esc(status)}</span>"
             f"<h2>{esc(r['title'])}</h2></header>"
-            f"<div class='values'><strong>{esc(price)}</strong>"
+            f"<div class='values'><strong>Vergleichspreis: {esc(total)}</strong>"
             f"<span>{esc(discount)}</span></div>"
+            f"<p>Angebotspreis: {esc(price)} · Versand: {esc(shipping)}</p>"
+            f"<p class='minor'>Vergleichspreis enthält nur belegte Versandkosten.</p>"
             f"<p>Vergleichsmedian (Angebotspreise): {esc(median)}"
             f" · {r['peer_count']} passende Vergleichsangebote</p>"
             f"<p class='minor'>Quelle: {esc(r['source'])}"

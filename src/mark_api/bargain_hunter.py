@@ -229,8 +229,10 @@ def _variant_key(title: str, model: str) -> tuple[str, str, str]:
     phone = _PHONE_CAPACITY.search(title)
     size = ""
     if storage:
-        size = (str(int(storage.group(1))) + "gb" if storage.group(1)
-                else str(int(storage.group(2)) * 1024) + "gb")
+        capacity = (str(int(storage.group(1))) if storage.group(1)
+                    else str(int(storage.group(2)) * 1024))
+        medium = "ssd" if storage.group().casefold().endswith("ssd") else "hdd"
+        size = capacity + "gb:" + medium
     elif phone:
         size = phone.group(1) + "gb"
     return (

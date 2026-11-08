@@ -116,6 +116,31 @@ class DealEngineTests(unittest.TestCase):
                 self.assertEqual(cheap["peer_count"], 0)
                 self.assertEqual(cheap["classification"], "nicht bewertbar")
 
+    def test_hdd_and_ssd_not_grouped_at_equal_capacities(self):
+        model = "Dell Optiplex 7050"
+        candidate = "Dell Optiplex 7050 i5 16GB RAM 500GB HDD"
+        peer = "Dell Optiplex 7050 i5 16GB RAM 500GB SSD"
+        offers = [normalize_offer(row(0, 100, title=candidate))]
+        offers += [normalize_offer(row(i, 300, title=peer)) for i in range(1, 5)]
+        assessed = assess_offers(offers, model)
+        cheap = next(item for item in assessed if item["id"] == str(1234567800))
+        self.assertEqual(cheap["peer_count"], 0)
+        self.assertEqual(cheap["classification"], "nicht bewertbar")
+
+    def test_report_explains_shipping_in_comparison_price(self):
+        offers = [normalize_offer(row(0, 100, extra={"shipping_eur": "80"}))]
+        offers += [normalize_offer(row(i, 200, extra={"shipping_eur": "0"}))
+                   for i in range(1, 5)]
+        evaluated = assess_offers(offers, MODEL)
+        cheap = next(item for item in evaluated if item["id"] == str(1234567800))
+        self.assertEqual(cheap["comparison_price_eur"], "180.00")
+        self.assertEqual(cheap["discount_pct"], "10.0")
+        html = render_report(MODEL, evaluated, generated_at="2026-11-08 11:00 UTC")
+        self.assertIn("Vergleichspreis: 180.00 €", html)
+        self.assertIn("Angebotspreis: 100.00 €", html)
+        self.assertIn("Versand: 80.00 €", html)
+        self.assertIn("10.0 % unter dem Angebotsmedian", html)
+
     def test_cpu_variant_mismatch_never_inflates_reference(self):
         offers = [normalize_offer(row(0, 100))]
         offers += [normalize_offer(row(i, 200)) for i in range(1, 5)]
