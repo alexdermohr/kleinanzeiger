@@ -135,4 +135,3 @@ class BrowserWriteAckLifecycleTests(unittest.TestCase):
             finally:
                 _stop_browser(browser)
                 output.close()
-
