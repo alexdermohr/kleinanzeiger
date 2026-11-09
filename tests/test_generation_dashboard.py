@@ -380,9 +380,13 @@ class GenerationHttpTests(unittest.TestCase):
                 port, "POST", "/api/dashboard/generate", body(),
                 {**h, "Content-Type": "text/plain"},
             )[0], 400)
-            self.assertEqual(http_call(
-                port, "POST", "/api/dashboard/generate", b"x" * 16385, h,
-            )[0], 400)
+            # The rejected body is larger than the ordinary JSON limit,
+            # but small enough for the bounded discard-only drain. It must
+            # produce HTTP 400 (not a Windows socket reset), repeatedly.
+            for _ in range(3):
+                self.assertEqual(http_call(
+                    port, "POST", "/api/dashboard/generate", b"x" * 16385, h,
+                )[0], 400)
             self.assertEqual(http_call(
                 port, "POST", "/api/dashboard/generate", body(),
                 {**h, "Idempotency-Key": "forbidden"},

@@ -242,11 +242,45 @@ def _sidecar_digest(path: Path, original: os.stat_result | None) -> str | None:
         os.close(descriptor)
 
 
+def _btrfs_subvolume_mapping_alias(path: str, mapped_device: int) -> bool:
+    """Verify an inode's procfs device is its Btrfs mount's superblock device.
+
+    /proc/self/maps uses the Btrfs superblock's device ID, whereas stat()
+    may expose a subvolume-specific device ID. Only translate for a live,
+    non-deleted regular pathname on an explicitly attested Btrfs mount.
+    On a rename, deleted mapping or unsupported mount, fail closed.
+    """
+    if not path.startswith("/") or path.endswith(" (deleted)"):
+        return False
+    best: tuple[int, str, str] | None = None
+    try:
+        with open("/proc/self/mountinfo", encoding="ascii", errors="surrogateescape") as mounts:
+            for line in mounts:
+                before, separator, after = line.partition(" - ")
+                fields, filesystem = before.split(), after.split()
+                if not separator or len(fields) < 5 or not filesystem:
+                    continue
+                # mountinfo escapes spaces (and other separators) numerically.
+                point = fields[4].replace(r"\040", " ").replace(r"\011", "\t").replace(r"\134", "\\")
+                if path == point or path.startswith(point.rstrip("/") + "/"):
+                    candidate = (len(point), fields[2], filesystem[0])
+                    if best is None or candidate[0] > best[0]:
+                        best = candidate
+        if best is None or best[2] != "btrfs":
+            return False
+        major, minor = best[1].split(":", 1)
+        return os.makedev(int(major), int(minor)) == mapped_device
+    except (OSError, ValueError, OverflowError):
+        return False
+
+
 def _shared_file_mappings() -> set[tuple[int, int]]:
     """Identify file-backed shared mappings, including renamed SQLite -shm.
 
-    Pathnames in /proc/self/maps are not reliable after a rename. Compare
-    numeric mapped device/inode against the attested -shm inode instead.
+    Compare numeric mapping device/inode to the attested -shm. For Btrfs
+    only, normalize a mapped device after independently verifying the
+    live original pathname, mapped inode and matching Btrfs mount.
+    Renames, deleted paths and foreign mappings remain fail-closed.
     """
     found: set[tuple[int, int]] = set()
     try:
@@ -261,7 +295,26 @@ def _shared_file_mappings() -> set[tuple[int, int]]:
                 if int(fields[4]) == 0:
                     continue
                 major, minor = fields[3].split(":", 1)
-                found.add((os.makedev(int(major, 16), int(minor, 16)), int(fields[4])))
+                mapped_device = os.makedev(int(major, 16), int(minor, 16))
+                mapped_inode = int(fields[4])
+                # On Btrfs subvolumes procfs and stat can legitimately
+                # disagree about st_dev for the same mapped inode. Verify
+                # the actual live mapping path and Btrfs mount before using
+                # the pathname's device identity. No inode-only fallback.
+                if len(fields) == 6:
+                    mapped_path = fields[5].rstrip("\n")
+                    try:
+                        actual = os.lstat(mapped_path)
+                    except OSError:
+                        actual = None
+                    if (actual is not None
+                            and stat.S_ISREG(actual.st_mode)
+                            and actual.st_nlink == 1
+                            and actual.st_ino == mapped_inode
+                            and actual.st_dev != mapped_device
+                            and _btrfs_subvolume_mapping_alias(mapped_path, mapped_device)):
+                        mapped_device = actual.st_dev
+                found.add((mapped_device, mapped_inode))
     except (OSError, ValueError) as exc:
         raise BackupError("WAL source identity mapping attestation is unavailable") from exc
     return found

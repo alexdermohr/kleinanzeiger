@@ -117,6 +117,10 @@ def request(base, path, *, method="GET", payload=None, key=None, authorized=True
         resp=op.open(req,timeout=3)
     except HTTPError as e:
         resp=e
+    except (OSError, TimeoutError) as exc:
+        # Include only the local operation identity for diagnosis; never
+        # retry an uncertain remote platform effect.
+        raise AssertionError(f"local HTTP transport failed: {method} {path}") from exc
     with resp:
         return resp.status,json.loads(resp.read()),dict(resp.headers)
 

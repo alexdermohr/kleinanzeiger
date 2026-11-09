@@ -385,8 +385,12 @@ class InboxServerTests(unittest.TestCase):
                 self.assertEqual(result["state"],"sent")
                 self.assertEqual(self.journal.state(prepared["request_id"])["state"],"sent")
         self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),2)
-        self.assertEqual(self.call("POST","/api/prepare",{
-            "conversation_id":"a:b","ad_id":"4711","message":"x"*17000})[0],400)
+        for _ in range(3):
+            self.assertEqual(self.call("POST","/api/prepare",{
+                "conversation_id":"a:b","ad_id":"4711","message":"x"*17000})[0],400)
+        # The connection must return an HTTP denial (not Winsock 10053);
+        # the next independent request must still be serviceable.
+        self.assertEqual(self.call("GET","/api/status")[0],200)
         self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),2)
 
 class AccountInboxBrowserRaceTests(unittest.TestCase):
