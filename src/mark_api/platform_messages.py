@@ -636,7 +636,8 @@ def create_inbox_server(
                 self.close_connection = True
                 return
             raw_length = lengths[0]
-            if not raw_length.isascii() or not raw_length.isdecimal():
+            if (len(raw_length) > 5 or not raw_length.isascii()
+                    or not raw_length.isdecimal()):
                 self.close_connection = True
                 return
             length = int(raw_length)
