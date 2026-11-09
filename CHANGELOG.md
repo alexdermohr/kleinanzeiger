@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.12] - 2026-11-09
+
+### Behoben
+- Bestimmte ungültige oder zu große Anfragen werden im Windows-Kontrollfenster wieder geordnet abgelehnt, statt die lokale Verbindung unerwartet zu trennen. Es werden dabei keine Plattformaktionen automatisch wiederholt.
+- Sicherungen einer laufenden SQLite-Datenbank auf Btrfs-Dateisystemen werden nicht mehr allein wegen unterschiedlicher Gerätekennungen derselben Datei abgewiesen. Integritäts- und Wiederherstellungsprüfungen bleiben erhalten.
+
 ## [1.0.11] - 2026-11-09
 
 ### Behoben
