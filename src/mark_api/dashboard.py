@@ -1613,29 +1613,40 @@ function validPendingEntry(entry) {
 }
 
 async function acknowledgePendingWrite(entry) {
-  const response = await fetch("/api/dashboard/pending-writes/ack", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Mark-Dashboard-Write": "1",
-      "X-Mark-Dashboard-Token": writeToken,
-    },
-    body: JSON.stringify({
-      scope: entry.scope,
-      idempotency_key: entry.key,
-    }),
-    cache: "no-store",
-  });
-  const text = await response.text();
-  let payload;
-  try {
-    payload = text ? JSON.parse(text) : {};
-  } catch (_error) {
-    throw new Error("pending recovery acknowledgement invalid");
+  // The durable ACK is intentionally two-phase: first acknowledge the observed
+  // terminal response, then finalize/delete only the exact bound request.
+  // Both steps are local bookkeeping, never another platform submission.
+  for (let step = 0; step < 2; step += 1) {
+    const response = await fetch("/api/dashboard/pending-writes/ack", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mark-Dashboard-Write": "1",
+        "X-Mark-Dashboard-Token": writeToken,
+      },
+      body: JSON.stringify({
+        scope: entry.scope,
+        idempotency_key: entry.key,
+      }),
+      cache: "no-store",
+    });
+    const text = await response.text();
+    let payload;
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch (_error) {
+      throw new Error("pending recovery acknowledgement invalid");
+    }
+    if (!response.ok || payload.acknowledged !== true) {
+      throw new Error(payload.error ?? "pending recovery acknowledgement failed");
+    }
+    if (payload.finalized === true) return;
+    if (payload.finalized !== false) {
+      throw new Error("pending recovery acknowledgement state invalid");
+    }
   }
-  if (!response.ok || payload.acknowledged !== true) {
-    throw new Error(payload.error ?? "pending recovery acknowledgement failed");
-  }
+  // Never drop the client fence without a server-confirmed finalization.
+  throw new Error("pending recovery acknowledgement not finalized");
 }
 
 async function refreshPendingWrites() {

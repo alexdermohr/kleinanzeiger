@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.11] - 2026-11-09
+
+### Behoben
+- Nach einer erfolgreich bestätigten Änderung an einer eigenen Anzeige schließt das Dashboard die lokale Schreibbestätigung nun vollständig ab. Dadurch bleibt keine bereits erledigte Anfrage fälschlich als offen stehen.
+- Bei einer fehlenden oder unklaren Bestätigung bleibt die betroffene Aktion gesperrt, ohne die Plattformänderung erneut auszulösen.
+
 ## [1.0.10] - 2026-11-08
 
 ### Verbessert

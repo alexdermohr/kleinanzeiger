@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +54,8 @@ class WindowsDealsUiContractTests(unittest.TestCase):
         self.assertIn("scripts\\windows-deals.ps1",workflow)
         self.assertIn("'windows-deals.ps1'",workflow)
         self.assertIn("test_windows_deals_ui.py",workflow)
-        self.assertIn("-SelfTest -ExpectedInstalledVersion '1.0.10'",workflow)
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        self.assertIn(f"-SelfTest -ExpectedInstalledVersion '{version}'",workflow)
         self.assertIn("Schnäppchenjäger", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
         self.assertIn("Schnäppchenjäger", (ROOT / "docs/START-HIER.html").read_text(encoding="utf-8"))
 
