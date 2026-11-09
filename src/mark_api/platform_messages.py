@@ -31,6 +31,7 @@ MAX_RESPONSE = 512 * 1024
 # Full 4,000-character Unicode message plus send-request UUID and metadata.
 # Browser JSON.stringify emits raw UTF-8; 16 KiB covers 4-byte scalars.
 MAX_MESSAGE_BODY_BYTES = 16_384
+_MAX_REJECTED_BODY_DRAIN_BYTES = 64 * 1024
 _CONV = re.compile(r"[a-zA-Z0-9:_-]{1,128}\Z")
 _AD = re.compile(r"[0-9]{1,32}\Z")
 _KEY = re.compile(r"klaz_live_[A-Za-z0-9_-]{8,200}\Z")
@@ -619,11 +620,46 @@ def create_inbox_server(
                 return False
             port_ = self.server.server_address[1]
             if self.headers.get_all("Host") != [f"127.0.0.1:{port_}"]:
+                self._drain_rejected_body()
                 self.send_error(421, "Misdirected Request")
                 return False
             return True
 
+        def _drain_rejected_body(self):
+            # A short rejected POST must not leave unread bytes that make
+            # Winsock reset its HTTP error response. Never parse or forward it.
+            if getattr(self, "_message_body_read_started", False):
+                return
+            self._message_body_read_started = True
+            lengths = self.headers.get_all("Content-Length") or []
+            if self.headers.get("Transfer-Encoding") is not None or len(lengths) != 1:
+                self.close_connection = True
+                return
+            raw_length = lengths[0]
+            if (len(raw_length) > 5 or not raw_length.isascii()
+                    or not raw_length.isdecimal()):
+                self.close_connection = True
+                return
+            length = int(raw_length)
+            if length > _MAX_REJECTED_BODY_DRAIN_BYTES:
+                self.close_connection = True
+                return
+            previous_timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(2.0)
+                if len(self.rfile.read(length)) != length:
+                    self.close_connection = True
+            except (OSError, TimeoutError):
+                self.close_connection = True
+            finally:
+                try:
+                    self.connection.settimeout(previous_timeout)
+                except OSError:
+                    pass
+
         def respond(self, status, data, content_type="application/json; charset=utf-8"):
+            if status >= 400 and getattr(self, "command", None) == "POST":
+                self._drain_rejected_body()
             if isinstance(data, (dict, list)):
                 raw = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
             elif isinstance(data, str):
@@ -729,7 +765,10 @@ def create_inbox_server(
             length = int(raw_length)
             if length < 2 or length > MAX_MESSAGE_BODY_BYTES:
                 raise MessagingError("invalid_body_length")
+            self._message_body_read_started = True
             raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise MessagingError("invalid_body_length")
             try: value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
             except (UnicodeError, ValueError, TypeError, RecursionError):
                 raise MessagingError("invalid_json") from None

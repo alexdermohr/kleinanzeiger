@@ -7549,7 +7549,11 @@ def _handler_factory(
                 return
             self._request_body_started = True
             try:
-                ignored_bytes = self._content_length(max_bytes=_MAX_PROXY_JSON_BODY_BYTES)
+                # Accept a bounded rejection envelope beyond the normal
+                # 16 KiB JSON limit; this is discard-only, never processed.
+                ignored_bytes = self._content_length(
+                    max_bytes=4 * _MAX_PROXY_JSON_BODY_BYTES
+                )
             except ValueError:
                 self.close_connection = True
                 return
