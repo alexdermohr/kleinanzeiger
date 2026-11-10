@@ -1770,6 +1770,21 @@ async function refreshPendingWrites() {
   }
 }
 
+function pendingWritesSummary() {
+  // Plain-language overview of open actions; nothing is resent from here.
+  const names = {pause: "Pausieren", activate: "Aktivieren", update: "Änderungen speichern", delete: "Löschen"};
+  const items = Array.from(pendingWrites.values()).slice(0, 5).map((entry) => {
+    if (entry.scope === "create" || entry.scope === "create-media") return "neue Anzeige";
+    const action = String(entry.scope).split(":").pop();
+    return "Anzeige " + (entry.adId ?? "?") + " (" + (names[action] ?? action) + ")";
+  });
+  const more = pendingWrites.size > items.length ? " und weitere" : "";
+  return "Noch offen: " + items.join(", ") + more + ". Bis zur Klärung sind "
+    + "Sammelaktionen und weitere Aktionen für diese Anzeige gesperrt; es wird nichts "
+    + "automatisch wiederholt. Zum Klären die Anzeige auswählen und erneut auf dieselbe "
+    + "Schaltfläche klicken.";
+}
+
 function setWriteStatus(message, kind = "warning") {
   const status = byId("write-status");
   status.textContent = message;
@@ -1806,10 +1821,7 @@ function renderWriteAvailability() {
     element.disabled = !ready || catalogBulkBusy;
   }
   if (ready && pendingWrites.size > 0) {
-    setWriteStatus(
-      "Eine frühere Write-Anfrage bleibt mit ihrem ursprünglichen Idempotency-Key gesperrt. Keine erneute Plattformweiterleitung ohne unabhängige Ergebnisprüfung.",
-      "warning",
-    );
+    setWriteStatus(pendingWritesSummary(), "warning");
   }
 }
 

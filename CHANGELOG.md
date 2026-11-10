@@ -13,6 +13,7 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 
 ### Verbessert
 - Ergebnis- und Statusmeldungen im Dashboard sind auf Deutsch und ohne Fachbegriffe formuliert (zum Beispiel »Pausieren: erledigt und von Kleinanzeigen bestätigt«, »Aktiv«/»Pausiert« statt »active«/»paused«).
+- Offene Aktionen werden beim Start mit Anzeigennummer und Aktion genannt (zum Beispiel »Noch offen: Anzeige 123 (Pausieren)«) samt Hinweis, wie sie sich klären lassen.
 - Die Kennzahlen für Aufrufe, Merker und Antworten zeigen »Noch keine Daten« beziehungsweise »1.234 (aus 87 Anzeigen)« statt »0 / 0 Ads«.
 
 ## [1.0.12] - 2026-11-09
