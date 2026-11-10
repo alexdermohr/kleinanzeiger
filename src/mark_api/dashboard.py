@@ -2725,22 +2725,35 @@ function prepareCatalogBulkAction(action) {
   }
   const sourceState = action === "pause" ? "active"
     : (action === "activate" ? "paused" : null);
+  const targetState = action === "pause" ? "paused"
+    : (action === "activate" ? "active" : null);
   const ads = [];
+  const alreadyDone = [];
   for (const id of ids) {
     const ad = catalogSelectedAds.get(id);
+    if (ad && ad.present === true && targetState !== null
+        && ad.lifecycle_state === targetState) {
+      // Already in the requested state: nothing to send, skip it.
+      alreadyDone.push(id);
+      continue;
+    }
     if (!ad || !/^[0-9]{1,32}$/.test(id)
         || ad.ad_id !== id || ad.present !== true
         || typeof ad.observed_at !== "string" || !ad.observed_at
         || (sourceState === null
           ? !["active", "paused"].includes(ad.lifecycle_state)
           : ad.lifecycle_state !== sourceState)) {
-      throw new Error("Auswahl enthält eine unpassende Anzeige. Bestand abgleichen und "
-        + (action === "pause" ? "aktive"
-          : action === "activate" ? "pausierte" : "aktive oder pausierte")
-        + " Anzeigen wählen.");
+      throw new Error("Anzeige " + id + " passt nicht zu dieser Sammelaktion "
+        + "(nicht mehr vorhanden oder unklarer Status). Bitte abwählen oder "
+        + "zuerst „Mit Kleinanzeigen abgleichen“.");
     }
     ads.push(ad);
   }
+  if (ads.length === 0) {
+    throw new Error("Alle ausgewählten Anzeigen sind bereits "
+      + (action === "pause" ? "pausiert" : "aktiv") + ". Nichts zu tun.");
+  }
+  ads.alreadyDone = alreadyDone;
   return ads;
 }
 
@@ -2818,6 +2831,7 @@ async function runCatalogBulkAction(action) {
   renderCatalogNavigation();
   let confirmed = 0;
   const confirmedIds = [];
+  const notApplied = [];
   let stopped = "";
   try {
     for (const ad of ads) {
@@ -2849,9 +2863,24 @@ async function runCatalogBulkAction(action) {
         "/api/write/ads/" + ad.ad_id + (destructive ? "" : "/" + action),
         null, {adId: ad.ad_id},
       );
+      if (
+        result !== null && result.response.status === 409
+        && result.payload?.operation_receipt?.outcome === "precondition_failed"
+        && result.payload.operation_receipt.writer_invoked === false
+        && pendingWrites.size === 0 && !pendingRecoveryBlocked
+      ) {
+        // Rejected before any platform change (e.g. already in that state on
+        // Kleinanzeigen). Safe to note and continue with the next ad.
+        notApplied.push(ad.ad_id);
+        catalogSelectedIds.delete(ad.ad_id);
+        catalogSelectedAds.delete(ad.ad_id);
+        renderCatalogSelection();
+        continue;
+      }
       if (!confirmedWriteResult(result)) {
-        stopped = "Anzeige " + ad.ad_id + ": Ausgang unklar oder abgelehnt. "
-          + "Keine weitere Aktion; Recovery prüfen, nicht erneut senden.";
+        stopped = "Anzeige " + ad.ad_id + ": Ergebnis unklar. Der Stapel wurde angehalten "
+          + "und nichts wird automatisch wiederholt. Bitte „Mit Kleinanzeigen abgleichen“ "
+          + "und die Anzeige prüfen.";
         break;
       }
       confirmed += 1;
@@ -2876,6 +2905,10 @@ async function runCatalogBulkAction(action) {
   showCatalogBulkProgress(
     confirmed + " von " + ads.length + " Anzeigen bestätigt"
     + (confirmedIds.length ? " · IDs: " + confirmedIds.join(", ") : "")
+    + (ads.alreadyDone.length
+      ? " · bereits im gewünschten Zustand, übersprungen: " + ads.alreadyDone.join(", ") : "")
+    + (notApplied.length
+      ? " · auf Kleinanzeigen nicht passend, nichts geändert: " + notApplied.join(", ") : "")
     + (stopped ? " · " + stopped : " · Stapel abgeschlossen.")
   );
 }
