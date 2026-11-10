@@ -3348,8 +3348,8 @@ globalThis.fetch = async (path, options) => {
   assert.equal(pendingWrites.has("ad:2:pause"), false);
   assert.equal(pendingForAd("2"), null);
   assert.equal(loadCalls, 1);
-  assert.match(writeStatus.textContent, /Ausgang unklar/i);
-  assert.match(writeStatus.textContent, /Kein automatischer Plattform-Retry/i);
+  assert.match(writeStatus.textContent, /Ergebnis unklar/i);
+  assert.match(writeStatus.textContent, /nicht automatisch wiederholt/i);
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
@@ -4391,7 +4391,10 @@ globalThis.fetch = async (path, options) => {
     assert.equal(result.response.status, expected);
     assert.equal(pendingWrites.get(scope).acknowledgeOnly, true);
     assert.equal(readOnlyRefreshes, id === "123" ? 1 : 2);
-    assert.match(status.textContent, /Recovery-ACK ist fehlgeschlagen/);
+    // A denied ACK for a confirmed result is a local recovery problem; for an
+    // unclear (202) result it is expected and the unclear-outcome text stays.
+    assert.match(status.textContent,
+      id === "123" ? /Recovery-ACK ist fehlgeschlagen/ : /Ergebnis unklar/);
   }
   const beforeRetry = requests.filter(p => p.startsWith("/api/write/"));
   assert.deepEqual(beforeRetry, [

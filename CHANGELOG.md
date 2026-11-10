@@ -3,6 +3,19 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.13] - 2026-11-10
+
+### Behoben
+- Ein doppelter Klick auf »Pausieren« oder »Aktivieren« (oder eine Aktion auf eine bereits passende Anzeige) sperrt die Anzeige nicht mehr dauerhaft. Kleinanzeiger meldet verständlich, dass nichts geändert wurde, und die Anzeige bleibt bearbeitbar. Von älteren Versionen so gesperrte Anzeigen werden durch erneutes Anklicken derselben Schaltfläche wieder freigegeben, ohne erneute Plattformaktion.
+- Nach einem unklaren Ergebnis bleibt eine Anzeige nicht mehr für immer gesperrt: Nach »Mit Kleinanzeigen abgleichen« lässt sich die Sperre ausdrücklich aufheben. Dabei wird nichts an Kleinanzeigen gesendet und nichts automatisch wiederholt.
+- Nach dem Pausieren oder Aktivieren zeigt das Bearbeitungsfeld sofort den neuen Status an.
+- Sammelaktionen »Auswahl pausieren/aktivieren« überspringen Anzeigen, die schon im gewünschten Zustand sind, statt die ganze Auswahl abzulehnen. Lehnt Kleinanzeigen eine einzelne Anzeige ohne Änderung ab, läuft der Stapel weiter; bei einem unklaren Ergebnis hält er weiterhin an. Unpassende Anzeigen werden mit ihrer Nummer genannt.
+
+### Verbessert
+- Ergebnis- und Statusmeldungen im Dashboard sind auf Deutsch und ohne Fachbegriffe formuliert (zum Beispiel »Pausieren: erledigt und von Kleinanzeigen bestätigt«, »Aktiv«/»Pausiert« statt »active«/»paused«).
+- Offene Aktionen werden beim Start mit Anzeigennummer und Aktion genannt (zum Beispiel »Noch offen: Anzeige 123 (Pausieren)«) samt Hinweis, wie sie sich klären lassen.
+- Die Kennzahlen für Aufrufe, Merker und Antworten zeigen »Noch keine Daten« beziehungsweise »1.234 (aus 87 Anzeigen)« statt »0 / 0 Ads«.
+
 ## [1.0.12] - 2026-11-09
 
 ### Behoben

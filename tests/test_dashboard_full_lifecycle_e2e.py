@@ -58,14 +58,15 @@ class PerAdReader:
         found = tuple(v for v in self.platform.ads.values() if v.ad_id == self.ad_id)
         return ReadResult.success_nonempty(found) if found else ReadResult.success_empty(())
 
-def service_for(platform, store):
+def service_for(platform, store, clock=None):
     return MarkService(
         owner_reader=platform, management_reader=platform,
         delete_confirmation_reader=platform, reaction_reader=None,
         state_writer=platform, delete_writer=platform,
         content_writer=platform, create_writer=platform,
         content_reader_factory=lambda ad_id: PerAdReader(platform, ad_id),
-        store=store, writes_enabled=True, clock=lambda: NOW + timedelta(seconds=10))
+        store=store, writes_enabled=True,
+        clock=clock if clock is not None else (lambda: NOW + timedelta(seconds=10)))
 
 @contextmanager
 def servers(platform, store):
@@ -243,6 +244,215 @@ class DashboardFullLifecycleE2ETests(unittest.TestCase):
                 self.assertEqual(edit["operation_receipt"]["outcome"], "confirmed")
                 self.assertEqual(platform.effects, ["create", "update_content"])
                 self.assertEqual(len(platform.backend_requests), 2)
+
+    def _ack_both_phases(self, base, scope, key):
+        for finalized in (False, True):
+            code, result, _ = request(
+                base, "/api/dashboard/pending-writes/ack", method="POST",
+                payload={"scope": scope, "idempotency_key": key},
+            )
+            self.assertEqual((code, result), (
+                200, {"acknowledged": True, "finalized": finalized},
+            ))
+
+    def test_precondition_failure_releases_fence_without_platform_effect(self):
+        """Double-clicking Pause must not lock the ad forever.
+
+        The second pause is rejected before the platform writer runs. That
+        settled, effect-free result must be acknowledgeable like a confirmed
+        one, so the ad stays usable; nothing is sent to the platform twice.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "mark.sqlite")
+            platform = SyntheticPlatform()
+            store.append_ad_snapshot(platform.ads["314"])
+            with servers(platform, store) as base:
+                status, body, _ = request(
+                    base, "/api/write/ads/314/pause", method="POST", key="pause-1",
+                )
+                self.assertEqual(status, 200, body)
+                self._ack_both_phases(base, "ad:314:pause", "pause-1")
+                status, body, _ = request(
+                    base, "/api/write/ads/314/pause", method="POST", key="pause-2",
+                )
+                self.assertEqual(status, 409, body)
+                receipt = body["operation_receipt"]
+                self.assertEqual(receipt["outcome"], "precondition_failed")
+                self.assertIs(receipt["writer_invoked"], False)
+                self.assertEqual(platform.effects, ["set_state:paused"])
+                self._ack_both_phases(base, "ad:314:pause", "pause-2")
+                self.assertEqual(store.dashboard_pending_writes(), ())
+                status, body, _ = request(
+                    base, "/api/write/ads/314/activate", method="POST", key="activate-1",
+                )
+                self.assertEqual(status, 200, body)
+                self.assertEqual(platform.effects, ["set_state:paused", "set_state:active"])
+
+    def test_previously_stuck_precondition_fence_recovers_by_exact_replay(self):
+        """Fences left by older versions clear via the same key, no new write."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "mark.sqlite")
+            platform = SyntheticPlatform()
+            platform.ads["314"] = replace(
+                platform.ads["314"], lifecycle_state=LifecycleState.PAUSED,
+            )
+            store.append_ad_snapshot(platform.ads["314"])
+            with servers(platform, store) as base:
+                status, original, _ = request(
+                    base, "/api/write/ads/314/pause", method="POST", key="stuck-pause",
+                )
+                self.assertEqual(status, 409, original)
+                # Browser closed before any ACK, as older versions left it.
+            with servers(platform, store) as base:
+                status, denied, _ = request(
+                    base, "/api/write/ads/314/activate", method="POST", key="other-action",
+                )
+                self.assertEqual(status, 409, denied)
+                self.assertEqual(denied["error"], "dashboard_pending_write_conflict")
+                status, replay, headers = request(
+                    base, "/api/write/ads/314/pause", method="POST", key="stuck-pause",
+                )
+                self.assertEqual((status, replay), (409, original))
+                self.assertEqual(headers.get("Idempotency-Replayed"), "true")
+                self._ack_both_phases(base, "ad:314:pause", "stuck-pause")
+                status, body, _ = request(
+                    base, "/api/write/ads/314/activate", method="POST", key="activate-after",
+                )
+                self.assertEqual(status, 200, body)
+                self.assertEqual(platform.effects, ["set_state:active"])
+                self.assertEqual(len(platform.backend_requests), 2)
+
+    def test_ambiguous_or_failed_writes_stay_fenced(self):
+        """Only provably effect-free failures are released; unknown ones are not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "mark.sqlite")
+            platform = SyntheticPlatform()
+            store.append_ad_snapshot(platform.ads["314"])
+
+            def broken_set_state(ad_id, state):
+                raise RuntimeError("synthetic transport loss")
+
+            platform.set_state = broken_set_state
+            with servers(platform, store) as base:
+                status, body, _ = request(
+                    base, "/api/write/ads/314/pause", method="POST", key="unclear-pause",
+                )
+                self.assertNotIn(status, (200, 409), body)
+                code, result, _ = request(
+                    base, "/api/dashboard/pending-writes/ack", method="POST",
+                    payload={"scope": "ad:314:pause", "idempotency_key": "unclear-pause"},
+                )
+                self.assertEqual(code, 409, result)
+                self.assertEqual(len(store.dashboard_pending_writes()), 1)
+
+
+class _TickingClock:
+    """Strictly increasing synthetic clock (one second per reading)."""
+
+    def __init__(self):
+        self.now = NOW
+
+    def __call__(self):
+        self.now += timedelta(seconds=1)
+        return self.now
+
+
+def resolve(base, scope, key, *, confirm=True, authorized=True):
+    return request(
+        base, "/api/dashboard/pending-writes/resolve", method="POST",
+        payload={"scope": scope, "idempotency_key": key, "confirm": confirm},
+        authorized=authorized,
+    )
+
+
+class UnclearWriteResolutionTests(unittest.TestCase):
+    """An unknown platform outcome is never retried, but must not lock forever."""
+
+    @contextmanager
+    def unclear_pause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SnapshotStore(Path(tmp) / "mark.sqlite")
+            platform = SyntheticPlatform()
+            store.append_ad_snapshot(platform.ads["314"])
+            applied = platform.set_state
+
+            def lost_request(ad_id, state):
+                platform.effects.append("lost:" + state.value)
+                raise RuntimeError("synthetic transport loss before apply")
+
+            platform.set_state = lost_request
+            clock = _TickingClock()
+            service = service_for(platform, store, clock=clock)
+            with servers_for_service(service, store, clock) as base:
+                status, body, _ = request(
+                    base, "/api/write/ads/314/pause", method="POST", key="unclear",
+                )
+                self.assertEqual(status, 202, body)
+                self.assertEqual(body["operation_receipt"]["outcome"], "ambiguous")
+                platform.set_state = applied
+                yield base, store, platform, service
+
+    def test_release_requires_fresh_sync_and_sends_nothing(self):
+        with self.unclear_pause() as (base, store, platform, service):
+            effects = list(platform.effects)
+            code, body, _ = resolve(base, "ad:314:pause", "unclear")
+            self.assertEqual((code, body["error"]), (409, "fresh_sync_required"))
+            self.assertEqual(len(store.dashboard_pending_writes()), 1)
+            self.assertTrue(service.refresh_inventory().is_success)
+            code, body, _ = resolve(base, "ad:314:pause", "unclear", confirm=False)
+            self.assertEqual(code, 400, body)
+            code, body, _ = resolve(base, "ad:314:pause", "unclear", authorized=False)
+            self.assertEqual(code, 403, body)
+            self.assertEqual(len(store.dashboard_pending_writes()), 1)
+            code, body, _ = resolve(base, "ad:314:pause", "unclear")
+            self.assertEqual(code, 200, body)
+            self.assertEqual(body, {"released": True, "platform_retry_authorized": False})
+            self.assertEqual(store.dashboard_pending_writes(), ())
+            self.assertEqual(platform.effects, effects)
+            # The user may now decide anew; this is a fresh, single operation.
+            status, body, _ = request(
+                base, "/api/write/ads/314/pause", method="POST", key="decided-again",
+            )
+            self.assertEqual(status, 200, body)
+            self.assertEqual(platform.effects, effects + ["set_state:paused"])
+
+    def test_settled_or_unknown_records_cannot_be_released(self):
+        with self.unclear_pause() as (base, store, platform, service):
+            self.assertTrue(service.refresh_inventory().is_success)
+            code, body, _ = resolve(base, "ad:314:pause", "other-key")
+            self.assertEqual((code, body["error"]), (409, "pending_write_not_found"))
+            code, body, _ = resolve(base, "ad:314:pause", "unclear")
+            self.assertEqual(code, 200, body)
+            status, body, _ = request(
+                base, "/api/write/ads/314/activate", method="POST", key="settled-409",
+            )
+            self.assertEqual(status, 409, body)
+            code, body, _ = resolve(base, "ad:314:activate", "settled-409")
+            self.assertEqual((code, body["error"]), (409, "write_outcome_not_unclear"))
+            self.assertEqual(len(store.dashboard_pending_writes()), 1)
+
+
+@contextmanager
+def servers_for_service(service, store, clock):
+    access = WriteApiAccess(principal="synthetic-lifecycle-only", bearer_token=BACKEND_TOKEN,
+         capabilities=frozenset(WriteCapability) - {WriteCapability.CREATE_MEDIA}, writes_enabled=True)
+    backend = create_write_api_server(service, store, access, port=0, clock=clock)
+    dashboard = create_server(store, port=0, write_proxy=DashboardWriteProxy(
+        host="127.0.0.1", port=backend.server_port, bearer_token=BACKEND_TOKEN, ui_token=UI_TOKEN,
+        backend_principal=access.principal, local_reconciliation_enabled=True))
+    threads = []
+    try:
+        for server in (backend, dashboard):
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            threads.append(thread)
+        yield "http://127.0.0.1:" + str(dashboard.server_port)
+    finally:
+        for server in (dashboard, backend):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=4)
 
 
 if __name__ == "__main__":
