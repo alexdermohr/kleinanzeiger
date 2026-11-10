@@ -71,7 +71,7 @@ picker.listeners.change();
 assert.equal(elements.get("manage-ad-id").value, "123");
 assert.equal(elements.get("manage-title").value, "Aktive Anzeige");
 assert.equal(elements.get("manage-description").value, "Gebraucht");
-assert.equal(elements.get("manage-state").textContent, "active");
+assert.equal(elements.get("manage-state").textContent, "Aktiv");
 
 picker.value = "456";
 picker.listeners.change();

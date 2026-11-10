@@ -3433,6 +3433,7 @@ function describeWriteResult(response, payload) {
       return {
         kind: "warning",
         text: `${label}: Ergebnis unklar – Kleinanzeigen hat die Änderung nicht eindeutig bestätigt. `
+          + "Sie wird nicht automatisch wiederholt. "
           + "Bitte nicht erneut ausführen, sondern zuerst „Mit Kleinanzeigen abgleichen“ "
           + `und die Anzeige prüfen. (Technischer Status: ${outcome})`,
       };
