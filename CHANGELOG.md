@@ -3,10 +3,14 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
-## [1.0.13] - 2026-11-10
+## [1.0.14] - 2026-11-12
 
 ### Behoben
 - Direkte Aufrufe der alten privaten Browser-/CDP-Adapter prüfen die Plattformberechtigung vor einem Verbindungsaufbau. Ohne nachgewiesene Berechtigung bleiben sie gesperrt; lokale Offline-Funktionen und synthetische Tests funktionieren weiter.
+
+## [1.0.13] - 2026-11-10
+
+### Behoben
 - Ein doppelter Klick auf »Pausieren« oder »Aktivieren« (oder eine Aktion auf eine bereits passende Anzeige) sperrt die Anzeige nicht mehr dauerhaft. Kleinanzeiger meldet verständlich, dass nichts geändert wurde, und die Anzeige bleibt bearbeitbar. Von älteren Versionen so gesperrte Anzeigen werden durch erneutes Anklicken derselben Schaltfläche wieder freigegeben, ohne erneute Plattformaktion.
 - Nach einem unklaren Ergebnis bleibt eine Anzeige nicht mehr für immer gesperrt: Nach »Mit Kleinanzeigen abgleichen« lässt sich die Sperre ausdrücklich aufheben. Dabei wird nichts an Kleinanzeigen gesendet und nichts automatisch wiederholt.
 - Nach dem Pausieren oder Aktivieren zeigt das Bearbeitungsfeld sofort den neuen Status an.
