@@ -146,6 +146,38 @@ const run=(action)=>vm.runInContext('runCatalogBulkAction('+JSON.stringify(actio
   prepare([ad("123","paused")]);
   await run("pause");
   assert.equal(confirmCount,0);assert.equal(writes.length,0);
+  assert.match(progress(),/bereits pausiert/);
+
+  // Ads already in the target state are skipped, not a reason to refuse.
+  prepare([ad("123"),ad("456","paused"),ad("789")]);
+  await run("pause");
+  assert.equal(confirmCount,1);
+  assert.ok(!preview.includes("456"),"skipped ad is not part of the preview");
+  assert.deepEqual(writes,["/api/write/ads/123/pause","/api/write/ads/789/pause"]);
+  assert.match(progress(),/2 von 2/);
+  assert.match(progress(),/übersprungen: 456/);
+
+  // A rejection before any platform change does not stop the batch.
+  prepare([ad("123"),ad("456")]);
+  reply=(id)=>id==="123"
+    ? {response:{status:409},payload:{operation_receipt:{outcome:"precondition_failed",writer_invoked:false}}}
+    : {response:{status:200},payload:{operation_receipt:{outcome:"confirmed"}}};
+  await run("pause");
+  assert.equal(writes.length,2);
+  assert.match(progress(),/1 von 2/);
+  assert.match(progress(),/nichts geändert: 123/);
+  assert.match(progress(),/Stapel abgeschlossen/);
+
+  // An unknown platform result is still never followed by further writes,
+  // even if the writer claims it was not invoked but a fence stays open.
+  prepare([ad("123"),ad("456")]);
+  window.write=async(scope,method,path)=>{
+    writes.push(path);
+    vm.runInContext('pendingWrites.set("unresolved",{scope:"unresolved"})',context);
+    return {response:{status:409},payload:{operation_receipt:{outcome:"precondition_failed",writer_invoked:false}}};
+  };
+  await run("pause");
+  assert.equal(writes.length,1);
 
   prepare([ad("123"),ad("456")]);
   inventory=[ad("123"),ad("456","paused")];

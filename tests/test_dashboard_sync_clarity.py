@@ -33,12 +33,25 @@ const byId=id=>{
  if(!elements.has(id))elements.set(id,{textContent:"",className:""});
  return elements.get(id);
 };
-const ctx={byId,optionalById:byId};
+const ctx={byId,optionalById:byId,manualSyncAvailable:false,localReady:false};
+ctx.localUiReady=()=>ctx.localReady;
 vm.createContext(ctx);vm.runInContext(source,ctx);
 const render=(sync,recovery)=>ctx.renderSyncStatus(sync,recovery);
 render({state:"never_attempted",latest_attempt:null,last_successful_attempt:null},
   {unresolved_count:0});
 assert.match(byId("last-confirmed-sync").textContent,/Noch kein erfolgreicher Kontoabgleich/);
+assert.match(byId("last-confirmed-sync").textContent,/Kontoabgleich ist in dieser Sitzung nicht verfügbar/);
+assert.doesNotMatch(byId("last-confirmed-sync").textContent,/Im Kleinanzeiger-Chrome anmelden/);
+ctx.manualSyncAvailable=true;
+render({state:"never_attempted",latest_attempt:null,last_successful_attempt:null},
+  {unresolved_count:0});
+assert.match(byId("last-confirmed-sync").textContent,/Kontoabgleich ist in dieser Sitzung nicht verfügbar/);
+assert.doesNotMatch(byId("last-confirmed-sync").textContent,/Im Kleinanzeiger-Chrome anmelden/);
+ctx.localReady=true;
+render({state:"never_attempted",latest_attempt:null,last_successful_attempt:null},
+  {unresolved_count:0});
+assert.match(byId("last-confirmed-sync").textContent,/Im Kleinanzeiger-Chrome anmelden/);
+ctx.manualSyncAvailable=false;
 render(null, null);
 assert.match(byId("last-confirmed-sync").textContent,/derzeit nicht abrufbar/);
 const last={completed_at:"2026-11-07T11:45:00+01:00",source:"owner_inventory",snapshot_count:3};
@@ -89,6 +102,7 @@ const check=(kind,word)=>{
 check("owner_inventory_login_required","anmelden");
 check("owner_inventory_connection_unavailable","Internet");
 check("owner_inventory_browser_unavailable","Chrome");
+check("owner_inventory_browser_wrong_tab","Meine Anzeigen");
 check("read_only","Kleinanzeiger.cmd");
 check("restart","erneut geprüft");
 ctx.renderConnectionHelp(null);assert.equal(help.hidden,true);

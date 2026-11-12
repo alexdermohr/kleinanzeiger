@@ -134,7 +134,8 @@ $productsExport = Add-Button 'Entwürfe exportieren' 28 449 282 43
 $restore = Add-Button 'Sicherung wiederherstellen …' 330 449 282 43
 $messages = Add-Button 'Nachrichten verwalten' 28 508 282 43
 $rollback = Add-Button 'Vorherige Programmversion verwenden …' 330 508 282 43
-$weekly = Add-Button 'Wochenbericht …' 28 568 584 43
+$weekly = Add-Button 'Wochenbericht …' 28 568 282 43
+$deals = Add-Button 'Schnäppchenjäger …' 330 568 282 43
 $rollback.AutoEllipsis = $true
 $statusLabel = Add-Label 'Bereit.' 28 397 584 44 $font $muted
 $detailsLink = [System.Windows.Forms.LinkLabel]::new()
@@ -192,7 +193,7 @@ $detailsLink.Add_Click({
 $script:advancedExpanded = $false
 function Set-AdvancedLayout([bool]$expanded) {
   $script:advancedExpanded = $expanded
-  foreach ($control in @($mail,$labels,$productsExport,$restore,$messages,$rollback,$weekly)) {
+  foreach ($control in @($mail,$labels,$productsExport,$restore,$messages,$rollback,$weekly,$deals)) {
     $control.Visible = $expanded
   }
   $advanced.Text = $(if($expanded){'Weniger anzeigen'}else{'Weitere Aktionen'})
@@ -300,6 +301,23 @@ function Get-ReleaseSummary([string]$notes) {
     }
   }
   return 'Alle Änderungen ansehen'
+}
+# Keep the actionable suffix readable at any supported DPI and font scale.
+# TextRenderer uses actual WinForms pixel metrics instead of guessing characters.
+function Get-FittingReleaseCaption([string]$version,[string]$summary,
+                                   [System.Drawing.Font]$useFont,[int]$maxWidth) {
+  $prefix = "Neu in ${version}: "
+  if (!$summary) { return $prefix + 'Alle Änderungen' }
+  $suffix = '  ·  Alle Änderungen'
+  for ($count = $summary.Length; $count -gt 0; $count--) {
+    $part = $summary.Substring(0,$count)
+    if ($count -lt $summary.Length) { $part = $part.TrimEnd() + '…' }
+    $caption = $prefix + $part + $suffix
+    if ([System.Windows.Forms.TextRenderer]::MeasureText($caption,$useFont).Width -le $maxWidth) {
+      return $caption
+    }
+  }
+  return $prefix + 'Alle Änderungen'
 }
 function Show-ReleaseNotes([string]$version) {
   if (!$version) { return }
@@ -417,7 +435,7 @@ function Refresh-Controls {
     }
     if ($script:displayNotesVersion) {
       $noteSummary = Get-ReleaseSummary (Get-ReleaseNotesForVersion $script:displayNotesVersion)
-      $releaseNotesLink.Text = "Neu in $($script:displayNotesVersion): $noteSummary  ·  Alle Änderungen"
+      $releaseNotesLink.Text = Get-FittingReleaseCaption $script:displayNotesVersion $noteSummary $releaseNotesLink.Font $releaseNotesLink.Width
       $releaseNotesLink.Visible = $true
     }
   } else {
@@ -433,12 +451,13 @@ function Refresh-Controls {
   $ai.Enabled = !$busy
   $messages.Enabled = !$busy -and (Test-Path -LiteralPath $db) -and (Test-Path -LiteralPath $python -PathType Leaf)
   $weekly.Enabled = !$busy -and (Test-Path -LiteralPath $db) -and (Test-Path -LiteralPath $python -PathType Leaf)
+  $deals.Enabled = !$busy -and (Test-Path -LiteralPath $python -PathType Leaf)
   $mail.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $labels.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $products.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $productsExport.Enabled = !$busy -and (Test-Path -LiteralPath $db)
   $account.Enabled = !$busy
-  $restore.Enabled = !$busy -and !(Test-Path -LiteralPath $db)
+  $restore.Enabled = !$busy -and (Test-Path -LiteralPath $python -PathType Leaf)
   $rollback.Enabled = !$busy -and (Test-Path -LiteralPath $python -PathType Leaf) -and
     (@(Get-ChildItem -LiteralPath $state -Directory -Filter '.venv-rollback-*' -ErrorAction SilentlyContinue).Count -gt 0)
 }
@@ -1028,6 +1047,21 @@ $messages.Add_Click({
     Set-Status 'Nachrichtenfenster gestartet. Jeder kostenpflichtige Aufruf braucht einen Klick.'
   } catch { Set-Status $_.Exception.Message $true }
 })
+$deals.Add_Click({
+  try {
+    if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
+      Set-Status 'Bitte zuerst Kleinanzeiger einrichten.' $true
+      return
+    }
+    $dealsScript = Join-Path $base 'windows-deals.ps1'
+    if (!(Test-Path -LiteralPath $dealsScript -PathType Leaf)) {
+      throw 'Schnäppchenjäger fehlt im installierten Paket. Bitte aktualisieren.'
+    }
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile',
+      '-STA','-ExecutionPolicy','Bypass','-File',('"' + $dealsScript + '"')) | Out-Null
+    Set-Status 'Schnäppchenjäger geöffnet. Nur eigene Angebotsdateien werden lokal ausgewertet.'
+  } catch { Set-Status $_.Exception.Message $true }
+})
 $mail.Add_Click({ try { Show-CustomerMailPicker } catch { Set-Status $_.Exception.Message $true } })
 $labels.Add_Click({ try { Show-CustomerLabels } catch { Set-Status $_.Exception.Message $true } })
 $products.Add_Click({ try { Show-ProductImport } catch { Set-Status $_.Exception.Message $true } })
@@ -1151,10 +1185,7 @@ $rollback.Add_Click({
   } catch { Set-Status $_.Exception.Message $true }
 })
 $restore.Add_Click({
-  if (Test-Path -LiteralPath $db) {
-    Set-Status 'Die Datenbank ist bereits vorhanden. Wiederherstellung gesperrt.' $true
-    return
-  }
+  $hasExistingData = Test-Path -LiteralPath $db -PathType Leaf
   $list = @(Get-ChildItem -LiteralPath (Join-Path $state 'Backups') -Filter '*.sqlite' -File -ErrorAction SilentlyContinue)
   if ($list.Count -eq 0) { Set-Status 'Noch keine Sicherungen vorhanden.'; return }
   $picker = [System.Windows.Forms.Form]::new()
@@ -1177,12 +1208,17 @@ $restore.Add_Click({
   $result = $picker.ShowDialog($form)
   $selected = [string]$select.SelectedItem
   $picker.Dispose()
-  if ($result -eq [Windows.Forms.DialogResult]::OK -and
-      [Windows.Forms.MessageBox]::Show("Sicherung $selected in die neue leere Datenbank einspielen?",'Kleinanzeiger',
-          [Windows.Forms.MessageBoxButtons]::YesNo) -eq [Windows.Forms.DialogResult]::Yes) {
-    try { Start-Worker 'Restore' $false $selected }
-    catch { Set-Status $_.Exception.Message $true }
-  }
+  if ($result -ne [Windows.Forms.DialogResult]::OK) { return }
+  $question = $(if ($hasExistingData) {
+    "Sicherung $selected wiederherstellen? Der aktuelle Bestand wird davor automatisch " +
+    "als eigene Sicherung aufbewahrt. Erst danach wird die gewählte Sicherung aktiviert."
+  } else {
+    "Sicherung $selected in die neue leere Datenbank einspielen?"
+  })
+  if ([Windows.Forms.MessageBox]::Show($question,'Kleinanzeiger – Sicherung wiederherstellen',
+        [Windows.Forms.MessageBoxButtons]::YesNo) -ne [Windows.Forms.DialogResult]::Yes) { return }
+  try { Start-Worker 'Restore' $false $selected }
+  catch { Set-Status $_.Exception.Message $true }
 })
 $form.Add_FormClosed({
   if ($script:releaseCheckClient) { $script:releaseCheckClient.Dispose() }
@@ -1240,7 +1276,7 @@ if ($SelfTest) {
   if ($ExpectedInstalledVersion -and (Get-InstalledVersion) -ne $ExpectedInstalledVersion) {
     throw 'Die installierte Version wurde vom Kontrollfenster nicht erkannt.'
   }
-  foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1','windows-messages.ps1')) {
+  foreach ($file in @('windows-worker.ps1','windows-chrome.ps1','windows-install.ps1','windows-messages.ps1','windows-deals.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $base $file))) { throw "Fehlendes Skript: $file" }
   }
   foreach ($file in @('Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html')) {
@@ -1261,7 +1297,7 @@ if ($SelfTest) {
   if (!$script:advancedExpanded -or $form.ClientSize.Height -ne 744 -or
       $advanced.Text -ne 'Weniger anzeigen' -or $statusLabel.Top -ne 630 -or
       $detailsLink.Top -ne 694 -or $copyDiagnostics.Top -ne 694 -or $rollback.Top -ne 508 -or
-      $mail.Top -ne 390 -or $productsExport.Top -ne 449) {
+      $mail.Top -ne 390 -or $productsExport.Top -ne 449 -or $deals.Top -ne 568) {
     throw 'Erweiterte Kundenaktionen sind nicht vollstaendig erreichbar.'
   }
   Set-AdvancedLayout $false
@@ -1286,6 +1322,13 @@ if ($SelfTest) {
       $null -eq $statusLabel -or $null -eq $detailsLink -or $null -eq $copyDiagnostics -or $null -eq $restore -or
       $null -eq $mail -or $null -eq $labels -or $null -eq $products -or $null -eq $productsExport -or $null -eq $messages -or $null -eq $rollback -or $null -eq $weekly -or $null -eq $help -or $null -eq $features) {
     throw 'Die zentrale Windows-Oberflaeche ist unvollstaendig.'
+  }
+  # Ensure the clickable action is never cut off at real Windows DPI/font metrics.
+  $longSummary = 'Die neue Version zeigt sämtliche nachprüfbaren Änderungen inklusive längerer Beschreibungen im Kontrollfenster an.'
+  $caption = Get-FittingReleaseCaption '1.0.3' $longSummary $releaseNotesLink.Font $releaseNotesLink.Width
+  if (!$caption.EndsWith('Alle Änderungen') -or
+      [Windows.Forms.TextRenderer]::MeasureText($caption,$releaseNotesLink.Font).Width -gt $releaseNotesLink.Width) {
+    throw 'Release notes link is clipped instead of fitting into the customer window.'
   }
   # Synthetic stable/preview/missing-asset cases: no network and no installation.
   $testVersion = '1.0.1'

@@ -362,6 +362,28 @@ class InboxServerTests(unittest.TestCase):
         self.assertEqual((status,body["error"]), (403,"no_confirmed_local_owner"))
         self.assertEqual(len(self.calls),before,"no billable provider open after ownership changed")
 
+    def test_oversized_content_length_header_returns_http_error_without_read(self):
+        # Codex P2: Python 3.12+ rejects integer conversion for headers with
+        # more than 4,300 decimal digits. The local handler must still deny
+        # the request with an HTTP response and never forward it to the client.
+        from http.client import HTTPConnection
+        before = len(self.calls)
+        for length in ("9" * 5000, "0" * 5000):
+            with self.subTest(first_digit=length[0]):
+                connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=5)
+                try:
+                    connection.request("POST", "/api/prepare", body=None, headers={
+                        "X-Kleinanzeiger-Session": self.token,
+                        "Content-Length": length,
+                    })
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(json.loads(response.read())["error"], "invalid_body_length")
+                finally:
+                    connection.close()
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(self.call("GET", "/api/status")[0], 200)
+
     def test_full_utf8_reply_and_send_metadata_are_accepted(self):
         # Codex P2: an 8 KiB cap admitted the preparation of 2700 CJK
         # characters but rejected the same message on /api/send because
@@ -385,8 +407,12 @@ class InboxServerTests(unittest.TestCase):
                 self.assertEqual(result["state"],"sent")
                 self.assertEqual(self.journal.state(prepared["request_id"])["state"],"sent")
         self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),2)
-        self.assertEqual(self.call("POST","/api/prepare",{
-            "conversation_id":"a:b","ad_id":"4711","message":"x"*17000})[0],400)
+        for _ in range(3):
+            self.assertEqual(self.call("POST","/api/prepare",{
+                "conversation_id":"a:b","ad_id":"4711","message":"x"*17000})[0],400)
+        # The connection must return an HTTP denial (not Winsock 10053);
+        # the next independent request must still be serviceable.
+        self.assertEqual(self.call("GET","/api/status")[0],200)
         self.assertEqual(sum(url.endswith("/messages") for _,url,_ in self.calls),2)
 
 class AccountInboxBrowserRaceTests(unittest.TestCase):

@@ -138,6 +138,20 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("Get-FileHash", worker)
         self.assertNotIn("Download-VerifiedRelease", gui)
 
+    def test_release_notes_action_fits_window_at_windows_font_metrics(self) -> None:
+        gui = (SCRIPTS / "windows-center.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("function Get-FittingReleaseCaption", gui)
+        self.assertIn("[System.Windows.Forms.TextRenderer]::MeasureText(", gui)
+        self.assertIn("return $prefix + 'Alle Änderungen'", gui)
+        self.assertIn(
+            "Get-FittingReleaseCaption $script:displayNotesVersion $noteSummary "
+            "$releaseNotesLink.Font $releaseNotesLink.Width", gui,
+        )
+        self.assertIn("Release notes link is clipped", gui)
+        # The fallback must still point to the exact version's release notes.
+        self.assertIn("Get-ReleaseNotesForVersion $version", gui)
+        self.assertIn("$releaseNotesLink.Add_Click({", gui)
+
     def test_update_and_backup_are_hash_bound_and_fail_closed(self) -> None:
         worker = (SCRIPTS / "windows-worker.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-VerifiedPackage", worker)
@@ -163,6 +177,11 @@ class WindowsHubContractTests(unittest.TestCase):
         self.assertIn("Kleinanzeiger.lnk", worker)
         self.assertIn("App", worker)
         self.assertIn("Wiederherstellung nur bei nicht vorhandener Datenbank", worker)
+        self.assertIn("windows-restore-existing.py", worker)
+        self.assertIn("windows-restore-existing.py", (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8"))
+        self.assertIn("if (Test-Path -LiteralPath $db -PathType Leaf)", worker)
+        self.assertIn("mark_api.windows_backup --backup $source --db $db", worker)
+        self.assertIn("mark_api.windows_backup", (SCRIPTS / "windows-restore-existing.py").read_text(encoding="utf-8"))
         self.assertNotIn("Remove-Item -LiteralPath $db", worker)
 
     def test_compact_workflow_and_explicit_advanced_tools(self) -> None:

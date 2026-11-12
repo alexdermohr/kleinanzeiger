@@ -218,6 +218,41 @@ const detail = (sku,revision=0) => ({sku,local_price_eur:50,rule:revision ? {
   assert.equal(byId("inventory-diff-body").children.length,1);
   assert.equal(byId("inventory-diff-body").children[0].children[0].textContent,"00031");
   assert.equal(run("inventoryDiffCursor"),null);
+  // A change row must open the exact local listing without searching 50-hit
+  // substring pages or triggering platform operations.
+  const comparisonRow=byId("inventory-diff-body").children[0];
+  const compareButton=comparisonRow.children[5].children[0];
+  assert.equal(compareButton.textContent,"Anzeige prüfen");
+  const compareSelections=[];
+  context.getJson=async path=>{
+    assert.equal(path,"/api/catalog/ad?id=00031");
+    return {ad:{ad_id:"00031",title:"Exact local owner listing"}};
+  };
+  context.renderAds=ads=>compareSelections.push(ads);
+  context.renderFollowupChoices=()=>{};
+  context.renderSaleChoices=()=>{};
+  context.renderCatalogNavigation=()=>{};
+  assert.equal(await compareButton.listeners.click(),true);
+  assert.equal(compareSelections.at(-1)[0].ad_id,"00031");
+  assert.equal(byId("catalog-search").value,"00031");
+  assert.match(byId("catalog-feedback").textContent,/Bestandsänderung nur anhand lokal/);
+  context.getJson=async path=>{
+    assert.equal(path,"/api/catalog/ad?id=00031");
+    return {ad:{ad_id:"000310",title:"Wrong target"}};
+  };
+  assert.equal(await compareButton.listeners.click(),false);
+  assert.equal(compareSelections.length,1);
+  assert.match(byId("inventory-diff-status").textContent,/nicht eindeutig lokal bestätigt/);
+  // A request resolving after the catalog changed cannot overwrite selection.
+  let resolveCompare;
+  context.getJson=()=>new Promise(resolve=>{resolveCompare=resolve;});
+  const staleCompare=compareButton.listeners.click();
+  run("catalogGeneration++");
+  resolveCompare({ad:{ad_id:"00031"}});
+  assert.equal(await staleCompare,false);
+  assert.equal(compareSelections.length,1);
+  assert.equal(await run("openInventoryDiffAd('INVALID')"),false);
+  assert.equal(compareSelections.length,1);
   // Autopilot: local read-only attention queue; never infer live inbox/sales.
   fetchImpl=async path=>{
     assert.match(path,/^\/api\/portfolio\/autopilot-attention\?/);

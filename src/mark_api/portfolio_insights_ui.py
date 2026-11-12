@@ -20,7 +20,7 @@ INSIGHTS_HTML = """
       <button id="inventory-diff-next" type="button" disabled>Nächste 50</button>
       <p id="inventory-diff-status" role="status" aria-live="polite">Noch kein Vergleich geladen.</p>
       <div class="table-scroll"><table>
-        <thead><tr><th>Anzeigen-ID</th><th>Änderung</th><th>Vorher</th><th>Jetzt</th><th>Quelle und Zeitpunkt</th></tr></thead>
+        <thead><tr><th>Anzeigen-ID</th><th>Änderung</th><th>Vorher</th><th>Jetzt</th><th>Quelle und Zeitpunkt</th><th>Prüfen</th></tr></thead>
         <tbody id="inventory-diff-body"></tbody>
       </table></div>
     </section>
@@ -94,6 +94,7 @@ let inventoryDiffEpoch = null;
 let inventoryDiffFilterSerial = 0;
 let inventoryDiffBusy = false;
 let inventoryDiffReloadPending = false;
+let insightCatalogFocusBusy = false;
 let priceRuleCursor = null;
 let priceRuleTarget = null;
 let priceRuleBusy = false;
@@ -178,6 +179,14 @@ async function loadInventoryDiff(next = false) {
       insightCell(row, item.previous ? [item.previous.title || "", item.previous.state].join(" · ") : "—");
       insightCell(row, item.current ? [item.current.title || "", item.current.state].join(" · ") : "Nicht bestätigt");
       insightCell(row, item.current ? item.current.source + " · " + item.current.observed_at : "—");
+      const action = document.createElement("td");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Anzeige prüfen";
+      button.setAttribute("aria-label", "Anzeige " + item.ad_id + " im lokalen Katalog prüfen");
+      button.addEventListener("click", () => openInventoryDiffAd(item.ad_id));
+      action.appendChild(button);
+      row.appendChild(action);
       rows.push(row);
     }
     const summary = page.total === null
@@ -206,6 +215,64 @@ async function loadInventoryDiff(next = false) {
       inventoryDiffReloadPending = false;
       if ((localWorkAvailable || writeUiAvailable) && localUiReady()) void loadInventoryDiff();
     }
+  }
+}
+
+// Reuse the indexed, read-only exact-ID lookup for G4 and the task radar.
+// A substring search can silently display the wrong one of 10,000 ads.
+async function focusExactCatalogAd(adId, detail) {
+  if (!/^[0-9]{1,32}$/.test(adId)) throw new Error("Ungültige Anzeigen-ID");
+  if (catalogLoading || catalogBulkBusy || insightCatalogFocusBusy) {
+    throw new Error("Anzeigenkatalog ist gerade beschäftigt");
+  }
+  const target = optionalById("ads-panel");
+  if (!target || target.hidden) throw new Error("Eigene Anzeigen nicht verfügbar");
+  insightCatalogFocusBusy = true;
+  try {
+    const before = catalogGeneration;
+    const found = (await getJson("/api/catalog/ad?id=" + encodeURIComponent(adId)))?.ad;
+    if (!found || found.ad_id !== adId) {
+      throw new Error("Zielanzeige nicht eindeutig lokal bestätigt");
+    }
+    if (before !== catalogGeneration || catalogLoading || catalogBulkBusy) {
+      throw new Error("Anzeigenkatalog hat sich während der Prüfung geändert");
+    }
+    catalogFilters = {search: adId, status: "all"};
+    byId("catalog-search").value = adId;
+    byId("catalog-status").value = "all";
+    catalogCursors = [""];
+    catalogPageIndex = 0;
+    catalogNextAfter = null;
+    catalogRows = [found];
+    renderAds([found]);
+    renderFollowupChoices();
+    renderSaleChoices();
+    renderCatalogNavigation();
+    byId("catalog-page-label").textContent = "Einzelanzeige";
+    byId("catalog-feedback").textContent =
+      "Anzeige " + adId + " über exakte ID geöffnet. " + detail +
+      "Für normale Seitenübersicht Suche erneut ausführen; keine Plattformaktion gestartet.";
+    return target;
+  } finally {
+    insightCatalogFocusBusy = false;
+  }
+}
+
+async function openInventoryDiffAd(adId) {
+  const status = byId("inventory-diff-status");
+  if (!(localWorkAvailable || writeUiAvailable) || !localUiReady()) return false;
+  try {
+    const target = await focusExactCatalogAd(adId,
+      "Bestandsänderung nur anhand lokal gespeicherter Beobachtungen prüfen. " +
+      "Nicht sichtbar bedeutet weder verkauft noch gelöscht. ");
+    if (typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({behavior: "smooth", block: "start"});
+    }
+    return true;
+  } catch (error) {
+    status.textContent = "Anzeige nicht geöffnet: " + error.message +
+      ". Vergleich bleibt lokal und unverändert; keine Plattformaktion gestartet.";
+    return false;
   }
 }
 
@@ -354,40 +421,10 @@ async function openAutopilotTask(item) {
       target.open = true;
       selectFollowupAd(item.ad_id, "");
     } else if (item.kind === "views_stagnant" || item.kind === "owner_original_unread") {
-      if (!/^[0-9]{1,32}$/.test(item.ad_id)) throw new Error("Ungültige Anzeigen-ID");
-      if (catalogLoading || catalogBulkBusy) throw new Error("Anzeigenkatalog ist gerade beschäftigt");
-      target = optionalById("ads-panel");
-      if (!target || target.hidden) throw new Error("Eigene Anzeigen nicht verfügbar");
-      // A substring query may hide the exact ID behind 50 earlier title
-      // matches. Reuse the existing indexed local GET and present precisely
-      // the returned ad without treating it as a new owner/write capability.
-      const catalogBefore = catalogGeneration;
-      const found = (await getJson("/api/catalog/ad?id=" +
-        encodeURIComponent(item.ad_id)))?.ad;
-      if (!found || found.ad_id !== item.ad_id) {
-        throw new Error("Zielanzeige nicht eindeutig lokal bestätigt");
-      }
-      if (catalogBefore !== catalogGeneration || catalogLoading || catalogBulkBusy) {
-        throw new Error("Anzeigenkatalog hat sich während der Prüfung geändert");
-      }
-      catalogFilters = {search: item.ad_id, status: "all"};
-      byId("catalog-search").value = item.ad_id;
-      byId("catalog-status").value = "all";
-      catalogCursors = [""];
-      catalogPageIndex = 0;
-      catalogNextAfter = null;
-      catalogRows = [found];
-      renderAds([found]);
-      renderFollowupChoices();
-      renderSaleChoices();
-      renderCatalogNavigation();
-      byId("catalog-page-label").textContent = "Einzelanzeige";
-      byId("catalog-feedback").textContent =
-        "Anzeige " + item.ad_id + " über exakte ID geöffnet. " +
-        (item.kind === "views_stagnant"
+      target = await focusExactCatalogAd(item.ad_id,
+        item.kind === "views_stagnant"
           ? "Aufrufzähler über zwei bestätigte Messzeitpunkte unverändert. "
-          : "Originalbeschreibung bislang lokal nicht bestätigt; daraus folgt keine fehlende Beschreibung auf Kleinanzeigen. ") +
-        "Für normale Seitenübersicht Suche erneut ausführen; keine Plattformaktion gestartet.";
+          : "Originalbeschreibung bislang lokal nicht bestätigt; daraus folgt keine fehlende Beschreibung auf Kleinanzeigen. ");
     } else {
       throw new Error("Unbekannter Prüfpunkt");
     }

@@ -51,9 +51,11 @@ class WindowsInstallerContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/windows.yml").read_text(encoding="utf-8")
         notes = release_notes(VERSION, ROOT)
         self.assertIn(f"# Kleinanzeiger {VERSION} – Windows 11", notes)
-        update_notes = release_notes("1.0.3", ROOT)
-        self.assertIn("Alle Änderungen ansehen", update_notes)
-        self.assertIn("ohne automatische Installation", update_notes)
+        # A release may announce any customer-relevant change; do not pin
+        # the tests to the wording of a previous version's release notes.
+        self.assertRegex(notes, r"(?m)^### .+$")
+        self.assertRegex(notes, r"(?m)^- .{20,}$")
+        self.assertNotIn("TODO", notes)
         self.assertIn("python3 tools/release_notes.py --current", workflow)
         self.assertIn("--notes-file", workflow)
         self.assertNotIn("<<'EOF'", workflow)
@@ -64,6 +66,14 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("Kostenfreigabe", features)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("Unbeaufsichtigte Massenveröffentlichungen", readme)
+
+    def test_customer_first_steps_use_real_installer_and_start_labels(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        intro = (ROOT / "docs/START-HIER.html").read_text(encoding="utf-8")
+        for document in (readme, intro):
+            self.assertNotIn("Einrichten und starten", document)
+            self.assertIn("Installieren / aktualisieren", document)
+            self.assertIn("Kleinanzeiger starten", document)
 
     def test_no_powershell_home_reserved_variable_write(self):
         for filename in ("windows-install.ps1", "windows-chrome.ps1"):

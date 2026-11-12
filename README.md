@@ -1,13 +1,17 @@
 # Kleinanzeiger
 
-**Version 1.0.4 · Windows 11 (64 Bit)**
+**Version 1.0.13 · Windows 11 (64 Bit)**
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
+**Schnäppchenjäger:** Über **Weitere Aktionen → Schnäppchenjäger** kann
+man selbst bereitgestellte Angebote (CSV/JSON) lokal bewerten und manuelle
+Kleinanzeigen-Suchen öffnen. Es werden keine Inserate automatisch abgerufen.
+
 ## In drei Schritten starten
 
-1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.0.4) und das ZIP **vollständig entpacken**.
-2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken. **Einrichten und starten** wählen; beim ersten Mal ist dafür Internet nötig.
+1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.0.13) und das ZIP **vollständig entpacken**.
+2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken, **Installieren / aktualisieren** wählen und danach **Kleinanzeiger starten** anklicken. Für die Installation werden benötigte Komponenten gegebenenfalls über das Internet geladen.
 3. **Kleinanzeigen-Konto öffnen**, im eigenen Kleinanzeiger-Chrome anmelden und gegebenenfalls bestätigen. Dann Kleinanzeiger starten und im Dashboard **Mit Kleinanzeigen abgleichen** wählen.
 
 Im Dashboard siehst du den **letzten bestätigten Kontoabgleich mit Datum und Uhrzeit**. Wenn die Anmeldung oder Verbindung fehlt, zeigt Kleinanzeiger direkt, was zu prüfen ist.

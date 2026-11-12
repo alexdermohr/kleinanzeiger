@@ -50,7 +50,7 @@ function Get-VerifiedPackage([string]$folder) {
   if (!(Test-Path -LiteralPath $wheel -PathType Leaf)) { throw 'Wheel fehlt.' }
   $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actual -ne $matched.Groups['digest'].Value.ToLowerInvariant()) { throw 'Wheel-Pruefsumme ungueltig.' }
-  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-messages.ps1','windows-weekly-report.ps1','windows-offline-compat.py',
+  foreach ($name in @('Kleinanzeiger.cmd','windows-center.ps1','windows-worker.ps1','windows-messages.ps1','windows-weekly-report.ps1','windows-deals.ps1','windows-offline-compat.py','windows-restore-existing.py',
        'Kleinanzeiger-Handbuch.html','Kleinanzeiger-Funktionen.html',
        'windows-install.ps1','windows-start.ps1','windows-chrome.ps1',
        'windows-ki-einrichten.ps1','windows-backup.ps1','windows-restore.ps1','windows-diagnostics.ps1','Kleinanzeiger-Diagnose.cmd')) {
@@ -398,11 +398,6 @@ switch ($Action) {
   'Rollback' { Invoke-ProgramRollback $BackupName }
   'Restore' {
     Assert-KleinanzeigerStopped
-    foreach ($suffix in @('','-wal','-shm','-journal')) {
-      if (Test-Path -LiteralPath ($db + $suffix)) {
-        throw 'Wiederherstellung nur bei nicht vorhandener Datenbank erlaubt.'
-      }
-    }
     if (!$BackupName -or $BackupName -ne [IO.Path]::GetFileName($BackupName) -or
         $BackupName -notmatch '^Kleinanzeiger-\d{8}-\d{6}-\d{3}\.sqlite$') {
       throw 'Ungueltiger Backup-Dateiname.'
@@ -412,9 +407,25 @@ switch ($Action) {
         !(Test-Path -LiteralPath ($source + '.manifest.json') -PathType Leaf)) {
       throw 'Sicherung oder Manifest fehlt.'
     }
-      # Restore can run against an older installed venv; keep its stable module path.
-  & $venvPython -m mark_api.windows_backup --backup $source --db $db
-    if ($LASTEXITCODE -ne 0) { throw 'Wiederherstellung abgewiesen.' }
+    if (Test-Path -LiteralPath $db -PathType Leaf) {
+      # Verify the chosen snapshot and save the current database before ONE
+      # atomic replacement. Restore failure leaves the current file intact.
+      $helper = Join-Path $PackageDirectory 'windows-restore-existing.py'
+      if (!(Test-Path -LiteralPath $helper -PathType Leaf)) {
+        throw 'Wiederherstellungshelfer fehlt. Bitte das gesamte Paket entpacken.'
+      }
+      & $venvPython -u $helper --backup $source --db $db
+      if ($LASTEXITCODE -ne 0) { throw 'Wiederherstellung abgewiesen. Bestehender Bestand bleibt erhalten.' }
+    } else {
+      foreach ($suffix in @('-wal','-shm','-journal')) {
+        if (Test-Path -LiteralPath ($db + $suffix)) {
+          throw 'Wiederherstellung nur bei nicht vorhandener Datenbank erlaubt.'
+        }
+      }
+      # Keep the legacy create-only restore for an empty installation.
+      & $venvPython -m mark_api.windows_backup --backup $source --db $db
+      if ($LASTEXITCODE -ne 0) { throw 'Wiederherstellung abgewiesen.' }
+    }
     Write-Output 'RESTORE_OK'
   }
   'Install' { Install-Package $PackageDirectory }

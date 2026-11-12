@@ -1612,30 +1612,99 @@ function validPendingEntry(entry) {
   return true;
 }
 
-async function acknowledgePendingWrite(entry) {
-  const response = await fetch("/api/dashboard/pending-writes/ack", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Mark-Dashboard-Write": "1",
-      "X-Mark-Dashboard-Token": writeToken,
-    },
-    body: JSON.stringify({
-      scope: entry.scope,
-      idempotency_key: entry.key,
-    }),
-    cache: "no-store",
-  });
-  const text = await response.text();
-  let payload;
+const UNCLEAR_RESOLVE_MESSAGES = Object.freeze({
+  fresh_sync_required:
+    "Bitte zuerst oben „Mit Kleinanzeigen abgleichen“ wählen und danach den Status der Anzeige in der Liste prüfen. Erst dann lässt sich die Sperre aufheben.",
+  write_outcome_not_unclear:
+    "Diese frühere Aktion ist noch nicht abgeschlossen. Bitte Kleinanzeiger beenden, neu starten und es danach erneut versuchen.",
+  pending_write_not_found:
+    "Die frühere Aktion ist bereits geklärt. Die Ansicht wurde neu geladen.",
+});
+
+async function offerUnclearResolution(entry) {
+  // Releasing only removes the local lock. Nothing is sent to Kleinanzeigen,
+  // and the server requires a fresh successful sync after the unclear write.
+  if (!entry || !writeUiReady()) return false;
+  const question =
+    "Das Ergebnis einer früheren Aktion für diese Anzeige ist unklar. "
+    + "Kleinanzeiger wiederholt sie deshalb nicht automatisch.\\n\\n"
+    + "Hast du gerade „Mit Kleinanzeigen abgleichen“ ausgeführt und den aktuellen "
+    + "Status der Anzeige in der Liste geprüft? Dann kann die Sperre aufgehoben werden. "
+    + "Dabei wird nichts an Kleinanzeigen gesendet.\\n\\nSperre jetzt aufheben?";
+  if (!window.confirm(question)) return false;
+  let response;
+  let payload = {};
   try {
+    response = await fetch("/api/dashboard/pending-writes/resolve", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mark-Dashboard-Write": "1",
+        "X-Mark-Dashboard-Token": writeToken,
+      },
+      body: JSON.stringify({scope: entry.scope, idempotency_key: entry.key, confirm: true}),
+      cache: "no-store",
+    });
+    const text = await response.text();
     payload = text ? JSON.parse(text) : {};
   } catch (_error) {
-    throw new Error("pending recovery acknowledgement invalid");
+    setWriteStatus("Die Sperre konnte nicht aufgehoben werden (lokale Verbindung). Bitte erneut versuchen.", "error");
+    return false;
   }
-  if (!response.ok || payload.acknowledged !== true) {
-    throw new Error(payload.error ?? "pending recovery acknowledgement failed");
+  if (response.ok && payload.released === true) {
+    pendingWrites.delete(entry.scope);
+    pendingAckOnly.delete(entry.scope);
+    await refreshAfterSettledWrite();
+    setWriteStatus(
+      "Sperre aufgehoben. Bitte den aktuellen Status der Anzeige prüfen, bevor du die Aktion bei Bedarf erneut auslöst.",
+      "success",
+    );
+    return true;
   }
+  if (payload.error === "pending_write_not_found") await refreshAfterSettledWrite();
+  setWriteStatus(
+    UNCLEAR_RESOLVE_MESSAGES[payload.error]
+      ?? `Die Sperre konnte nicht aufgehoben werden (technischer Code: ${payload.error ?? response.status}).`,
+    "warning",
+  );
+  return false;
+}
+
+async function acknowledgePendingWrite(entry) {
+  // The durable ACK is intentionally two-phase: first acknowledge the observed
+  // terminal response, then finalize/delete only the exact bound request.
+  // Both steps are local bookkeeping, never another platform submission.
+  for (let step = 0; step < 2; step += 1) {
+    const response = await fetch("/api/dashboard/pending-writes/ack", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mark-Dashboard-Write": "1",
+        "X-Mark-Dashboard-Token": writeToken,
+      },
+      body: JSON.stringify({
+        scope: entry.scope,
+        idempotency_key: entry.key,
+      }),
+      cache: "no-store",
+    });
+    const text = await response.text();
+    let payload;
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch (_error) {
+      throw new Error("pending recovery acknowledgement invalid");
+    }
+    if (!response.ok || payload.acknowledged !== true) {
+      throw new Error(payload.error ?? "pending recovery acknowledgement failed");
+    }
+    if (payload.finalized === true) return;
+    if (payload.finalized !== false) {
+      throw new Error("pending recovery acknowledgement state invalid");
+    }
+  }
+  // Never drop the client fence without a server-confirmed finalization.
+  throw new Error("pending recovery acknowledgement not finalized");
 }
 
 async function refreshPendingWrites() {
@@ -1701,6 +1770,21 @@ async function refreshPendingWrites() {
   }
 }
 
+function pendingWritesSummary() {
+  // Plain-language overview of open actions; nothing is resent from here.
+  const names = {pause: "Pausieren", activate: "Aktivieren", update: "Änderungen speichern", delete: "Löschen"};
+  const items = Array.from(pendingWrites.values()).slice(0, 5).map((entry) => {
+    if (entry.scope === "create" || entry.scope === "create-media") return "neue Anzeige";
+    const action = String(entry.scope).split(":").pop();
+    return "Anzeige " + (entry.adId ?? "?") + " (" + (names[action] ?? action) + ")";
+  });
+  const more = pendingWrites.size > items.length ? " und weitere" : "";
+  return "Noch offen: " + items.join(", ") + more + ". Bis zur Klärung sind "
+    + "Sammelaktionen und weitere Aktionen für diese Anzeige gesperrt; es wird nichts "
+    + "automatisch wiederholt. Zum Klären die Anzeige auswählen und erneut auf dieselbe "
+    + "Schaltfläche klicken.";
+}
+
 function setWriteStatus(message, kind = "warning") {
   const status = byId("write-status");
   status.textContent = message;
@@ -1737,10 +1821,7 @@ function renderWriteAvailability() {
     element.disabled = !ready || catalogBulkBusy;
   }
   if (ready && pendingWrites.size > 0) {
-    setWriteStatus(
-      "Eine frühere Write-Anfrage bleibt mit ihrem ursprünglichen Idempotency-Key gesperrt. Keine erneute Plattformweiterleitung ohne unabhängige Ergebnisprüfung.",
-      "warning",
-    );
+    setWriteStatus(pendingWritesSummary(), "warning");
   }
 }
 
@@ -1796,7 +1877,9 @@ function renderSyncStatus(sync, recovery) {
     freshness.textContent = observed
       ? "Letzter bestätigter Kontoabgleich: " + observed
         + " (" + ageDescription(completed) + ")."
-      : "Noch kein erfolgreicher Kontoabgleich. Im Kleinanzeiger-Chrome anmelden und „Mit Kleinanzeigen abgleichen“ wählen.";
+      : "Noch kein erfolgreicher Kontoabgleich. " + (manualSyncAvailable && localUiReady()
+        ? "Im Kleinanzeiger-Chrome anmelden und „Mit Kleinanzeigen abgleichen“ wählen."
+        : "Der Kontoabgleich ist in dieser Sitzung nicht verfügbar. Gespeicherte lokale Daten bleiben lesbar; es erfolgt keine Live-Aktualisierung.");
     const open = recovery && typeof recovery === "object"
       ? recovery.unresolved_count : null;
     if (Number.isSafeInteger(open) && open > 0) {
@@ -1937,6 +2020,20 @@ function renderOriginalContentAvailability() {
     || !managedAdBaseline || !missing;
 }
 
+const AD_STATE_LABELS = Object.freeze({
+  active: "Aktiv", paused: "Pausiert", absent: "Entfernt", pending: "Offen",
+});
+
+function metricSummaryText(total, observedAds) {
+  if (!observedAds) return "Noch keine Daten";
+  const fmt = (value) => Number(value).toLocaleString("de-DE");
+  return `${fmt(total)} (aus ${fmt(observedAds)} ${observedAds === 1 ? "Anzeige" : "Anzeigen"})`;
+}
+
+function adStateLabel(state) {
+  return AD_STATE_LABELS[state] ?? (state || "Unbekannt");
+}
+
 function populateManageForm(ad) {
   if (typeof resetGenerationExistingTarget === "function") resetGenerationExistingTarget();
   managedAdBaseline = managedBaselineFor(ad);
@@ -1946,7 +2043,7 @@ function populateManageForm(ad) {
   byId("manage-description").value = managedAdBaseline.descriptionKnown
     ? managedAdBaseline.description
     : "";
-  byId("manage-state").textContent = ad.lifecycle_state ?? "—";
+  byId("manage-state").textContent = ad.lifecycle_state ? adStateLabel(ad.lifecycle_state) : "—";
   const improve = typeof optionalById === "function" ? optionalById("manage-ai-improve") : null;
   if (improve) improve.disabled = !(typeof generationUiReady === "function"
     && generationUiReady() && writeUiReady() && ad.present === true
@@ -2640,22 +2737,35 @@ function prepareCatalogBulkAction(action) {
   }
   const sourceState = action === "pause" ? "active"
     : (action === "activate" ? "paused" : null);
+  const targetState = action === "pause" ? "paused"
+    : (action === "activate" ? "active" : null);
   const ads = [];
+  const alreadyDone = [];
   for (const id of ids) {
     const ad = catalogSelectedAds.get(id);
+    if (ad && ad.present === true && targetState !== null
+        && ad.lifecycle_state === targetState) {
+      // Already in the requested state: nothing to send, skip it.
+      alreadyDone.push(id);
+      continue;
+    }
     if (!ad || !/^[0-9]{1,32}$/.test(id)
         || ad.ad_id !== id || ad.present !== true
         || typeof ad.observed_at !== "string" || !ad.observed_at
         || (sourceState === null
           ? !["active", "paused"].includes(ad.lifecycle_state)
           : ad.lifecycle_state !== sourceState)) {
-      throw new Error("Auswahl enthält eine unpassende Anzeige. Bestand abgleichen und "
-        + (action === "pause" ? "aktive"
-          : action === "activate" ? "pausierte" : "aktive oder pausierte")
-        + " Anzeigen wählen.");
+      throw new Error("Anzeige " + id + " passt nicht zu dieser Sammelaktion "
+        + "(nicht mehr vorhanden oder unklarer Status). Bitte abwählen oder "
+        + "zuerst „Mit Kleinanzeigen abgleichen“.");
     }
     ads.push(ad);
   }
+  if (ads.length === 0) {
+    throw new Error("Alle ausgewählten Anzeigen sind bereits "
+      + (action === "pause" ? "pausiert" : "aktiv") + ". Nichts zu tun.");
+  }
+  ads.alreadyDone = alreadyDone;
   return ads;
 }
 
@@ -2733,6 +2843,7 @@ async function runCatalogBulkAction(action) {
   renderCatalogNavigation();
   let confirmed = 0;
   const confirmedIds = [];
+  const notApplied = [];
   let stopped = "";
   try {
     for (const ad of ads) {
@@ -2764,9 +2875,24 @@ async function runCatalogBulkAction(action) {
         "/api/write/ads/" + ad.ad_id + (destructive ? "" : "/" + action),
         null, {adId: ad.ad_id},
       );
+      if (
+        result !== null && result.response.status === 409
+        && result.payload?.operation_receipt?.outcome === "precondition_failed"
+        && result.payload.operation_receipt.writer_invoked === false
+        && pendingWrites.size === 0 && !pendingRecoveryBlocked
+      ) {
+        // Rejected before any platform change (e.g. already in that state on
+        // Kleinanzeigen). Safe to note and continue with the next ad.
+        notApplied.push(ad.ad_id);
+        catalogSelectedIds.delete(ad.ad_id);
+        catalogSelectedAds.delete(ad.ad_id);
+        renderCatalogSelection();
+        continue;
+      }
       if (!confirmedWriteResult(result)) {
-        stopped = "Anzeige " + ad.ad_id + ": Ausgang unklar oder abgelehnt. "
-          + "Keine weitere Aktion; Recovery prüfen, nicht erneut senden.";
+        stopped = "Anzeige " + ad.ad_id + ": Ergebnis unklar. Der Stapel wurde angehalten "
+          + "und nichts wird automatisch wiederholt. Bitte „Mit Kleinanzeigen abgleichen“ "
+          + "und die Anzeige prüfen.";
         break;
       }
       confirmed += 1;
@@ -2791,6 +2917,10 @@ async function runCatalogBulkAction(action) {
   showCatalogBulkProgress(
     confirmed + " von " + ads.length + " Anzeigen bestätigt"
     + (confirmedIds.length ? " · IDs: " + confirmedIds.join(", ") : "")
+    + (ads.alreadyDone.length
+      ? " · bereits im gewünschten Zustand, übersprungen: " + ads.alreadyDone.join(", ") : "")
+    + (notApplied.length
+      ? " · auf Kleinanzeigen nicht passend, nichts geändert: " + notApplied.join(", ") : "")
     + (stopped ? " · " + stopped : " · Stapel abgeschlossen.")
   );
 }
@@ -2840,11 +2970,18 @@ function renderAds(ads) {
     eligibleIds.add(ad.ad_id);
     const option = document.createElement("option");
     option.value = ad.ad_id;
-    option.textContent = `${ad.title || "Ohne Titel"} · ${ad.ad_id} · ${ad.lifecycle_state ?? "unbekannt"}`;
+    option.textContent = `${ad.title || "Ohne Titel"} · ${ad.ad_id} · ${adStateLabel(ad.lifecycle_state)}`;
     picker.append(option);
   }
   if (eligibleIds.has(previouslySelected)) {
     picker.value = previouslySelected;
+    // Keep the shown platform status current after a write or sync without
+    // overwriting title/description the user may be editing.
+    const refreshed = ads.find((ad) => ad.ad_id === previouslySelected);
+    if (refreshed && byId("manage-ad-id").value === previouslySelected) {
+      byId("manage-state").textContent = refreshed.lifecycle_state
+        ? adStateLabel(refreshed.lifecycle_state) : "—";
+    }
   } else {
     clearManagedSelection();
   }
@@ -2872,8 +3009,7 @@ function renderAds(ads) {
       name.append(title, id);
       const state = document.createElement("span");
       state.className = "state " + (ad.lifecycle_state ?? "");
-      const stateLabels = {active: "Aktiv", paused: "Pausiert", absent: "Entfernt", pending: "Offen"};
-      state.textContent = stateLabels[ad.lifecycle_state] ?? (ad.lifecycle_state || "Unbekannt");
+      state.textContent = adStateLabel(ad.lifecycle_state);
       heading.append(name, state);
       const footer = document.createElement("div");
       footer.className = "ad-card-footer";
@@ -3281,25 +3417,52 @@ async function refreshAfterSettledWrite() {
   }
 }
 
+const WRITE_OPERATION_LABELS = Object.freeze({
+  update_content: "Änderung von Titel/Beschreibung",
+  "set_state:paused": "Pausieren",
+  "set_state:active": "Aktivieren",
+  delete: "Löschen",
+  create: "Neue Anzeige",
+});
+
 function describeWriteResult(response, payload) {
   if (payload.operation_receipt) {
     const outcome = payload.operation_receipt.outcome ?? "unknown";
-    if (response.status === 200) {
-      return {kind: "success", text: `Bestätigt: ${outcome}.`};
+    const label = WRITE_OPERATION_LABELS[payload.operation_receipt.operation] ?? "Aktion";
+    if (response.status === 200 && outcome === "confirmed") {
+      return {kind: "success", text: `${label}: erledigt und von Kleinanzeigen bestätigt.`};
+    }
+    if (response.status === 409 && outcome === "precondition_failed") {
+      return {
+        kind: "warning",
+        text: `${label}: nicht ausgeführt, auf Kleinanzeigen wurde nichts geändert. `
+          + "Die Anzeige ist dort nicht (mehr) in einem passenden Zustand, "
+          + "zum Beispiel bereits pausiert, bereits aktiv oder nicht mehr vorhanden. "
+          + "Die Liste wurde neu geladen.",
+      };
     }
     if (response.status === 202) {
       return {
         kind: "warning",
-        text: `Ausgang unklar (${outcome}). Kein automatischer Plattform-Retry.`,
+        text: `${label}: Ergebnis unklar – Kleinanzeigen hat die Änderung nicht eindeutig bestätigt. `
+          + "Sie wird nicht automatisch wiederholt. "
+          + "Bitte nicht erneut ausführen, sondern zuerst „Mit Kleinanzeigen abgleichen“ "
+          + `und die Anzeige prüfen. (Technischer Status: ${outcome})`,
       };
     }
-    return {kind: "error", text: `Write-Ergebnis: ${outcome} (HTTP ${response.status}).`};
+    return {
+      kind: "error",
+      text: `${label}: nicht erfolgreich (technischer Status: ${outcome}, HTTP ${response.status}).`,
+    };
   }
   if (payload.error) {
     const retry = payload.platform_retry_authorized === true
-      ? " Retry autorisiert."
-      : " Kein automatischer Plattform-Retry.";
-    return {kind: response.ok ? "warning" : "error", text: `${payload.error} (HTTP ${response.status}).${retry}`};
+      ? " Ein erneuter Versuch ist zulässig."
+      : " Kleinanzeiger wiederholt die Aktion nicht automatisch.";
+    return {
+      kind: response.ok ? "warning" : "error",
+      text: `Aktion nicht abgeschlossen (technischer Code: ${payload.error}, HTTP ${response.status}).${retry}`,
+    };
   }
   return {kind: response.ok ? "success" : "error", text: `HTTP ${response.status}.`};
 }
@@ -3330,6 +3493,9 @@ async function runPlatformWrite(
         `Der lokale Recovery-ACK bleibt offen: ${error.message}. Kein neuer Plattformrequest.`,
         "warning",
       );
+      if (error.message === "dashboard_pending_write_conflict") {
+        await offerUnclearResolution(entry);
+      }
     }
     return null;
   }
@@ -3389,7 +3555,10 @@ async function runPlatformWrite(
           // backend response. Refresh neither retries nor clears the write.
           await refreshAfterSettledWrite();
           setWriteStatus(
-            `Write-Ergebnis ist terminal, aber der lokale Recovery-ACK ist fehlgeschlagen: ${error.message}. Derselbe Request/Key bleibt gebunden.`,
+            unknownEffectTerminalWriteResult({response, payload: responsePayload})
+              // Expected: an unclear result is never ACKed as settled.
+              ? result.text
+              : `Write-Ergebnis ist terminal, aber der lokale Recovery-ACK ist fehlgeschlagen: ${error.message}. Derselbe Request/Key bleibt gebunden.`,
             "warning",
           );
           return {response, payload: responsePayload};
@@ -3400,6 +3569,7 @@ async function runPlatformWrite(
       await refreshAfterSettledWrite();
     } else if (responsePayload.error === "dashboard_pending_write_conflict") {
       await refreshAfterSettledWrite();
+      if (retryingPending) await offerUnclearResolution(entry);
     } else if (
       canClearPendingAfterError(
         response,
@@ -3727,6 +3897,15 @@ function selectedAdId() {
   return adId;
 }
 
+function pendingActionHint(scope) {
+  const action = String(scope).split(":").pop();
+  const button = {pause: "Pausieren", activate: "Aktivieren", update: "Änderungen speichern", delete: "Löschen"}[action];
+  const how = button
+    ? `Bitte zuerst erneut „${button}“ anklicken: Kleinanzeiger ruft dann nur das Ergebnis dieser früheren Aktion ab und führt sie nicht doppelt aus. Ist das Ergebnis unklar, kannst du die Sperre nach einem Abgleich mit Kleinanzeigen aufheben.`
+    : "Bitte zuerst das Ergebnis dieser früheren Aktion klären.";
+  return `Für diese Anzeige ist noch eine frühere Aktion offen (${scope}). ${how}`;
+}
+
 async function runAdAction(
   action,
   method,
@@ -3740,7 +3919,7 @@ async function runAdAction(
   const scope = `ad:${adId}:${action}`;
   if (existing !== null && existing.scope !== scope) {
     setWriteStatus(
-      `Für diese Anzeige ist bereits „${existing.scope}“ mit unbekanntem/ausstehendem Ergebnis gebunden. Zuerst den ursprünglichen Ausgang unabhängig klären.`,
+      pendingActionHint(existing.scope),
       "warning",
     );
     return;
@@ -4723,6 +4902,7 @@ const syncFailureHints = Object.freeze({
   write_session_required: "Die lokale Sitzung ist abgelaufen. Kleinanzeiger vollständig beenden und neu starten.",
   owner_inventory_busy: "Ein anderer Vorgang verwendet gerade den Browser. Danach erneut abgleichen.",
   owner_inventory_browser_unavailable: "Der von Kleinanzeiger verwendete Chrome ist nicht erreichbar. Kleinanzeiger neu starten.",
+  owner_inventory_browser_wrong_tab: "Der verwendete Chrome-Reiter zeigt nicht „Meine Anzeigen“. Dort „Meine Anzeigen“ öffnen und danach einmal erneut abgleichen.",
   owner_inventory_recovery_required: "Ein früherer Abgleich hat einen ungeklärten Zustand. Im Status nachsehen, nicht wiederholt auslösen.",
   owner_inventory_storage_unavailable: "Der lokale Abgleichstatus ist nicht lesbar. Kleinanzeiger neu starten und Diagnose prüfen.",
   owner_inventory_login_required: "Im von Kleinanzeiger geöffneten Chrome bei Kleinanzeigen anmelden, dann erneut abgleichen.",
@@ -4733,6 +4913,7 @@ const syncFailureHints = Object.freeze({
 const connectionHelpMessages = Object.freeze({
   owner_inventory_login_required: "Anmeldung erforderlich: „Kleinanzeigen-Konto öffnen“ im Kleinanzeiger-Startfenster wählen, dort bei Kleinanzeigen anmelden und danach „Mit Kleinanzeigen abgleichen“ anklicken.",
   owner_inventory_browser_unavailable: "Kleinanzeiger-Chrome nicht erreichbar: Das Startfenster öffnen, den Konto-Browser prüfen und Kleinanzeiger kontrolliert neu starten.",
+  owner_inventory_browser_wrong_tab: "Falscher Browser-Reiter: Im Kleinanzeiger-Chrome genau den verwendeten Reiter auf „Meine Anzeigen“ öffnen und danach den Kontoabgleich erneut starten. Gespeicherte Anzeigen bleiben erhalten.",
   owner_inventory_connection_unavailable: "Keine Verbindung zu Kleinanzeigen: Internet und Anmeldung im Kleinanzeiger-Chrome prüfen. Vorhandene Anzeigen bleiben gespeichert.",
   write_session_required: "Diese Sitzung kann keine Plattformänderungen ausführen. Kleinanzeiger über Kleinanzeiger.cmd vollständig neu starten und den Eigenbestand erneut abgleichen.",
   read_only: "Bearbeiten und Veröffentlichen sind in dieser reinen Ansicht nicht möglich. Kleinanzeiger über Kleinanzeiger.cmd normal starten.",
@@ -4819,11 +5000,11 @@ async function load() {
     byId("current").textContent = summary.current_ads;
     byId("absent").textContent = summary.absent_ads;
     byId("views").textContent =
-      `${summary.views_total_known} / ${summary.views_observed_ads} Ads`;
+      metricSummaryText(summary.views_total_known, summary.views_observed_ads);
     byId("watches").textContent =
-      `${summary.watch_total_known} / ${summary.watch_observed_ads} Ads`;
+      metricSummaryText(summary.watch_total_known, summary.watch_observed_ads);
     byId("replies").textContent =
-      `${summary.replies_total_known} / ${summary.replies_observed_ads} Ads`;
+      metricSummaryText(summary.replies_total_known, summary.replies_observed_ads);
     writeUiAvailable = dashboardConfig.write_ui_available === true;
     localWorkAvailable = dashboardConfig.local_work_available === true;
     const offlineNotice = optionalById("offline-notice");
@@ -7206,6 +7387,77 @@ def _local_pending_matches(
     return tuple(store._dashboard_pending_write_record(row) for row in rows)
 
 
+# Write API HTTP status for each settled outcome that may clear a UI fence.
+_SETTLED_WRITE_STATUS_BY_OUTCOME = {"confirmed": 200, "precondition_failed": 409}
+
+
+def _settled_write_replay_status(response_bytes: bytes) -> int:
+    """HTTP status for replaying an already verified settled write response."""
+    receipt = strict_json_object(response_bytes).get("operation_receipt")
+    outcome = receipt.get("outcome") if isinstance(receipt, dict) else None
+    return _SETTLED_WRITE_STATUS_BY_OUTCOME.get(outcome, 200)
+
+
+# Backend results whose platform effect is unknown. They are never retried and
+# never ACKed as settled; they may only be released after the user has run a
+# fresh, successful account sync that started after the write had finished.
+_UNCLEAR_WRITE_STATUSES = frozenset({202, 500})
+
+
+class UnclearWriteResolutionError(ValueError):
+    """Release refused; ``code`` is a stable machine-readable reason."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _release_unclear_pending_write(
+    store: SnapshotStore | StorageOwnerClient, proxy: DashboardWriteProxy,
+    *, scope: str, idempotency_key: str,
+) -> None:
+    """Release one UI fence for a finished write with an unknown outcome.
+
+    This sends nothing to the platform and authorizes no retry. Releasing only
+    lets the user decide anew, based on a fresh owner-inventory observation
+    taken strictly after the unclear write completed. In-progress, missing or
+    settled backend records are refused (settled ones use the normal ACK).
+    """
+    if not _local_reconciliation_allowed(store, proxy):
+        raise UnclearWriteResolutionError("reconciliation_not_available")
+    assert type(store) is SnapshotStore
+    with store.dashboard_pending_write_guard():
+        matches = _local_pending_matches(store, scope=scope, key=idempotency_key)
+        if (
+            len(matches) != 1 or matches[0].scope != scope
+            or matches[0].idempotency_key != idempotency_key
+        ):
+            raise UnclearWriteResolutionError("pending_write_not_found")
+        record = store.write_api_request(idempotency_key)
+        if (
+            record is None or record.state != "completed"
+            or record.completed_at is None
+            or record.response_status not in _UNCLEAR_WRITE_STATUSES
+        ):
+            raise UnclearWriteResolutionError("write_outcome_not_unclear")
+        if store.sync_recovery_status()["unresolved_count"] != 0:
+            raise UnclearWriteResolutionError("fresh_sync_required")
+        synced = store.last_successful_sync_attempt()
+        if (
+            synced is None or synced.completed_at is None
+            or synced.started_at <= record.completed_at
+        ):
+            raise UnclearWriteResolutionError("fresh_sync_required")
+        for _phase in ("acknowledged", "finalized"):
+            phase = store.acknowledge_dashboard_pending_write(
+                scope=scope, idempotency_key=idempotency_key,
+            )
+            if phase == "missing":
+                raise UnclearWriteResolutionError("pending_write_not_found")
+            if phase == "finalized":
+                break
+
+
 def _local_completed_write_response(
     store: SnapshotStore, proxy: DashboardWriteProxy, pending: DashboardPendingWrite,
 ) -> bytes:
@@ -7269,7 +7521,8 @@ def _stored_completed_write_response(
             path=pending.path, payload=payload,
         )
         or record.state != "completed" or record.execution_started_at is None
-        or record.completed_at is None or record.response_status != 200
+        or record.completed_at is None
+        or record.response_status not in _SETTLED_WRITE_STATUS_BY_OUTCOME.values()
         or not record.claim_owner
         or any(value.utcoffset() is None for value in (
             record.requested_at, record.execution_started_at, record.completed_at,
@@ -7296,33 +7549,50 @@ def _stored_completed_write_response(
             pending.path.rsplit("/", 1)[1]
         ]
     )
+    outcome = receipt.get("outcome") if isinstance(receipt, dict) else None
+    # Two settled outcomes may release the UI fence: a confirmed write, and a
+    # precondition failure where the platform writer was provably never
+    # invoked (the same "safe" outcome the Write API and witness accept).
+    # Ambiguous or failed executions stay fenced.
     if (
         _json_bytes(response) != response_bytes or set(response) != response_fields
         or response["idempotency_key"] != pending.idempotency_key
         or response["platform_retry_authorized"] is not False
         or not isinstance(receipt, dict)
         or receipt.get("operation") != operation
-        or receipt.get("outcome") != "confirmed"
-        or receipt.get("writer_invoked") is not True
+        or outcome not in _SETTLED_WRITE_STATUS_BY_OUTCOME
+        or record.response_status != _SETTLED_WRITE_STATUS_BY_OUTCOME[outcome]
+        or receipt.get("writer_invoked") is not (outcome == "confirmed")
         or receipt.get("authorization_by") != principal
         or receipt.get("authorization_reference") != "write-api:" + pending.idempotency_key
     ):
         raise ValueError("invalid completed receipt")
+    confirmed = outcome == "confirmed"
     if pending.ad_id is None:
-        if not isinstance(receipt.get("created_ad_id"), str) or not _valid_ad_id(receipt["created_ad_id"]):
+        if confirmed and (
+            not isinstance(receipt.get("created_ad_id"), str)
+            or not _valid_ad_id(receipt["created_ad_id"])
+        ):
             raise ValueError("invalid created target")
-        if any(receipt.get(name) != "success_nonempty" for name in (
+        if not confirmed and receipt.get("created_ad_id") is not None:
+            raise ValueError("precondition failure must not name a created ad")
+        if confirmed and any(receipt.get(name) != "success_nonempty" for name in (
             "post_read_status", "confirmation_post_read_status", "content_post_read_status",
         )):
             raise ValueError("incomplete create confirmation")
     elif receipt.get("ad_id") != pending.ad_id:
         raise ValueError("receipt target mismatch")
-    if media and (
+    if media and confirmed and (
         receipt.get("media_persistence_confirmed") is not True
         or response["media_persistence_confirmed"] is not True
         or response["media_post_read_status"] != receipt.get("media_post_read_status")
     ):
         raise ValueError("unconfirmed media")
+    if media and not confirmed and (
+        response["media_persistence_confirmed"] is True
+        or receipt.get("media_persistence_confirmed") is True
+    ):
+        raise ValueError("precondition failure must not confirm media")
     for name in ("started_at", "completed_at"):
         raw = receipt.get(name)
         if not isinstance(raw, str) or len(raw) > 80:
@@ -7534,7 +7804,11 @@ def _handler_factory(
                 return
             self._request_body_started = True
             try:
-                ignored_bytes = self._content_length(max_bytes=_MAX_PROXY_JSON_BODY_BYTES)
+                # Accept a bounded rejection envelope beyond the normal
+                # 16 KiB JSON limit; this is discard-only, never processed.
+                ignored_bytes = self._content_length(
+                    max_bytes=4 * _MAX_PROXY_JSON_BODY_BYTES
+                )
             except ValueError:
                 self.close_connection = True
                 return
@@ -7887,7 +8161,8 @@ def _handler_factory(
                     return
                 if replay_body is not None:
                     self._send(
-                        200, replay_body, "application/json; charset=utf-8",
+                        _settled_write_replay_status(replay_body), replay_body,
+                        "application/json; charset=utf-8",
                         idempotency_replayed=True,
                     )
                     return
@@ -8600,6 +8875,54 @@ def _handler_factory(
 
         def do_HEAD(self) -> None:
             self._method_not_allowed()
+
+        def _resolve_unclear_pending_write(self) -> None:
+            target = urlsplit(self.path)
+            if write_proxy is None or target.query:
+                self._send_json(404, {"error": "not_found"})
+                return
+            if not self._write_session_authorized():
+                self._send_json(403, {
+                    "error": "write_session_required",
+                    "platform_retry_authorized": False,
+                })
+                return
+            if self.headers.get("Idempotency-Key") is not None:
+                self._send_json(400, {
+                    "error": "idempotency_key_not_allowed_for_pending_resolve",
+                    "platform_retry_authorized": False,
+                })
+                return
+            try:
+                body, _ = self._read_proxy_body("local_json")
+                payload = strict_json_object(body)
+                if (
+                    set(payload) != {"scope", "idempotency_key", "confirm"}
+                    or not isinstance(payload["scope"], str)
+                    or not isinstance(payload["idempotency_key"], str)
+                    or payload["confirm"] is not True
+                ):
+                    raise ValueError("invalid_resolve_request")
+                _release_unclear_pending_write(
+                    store, write_proxy,
+                    scope=payload["scope"], idempotency_key=payload["idempotency_key"],
+                )
+            except UnclearWriteResolutionError as exc:
+                self._send_json(409, {"error": exc.code, "platform_retry_authorized": False})
+                return
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {
+                    "error": "invalid_resolve_request",
+                    "platform_retry_authorized": False,
+                })
+                return
+            except Exception:
+                self._send_json(500, {
+                    "error": "dashboard_pending_store_error",
+                    "platform_retry_authorized": False,
+                })
+                return
+            self._send_json(200, {"released": True, "platform_retry_authorized": False})
 
         def _ack_dashboard_pending_write(self) -> None:
             target = urlsplit(self.path)
@@ -9318,6 +9641,9 @@ def _handler_factory(
                 return
             if urlsplit(self.path).path == "/api/dashboard/pending-writes/ack":
                 self._ack_dashboard_pending_write()
+                return
+            if urlsplit(self.path).path == "/api/dashboard/pending-writes/resolve":
+                self._resolve_unclear_pending_write()
                 return
             self._proxy_write("POST")
 

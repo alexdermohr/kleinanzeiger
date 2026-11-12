@@ -303,6 +303,34 @@ class BackupCliTests(unittest.TestCase):
             self.assertTrue(tampered)
             self.assertFalse(self.backup.exists())
 
+    def test_btrfs_mapping_device_alias_requires_inode_mount_and_live_path(self) -> None:
+        # Btrfs exposes a subvolume-specific stat.st_dev, but the kernel
+        # reports its superblock's device in /proc/self/maps. Only a live
+        # matching file on that Btrfs mount may be normalized.
+        device, inode = self.source.stat().st_dev, self.source.stat().st_ino
+        mapped_device = 32
+        def scan(filesystem, reported_inode=inode, path=None):
+            shown = self.source if path is None else path
+            maps = f"1-2 rw-s 00000000 00:20 {reported_inode} {shown}\n"
+            mount = f"999 101 0:32 / {self.root} rw - {filesystem} dev rw\n"
+            real_open = open
+            def fake_open(name, *args, **kwargs):
+                if name == "/proc/self/maps":
+                    return io.StringIO(maps)
+                if name == "/proc/self/mountinfo":
+                    return io.StringIO(mount)
+                return real_open(name, *args, **kwargs)
+            with patch("builtins.open", side_effect=fake_open):
+                return backup_cli._shared_file_mappings()
+        self.assertEqual(scan("btrfs"), {(device, inode)})
+        # An unrelated/non-Btrfs device must not be silently accepted.
+        self.assertEqual(scan("ext4"), {(mapped_device, inode)})
+        self.assertEqual(scan("btrfs", inode + 1), {(mapped_device, inode + 1)})
+        self.assertEqual(
+            scan("btrfs", path=str(self.source) + " (deleted)"),
+            {(mapped_device, inode)},
+        )
+
     def test_external_live_wal_writer_is_backed_up_without_false_content_drift(self) -> None:
         # A separate process keeps committed WAL frames live. A read-only
         # backup must include those frames without rejecting harmless

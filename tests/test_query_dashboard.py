@@ -3316,7 +3316,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -3348,8 +3348,8 @@ globalThis.fetch = async (path, options) => {
   assert.equal(pendingWrites.has("ad:2:pause"), false);
   assert.equal(pendingForAd("2"), null);
   assert.equal(loadCalls, 1);
-  assert.match(writeStatus.textContent, /Ausgang unklar/i);
-  assert.match(writeStatus.textContent, /Kein automatischer Plattform-Retry/i);
+  assert.match(writeStatus.textContent, /Ergebnis unklar/i);
+  assert.match(writeStatus.textContent, /nicht automatisch wiederholt/i);
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
@@ -3422,7 +3422,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -3516,7 +3516,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -3631,7 +3631,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -3755,7 +3755,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -3875,7 +3875,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -3979,7 +3979,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -4083,7 +4083,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -4206,7 +4206,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -4285,7 +4285,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -4391,7 +4391,10 @@ globalThis.fetch = async (path, options) => {
     assert.equal(result.response.status, expected);
     assert.equal(pendingWrites.get(scope).acknowledgeOnly, true);
     assert.equal(readOnlyRefreshes, id === "123" ? 1 : 2);
-    assert.match(status.textContent, /Recovery-ACK ist fehlgeschlagen/);
+    // A denied ACK for a confirmed result is a local recovery problem; for an
+    // unclear (202) result it is expected and the unclear-outcome text stays.
+    assert.match(status.textContent,
+      id === "123" ? /Recovery-ACK ist fehlgeschlagen/ : /Ergebnis unklar/);
   }
   const beforeRetry = requests.filter(p => p.startsWith("/api/write/"));
   assert.deepEqual(beforeRetry, [
@@ -4459,7 +4462,7 @@ globalThis.fetch = async (path, options) => {
     acknowledgements += 1;
     if (acknowledgements === 1) throw new Error("ACK transport lost");
     return {status: 200, ok: true, async text() {
-      return JSON.stringify({acknowledged: true, finalized: false});
+      return JSON.stringify({acknowledged: true, finalized: acknowledgements >= 3});
     }};
   }
   assert.equal(path, "/api/write/ads/123");
@@ -4506,11 +4509,13 @@ globalThis.fetch = async (path, options) => {
       "/api/dashboard/pending-writes",
       "/api/dashboard/pending-writes",
       "/api/dashboard/pending-writes/ack",
+      "/api/dashboard/pending-writes/ack",
     ],
   );
   assert.deepEqual(JSON.parse(calls[4].options.body), {
     scope, idempotency_key: pending.key,
   });
+  assert.equal(acknowledgements, 3);
   assert.equal(pendingWrites.has(scope), false);
   assert.equal(refreshes, 2);
 })().catch((error) => {
@@ -4558,7 +4563,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -4988,7 +4993,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -5227,7 +5232,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -5376,7 +5381,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -5506,7 +5511,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
@@ -5691,7 +5696,7 @@ globalThis.fetch = async (path, options) => {
       status: 200,
       ok: true,
       async text() {
-        return JSON.stringify({acknowledged: true});
+        return JSON.stringify({acknowledged: true, finalized: true});
       },
     };
   }
