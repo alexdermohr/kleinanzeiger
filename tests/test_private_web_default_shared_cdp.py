@@ -18,7 +18,10 @@ from mark_api.write_api import WriteApiAccess, WriteCapability
 
 class DefaultOwnedCdpSessionTests(unittest.TestCase):
     def test_content_reader_and_every_writer_borrow_same_native_owner(self):
-        with patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"):
+        with (
+            patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority"),
+        ):
             runtime = build_private_web_content_runtime(
                 cdp_port=19972, timeout_seconds=1,
             )
@@ -50,7 +53,10 @@ class DefaultOwnedCdpSessionTests(unittest.TestCase):
                 )),
                 writes_enabled=True,
             )
-            with patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"):
+            with (
+            patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority"),
+        ):
                 runtime = build_private_web_write_api_runtime(
                     cdp_port=19972,
                     store=store,
@@ -102,6 +108,7 @@ class DefaultOwnedCdpSessionTests(unittest.TestCase):
 
         with (
             patch("mark_api.private_web_runtime.require_private_web_runtime_dependency"),
+            patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority"),
             patch.object(protected_cdp_session, "_LoopbackCdpClient", SyntheticNative),
             patch.object(
                 protected_cdp_session, "_require_private_web_cdp_authority",

@@ -3,6 +3,11 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.14] - 2026-11-12
+
+### Behoben
+- Direkte Aufrufe der alten privaten Browser-/CDP-Adapter prüfen die Plattformberechtigung vor einem Verbindungsaufbau. Ohne nachgewiesene Berechtigung bleiben sie gesperrt; lokale Offline-Funktionen und synthetische Tests funktionieren weiter.
+
 ## [1.0.13] - 2026-11-10
 
 ### Behoben

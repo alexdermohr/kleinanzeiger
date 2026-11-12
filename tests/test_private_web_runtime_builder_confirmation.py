@@ -23,6 +23,7 @@ class _OwnerReader:
 class PrivateWebWriteApiRuntimeBuilderConfirmationTests(unittest.TestCase):
     TOKEN = "fake-runtime-token"
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_accepts_caller_supplied_confirmation_runtime(self) -> None:
         close_events: list[str] = []
         content_runtime = PrivateWebContentRuntime(
@@ -83,6 +84,7 @@ class PrivateWebWriteApiRuntimeBuilderConfirmationTests(unittest.TestCase):
 
         self.assertEqual(close_events, ["confirmation", "content"])
 
+    @patch("mark_api.private_web_runtime._legacy_admission.require_legacy_platform_authority", new=lambda: None)
     def test_builder_rejects_invalid_confirmation_before_browser_setup(self) -> None:
         access = WriteApiAccess(
             principal="runtime-test",
