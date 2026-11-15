@@ -42,7 +42,9 @@ Anbieter. Das lokale Menü ist unabhängig vom Windows-Installer.
 - **Konto / Dashboard** und **Offline** starten denselben bestehenden Linux-Client.
   Die Zentrale bleibt geöffnet. Zum Moduswechsel zuerst **Client beenden** wählen.
   Abbrechen/Schließen der Zentrale beendet ihren Client samt eigener Prozessgruppe;
-  ein bereits vorher laufender Chrome wird nicht beendet. Ein neu gestarteter
+  ein bereits vorher laufender Chrome wird nicht beendet.
+  Offline aktiviert den sitzungsgebundenen lokalen Arbeitsbereich fuer
+  Entwuerfe und Verkaufsvermerke, ohne Plattformaktionen. Ein neu gestarteter
   App-Chrome gehört zur Client-Prozessgruppe und wird mit beendet.
 - Ein Lock verhindert mehrere Zentralen desselben Benutzers. Zusätzlich verhindert
   die Zentrale einen zweiten eigenen Client. Direkt separat aufgerufene

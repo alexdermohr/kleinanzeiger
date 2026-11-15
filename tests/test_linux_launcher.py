@@ -5,6 +5,7 @@ import importlib.util
 import json
 from urllib.parse import unquote
 import os
+import sys
 from pathlib import Path
 import socket
 import tempfile
@@ -290,6 +291,33 @@ class LinuxLauncherTests(unittest.TestCase):
         self.assertIn("if not _open_in_own_chrome(", code)
         self.assertIn("browser_profile=browser_profile", code)
         self.assertIn("else:\\n                    opener = shutil.which", code.replace("\n", "\\n"))
+
+    def test_offline_start_enables_local_work_without_platform_or_chrome(self):
+        mod = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mod._ROOT = root
+            mod._DB = root / "local.sqlite3"
+            child = unittest.mock.MagicMock()
+            child.wait.return_value = 0
+            child.poll.return_value = 0
+            with (
+                patch.object(mod, "version", return_value="1.0.14"),
+                patch.object(mod, "_free_port", return_value=43120),
+                patch.object(mod, "_start_chrome") as chrome,
+                patch.object(mod.subprocess, "Popen", return_value=child) as spawn,
+                patch.object(mod, "_open_dashboard", return_value=True) as ui,
+                patch("sys.argv", ["kleinanzeiger-linux", "offline"]),
+            ):
+                self.assertEqual(mod.main(), 0)
+            chrome.assert_not_called()
+            command = spawn.call_args.args[0]
+            self.assertEqual(command[:4], [sys.executable, "-m", "kleinanzeiger", "offline"])
+            self.assertEqual(command[-1], "--init-db")
+            self.assertEqual(command.count("--local-work"), 1)
+            self.assertNotIn("--enable-writes", command)
+            self.assertNotIn("--cdp-port", command)
+            ui.assert_called_once_with(43120, child, cdp_port=None, browser_profile=None)
 
     def test_public_linux_launcher_is_packaged(self):
         import tomllib
