@@ -139,6 +139,57 @@ class VersionPolicyTests(unittest.TestCase):
                 self.assertNotIn(version, content)
 
 
+    def test_linux_kde_only_change_keeps_windows_release_without_opening_metadata_gate(self):
+        import subprocess
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp)
+            for filename in ("pyproject.toml", "CHANGELOG.md", *RELEASE_REFERENCES):
+                target = copy / filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                content = (root / filename).read_text(encoding="utf-8")
+                if filename == "pyproject.toml":
+                    entry = 'kleinanzeiger-center = "kleinanzeiger.linux_center:main"\n'
+                    self.assertEqual(content.count(entry), 1)
+                    content = content.replace(entry, "")
+                target.write_text(content, encoding="utf-8")
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-c", "user.name=Release Test",
+                     "-c", "user.email=test@example.invalid", *args],
+                    cwd=copy, check=True, capture_output=True, text=True,
+                )
+
+            git("init", "-q")
+            git("add", ".")
+            git("commit", "-qm", "Windows release baseline")
+            version = canonical_version(copy)
+            git("tag", "v" + ".".join(map(str, version)))
+
+            linux = copy / "src/kleinanzeiger/linux_center.py"
+            linux.parent.mkdir(parents=True)
+            linux.write_text("def main():\n    return 0\n", encoding="utf-8")
+            pyproject = copy / "pyproject.toml"
+            original = pyproject.read_text(encoding="utf-8")
+            target = 'kleinanzeiger = "kleinanzeiger.cli:launcher"\n'
+            self.assertEqual(original.count(target), 1)
+            pyproject.write_text(original.replace(
+                target, target + 'kleinanzeiger-center = "kleinanzeiger.linux_center:main"\n'
+            ), encoding="utf-8")
+            git("add", ".")
+            git("commit", "-qm", "Linux-only KDE frontend")
+            self.assertEqual(check(copy), version)
+
+            # Dependency or Windows changes cannot piggyback on the Linux-only lane.
+            pyproject.write_text(pyproject.read_text(encoding="utf-8").replace(
+                'requires-python = ">=3.12"', 'requires-python = ">=3.13"',
+            ), encoding="utf-8")
+            git("add", ".")
+            git("commit", "-qm", "unexpected package compatibility change")
+            with self.assertRaisesRegex(VersionPolicyError, "without a new version"):
+                require_bump_for_customer_changes(copy, version, version)
+
     def test_shipping_change_requires_bump_but_docs_only_do_not(self):
         root = Path(__file__).resolve().parents[1]
         import subprocess
