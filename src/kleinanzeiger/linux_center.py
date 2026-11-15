@@ -250,7 +250,7 @@ Schnäppchenjäger: lokale CSV/JSON oder bewusste manuelle Browser-Suche, kein S
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.0.15 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.0.14 · KDE-Kontrollzentrale
 Neue Linux-Bedienung mit externem kdialog, Konto-/Offline-Start und Client-Verwaltung.
 Geprüfte SQLite-Backup-CLI, Artikelvorschau mit bestätigtem hashgebundenem Import,
 lokaler Wochenbericht, Schnäppchenjäger, bereinigte Diagnose und dieses Handbuch.

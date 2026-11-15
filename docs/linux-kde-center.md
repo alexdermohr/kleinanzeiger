@@ -1,4 +1,4 @@
-# Kleinanzeiger 1.0.15 unter NixOS/KDE
+# Kleinanzeiger 1.0.14 unter NixOS/KDE
 
 Die Kontrollzentrale nutzt das externe KDE-Programm `kdialog`. Sie benötigt
 keine Python-GUI-Bibliothek. Python ab 3.12 und für den Kontomodus Google Chrome
@@ -14,8 +14,8 @@ unverändert. Aus diesem geprüften Quell-Checkout:
 
 ~~~bash
 nix profile add nixpkgs#kdePackages.kdialog
-export UV_TOOL_DIR="$HOME/.local/share/kleinanzeiger/releases/v1.0.15-nixos/tools"
-export UV_TOOL_BIN_DIR="$HOME/.local/share/kleinanzeiger/releases/v1.0.15-nixos/bin"
+export UV_TOOL_DIR="$HOME/.local/share/kleinanzeiger/releases/v1.0.14-kde-nixos/tools"
+export UV_TOOL_BIN_DIR="$HOME/.local/share/kleinanzeiger/releases/v1.0.14-kde-nixos/bin"
 nix shell nixpkgs#uv --command uv tool install --python 3.13 --python-preference only-managed '.[private-web]'
 ~~~
 
