@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Kleinanzeiger Kontrollzentrale
+Comment=Dashboard, lokale Importe, Backups und Berichte
+Exec=kleinanzeiger-center
+TryExec=kleinanzeiger-center
+Icon=preferences-system
+Terminal=false
+Categories=Utility;
+StartupNotify=false

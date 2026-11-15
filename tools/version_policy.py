@@ -142,6 +142,34 @@ def check_references(root: Path, expected: tuple[int, int, int]) -> int:
     return matched
 
 
+def is_linux_only_change(root: Path, tag: str, changed: list[str]) -> bool:
+    """Keep Windows customer ZIP version stable for an isolated Linux GUI lane.
+
+    Only Linux-named modules and precisely one Linux-only console entrypoint
+    qualify. Runtime, metadata, dependency and Windows script changes still
+    need the normal customer release bump.
+    """
+    linux_module = lambda path: (
+        path.startswith("src/kleinanzeiger/linux_") and path.endswith(".py")
+    )
+    if not changed or not any(linux_module(path) for path in changed):
+        return False
+    if any(not linux_module(path) and path != "pyproject.toml"
+           for path in changed):
+        return False
+    if "pyproject.toml" not in changed:
+        return True
+    before = tomllib.loads(subprocess.check_output(
+        ["git", "show", f"{tag}:pyproject.toml"], cwd=root, text=True,
+    ))
+    after = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    scripts = after["project"]["scripts"]
+    if scripts.get("kleinanzeiger-center") != "kleinanzeiger.linux_center:main":
+        return False
+    del scripts["kleinanzeiger-center"]
+    return before == after
+
+
 def require_bump_for_customer_changes(
     root: Path,
     current: tuple[int, int, int],
@@ -163,7 +191,7 @@ def require_bump_for_customer_changes(
         ],
         cwd=root, text=True,
     ).splitlines()
-    if changed:
+    if changed and not is_linux_only_change(root, tag, changed):
         raise VersionPolicyError(
             f"Customer files changed since {tag} without a new version: "
             + ", ".join(changed[:8])

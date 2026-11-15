@@ -5,6 +5,9 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 
 ## [1.0.14] - 2026-11-12
 
+### Linux/KDE-Ergänzung vom 15. November 2026
+- Neue KDE-Kontrollzentrale (`kleinanzeiger-center`) mit Konto-/Offline-Start, SQLite-Backup über die geprüfte CLI, bestätigtem hashgebundenem CSV/XLSX-Artikelimport, lokalem Wochenbericht, Schnäppchenjäger, Diagnose und Handbuch. NixOS-Installation und Desktop-Eintrag sind dokumentiert.
+
 ### Behoben
 - Direkte Aufrufe der alten privaten Browser-/CDP-Adapter prüfen die Plattformberechtigung vor einem Verbindungsaufbau. Ohne nachgewiesene Berechtigung bleiben sie gesperrt; lokale Offline-Funktionen und synthetische Tests funktionieren weiter.
 
