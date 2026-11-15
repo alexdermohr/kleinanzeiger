@@ -1,4 +1,4 @@
-# Kleinanzeiger 1.0.14 unter NixOS/KDE
+# Kleinanzeiger 1.0.15 unter NixOS/KDE
 
 Die Kontrollzentrale nutzt das externe KDE-Programm `kdialog`. Sie benötigt
 keine Python-GUI-Bibliothek. Python ab 3.12 und für den Kontomodus Google Chrome

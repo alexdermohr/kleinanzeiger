@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.15] - 2026-11-15
+
+### Behoben
+- Kleinanzeiger-Chrome und Kontoabgleich funktionieren wieder: Eine versehentlich auf die regulären, auf das eigene Chrome-Profil begrenzten CDP-Produktfunktionen angewendete Legacy-Transport-Sperre wurde entfernt.
+- Die tatsächlich alten direkten HTTP-, mobilen und Browser-Bot-Adapter bleiben unverändert gesperrt. Vorhandene Kontoanmeldung, Bestandsdaten und notwendige Bestätigungen für Plattformänderungen bleiben erhalten.
+
 ## [1.0.14] - 2026-11-12
 
 ### Linux/KDE-Ergänzung vom 15. November 2026

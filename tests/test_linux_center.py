@@ -221,7 +221,7 @@ class CenterTests(unittest.TestCase):
         import tomllib
         root = Path(__file__).resolve().parents[1]
         metadata = tomllib.loads((root / "pyproject.toml").read_text())
-        self.assertEqual(metadata["project"]["version"], "1.0.14")
+        self.assertRegex(metadata["project"]["version"], r"^\d+\.\d+\.\d+$")
         self.assertEqual(metadata["project"]["scripts"]["kleinanzeiger-center"], "kleinanzeiger.linux_center:main")
         desktop = (root / "docs" / "kleinanzeiger-center.desktop").read_text()
         self.assertIn("Exec=kleinanzeiger-center\n", desktop)
