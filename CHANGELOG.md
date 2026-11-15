@@ -3,6 +3,11 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.0.15] - 2026-11-15
+
+### Linux-Ergänzung
+- Neue KDE-Kontrollzentrale (`kleinanzeiger-center`) mit Konto-/Offline-Start, SQLite-Backup über die geprüfte CLI, bestätigtem hashgebundenem CSV/XLSX-Artikelimport, lokalem Wochenbericht, Schnäppchenjäger, Diagnose und Handbuch. NixOS-Installation und Desktop-Eintrag sind dokumentiert.
+
 ## [1.0.14] - 2026-11-12
 
 ### Behoben

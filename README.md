@@ -36,3 +36,10 @@ KI benötigt einen eigenen Anbieterzugang und eine ausdrückliche Kostenfreigabe
 - [Windows-Installation und Problemlösung](docs/windows-installation.md)
 
 Bei Problemen im Kleinanzeiger-Fenster **Fehlerdetails anzeigen** oder **Diagnose kopieren** wählen. Profile, Datenbank und Backups nicht zur Fehlerbehebung löschen.
+
+### Linux / KDE
+
+`kleinanzeiger-center` öffnet die deutsche KDE-Kontrollzentrale mit Konto- und
+Offline-Start, geprüften SQLite-Backups, bestätigtem CSV/XLSX-Artikelimport,
+Wochenbericht und Schnäppchenjäger. Externes `kdialog` erforderlich:
+[NixOS-Installation und Desktop-Eintrag](docs/linux-kde-center.md).
