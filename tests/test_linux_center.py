@@ -47,10 +47,25 @@ class CenterTests(unittest.TestCase):
                 self.fail("must reject")
         self.assertEqual(target.read_text(), "original")
 
+    def test_legacy_session_keeps_existing_account_and_denies_second_launcher(self):
+        with (
+            patch.object(mod.linux_launcher, "_other_kleinanzeiger_running", return_value=True),
+            patch.object(mod.subprocess, "Popen") as spawned,
+            patch.object(self.center, "message") as message,
+        ):
+            self.assertIs(self.center.start("konto"), False)
+        spawned.assert_not_called()
+        message.assert_called_once()
+        self.assertEqual(self.center.last_status, "Andere Sitzung läuft")
+
     def test_start_reuses_launcher_and_rejects_duplicate(self):
         child = MagicMock()
         child.poll.return_value = None
-        with patch.object(mod.subprocess, "Popen", return_value=child) as spawn, patch.object(self.center, "message"):
+        with (
+            patch.object(mod.subprocess, "Popen", return_value=child) as spawn,
+            patch.object(mod.linux_launcher, "_other_kleinanzeiger_running", return_value=False),
+            patch.object(self.center, "message"),
+        ):
             self.center.start("konto")
             self.center.start("offline")
         spawn.assert_called_once()

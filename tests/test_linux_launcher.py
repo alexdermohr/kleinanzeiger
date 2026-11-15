@@ -82,6 +82,7 @@ class LinuxLauncherTests(unittest.TestCase):
                 patch.object(mod, "_start_chrome", return_value=50365) as browser,
                 patch.object(mod.subprocess, "Popen", return_value=app),
                 patch.object(mod, "_open_dashboard", return_value=True) as dashboard,
+                patch.object(mod, "_other_kleinanzeiger_running", return_value=False),
                 patch.object(mod, "_free_port", return_value=41234),
                 patch("sys.argv", ["kleinanzeiger-linux", "konto"]),
             ):
@@ -303,6 +304,7 @@ class LinuxLauncherTests(unittest.TestCase):
             child.poll.return_value = 0
             with (
                 patch.object(mod, "version", return_value="1.0.14"),
+                patch.object(mod, "_other_kleinanzeiger_running", return_value=False),
                 patch.object(mod, "_free_port", return_value=43120),
                 patch.object(mod, "_start_chrome") as chrome,
                 patch.object(mod.subprocess, "Popen", return_value=child) as spawn,
@@ -318,6 +320,49 @@ class LinuxLauncherTests(unittest.TestCase):
             self.assertNotIn("--enable-writes", command)
             self.assertNotIn("--cdp-port", command)
             ui.assert_called_once_with(43120, child, cdp_port=None, browser_profile=None)
+
+    def test_existing_other_user_launcher_blocks_even_older_versions(self):
+        mod = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            candidate = proc / "1234"
+            candidate.mkdir()
+            (candidate / "cmdline").write_bytes(
+                (b"/nix/store/python|/home/alex/.local/share/kleinanzeiger/"
+                 b"releases/v0.1.23/venv/bin/kleinanzeiger-linux|konto|")
+                .replace(b"|", bytes((0,)))
+            )
+            with patch.object(mod.os, "getpid", return_value=9999):
+                self.assertTrue(mod._other_kleinanzeiger_running(proc))
+            # Only the same operating-system user matters.
+            with patch.object(mod.os, "getuid", return_value=999999):
+                self.assertFalse(mod._other_kleinanzeiger_running(proc))
+            (candidate / "cmdline").write_bytes(
+                b"/usr/bin/chrome|--user-data-dir=/tmp/kleinanzeiger-linux|"
+                .replace(b"|", bytes((0,)))
+            )
+            self.assertFalse(mod._other_kleinanzeiger_running(proc))
+
+    def test_live_other_launcher_refuses_start_before_browser_and_db(self):
+        mod = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mod._ROOT = root
+            mod._DB = root / "data" / "synthetic.sqlite"
+            with (
+                patch.object(mod, "version", return_value="1.0.14"),
+                patch.object(mod, "_other_kleinanzeiger_running", return_value=True),
+                patch.object(mod, "_start_chrome") as chrome,
+                patch.object(mod.subprocess, "Popen") as spawn,
+                patch("sys.argv", ["kleinanzeiger-linux", "konto"]),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    mod.main()
+            self.assertEqual(caught.exception.code, 2)
+            self.assertFalse((root / "data").exists())
+            chrome.assert_not_called()
+            spawn.assert_not_called()
 
     def test_public_linux_launcher_is_packaged(self):
         import tomllib

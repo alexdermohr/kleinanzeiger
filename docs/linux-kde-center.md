@@ -47,8 +47,11 @@ Anbieter. Das lokale Menü ist unabhängig vom Windows-Installer.
   Entwuerfe und Verkaufsvermerke, ohne Plattformaktionen. Ein neu gestarteter
   App-Chrome gehört zur Client-Prozessgruppe und wird mit beendet.
 - Ein Lock verhindert mehrere Zentralen desselben Benutzers. Zusätzlich verhindert
-  die Zentrale einen zweiten eigenen Client. Direkt separat aufgerufene
-  `kleinanzeiger-linux`-Instanzen werden dadurch nicht gesperrt.
+  die Zentrale einen zweiten eigenen Client. Auch ältere Linux-Launcher
+  derselben Benutzerkennung werden vor einem weiteren Konto-/Offline-Start
+  erkannt. Eine aktive ältere Sitzung und ihr Chrome-Profil werden nicht
+  beendet; erst nach deren normaler Beendigung die neue Sitzung starten.
+  So werden parallele Frontends auf derselben SQLite-DB vermieden.
 - Die Datenbank liegt wie bisher unter
   `~/.local/share/kleinanzeiger/data/portfolio.sqlite3`. Nur ein ausdrücklicher
   Clientstart kann sie initialisieren. Die anderen Datenbankaktionen verlangen
