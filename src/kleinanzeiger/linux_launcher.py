@@ -33,6 +33,37 @@ _OLD_PROFILE = _ROOT / "chrome-profile"
 _PREFERRED_PROFILE_FILE = _HOME / ".local" / "state" / "kleinanzeiger" / "chrome-profile-choice"
 
 
+def _other_kleinanzeiger_running(proc_root: Path = Path("/proc")) -> bool:
+    """Detect a same-user product launcher before opening another DB/CDP owner.
+
+    Pre-KDE launchers have no shared lock. Read only live process identity,
+    never browser profiles, cookies, customer data or page contents.
+    Do not terminate or modify the running application.
+    """
+    try:
+        processes = list(proc_root.iterdir())
+    except OSError:
+        return False
+    for process in processes:
+        if not process.name.isdecimal() or int(process.name) == os.getpid():
+            continue
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+            argv = [part for part in (process / "cmdline").read_bytes().split(b"\0") if part]
+            if b"--check" in argv:
+                continue
+            if any(not part.startswith(b"-")
+                   and Path(os.fsdecode(part)).name == "kleinanzeiger-linux"
+                   for part in argv[:2]):
+                return True
+            if len(argv) > 2 and argv[1:3] == [
+                    b"-m", b"kleinanzeiger.linux_launcher"]:
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -321,6 +352,8 @@ def main() -> int:
     if opts.check:
         print("Kleinanzeiger", installed, "bereit")
         return 0
+    if _other_kleinanzeiger_running():
+        parser.error("Eine andere Kleinanzeiger-Sitzung läuft bereits. Bitte diese zuerst beenden.")
     if (_ROOT.is_symlink() or _DB.parent.is_symlink() or _DB.is_symlink()
             or (_DB.exists() and not _DB.is_file())):
         parser.error("Ungültiger oder verknüpfter Datenbankpfad.")

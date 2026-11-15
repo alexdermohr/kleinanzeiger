@@ -122,6 +122,11 @@ class Center:
                 self.message("Ein Client läuft bereits. Zum Wechsel zuerst „Client beenden“ wählen.")
                 return
             self.stop()
+        if linux_launcher._other_kleinanzeiger_running():
+            self.last_status = "Andere Sitzung läuft"
+            self.message("Eine andere Kleinanzeiger-Sitzung ist noch geöffnet. "
+                         "Bitte diese zuerst beenden; die Anmeldung bleibt erhalten.")
+            return False
         self.client = subprocess.Popen(
             [sys.executable, "-m", "kleinanzeiger.linux_launcher", mode],
             shell=False, start_new_session=True, stdin=subprocess.DEVNULL,
@@ -226,8 +231,8 @@ class Center:
                 if choice not in actions:
                     continue
                 try:
-                    actions[choice]()
-                    self.last_status = "Abgeschlossen"
+                    if actions[choice]() is not False:
+                        self.last_status = "Abgeschlossen"
                 except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
                     self.last_status = "Fehlgeschlagen"
                     self.message("Aktion fehlgeschlagen. Installation, Eingabedatei und Zugriffsrechte prüfen.\n"
