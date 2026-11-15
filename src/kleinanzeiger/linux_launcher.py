@@ -341,8 +341,9 @@ def main() -> int:
                 "--db", str(_DB), "--cdp-port", str(cdp_port),
                 "--dashboard-port", str(port), "--write-port", "0"]
     else:
+        # Match Windows offline: token-bound local changes, no platform writes.
         argv = [sys.executable, "-m", "kleinanzeiger", "offline",
-                "--db", str(_DB), "--port", str(port)]
+                "--db", str(_DB), "--port", str(port), "--local-work"]
     if not _DB.exists():
         argv.append("--init-db")
     if opts.mode == "konto" and os.environ.get("OPENAI_API_KEY"):
