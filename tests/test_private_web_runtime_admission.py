@@ -14,38 +14,63 @@ from mark_api.write_api import WriteApiAccess, WriteCapability
 
 
 class PrivateWebRuntimeAdmissionTests(unittest.TestCase):
-    def test_direct_builders_deny_before_setup_even_with_environment_flags(self):
+    def test_product_cdp_builders_reach_technical_setup_not_legacy_gate(self):
+        """Current product CDP paths must work; historical transports stay denied."""
+        class TechnicalSetupReached(RuntimeError):
+            pass
+
         access = WriteApiAccess(
             principal="synthetic", bearer_token="synthetic-runtime-token",
             capabilities=frozenset(WriteCapability),
         )
-        builders = (
-            (runtime.build_private_web_inventory_runtime, {}),
-            (runtime.build_private_web_content_runtime, {}),
-            (runtime.build_private_web_media_create_runtime, {"cdp_session": object()}),
-            (runtime.build_private_web_write_api_runtime, {
-                "store": object(), "access": access,
-                "core_writes_enabled": True, "media_writes_enabled": True,
-            }),
-        )
-        with ExitStack() as stack:
-            effects = [stack.enter_context(patch.object(
-                runtime, name, side_effect=AssertionError("setup before admission"),
-            )) for name in (
-                "require_private_web_runtime_dependency", "_build_private_web_owner_reader",
-                "CdpManagementInventoryReader", "build_private_web_content_runtime",
-                "acquire_write_api_store_lock", "compose_private_web_write_api_runtime",
-            )]
-            stack.enter_context(patch.dict(os.environ, {
+        # A factory test cannot touch the browser, DB, credentials or network.
+        # The sentinel proves the boundary was reached and no legacy admission
+        # was consulted, with or without unrelated environment flags.
+        with (
+            patch.object(
+                runtime._legacy_admission, "require_legacy_platform_authority",
+                side_effect=AssertionError("product CDP consulted legacy gate"),
+            ) as obsolete_gate,
+            patch.dict(os.environ, {
                 "MARK_PRIVATE_WEB_APPROVED": "true",
                 "MARK_PLATFORM_WRITES_ENABLED": "true",
-            }))
-            for builder, options in builders:
+            }),
+            patch.object(
+                runtime, "require_private_web_runtime_dependency",
+                side_effect=TechnicalSetupReached("product dependency validation"),
+            ) as dependency,
+        ):
+            for builder, options in (
+                (runtime.build_private_web_inventory_runtime, {}),
+                (runtime.build_private_web_content_runtime, {}),
+                (runtime.build_private_web_media_create_runtime, {
+                    "cdp_session": object(),
+                }),
+            ):
                 with self.subTest(builder=builder.__name__):
-                    with self.assertRaisesRegex(LegacyPlatformAdmissionDenied, "not authorized"):
+                    with self.assertRaisesRegex(
+                        TechnicalSetupReached, "product dependency validation",
+                    ):
                         builder(cdp_port=9222, **options)
-            for effect in effects:
-                effect.assert_not_called()
+            self.assertEqual(dependency.call_count, 3)
+            obsolete_gate.assert_not_called()
+        with (
+            patch.object(
+                runtime._legacy_admission, "require_legacy_platform_authority",
+                side_effect=AssertionError("product write runtime consulted legacy gate"),
+            ) as obsolete_gate,
+            patch.object(
+                runtime, "acquire_write_api_store_lock",
+                side_effect=TechnicalSetupReached("local store admission"),
+            ) as store_lock,
+        ):
+            with self.assertRaisesRegex(TechnicalSetupReached, "local store admission"):
+                runtime.build_private_web_write_api_runtime(
+                    cdp_port=9222, store=object(), access=access,
+                    core_writes_enabled=True, media_writes_enabled=True,
+                )
+            store_lock.assert_called_once()
+            obsolete_gate.assert_not_called()
 
     def test_default_and_explicit_real_smoke_deny_before_factory_or_local_setup(self):
         real_factory = smoke.build_private_web_inventory_runtime
