@@ -36,6 +36,8 @@ class WindowsDealsUiContractTests(unittest.TestCase):
         self.assertNotIn("$out = @(& $python",source)
         self.assertIn("Start-Process -FilePath $report",source)
         self.assertIn("Start-Process -FilePath $url",source)
+        self.assertNotIn('\x00',source)
+        self.assertNotIn('\x1f',source)
         self.assertIn("'https'",source)
         self.assertIn("'www.kleinanzeigen.de'",source)
         self.assertIn("Join-Path $state 'Berichte'",source)

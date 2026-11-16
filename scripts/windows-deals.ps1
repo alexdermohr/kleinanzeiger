@@ -191,7 +191,7 @@ $radarButton.Add_Click({
         [int]$summary.new -lt 0 -or [int]$summary.price_changes -lt 0 -or
         [int]$summary.hits -lt 0) { throw 'Radar-Ergebnis ungültig.' }
     $config = Get-Content -Raw -LiteralPath $profilePath -Encoding UTF8 | ConvertFrom-Json
-    if (!$config.report -or [string]$config.report -match '[ -]') {
+    if (!$config.report -or [string]$config.report -match '[\x00-\x1f]') {
       throw 'Radar-Profil ohne Berichtspfad.'
     }
     $reportPath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $profilePath) ([string]$config.report)))
