@@ -83,6 +83,68 @@ def _is_cdp_ready(port: int) -> bool:
         return False
 
 
+def _management_tab_visible(port: int) -> bool:
+    """Observe only owned Chrome's loopback target list, never page credentials.
+
+    /json/version is ready before the initially opened owner-management tab.
+    Launching the product during that gap records a transport_error and
+    permanently drops it into the local-only workspace for this session.
+    """
+    if type(port) is not int or not 1 <= port <= 65535:
+        return False
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/json/list", timeout=1) as response:
+            if response.status != 200:
+                return False
+            payload = response.read(256 * 1024 + 1)
+        if len(payload) > 256 * 1024:
+            return False
+        targets = json.loads(payload)
+        if type(targets) is not list:
+            return False
+        for target in targets:
+            if type(target) is not dict or target.get("type") != "page":
+                continue
+            url = target.get("url")
+            if type(url) is not str:
+                continue
+            parsed = urlsplit(url)
+            if (
+                parsed.scheme == "https"
+                and parsed.netloc == "www.kleinanzeigen.de"
+                and parsed.path == "/m-meine-anzeigen.html"
+            ):
+                return True
+    except (OSError, TimeoutError, ValueError, TypeError):
+        return False
+    return False
+
+
+def _wait_for_management_tab(
+    port: int, *, probe=None, sleeper=None,
+    max_checks: int = 60, stable_checks: int = 8,
+) -> bool:
+    """Wait for a stable management target before the startup inventory GET.
+
+    This never navigates a tab, reads cookies, modifies provider data or
+    opens a competing CDP WebSocket. The runtime owns all authenticated
+    inventory reads after this bounded preflight.
+    """
+    check = _management_tab_visible if probe is None else probe
+    pause = time.sleep if sleeper is None else sleeper
+    stable = 0
+    for attempt in range(max_checks):
+        if check(port):
+            stable += 1
+            if stable >= stable_checks:
+                return True
+        else:
+            stable = 0
+        if attempt != max_checks - 1:
+            pause(0.25)
+    return False
+
+
 def _chrome_flag_value(cmdline: bytes, flag: bytes) -> bytes | None:
     """Read an exact Chrome option from /proc/<pid>/cmdline.
 
@@ -367,6 +429,9 @@ def main() -> int:
         browser_profile = _choose_persistent_chrome_profile()
         try:
             cdp_port = _start_chrome(browser_profile)
+            if not _wait_for_management_tab(cdp_port):
+                print("Kleinanzeiger: Anzeigenverwaltung noch nicht bereit; "
+                      "Anmeldung im Kleinanzeiger-Chrome prüfen.", file=sys.stderr)
             _remember_chrome_profile(browser_profile)
         except RuntimeError as exc:
             parser.error(str(exc))

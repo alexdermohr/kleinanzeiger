@@ -80,6 +80,7 @@ class LinuxLauncherTests(unittest.TestCase):
                 patch.object(mod, "_existing_chrome_port",
                              side_effect=lambda p: 50365 if p==mod._OLD_PROFILE else None),
                 patch.object(mod, "_start_chrome", return_value=50365) as browser,
+                patch.object(mod, "_wait_for_management_tab", return_value=True) as ready,
                 patch.object(mod.subprocess, "Popen", return_value=app),
                 patch.object(mod, "_open_dashboard", return_value=True) as dashboard,
                 patch.object(mod, "_other_kleinanzeiger_running", return_value=False),
@@ -89,6 +90,7 @@ class LinuxLauncherTests(unittest.TestCase):
                 self.assertEqual(mod.main(), 0)
             self.assertEqual((root / "profile-choice").read_text(encoding="ascii"), "old\n")
             browser.assert_called_once_with(mod._OLD_PROFILE)
+            ready.assert_called_once_with(50365)
             self.assertEqual(dashboard.call_args.kwargs["browser_profile"], mod._OLD_PROFILE)
             self.assertEqual(dashboard.call_args.kwargs["cdp_port"],50365)
 
@@ -279,6 +281,59 @@ class LinuxLauncherTests(unittest.TestCase):
         ):
             self.assertFalse(mod._open_in_own_chrome(9222, url, 45678))
             opened.assert_not_called()
+
+    def test_management_tab_probe_requires_exact_authenticated_owner_page(self):
+        mod = _load()
+        for url, expected in (
+            ("https://www.kleinanzeigen.de/m-meine-anzeigen.html", True),
+            ("https://www.kleinanzeigen.de/einloggen.html", False),
+            ("https://evil.example/m-meine-anzeigen.html", False),
+            ("http://www.kleinanzeigen.de/m-meine-anzeigen.html", False),
+            ("https://www.kleinanzeigen.de.evil.example/m-meine-anzeigen.html", False),
+        ):
+            with self.subTest(category=expected, url=url):
+                reply = unittest.mock.MagicMock()
+                reply.__enter__.return_value.status = 200
+                reply.__enter__.return_value.read.return_value = json.dumps(
+                    [{"type": "page", "url": url}]
+                ).encode("utf-8")
+                with patch.object(mod, "urlopen", return_value=reply) as opener:
+                    self.assertEqual(mod._management_tab_visible(41411), expected)
+                opener.assert_called_once_with(
+                    "http://127.0.0.1:41411/json/list", timeout=1,
+                )
+
+    def test_management_tab_waits_for_stable_page_not_just_browser_port(self):
+        mod = _load()
+        checks = unittest.mock.MagicMock(
+            side_effect=[True, True, False, True, True, True],
+        )
+        sleep = unittest.mock.MagicMock()
+        self.assertTrue(mod._wait_for_management_tab(
+            41411, probe=checks, sleeper=sleep,
+            max_checks=8, stable_checks=3,
+        ))
+        self.assertEqual(checks.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertTrue(all(x.args == (0.25,) for x in sleep.call_args_list))
+        never = unittest.mock.MagicMock(return_value=False)
+        sleep.reset_mock()
+        self.assertFalse(mod._wait_for_management_tab(
+            41411, probe=never, sleeper=sleep,
+            max_checks=4, stable_checks=2,
+        ))
+        self.assertEqual(never.call_count, 4)
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_management_readiness_never_navigates_or_opens_a_websocket(self):
+        mod = _load()
+        with patch.object(mod, "urlopen", side_effect=OSError("unavailable")) as opener:
+            self.assertFalse(mod._management_tab_visible(41411))
+        opener.assert_called_once()
+        with patch.object(mod, "urlopen") as opener:
+            self.assertFalse(mod._management_tab_visible(0))
+            self.assertFalse(mod._management_tab_visible(99999))
+        opener.assert_not_called()
 
     def test_account_dashboard_refuses_external_url(self):
         mod = _load()
