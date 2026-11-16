@@ -183,6 +183,24 @@ class RadarTests(unittest.TestCase):
         self.assertEqual(self.cli(), 0)
         self.assertEqual(self.result()['price_changes'], 1)
 
+    def test_identical_cross_file_observation_with_timezone_and_source_variants(self):
+        duplicate = dict(self.rows[0], observed_at='2026-11-16T11:00:00+01:00',
+                         source='zweiter berechtigter Export')
+        (self.source / 'second.json').write_text(json.dumps([duplicate]))
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.result()['new'], 6)
+        self.assertEqual(self.result()['hits'], 1)
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.result()['new'], 0)
+
+    def test_cross_file_equal_instant_conflicting_price_rejected(self):
+        duplicate = dict(self.rows[0], price=50,
+                         observed_at='2026-11-16T11:00:00+01:00',
+                         source='zweiter berechtigter Export')
+        (self.source / 'second.json').write_text(json.dumps([duplicate]))
+        self.assertEqual(self.cli(), 2)
+        self.assertFalse((self.root / 'radar.sqlite').exists())
+
     def test_conflicting_archive_and_output_collision(self):
         (self.source / 'other.json').write_text(json.dumps([dict(self.rows[0], price=50)]))
         self.assertEqual(self.cli(), 2)

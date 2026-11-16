@@ -65,8 +65,15 @@ def run(config_path: Path) -> dict:
             if old and old != offer:
                 before = _observation_instant(old.observed_at)
                 after = _observation_instant(offer.observed_at)
-                if before is None or after is None or before == after:
+                if before is None or after is None:
                     raise DealInputError(f'Widersprüchliche Eingaben für ID {offer.uid}')
+                if before == after:
+                    # Equal instants and substantive fields are the same listing,
+                    # even if export timezone or source metadata differs.
+                    if any(getattr(old, field) != getattr(offer, field) for field in
+                           ('title', 'price_eur', 'url', 'shipping_eur', 'condition')):
+                        raise DealInputError(f'Widersprüchliche Eingaben für ID {offer.uid}')
+                    continue
                 if after < before:
                     continue
             offers[offer.uid] = offer
