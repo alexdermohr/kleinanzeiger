@@ -205,35 +205,19 @@ Trackinglinks, falsche Produktgruppen und unklare Zuordnungen werden diagnostizi
 Preiswidersprüche gleicher ID/Zeit brechen den Lauf vor Historienänderungen ab.
 Neuere bestätigte Beobachtungen dürfen ältere ersetzen.
 
-Absender, Date und Authentication-Results sind manipulierbare Header und werden
-**nicht** zur Verifikation verwendet. Eine angeblich offizielle Mail allein reicht
-nicht. Der Nutzer muss Herkunft, Suchmail-Zweck und tatsächlichen Zeitpunkt der
-Angebotsbeobachtung unabhängig prüfen. Ein lokales Manifest
-`suchmail-freigaben.json` bindet diese ausdrückliche Freigabe an unveränderte Bytes:
+Der im Profil einmalig ausgewählte lokale Suchmailordner ist die Freigabe der
+Eingangsquelle. Neue EML-Dateien darin werden beim nächsten Lauf ohne
+Einzelfreigabe eingelesen. Eine automatische Mailzustellung kann über ein
+vom Nutzer eingerichtetes Mailprogramm in diesen Ordner erfolgen; Kleinanzeiger
+verbindet sich selbst nicht mit Gmail oder IMAP.
 
-```json
-{
-  "angebot.eml": {
-    "sha256": "HIER_DEN_TATSAECHLICHEN_SHA256_EINTRAGEN",
-    "authorized_search_mail": true,
-    "observed_at": "2026-11-16T10:00:00+01:00"
-  }
-}
-```
-
-Hash lokal plattformübergreifend bestimmen:
-
-```sh
-python -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('suchmails/angebot.eml').read_bytes()).hexdigest())"
-python -m mark_api.bargain_hunter_cli --radar search-mail-radar.json
-```
-
-Im Quellcheckout zuvor Linux `export PYTHONPATH=src`, PowerShell
-`$env:PYTHONPATH='src'` setzen; bei installiertem Paket entfällt das.
-Der Aufruf ist aus jedem Arbeitsverzeichnis mit absolutem Profilpfad möglich.
-Keinen erfundenen Hash übernehmen und das Beobachtungsdatum nicht beim Wiederholen
-auf heute setzen: erneutes Lesen ist keine neue Marktbeobachtung. Eine Freigabe
-beweist keine Echtheit; der JSON-Beleg enthält den Hash als Quellnachweis.
+Der Absenderheader muss auf eine kleinanzeigen.de-Adresse oder Subdomain
+lauten. Zusammen mit dem Date-Header und der direkten Inserat-URL ist dies nur
+eine Plausibilitätsprüfung, kein Echtheits- oder DKIM-Nachweis. Ein Datum mit
+Zeitzone muss aktuell sein; alte kopierte Mails werden nicht als aktuelle
+Angebote eingestuft. Bei zweifelhaften Daten erscheint Importdiagnostik
+statt eines Schnäppchenalarms. Vor einem Kauf den tatsächlichen Inseratpreis
+und den Verkäufer prüfen.
 
 Standardmäßig maximal 48 Stunden alte Beobachtungen (konfigurierbar 1–168), keine
 zukünftigen/undatierten Daten, höchstens 100 Dateien mit je 1 MB und 20 MIME-Teilen.

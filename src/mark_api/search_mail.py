@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
+from email.utils import parseaddr, parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .bargain_hunter import DealInputError, _observation_instant, euro, matches_model
+from .bargain_hunter import DealInputError, euro, matches_model
 
 MAX_FILES = 100
 MAX_BYTES = 1_000_000
@@ -63,15 +63,14 @@ def body_row(text, kind):
     return dict(id=match[1], title=title, price_eur=str(amount), url=url)
 
 
-def load_search_mail(source: Path, manifest: Path, model: str, *, max_age_hours=48, now=None):
+def load_search_mail(source: Path, model: str, *, max_age_hours=48, now=None):
     if type(max_age_hours) is not int or not 1 <= max_age_hours <= 168:
         raise DealInputError('max_age_hours muss 1–168 sein')
     now = now or datetime.now(timezone.utc)
-    if manifest.stat().st_size > MAX_BYTES:
-        raise DealInputError('Freigabemanifest zu groß')
-    approvals = json.loads(manifest.read_text(encoding='utf-8-sig'))
-    if not isinstance(approvals, dict) or len(approvals) > MAX_FILES:
-        raise DealInputError('Ungültiges Freigabemanifest')
+    if not source.is_dir() or source.is_symlink():
+        raise DealInputError('Ein ausdrücklich gewählter EML-Eingangsordner ist erforderlich')
+    # The opt-in is the selected local inbox; not one approval for each message.
+    # From and Date are plausible mail-format signals, not proof of sender authenticity.
     files = []
     for file in source.iterdir():
         if file.suffix.lower() == '.eml':
@@ -88,14 +87,27 @@ def load_search_mail(source: Path, manifest: Path, model: str, *, max_age_hours=
             if len(raw) > MAX_BYTES:
                 raise DealInputError('EML größer als 1 MB')
             digest = hashlib.sha256(raw).hexdigest()
-            approval = approvals.get(file.name)
-            if (not isinstance(approval, dict) or approval.get('sha256') != digest or
-                    approval.get('authorized_search_mail') is not True):
-                raise DealInputError('Keine hashgebundene lokale Suchmail-Freigabe; Header unverifiziert')
-            observed = _observation_instant(str(approval.get('observed_at', '')))
-            if observed is None or not now - timedelta(hours=max_age_hours) <= observed <= now:
-                raise DealInputError('Beobachtung fehlt, ist alt oder liegt in der Zukunft')
             msg = BytesParser(policy=policy.default).parsebytes(raw)
+            from_headers = msg.get_all('From', [])
+            if len(from_headers) != 1:
+                raise DealInputError('Eindeutiger Absenderheader fehlt')
+            _, sender = parseaddr(str(from_headers[0]))
+            domain = sender.casefold().rpartition('@')[2]
+            if not sender or not domain or not (
+                    domain == 'kleinanzeigen.de' or domain.endswith('.kleinanzeigen.de')):
+                raise DealInputError('Absenderheader passt nicht zu Kleinanzeigen (kein Echtheitsbeweis)')
+            date_headers = msg.get_all('Date', [])
+            if len(date_headers) != 1:
+                raise DealInputError('Eindeutiger Datumsheader fehlt')
+            try:
+                observed = parsedate_to_datetime(str(date_headers[0]))
+            except (ValueError, TypeError) as exc:
+                raise DealInputError('Ungültiger Datumsheader') from exc
+            if observed is None or observed.tzinfo is None or observed.utcoffset() is None:
+                raise DealInputError('Zeitangabe braucht Zeitzone')
+            observed = observed.astimezone(timezone.utc)
+            if not now - timedelta(hours=max_age_hours) <= observed <= now:
+                raise DealInputError('Mail ist alt, undatiert oder liegt in der Zukunft')
             parts = list(msg.walk())
             if len(parts) > 20 or any(p.defects for p in parts):
                 raise DealInputError('Fehlerhafte oder zu komplexe MIME-Mail')

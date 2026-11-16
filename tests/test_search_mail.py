@@ -1,11 +1,11 @@
 """Synthetic layouts only; no real saved-search templates or mail accounts."""
-import hashlib
 import json
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import format_datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,15 +25,14 @@ class SearchMailTests(unittest.TestCase):
         self.config = json.loads(example.read_text())
         self.config['notify'] = True
         self.profile.write_text(json.dumps(self.config))
-        self.approvals = {}
-        self.now = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self.now = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=5)
         for i in range(5):
             self.mail(i, 100 if i == 0 else 300, html=i == 1, multipart=i == 2)
 
     def mail(self, i, price, html=False, multipart=False, title='Lenovo ThinkPad T14 Gen 3', url=None, approved=True, age=0):
         msg = EmailMessage()
-        msg['From'] = 'Kleinanzeigen <official@evil.invalid>'
-        msg['Date'] = 'Mon, 16 Nov 2099 10:00:00 +0000'
+        msg['From'] = 'Kleinanzeigen <hinweise@kleinanzeigen.de>' if approved else 'official@evil.invalid'
+        msg['Date'] = format_datetime(self.now - timedelta(hours=age))
         url = url or f'https://www.kleinanzeigen.de/s-anzeige/test/{100+i}'
         plain = f'{title}\n{price} EUR\n{url}\n'
         markup = f'<a href="{url}">{title}</a><p>{price} EUR</p>'
@@ -43,9 +42,6 @@ class SearchMailTests(unittest.TestCase):
         raw = msg.as_bytes()
         name = f'{i}.eml'
         (self.root / 'suchmails' / name).write_bytes(raw)
-        self.approvals[name] = dict(sha256=hashlib.sha256(raw).hexdigest(), authorized_search_mail=approved,
-            observed_at=(self.now - timedelta(hours=age)).isoformat())
-        (self.root / 'suchmail-freigaben.json').write_text(json.dumps(self.approvals))
 
     def test_e2e_repeat_drop_notify_and_readonly(self):
         before = {p: p.read_bytes() for p in (self.root / 'suchmails').iterdir()}
@@ -110,14 +106,13 @@ class SearchMailTests(unittest.TestCase):
     def test_unverified_header_and_multipart_disagreement(self):
         msg = EmailMessage()
         msg['From'] = 'official@kleinanzeigen.de'
+        msg['Date'] = format_datetime(self.now)
         msg['Authentication-Results'] = 'fake; dkim=pass'
         msg.set_content('Lenovo ThinkPad T14 Gen 3\n100 EUR\nhttps://www.kleinanzeigen.de/s-anzeige/t/100')
         msg.add_alternative('<a href="https://www.kleinanzeigen.de/s-anzeige/t/100">Lenovo ThinkPad T14 Gen 3</a><p>90 EUR</p>', subtype='html')
         raw = msg.as_bytes()
         (self.root / 'suchmails/0.eml').write_bytes(raw)
         self.assertTrue(run(self.profile)['diagnostics'])
-        self.approvals['0.eml']['sha256'] = hashlib.sha256(raw).hexdigest()
-        (self.root / 'suchmail-freigaben.json').write_text(json.dumps(self.approvals))
         self.assertIn('Multipart', run(self.profile)['diagnostics'][0]['reason'])
 
     def test_html_ambiguity_currency_and_multipart_disagreement(self):
@@ -125,11 +120,11 @@ class SearchMailTests(unittest.TestCase):
         for body in ('<a href="https://www.kleinanzeigen.de/s-anzeige/t/100">Lenovo ThinkPad T14 Gen 3</a><p>100 USD</p>',
                      '<script>alert(1)</script>', '<a href="x">A</a><a href="y">B</a>'):
             msg = EmailMessage()
+            msg['From'] = 'alerts@kleinanzeigen.de'
+            msg['Date'] = format_datetime(self.now)
             msg.set_content(body, subtype='html')
             raw = msg.as_bytes()
             p.write_bytes(raw)
-            self.approvals['0.eml']['sha256'] = hashlib.sha256(raw).hexdigest()
-            (self.root / 'suchmail-freigaben.json').write_text(json.dumps(self.approvals))
             self.assertTrue(run(self.profile)['diagnostics'])
 
 

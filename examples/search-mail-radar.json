@@ -2,7 +2,6 @@
   "model": "Lenovo ThinkPad T14 Gen 3",
   "input_type": "eml",
   "input": "suchmails",
-  "authorization": "suchmail-freigaben.json",
   "max_age_hours": 48,
   "history": "suchmail-radar.sqlite",
   "report": "suchmail-bericht.html",

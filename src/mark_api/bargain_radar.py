@@ -66,14 +66,13 @@ def run(config_path: Path) -> dict:
             raise DealInputError('Suchmail benötigt mindestens vier Peers')
         if json_report is None:
             raise DealInputError('Suchmail benötigt json_report')
-        manifest = path('authorization')
-        mail_rows, diagnostics = load_search_mail(source, manifest, model,
+        mail_rows, diagnostics = load_search_mail(source, model,
             max_age_hours=config.get('max_age_hours', 48))
         files = []
     if not files and not mail_mode:
         raise DealInputError('Keine CSV-/JSON-Eingaben gefunden')
     outputs = [history, report] + ([json_report] if json_report else [])
-    protected = ([manifest] if mail_mode else []) + [config_path.resolve(), *[p.resolve() for p in files]]
+    protected = [config_path.resolve(), *[p.resolve() for p in files]]
     if len(set(outputs)) != len(outputs) or any(p in protected for p in outputs):
         raise DealInputError('Eingaben, Profil, Historie und Berichte müssen getrennt sein')
     if source.is_dir() and any(p == source or source in p.parents for p in outputs):
