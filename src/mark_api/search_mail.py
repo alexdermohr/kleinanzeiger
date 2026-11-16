@@ -11,7 +11,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .bargain_hunter import DealInputError, euro, matches_model
+from .bargain_hunter import DealInputError, euro, matches_model, normalize_offer
 
 MAX_FILES = 100
 MAX_BYTES = 1_000_000
@@ -135,6 +135,9 @@ def load_search_mail(source: Path, model: str, *, max_age_hours=48, now=None):
             if not matches_model(row['title'], model):
                 raise DealInputError('Keine eindeutige passende Produktgruppe/Modellzuordnung')
             row.update(observed_at=observed.isoformat(), source='Lokale Suchmail SHA256:' + digest)
+            # Validate field limits and price/url semantics before leaving the
+            # per-EML exception handler; a single bad mail must not block peers.
+            normalize_offer(row)
             rows.append(row)
         except (ValueError, OSError, UnicodeError, LookupError) as exc:
             diagnostics.append(dict(file=file.name, reason=str(exc)))

@@ -92,6 +92,14 @@ class SearchMailTests(unittest.TestCase):
         self.assertEqual(result["hits"], 1)
         self.assertTrue(any("102 alte EML" in note["reason"] for note in result["diagnostics"]))
 
+    def test_overlong_title_is_diagnostic_and_does_not_block_valid_peers(self):
+        self.mail(9, 20, title="Lenovo ThinkPad T14 Gen 3 " + "X" * 400)
+        result = run(self.profile)
+        self.assertEqual(result["new"], 5)
+        self.assertEqual(result["hits"], 1)
+        self.assertTrue(any(item["file"] == "9.eml" for item in result["diagnostics"]))
+        self.assertEqual(run(self.profile)["new"], 0)
+
     def test_empty_bounded_disabled_and_output_collision(self):
         for p in (self.root / 'suchmails').iterdir():
             p.unlink()
