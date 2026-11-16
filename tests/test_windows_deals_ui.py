@@ -45,6 +45,10 @@ class WindowsDealsUiContractTests(unittest.TestCase):
             self.assertNotIn(forbidden,source)
         self.assertIn("DEALS_CUSTOMER_UI_SELFTEST_PASS",source)
         self.assertIn("Eigene Angebotsdatei (CSV oder JSON)",source)
+        self.assertIn("Radar-Profil auswählen und auswerten",source)
+        self.assertIn("Invoke-DealsCli @('--radar',$profilePath)",source)
+        self.assertIn("Invoke-DealsCli @('--radar',$radarProfile)",source)
+        self.assertIn("Radar meldet unveränderte Inserate erneut.",source)
         self.assertIn("[string[]]$lines.ToArray()",source)
 
     def test_new_customer_script_is_in_package_and_real_windows_selftest(self):
