@@ -92,3 +92,4 @@ PYTHONPATH=src python -m unittest discover -s tests -p 'test_linux_launcher.py' 
 Dialoge und Browserstarts werden gemockt. Backend-Integrationstests arbeiten
 nur mit temporären synthetischen SQLite-Datenbanken. Ein visueller KDE-Test
 ist zusätzlich in einer echten grafischen Sitzung erforderlich.
+\nBeim Konto-Start wartet der Linux-Launcher auf einen stabilen Anzeigenverwaltung-Tab,\nbevor der erste synchronisierende Produktstart beginnt.\n
