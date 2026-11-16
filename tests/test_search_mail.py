@@ -80,6 +80,18 @@ class SearchMailTests(unittest.TestCase):
         with patch('mark_api.bargain_radar.atomic_report', side_effect=PermissionError('Defender denied')):
             self.assertEqual(main(['--radar', str(self.profile)]), 2)
 
+    def test_old_inbox_files_do_not_permanently_block_new_mail(self):
+        import os
+        old = (self.now - timedelta(days=4)).timestamp()
+        for i in range(102):
+            stale = self.root / "suchmails" / f"old-{i}.eml"
+            stale.write_text("old")
+            os.utime(stale, (old, old))
+        result = run(self.profile)
+        self.assertEqual(result["new"], 5)
+        self.assertEqual(result["hits"], 1)
+        self.assertTrue(any("102 alte EML" in note["reason"] for note in result["diagnostics"]))
+
     def test_empty_bounded_disabled_and_output_collision(self):
         for p in (self.root / 'suchmails').iterdir():
             p.unlink()

@@ -217,6 +217,30 @@ class CenterTests(unittest.TestCase):
             self.center.bargains()
         self.assertIn("Schnäppchenjäger", report.read_text())
 
+    def test_local_search_mail_radar_uses_profile_without_model_prompt(self):
+        profile = self.root / "search-mail.json"
+        profile.write_text('{"model":"ThinkPad","input_type":"eml"}')
+        response = json.dumps({"new": 2, "price_changes": 1, "hits": 1})
+        with patch.object(self.center, "dialog", side_effect=["radar", str(profile)]) as dialog, patch.object(
+            self.center, "backend", return_value=response
+        ) as backend, patch.object(self.center, "message") as notify:
+            self.center.bargains()
+        self.assertEqual(dialog.call_count, 2)
+        backend.assert_called_once_with("mark_api.bargain_hunter_cli", "--radar", str(profile))
+        self.assertIn("1 auffällig günstige", notify.call_args.args[0])
+
+    def test_search_mail_radar_cancellation_and_malformed_summary(self):
+        with patch.object(self.center, "dialog", side_effect=["radar", None]), patch.object(
+            self.center, "backend"
+        ) as backend:
+            self.center.bargains()
+        backend.assert_not_called()
+        with patch.object(self.center, "dialog", side_effect=["radar", "/tmp/profile.json"]), patch.object(
+            self.center, "backend", return_value='{"new":true,"price_changes":0,"hits":0}'
+        ):
+            with self.assertRaises(ValueError):
+                self.center.bargains()
+
     def test_entrypoint_version_and_desktop_file_match(self):
         import tomllib
         root = Path(__file__).resolve().parents[1]

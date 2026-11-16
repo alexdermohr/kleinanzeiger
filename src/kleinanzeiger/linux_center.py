@@ -175,8 +175,21 @@ class Center:
 
     def bargains(self):
         choice = self.dialog("--menu", "Schnäppchenjäger: beobachtete Angebotspreise",
-                             "file", "Lokale CSV/JSON auswerten", "search", "Manuell im Browser suchen")
-        if choice not in ("file", "search"):
+                             "file", "Lokale CSV/JSON auswerten", "search", "Manuell im Browser suchen",
+                             "radar", "Suchmail-/Datei-Radar aus Profil auswerten")
+        if choice not in ("file", "search", "radar"):
+            return
+        if choice == "radar":
+            profile = self.dialog("--getopenfilename", str(Path.home()), "*.json | Radar-Profile")
+            if not profile:
+                return
+            result = json.loads(self.backend("mark_api.bargain_hunter_cli", "--radar", profile))
+            counts = (result.get("new"), result.get("price_changes"), result.get("hits"))
+            if any(type(n) is not int or n < 0 for n in counts):
+                raise ValueError("invalid radar summary")
+            self.message(f"Radar geprüft: {counts[0]} neue Inserate, {counts[1]} Preisänderungen, "
+                         f"{counts[2]} auffällig günstige Treffer. Bericht und Details: im Radar-Profil. "
+                         "Nur lokale Eingaben, keine Marktplatzabfrage.")
             return
         model = self.dialog("--inputbox", "Genaue Modellbezeichnung:")
         if not model:
@@ -251,11 +264,11 @@ Importiert werden lokale Entwürfe. Änderungen der Datei nach der Vorschau werd
 XLSX benötigt das optionale Paket openpyxl (private-web Extra).
 Backup: vorhandene Datenbank, neue Zieldatei in vorhandenem Ordner wählen.
 Wochenbericht: Zielordner wählen; vorhandener Bericht desselben UTC-Tages wird ersetzt.
-Schnäppchenjäger: lokale CSV/JSON oder bewusste manuelle Browser-Suche, kein Scraping.
+Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar über ein JSON-Profil oder bewusste Browser-Suche, kein Scraping.
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.0.15 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.2.0 · KDE-Kontrollzentrale
 Neue Linux-Bedienung mit externem kdialog, Konto-/Offline-Start und Client-Verwaltung.
 Geprüfte SQLite-Backup-CLI, Artikelvorschau mit bestätigtem hashgebundenem Import,
 lokaler Wochenbericht, Schnäppchenjäger, bereinigte Diagnose und dieses Handbuch.

@@ -219,9 +219,11 @@ Angebote eingestuft. Bei zweifelhaften Daten erscheint Importdiagnostik
 statt eines Schnäppchenalarms. Vor einem Kauf den tatsächlichen Inseratpreis
 und den Verkäufer prüfen.
 
+Alte EML-Dateien außerhalb des Zeitfensters können im Eingangsordner verbleiben: sie werden anhand ihres lokalen Dateialters übersprungen. Der Ordner darf wachsen, ohne nach 100 alten Dateien die Analyse zu blockieren.
+
 Standardmäßig maximal 48 Stunden alte Beobachtungen (konfigurierbar 1–168), keine
 zukünftigen/undatierten Daten, höchstens 100 Dateien mit je 1 MB und 20 MIME-Teilen.
-Unterordner werden ignoriert. Keine optionalen CSV/JSON-Referenzen in diesem Modus;
+Unterordner werden ignoriert; das Limit von 100 Dateien gilt für aktuelle EMLs. Keine optionalen CSV/JSON-Referenzen in diesem Modus;
 alle Peers müssen denselben Aktualitätsfilter passieren. Ein leerer oder vollständig
 abgewiesener Eingang erzeugt einen Bericht mit Diagnostik und null Alarmen.
 Lesefehler einzelner Mails erscheinen ebenfalls dort; Profil-/Manifestfehler ergeben
@@ -245,3 +247,5 @@ erfolgreiche Laufbelege bleiben zusätzlich in `radar_runs`. Keine Hintergrundak
 ```sh
 python -m unittest discover -s tests -p 'test_search_mail.py'
 ```
+
+Unter Linux/KDE steht derselbe Profilaufruf zusätzlich unter Schnäppchenjäger → Suchmail-/Datei-Radar zur Verfügung. Die Kontrollzentrale zeigt neue Einträge, Preisänderungen und günstige Funde an, ohne Rohinhalte in Dialoge zu übernehmen.

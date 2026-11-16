@@ -72,12 +72,21 @@ def load_search_mail(source: Path, model: str, *, max_age_hours=48, now=None):
     # The opt-in is the selected local inbox; not one approval for each message.
     # From and Date are plausible mail-format signals, not proof of sender authenticity.
     files = []
+    old_files = 0
+    cutoff = (now - timedelta(hours=max_age_hours)).timestamp()
     for file in source.iterdir():
         if file.suffix.lower() == '.eml':
+            # Old processed mails remain intact without permanently blocking
+            # the next new delivery after the folder exceeds MAX_FILES.
+            if file.is_file() and not file.is_symlink() and file.stat().st_mtime < cutoff:
+                old_files += 1
+                continue
             files.append(file)
             if len(files) > MAX_FILES:
-                raise DealInputError('Mehr als 100 EML-Dateien')
+                raise DealInputError('Mehr als 100 aktuelle EML-Dateien')
     rows, diagnostics = [], []
+    if old_files:
+        diagnostics.append(dict(file='', reason=f'{old_files} alte EML-Dateien außerhalb des Zeitfensters ignoriert'))
     for file in sorted(files):
         try:
             if file.is_symlink() or not file.is_file():
