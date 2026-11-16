@@ -1,0 +1,9 @@
+{
+  "model": "Lenovo ThinkPad T14 Gen 3",
+  "input": "eingang",
+  "history": "radar.sqlite",
+  "report": "radar.html",
+  "json_report": "radar-ergebnis.json",
+  "min_peers": 4,
+  "discount_pct": 30
+}
