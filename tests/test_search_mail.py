@@ -92,6 +92,29 @@ class SearchMailTests(unittest.TestCase):
         self.assertEqual(result["hits"], 1)
         self.assertTrue(any("102 alte EML" in note["reason"] for note in result["diagnostics"]))
 
+    def test_deeply_nested_mime_is_diagnostic_without_suppressing_valid_mails(self):
+        # A legal-sized message with excessive MIME nesting exceeds Python's
+        # recursion depth in email.parser before its part-count limit is reached.
+        boundary_count = 1100
+        lines = ['From: alerts@kleinanzeigen.de',
+                 'Date: Mon, 16 Nov 2026 10:00:00 +0000',
+                 'MIME-Version: 1.0',
+                 'Content-Type: multipart/mixed; boundary="b0"', '']
+        for i in range(boundary_count):
+            lines += [f'--b{i}', 'Content-Type: multipart/mixed; boundary="b' + str(i+1) + '"', '']
+        lines += [f'--b{boundary_count}', 'Content-Type: text/plain', '',
+                  'Lenovo ThinkPad T14 Gen 3', '10 EUR',
+                  'https://www.kleinanzeigen.de/s-anzeige/thinkpad/9000']
+        for i in reversed(range(boundary_count + 1)):
+            lines += [f'--b{i}--']
+        raw = '\n'.join(lines).encode()
+        self.assertLess(len(raw), 1_000_000)
+        (self.root / 'suchmails/9.eml').write_bytes(raw)
+        result = run(self.profile)
+        self.assertEqual(result['new'], 5)
+        self.assertEqual(result['hits'], 1)
+        self.assertTrue(any(x['file']=='9.eml' for x in result['diagnostics']))
+
     def test_overlong_title_is_diagnostic_and_does_not_block_valid_peers(self):
         self.mail(9, 20, title="Lenovo ThinkPad T14 Gen 3 " + "X" * 400)
         result = run(self.profile)
