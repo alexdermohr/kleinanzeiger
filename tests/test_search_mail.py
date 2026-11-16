@@ -92,6 +92,27 @@ class SearchMailTests(unittest.TestCase):
         self.assertEqual(result["hits"], 1)
         self.assertTrue(any("102 alte EML" in note["reason"] for note in result["diagnostics"]))
 
+    def test_disappearing_mail_during_age_scan_is_diagnostic(self):
+        from mark_api.search_mail import load_search_mail
+
+        self.mail(9, 25)
+        stat = Path.stat
+        calls = 0
+
+        def disappearing(path, *args, **kwargs):
+            nonlocal calls
+            if path.name == '9.eml':
+                calls += 1
+                if calls == 2:
+                    raise FileNotFoundError('EML was moved during age check')
+            return stat(path, *args, **kwargs)
+
+        with patch.object(Path, 'stat', disappearing):
+            rows, diagnostics = load_search_mail(
+                self.root / 'suchmails', self.config['model'])
+        self.assertEqual(len(rows), 5)
+        self.assertTrue(any(item['file'] == '9.eml' for item in diagnostics))
+
     def test_deeply_nested_mime_is_diagnostic_without_suppressing_valid_mails(self):
         # A legal-sized message with excessive MIME nesting exceeds Python's
         # recursion depth in email.parser before its part-count limit is reached.

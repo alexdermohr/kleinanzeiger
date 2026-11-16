@@ -71,20 +71,25 @@ def load_search_mail(source: Path, model: str, *, max_age_hours=48, now=None):
         raise DealInputError('Ein ausdrücklich gewählter EML-Eingangsordner ist erforderlich')
     # The opt-in is the selected local inbox; not one approval for each message.
     # From and Date are plausible mail-format signals, not proof of sender authenticity.
-    files = []
+    files, diagnostics = [], []
     old_files = 0
     cutoff = (now - timedelta(hours=max_age_hours)).timestamp()
     for file in source.iterdir():
-        if file.suffix.lower() == '.eml':
-            # Old processed mails remain intact without permanently blocking
-            # the next new delivery after the folder exceeds MAX_FILES.
+        if file.suffix.lower() != '.eml':
+            continue
+        # A mail program can move/delete a message between is_file and stat.
+        # Diagnose that single file instead of suppressing every valid mail.
+        try:
             if file.is_file() and not file.is_symlink() and file.stat().st_mtime < cutoff:
                 old_files += 1
                 continue
-            files.append(file)
-            if len(files) > MAX_FILES:
-                raise DealInputError('Mehr als 100 aktuelle EML-Dateien')
-    rows, diagnostics = [], []
+        except OSError as exc:
+            diagnostics.append(dict(file=file.name, reason=str(exc)))
+            continue
+        files.append(file)
+        if len(files) > MAX_FILES:
+            raise DealInputError('Mehr als 100 aktuelle EML-Dateien')
+    rows = []
     if old_files:
         diagnostics.append(dict(file='', reason=f'{old_files} alte EML-Dateien außerhalb des Zeitfensters ignoriert'))
     for file in sorted(files):
