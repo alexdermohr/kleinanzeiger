@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .bargain_hunter import (
-    DealInputError, MAX_OFFERS, _observation_instant, assess_offers, load_offers,
+    DealInputError, MAX_OFFERS, _DAMAGED, _observation_instant, assess_offers, load_offers, matches_model,
 )
 from .bargain_hunter_cli import render_report
 
@@ -104,6 +104,9 @@ def run(config_path: Path) -> dict:
         changed = {}
         current_offers = []
         for uid, offer in offers.items():
+            # Profile-isolated history: unrelated or defective listings must not consume IDs.
+            if not matches_model(offer.title, model) or _DAMAGED.search(offer.condition):
+                continue
             current = json.loads(json.dumps(asdict(offer), default=str))
             payload = json.dumps(current, sort_keys=True)
             stored = db.execute('SELECT payload FROM radar_current WHERE id=?', (uid,)).fetchone()

@@ -59,6 +59,21 @@ class RadarTests(unittest.TestCase):
         self.assertEqual(self.cli(), 0)
         self.assertEqual(self.result()['price_changes'], 0)
 
+    def test_unrelated_offer_does_not_consume_profile_identity(self):
+        extra = dict(self.rows[0], id='elsewhere', title='iPhone 14 128GB',
+                     price=150, url='https://www.kleinanzeigen.de/s-anzeige/test/elsewhere')
+        self.rows.append(extra)
+        self.write()
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.result()['new'], 6)
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.result()['new'], 0)
+        extra.update(title='Lenovo ThinkPad T14 Gen 3', observed_at='2026-11-16T11:00:00Z')
+        self.write()
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.result()['new'], 1)
+        self.assertEqual(self.result()['offers'][0]['id'], 'elsewhere')
+
     def test_price_cycle_and_shipping_change(self):
         self.assertEqual(self.cli(), 0)
         for price, shipping, time in ((80, '0', '11'), (100, '0', '12'), (100, '7', '13')):
