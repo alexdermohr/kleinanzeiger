@@ -148,7 +148,7 @@ def _observation_instant(value: str) -> datetime | None:
     return date.astimezone(timezone.utc)
 
 
-def load_offers(path: str | Path) -> list[Offer]:
+def load_offers(path: str | Path, *, reject_conflicting_duplicates: bool = False) -> list[Offer]:
     """Import user-provided CSV, plain JSON list or REST data.ads JSON.
 
     No URL is fetched. The file limit prevents unbounded memory/HTML reports.
@@ -188,6 +188,7 @@ def load_offers(path: str | Path) -> list[Offer]:
     if not isinstance(rows, list) or len(rows) > MAX_OFFERS:
         raise DealInputError("Inseratliste fehlt oder ist zu groß")
     deduplicated: dict[str, Offer] = {}
+    observations: dict[tuple[str, object], Offer] = {}
     for number, row in enumerate(rows, start=1):
         try:
             offer = normalize_offer(row)
@@ -196,8 +197,21 @@ def load_offers(path: str | Path) -> list[Offer]:
         # Compare actual instants, not lexical offset strings.
         # A dated record outranks an unknown/naive timestamp; when neither
         # is dated, the last input row wins deterministically.
-        earlier = deduplicated.get(offer.uid)
         current_time = _observation_instant(offer.observed_at)
+        if reject_conflicting_duplicates:
+            # Compare every row before choosing the latest per ID. This also
+            # catches a stale conflicting observation after a newer row.
+            key = (offer.uid, current_time)
+            prior = observations.get(key)
+            if prior is not None and any(
+                getattr(prior, field) != getattr(offer, field)
+                for field in ("title", "price_eur", "url", "shipping_eur", "condition")
+            ):
+                raise DealInputError(
+                    f"Zeile {number}: Widersprüchliche Eingaben für ID {offer.uid}"
+                )
+            observations.setdefault(key, offer)
+        earlier = deduplicated.get(offer.uid)
         previous_time = _observation_instant(earlier.observed_at) if earlier else None
         if (earlier is None or
                 (current_time is not None and

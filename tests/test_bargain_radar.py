@@ -74,6 +74,38 @@ class RadarTests(unittest.TestCase):
         self.assertEqual(self.result()['new'], 1)
         self.assertEqual(self.result()['offers'][0]['id'], 'elsewhere')
 
+    def test_conflicting_same_file_observations_rejected_before_deduplication(self):
+        first = dict(self.rows[0])
+        wrong = dict(first, price=50)
+        source_file = self.source / 'list.json'
+        for ordered in ([first, wrong], [wrong, first]):
+            with self.subTest(order=ordered[0]['price']):
+                source_file.write_text(json.dumps([*self.rows[1:], *ordered]))
+                self.assertEqual(self.cli(), 2)
+                self.assertFalse((self.root / 'radar.sqlite').exists())
+        # A conflict in an older observation remains invalid even when a newer
+        # price has already been seen within this same file.
+        newer = dict(first, price=80, observed_at='2026-11-16T11:00:00Z')
+        source_file.write_text(json.dumps([*self.rows[1:], first, newer, wrong]))
+        self.assertEqual(self.cli(), 2)
+        self.assertFalse((self.root / 'radar.sqlite').exists())
+
+    def test_same_file_newer_observation_and_legacy_import_remain_compatible(self):
+        old = dict(self.rows[0])
+        newer = dict(old, price=80, observed_at='2026-11-16T11:00:00Z')
+        source_file = self.source / 'list.json'
+        source_file.write_text(json.dumps([*self.rows[1:], old, newer, old]))
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.result()['new'], 6)
+        self.assertEqual(self.result()['offers'][0]['price_eur'], '80.00')
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.result()['new'], 0)
+        # Standalone caller intentionally retains its original last-row
+        # deduplication semantics unless strict duplicate checks are enabled.
+        from mark_api.bargain_hunter import load_offers
+        source_file.write_text(json.dumps([old, dict(old, price=50)]))
+        self.assertEqual(load_offers(source_file)[0].price_eur, 50)
+
     def test_price_cycle_and_shipping_change(self):
         self.assertEqual(self.cli(), 0)
         for price, shipping, time in ((80, '0', '11'), (100, '0', '12'), (100, '7', '13')):

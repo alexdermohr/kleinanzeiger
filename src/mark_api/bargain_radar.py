@@ -60,7 +60,7 @@ def run(config_path: Path) -> dict:
         raise DealInputError('Ausgaben müssen außerhalb des Eingangsordners liegen')
     offers = {}
     for file in files:
-        for offer in load_offers(file):
+        for offer in load_offers(file, reject_conflicting_duplicates=True):
             old = offers.get(offer.uid)
             if old and old != offer:
                 before = _observation_instant(old.observed_at)
