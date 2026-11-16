@@ -5,6 +5,7 @@ import argparse
 import html
 import json
 import sys
+import sqlite3
 import webbrowser
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -76,7 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Nutzerdatei lokal mit vergleichbaren Angebotspreisen auswerten; kein Scraping.",
     )
     parser.add_argument("--datei", type=Path, help="Export mit Angeboten (.csv/.json)")
-    parser.add_argument("--modell", required=True, help="Exakte Modellbezeichnung, z.B. 'Lenovo ThinkPad T14 Gen 3'")
+    parser.add_argument("--radar", type=Path, help="Lokales Radar-Profil (.json); ohne Browser/Netzwerk")
+    parser.add_argument("--modell", help="Exakte Modellbezeichnung, z.B. 'Lenovo ThinkPad T14 Gen 3'")
     parser.add_argument("--bericht", type=Path, default=Path("schnäppchenbericht.html"))
     parser.add_argument("--json", action="store_true", help="Strukturiertes Ergebnis auf stdout")
     parser.add_argument("--oeffnen", action="store_true", help="HTML-Bericht im Browser öffnen")
@@ -86,6 +88,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--abschlag", default="30", help="Schwelle in Prozent (Standard: 30)")
     args = parser.parse_args(argv)
     try:
+        if args.radar:
+            if args.datei or args.modell or args.suchlink or args.oeffnen:
+                raise DealInputError("--radar separat mit Profil verwenden")
+            from .bargain_radar import run
+            result = run(args.radar)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if not args.modell:
+            parser.error("--modell erforderlich")
         if args.suchlink:
             print(search_url(args.modell, maximum_eur=args.hoechstpreis))
             if not args.datei:
@@ -111,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.oeffnen:
             webbrowser.open(args.bericht.resolve().as_uri())
         return 0
-    except (DealInputError, OSError) as exc:
+    except (ValueError, OSError, sqlite3.Error, ArithmeticError) as exc:
         print(f"Schnäppchenjäger: {exc}", file=sys.stderr)
         return 2
 

@@ -3,6 +3,13 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.1.0] - 2026-11-16
+
+### Neu
+- Lokales Schnäppchenradar mit wiederholt einlesbaren CSV-/JSON-Dateien oder Eingangsordner, exakt benanntem Modellprofil und eigener SQLite-Historie. Neue Inserate und Preisänderungen erscheinen im HTML- und optional JSON-Bericht; identische Wiederholungen erzeugen keine neuen Treffer.
+- Transaktionen und SQLite-Sperren schützen wiederholte Timer-Läufe. Fremde Datenbanken werden abgewiesen. Die Bewertung verwendet ausschließlich beobachtete Angebotspreise der Eingaben und meldet bei fehlenden Vergleichsangeboten keine Schnäppchen.
+- Keine automatischen Marktplatzabrufe, Käufe, Nachrichten, KI oder zusätzlichen Abhängigkeiten. Bestehende manuelle Windows-/Linux-Auswertung bleibt verfügbar.
+
 ## [1.0.15] - 2026-11-15
 
 ### Behoben
