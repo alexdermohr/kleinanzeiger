@@ -168,6 +168,13 @@ def _credential_assignment_rule(line: bytes) -> str | None:
         return None
     if lowered.startswith(_PLACEHOLDER_PREFIXES):
         return None
+    # A local JSON filename assigned to "authorization" is configuration,
+    # not an Authorization credential. Direct token signatures still fail
+    # earlier in _line_rules regardless of this narrow exception.
+    if name == "authorization" and re.fullmatch(
+        rb"[A-Za-z0-9][A-Za-z0-9._-]{0,100}\.json", value, flags=re.I
+    ):
+        return None
     if (
         value.startswith((b"$", b"{{", b"${"))
         or b"(" in value
