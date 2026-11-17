@@ -53,6 +53,24 @@ if ($SelfTest) {
       if (!$html.Contains('auffällig günstig') -or !$html.Contains('Synthetischer Windows-Test')) {
         throw 'Der lokale Bericht enthält nicht die erwartete Bewertung.'
       }
+      $radarProfile = Join-Path $temp 'radar-profile.json'
+      $radarSettings = @{ model = $model; input = 'synthetische-angebote.csv';
+        history = 'radar.sqlite'; report = 'radar.html'; json_report = 'radar.json';
+        min_peers = 4; discount_pct = 30 } | ConvertTo-Json -Compress
+      [IO.File]::WriteAllText($radarProfile,$radarSettings,[Text.UTF8Encoding]::new($false))
+      $radarFirst = Invoke-DealsCli @('--radar',$radarProfile)
+      if ($radarFirst.Code -ne 0) { throw 'Installierter Radar-CLI-Pfad defekt.' }
+      $radarFirstResult = (@($radarFirst.Lines) | Out-String | ConvertFrom-Json)
+      if ($radarFirstResult.new -ne 5 -or $radarFirstResult.hits -ne 1 -or
+          !(Test-Path -LiteralPath (Join-Path $temp 'radar.html') -PathType Leaf)) {
+        throw 'Radar erstellt nicht die erwarteten Erstlaufergebnisse.'
+      }
+      $radarAgain = Invoke-DealsCli @('--radar',$radarProfile)
+      if ($radarAgain.Code -ne 0) { throw 'Radar-Wiederholung fehlgeschlagen.' }
+      $radarAgainResult = (@($radarAgain.Lines) | Out-String | ConvertFrom-Json)
+      if ($radarAgainResult.new -ne 0 -or $radarAgainResult.hits -ne 0) {
+        throw 'Radar meldet unveränderte Inserate erneut.'
+      }
     } finally {
       Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -70,7 +88,7 @@ if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
 }
 $dialog = [Windows.Forms.Form]::new()
 $dialog.Text = 'Kleinanzeiger – Schnäppchenjäger'
-$dialog.ClientSize = [Drawing.Size]::new(632,404)
+$dialog.ClientSize = [Drawing.Size]::new(632,462)
 $dialog.FormBorderStyle = 'FixedDialog'
 $dialog.MaximizeBox = $false
 $dialog.StartPosition = 'CenterScreen'
@@ -108,7 +126,8 @@ $note = Add-DealsLabel 'Nur selbst bereitgestellte Angebote werden verglichen. K
 $note.ForeColor = [Drawing.Color]::FromArgb(88,107,115)
 $searchButton = Add-DealsButton 'Suche im Browser öffnen' 22 279 281 44
 $checkButton = Add-DealsButton 'Datei lokal auswerten' 325 279 281 44
-$statusLabel = Add-DealsLabel 'Modell eingeben; anschließend suchen oder eine Angebotsdatei prüfen.' 22 341 584 49
+$radarButton = Add-DealsButton 'Radar-Profil auswählen und auswerten …' 22 336 584 38
+$statusLabel = Add-DealsLabel 'Modell eingeben; anschließend suchen, Angebotsdatei oder Radar-Profil prüfen.' 22 389 584 55
 $statusLabel.ForeColor = [Drawing.Color]::FromArgb(17,103,122)
 function Get-DealsModel {
   $model = $modelInput.Text.Trim()
@@ -148,6 +167,44 @@ $searchButton.Add_Click({
     Start-Process -FilePath $url | Out-Null
     $statusLabel.Text = 'Kleinanzeigen-Suchseite geöffnet. Angebote werden nicht automatisch eingelesen.'
   } catch { $statusLabel.Text = $_.Exception.Message }
+})
+$radarButton.Add_Click({
+  $radarButton.Enabled = $false
+  try {
+    $picker = [Windows.Forms.OpenFileDialog]::new()
+    try {
+      $picker.Title = 'Lokales Radar-Profil auswählen'
+      $picker.Filter = 'Radar-Profil (*.json)|*.json'
+      $picker.Multiselect = $false
+      $picker.CheckFileExists = $true
+      if ($picker.ShowDialog($dialog) -ne [Windows.Forms.DialogResult]::OK) { return }
+      $profilePath = $picker.FileName
+    } finally { $picker.Dispose() }
+    if ((Get-Item -LiteralPath $profilePath).Length -gt 100000) {
+      throw 'Radar-Profil ist zu groß.'
+    }
+    $radarCall = Invoke-DealsCli @('--radar',$profilePath)
+    if ($radarCall.Code -ne 0) { throw 'Radar-Import fehlgeschlagen.' }
+    $summary = (@($radarCall.Lines) | Out-String | ConvertFrom-Json)
+    if ($null -eq $summary -or $null -eq $summary.new -or
+        $null -eq $summary.price_changes -or $null -eq $summary.hits -or
+        [int]$summary.new -lt 0 -or [int]$summary.price_changes -lt 0 -or
+        [int]$summary.hits -lt 0) { throw 'Radar-Ergebnis ungültig.' }
+    $config = Get-Content -Raw -LiteralPath $profilePath -Encoding UTF8 | ConvertFrom-Json
+    if (!$config.report -or [string]$config.report -match '[\x00-\x1f]') {
+      throw 'Radar-Profil ohne Berichtspfad.'
+    }
+    $reportPath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $profilePath) ([string]$config.report)))
+    if ([IO.Path]::GetExtension($reportPath).ToLowerInvariant() -cne '.html' -or
+        !(Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+      throw 'Radar-HTML-Bericht fehlt.'
+    }
+    Start-Process -FilePath $reportPath | Out-Null
+    $statusLabel.Text = ('Radar geprüft: {0} neu, {1} Preisänderungen, {2} auffällig günstig. HTML-Bericht geöffnet.' -f
+      $summary.new, $summary.price_changes, $summary.hits)
+  } catch {
+    $statusLabel.Text = 'Radar nicht ausgewertet. JSON-Profil, EML-Eingang und Dateirechte prüfen.'
+  } finally { $radarButton.Enabled = $true }
 })
 $checkButton.Add_Click({
   $checkButton.Enabled = $false

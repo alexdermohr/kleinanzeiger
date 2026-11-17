@@ -79,7 +79,7 @@ der Unsicherheit. `--json` gibt dieselbe Bewertung maschinenlesbar aus.
 ## Datenquellen und Grenzen
 
 - Kleinanzeigen erlaubt gespeicherte Suchen und E-Mail-Benachrichtigungen.
-  Eine Übernahme dieser Benachrichtigungen ist noch nicht implementiert.
+  Ein begrenzter lokaler EML-Pfad ist unten beschrieben; echte Templates sind nicht verifiziert.
 - Die Nutzungsbedingungen untersagen das automatisierte Sammeln von
   Inhalten ohne ausdrückliche schriftliche Zustimmung. Deshalb kein direkter
   Crawler, keine fremden Login-Sitzungen und keine CAPTCHA-Umgehung.
@@ -160,7 +160,7 @@ Nach einem fehlgeschlagenen Lauf erneut ausführen; erfolgreiche Laufberichte li
 zusätzlich als JSON in der separaten Tabelle `radar_runs`. Es gibt keine automatische
 Bereinigung dieser Historie. Unterschiedliche Historien dürfen keine Berichtspfade teilen.
 
-Keine Verkaufspreisprognose, Kaufgarantie, automatische Beschaffung oder E-Mail-Übernahme.
+Keine Verkaufspreisprognose, Kaufgarantie oder automatische Beschaffung.
 Ohne genügend Peers lautet das Ergebnis ausdrücklich „nicht bewertbar“.
 
 Radar- und Regressionstests mit ausschließlich synthetischen Daten:
@@ -168,3 +168,86 @@ Radar- und Regressionstests mit ausschließlich synthetischen Daten:
 ```sh
 python -m unittest discover -s tests -p 'test_bargain*.py'
 ```
+
+## Lokale Suchmail-Dateien (begrenzter Parser)
+
+Es liegen keine echten Suchmail-Vorlagen aus Nutzer-Gmail vor. Diese Erweiterung
+behauptet keine Kompatibilität mit offiziellen Mailtemplates. Sie benötigt weder
+Gmail-/IMAP-Anmeldung noch Netzwerk, KI, Scraper oder Drittanbieterbibliotheken.
+Der Chatmail-Importer bleibt getrennt. HTML wird nur mit `HTMLParser` gelesen,
+niemals gerendert; Skripte, Bilder, Anhänge und komplexe Layouts werden abgewiesen.
+
+`examples/search-mail-radar.json` in einen eigenen Profilordner kopieren, dort
+`suchmails` anlegen. Ausschließlich ausdrücklich erlaubte eigene lokale `.eml`
+hineinlegen. Keine Verkäufer-Datenbank verwenden. Kein Staging: Originaldateien
+werden ausschließlich gelesen. Für jedes Modell eigene Ordner, Profile, Historie
+und Berichtspfade verwenden. Keine parallelen Profile mit gemeinsamen Ausgaben.
+
+Unterstützt ist genau **ein Angebot pro Mail**:
+
+```text
+Lenovo ThinkPad T14 Gen 3
+100 EUR
+https://www.kleinanzeigen.de/s-anzeige/thinkpad/1234567890-278-1234
+```
+
+Oder genau dieses HTML-Fragment (ohne weitere Elemente/Attribute):
+
+```html
+<a href="https://www.kleinanzeigen.de/s-anzeige/thinkpad/1234567890-278-1234">Lenovo ThinkPad T14 Gen 3</a><p>100 EUR</p>
+```
+
+Multipart darf dieselbe Zuordnung als Text und HTML enthalten; Abweichungen
+werden übersprungen. Keine automatische Extraktion aus beliebigen Newslettern.
+Nur direkte HTTPS-Inseratlinks ohne Query/Fragment, numerische aus dem Link
+abgeleitete IDs, positive EUR-Festpreise. VB, kostenlos, andere Währungen,
+Trackinglinks, falsche Produktgruppen und unklare Zuordnungen werden diagnostiziert.
+Preiswidersprüche gleicher ID/Zeit brechen den Lauf vor Historienänderungen ab.
+Neuere bestätigte Beobachtungen dürfen ältere ersetzen.
+
+Der im Profil einmalig ausgewählte lokale Suchmailordner ist die Freigabe der
+Eingangsquelle. Neue EML-Dateien darin werden beim nächsten Lauf ohne
+Einzelfreigabe eingelesen. Eine automatische Mailzustellung kann über ein
+vom Nutzer eingerichtetes Mailprogramm in diesen Ordner erfolgen; Kleinanzeiger
+verbindet sich selbst nicht mit Gmail oder IMAP.
+
+Der Absenderheader muss auf eine kleinanzeigen.de-Adresse oder Subdomain
+lauten. Zusammen mit dem Date-Header und der direkten Inserat-URL ist dies nur
+eine Plausibilitätsprüfung, kein Echtheits- oder DKIM-Nachweis. Ein Datum mit
+Zeitzone muss aktuell sein; alte kopierte Mails werden nicht als aktuelle
+Angebote eingestuft. Bei zweifelhaften Daten erscheint Importdiagnostik
+statt eines Schnäppchenalarms. Vor einem Kauf den tatsächlichen Inseratpreis
+und den Verkäufer prüfen.
+
+Alte EML-Dateien außerhalb des Zeitfensters können im Eingangsordner verbleiben: sie werden anhand ihres lokalen Dateialters übersprungen. Der Ordner darf wachsen, ohne nach 100 alten Dateien die Analyse zu blockieren.
+
+Standardmäßig maximal 48 Stunden alte Beobachtungen (konfigurierbar 1–168), keine
+zukünftigen/undatierten Daten, höchstens 100 Dateien mit je 1 MB und 20 MIME-Teilen.
+Unterordner werden ignoriert; das Limit von 100 Dateien gilt für aktuelle EMLs. Keine optionalen CSV/JSON-Referenzen in diesem Modus;
+alle Peers müssen denselben Aktualitätsfilter passieren. Ein leerer oder vollständig
+abgewiesener Eingang erzeugt einen Bericht mit Diagnostik und null Alarmen.
+Lesefehler einzelner Mails erscheinen ebenfalls dort; Profil-/Manifestfehler ergeben
+Exitcode 2. JSON-Beleg ist verpflichtend. Originale werden nie geändert oder gelöscht.
+
+`notify: true` aktiviert optional das vorhandene freie `notify-send` unter Linux.
+Nur tatsächlich neue/preisgeänderte, als „auffällig günstig“ klassifizierte Angebote
+mit mindestens vier aktuellen passenden Peers können einen Sammelhinweis auslösen.
+Windows 11 und Linux benötigen für CLI/HTML/JSON nur Python; ohne `notify-send`
+entfällt der Desktop-Hinweis. Es wird nichts installiert oder automatisch aktiviert.
+
+Historie wird vor Zustellung committed: identische Wiederholungen senden keinen
+Hinweis. **Exactly-once-Zustellung ist nicht garantiert**: Absturz nach Commit oder
+fehlgeschlagenes `notify-send` kann einen Hinweis verlieren; kein Zustellretry.
+Berichte bleiben unabhängig vom Desktop lesbar. SQLite und HTML/JSON bilden keine
+gemeinsame atomare Einheit; jede Berichtsdatei wird einzeln atomar ersetzt. Bei
+Dateisperren (etwa Defender) Exitcode 2 und Rollback; ein bereits ersetzter Bericht
+kann dann vom Historienstand abweichen. Erneuter Lauf regeneriert die Berichte;
+erfolgreiche Laufbelege bleiben zusätzlich in `radar_runs`. Keine Hintergrundaktivierung.
+
+```sh
+python -m unittest discover -s tests -p 'test_search_mail.py'
+```
+
+Unter Windows 11 steht der Profilaufruf im Schnäppchenjäger-Fenster über die Schaltfläche Radar-Profil auswählen und auswerten bereit. Nach erfolgreicher Analyse öffnet sich der lokale HTML-Bericht. Auch dort ist dies nur ein lokaler Import, keine automatische Marktbeobachtung.
+
+Unter Linux/KDE steht derselbe Profilaufruf zusätzlich unter Schnäppchenjäger → Suchmail-/Datei-Radar zur Verfügung. Die Kontrollzentrale zeigt neue Einträge, Preisänderungen und günstige Funde an, ohne Rohinhalte in Dialoge zu übernehmen.

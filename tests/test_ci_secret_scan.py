@@ -159,6 +159,25 @@ class CiSecretScanTests(unittest.TestCase):
             ), ("openai_key",),
         )
 
+    def test_local_authorization_filename_is_not_a_secret_but_token_is(self) -> None:
+        self.assertIsNone(
+            ci_secret_scan._credential_assignment_rule(
+                b'  "authorization": "suchmail-freigaben.json",'
+            )
+        )
+        self.assertEqual(
+            ci_secret_scan._credential_assignment_rule(
+                b'authorization = "actual-credential-value-1234567890"'
+            ),
+            "authorization_assignment",
+        )
+        self.assertEqual(
+            ci_secret_scan._line_rules(
+                b'authorization = "ghp_' + b'A' * 24 + b'.json"'
+            ),
+            ("github_token",),
+        )
+
     def test_specific_token_pattern_still_blocks(self) -> None:
         repo = self.make_repo()
         self.commit_file(repo, "sample.txt", "safe\n", "base")

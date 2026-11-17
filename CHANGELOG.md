@@ -3,6 +3,16 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.2.0] - 2026-11-16
+
+### Neu
+- Windows 11 und Linux: Das lokale Schnäppchenradar kann ausdrücklich freigegebene exportierte Suchmail-Dateien ohne Mailkonto oder zusätzliche Python-Abhängigkeiten lesen. Ein eigenes Profil, ein einmalig gewählter lokaler Suchmailordner und aktuelle Maildatumsangaben sind erforderlich; Anleitung und Profil stehen in docs/schnaeppchenjaeger.md und examples/search-mail-radar.json.
+- Der begrenzte Parser unterstützt ausschließlich die dokumentierten direkt verlinkten Text-/HTML-Layouts. Echte Kleinanzeigen-Mailtemplates sind nicht verifiziert. Unsichere oder unvollständige Inhalte werden diagnostiziert, ohne Angebote zu erfinden. Chatmails bleiben beim bisherigen separaten Import.
+- Die Windows-Schnäppchenjäger-Oberfläche kann ein eigenes Radar-JSON-Profil ausführen und den HTML-Bericht öffnen; der native Windows-SelfTest prüft Erst- und Wiederholungsimport.
+- Die KDE-Kontrollzentrale kann den Radar über eine gewählte JSON-Profildatei ausführen. Veraltete EML-Dateien blockieren den Eingang bei größerem Mailbestand nicht.
+- HTML-/JSON-Berichte und eigene Historie zeigen neue Inserate und Preisänderungen. Mindestens vier aktuelle passende Vergleichsangebote sind für einen günstigen Treffer erforderlich. Optional kann vorhandenes Linux notify-send einmal pro Änderung hinweisen; Zustellung ist nicht garantiert. Unter Windows bleiben CLI und Berichte ohne Desktop-Hinweis nutzbar.
+- Keine Marktplatzabrufe, Gmail-/IMAP-Anmeldung, automatischen Käufe, KI oder Hintergrundaktivierung. EML-Originale werden ausschließlich gelesen.
+
 ## [1.1.0] - 2026-11-16
 
 ### Neu

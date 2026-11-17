@@ -1,0 +1,12 @@
+{
+  "model": "Lenovo ThinkPad T14 Gen 3",
+  "input_type": "eml",
+  "input": "suchmails",
+  "max_age_hours": 48,
+  "history": "suchmail-radar.sqlite",
+  "report": "suchmail-bericht.html",
+  "json_report": "suchmail-beleg.json",
+  "min_peers": 4,
+  "discount_pct": 30,
+  "notify": false
+}

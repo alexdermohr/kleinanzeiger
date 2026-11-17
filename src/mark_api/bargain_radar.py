@@ -1,8 +1,11 @@
 """Repeatable local imports; no seller storage or network access."""
 from __future__ import annotations
 
+import html
 import json
 import os
+import shutil
+import subprocess
 import sqlite3
 import tempfile
 from contextlib import closing
@@ -12,7 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .bargain_hunter import (
-    DealInputError, MAX_OFFERS, _DAMAGED, _observation_instant, assess_offers, load_offers, matches_model,
+    DealInputError, MAX_OFFERS, _DAMAGED, _observation_instant, assess_offers, load_offers, matches_model, normalize_offer,
 )
 from .bargain_hunter_cli import render_report
 
@@ -50,17 +53,42 @@ def run(config_path: Path) -> dict:
     json_report = path('json_report') if 'json_report' in config else None
     files = sorted(p for p in source.iterdir() if p.is_file() and
                    p.suffix.lower() in ('.csv', '.json')) if source.is_dir() else [source]
-    if not files:
+    if config.get('input_type', 'exports') not in ('exports', 'eml'):
+        raise DealInputError('Unbekannter input_type')
+    mail_mode = config.get('input_type') == 'eml'
+    diagnostics = []
+    mail_rows = []
+    if mail_mode:
+        from .search_mail import load_search_mail
+        if type(config.get('notify', False)) is not bool:
+            raise DealInputError('notify muss boolesch sein')
+        if type(config.get('min_peers', 4)) is not int or not 4 <= config.get('min_peers', 4) <= 100:
+            raise DealInputError('Suchmail benötigt mindestens vier Peers')
+        if json_report is None:
+            raise DealInputError('Suchmail benötigt json_report')
+        mail_rows, diagnostics = load_search_mail(source, model,
+            max_age_hours=config.get('max_age_hours', 48))
+        files = []
+    if not files and not mail_mode:
         raise DealInputError('Keine CSV-/JSON-Eingaben gefunden')
     outputs = [history, report] + ([json_report] if json_report else [])
     protected = [config_path.resolve(), *[p.resolve() for p in files]]
     if len(set(outputs)) != len(outputs) or any(p in protected for p in outputs):
         raise DealInputError('Eingaben, Profil, Historie und Berichte müssen getrennt sein')
-    if source.is_dir() and any(p.parent == source for p in outputs):
+    if source.is_dir() and any(p == source or source in p.parents for p in outputs):
         raise DealInputError('Ausgaben müssen außerhalb des Eingangsordners liegen')
     offers = {}
-    for file in files:
-        for offer in load_offers(file, reject_conflicting_duplicates=True):
+    batches = ([normalize_offer(row) for row in mail_rows],) if mail_mode else (
+        load_offers(file, reject_conflicting_duplicates=True) for file in files)
+    observations = {}
+    for batch in batches:
+        for offer in batch:
+            key = (offer.uid, _observation_instant(offer.observed_at))
+            prior = observations.get(key)
+            if prior and any(getattr(prior, field) != getattr(offer, field) for field in
+                    ('title', 'price_eur', 'url', 'shipping_eur', 'condition')):
+                raise DealInputError(f'Widersprüchliche Eingaben für ID {offer.uid}')
+            observations[key] = offer
             old = offers.get(offer.uid)
             if old and old != offer:
                 before = _observation_instant(old.observed_at)
@@ -147,7 +175,7 @@ def run(config_path: Path) -> dict:
                       imported=len(offers), new=sum(v[0] == 'new' for v in changed.values()),
                       price_changes=sum(v[0] == 'price_changed' for v in changed.values()),
                       hits=sum(e['classification'] == 'auffällig günstig' for e in events),
-                      offers=events)
+                      offers=events, diagnostics=diagnostics)
         db.execute('INSERT INTO radar_runs(payload) VALUES (?)',
                    (json.dumps(result, ensure_ascii=False),))
         # Successful run results remain available in the isolated history.
@@ -158,11 +186,24 @@ def run(config_path: Path) -> dict:
         summary = (f"<p>Radar: {result['new']} neue Inserate, {result['price_changes']} Preisänderungen, "
                    f"{result['hits']} neue auffällig günstige Treffer. Nur Änderungen dieses Laufs; "
                    "Vergleich aus aktuellen Eingabedateien. Keine Änderungen: keine neuen Treffer.</p>")
-        page = page.replace('<section class="info">', '<section class="info">' + summary)
+        if diagnostics:
+            page = page.replace('</main>', '<section class="info"><h2>Importdiagnostik</h2><pre>' +
+                html.escape(json.dumps(diagnostics, ensure_ascii=False, indent=2)) + '</pre></section></main>')
+        page = page.replace('<section class="info">', '<section class="info">' + summary, 1)
         if not events:
             page = page.replace('Keine Angebote passen eindeutig auf das gesuchte Modell. Modellbezeichnung oder Eingabedaten prüfen.',
                                 'Keine neuen bewertbaren Inserate oder Preisänderungen für dieses Modell.')
         if json_report:
             atomic_report(json_report, json.dumps(result, ensure_ascii=False, indent=2))
         atomic_report(report, page)
+    # History commits before delivery: no repeat spam; a crash can lose delivery.
+    if mail_mode and config.get('notify', False) and result['hits']:
+        executable = shutil.which('notify-send')
+        if executable:
+            try:
+                subprocess.run([executable, '--', 'Kleinanzeiger',
+                    f"{result['hits']} neue auffällig günstige Inserate. Bericht: {report}"],
+                    check=True, timeout=10, capture_output=True)
+            except (OSError, subprocess.SubprocessError):
+                pass  # Reports/history remain authoritative, never retry delivery.
     return result
