@@ -60,7 +60,7 @@ def render_report(model: str, offers: list[dict], *, generated_at: str, category
         "<p class='empty'>Keine Angebote passen eindeutig auf das gesuchte Modell. "
         "Modellbezeichnung oder Eingabedaten prüfen.</p>"
     )
-    heading = (f"{len(offers)} passende Geräteänderungen; keine Modellpreisbewertung." if category else
+    heading = (f"{len(offers)} historisch beobachtete Kandidaten; keine Modellpreisbewertung." if category else
                f"{len(offers)} passende Angebote, davon {count} auffällig günstig.")
     if category and not offers:
         body = "<p>Keine neuen passenden Geräte oder Preisänderungen.</p>"

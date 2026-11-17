@@ -5,11 +5,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import sqlite3
 from pathlib import Path
 import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 
 
 def safe(path: Path, *, directory=False):
@@ -178,6 +181,92 @@ class RadarWatch:
         finally:
             os.unlink(temporary)
         return target
+
+    def local_status(self, profile: Path) -> str:
+        config = self.load(profile)
+        inbox = profile.parent / 'suchmails'
+        count = 0
+        for item in inbox.iterdir():
+            if item.suffix.lower() == '.eml' and not item.is_symlink() and item.is_file():
+                count += 1
+                if count > 1000:
+                    break
+        lines = [f'EML-Eingang: {inbox}',
+                 f'EML-Dateien: {count if count <= 1000 else "über 1000"}',
+                 'Eingangsquelle nicht belegt; kein neuer Marktplatzfeed.' if not count else
+                 'Lokale EML-Dateien vorhanden; automatische Herkunft nicht nachgewiesen.']
+        if config.get('category'):
+            lines.append(f'SACD-Kandidatenbericht: {profile.parent / "bericht.html"}')
+        history = profile.parent / 'history.sqlite'
+        if not history.exists():
+            return '\n'.join(lines + ['Noch keine lokale Auswertung; Eingangsquelle nicht eingerichtet/nicht belegt.'])
+        safe(history)
+        try:
+            with closing(sqlite3.connect(f'{history.as_uri()}?mode=ro', uri=True, timeout=1)) as db:
+                if db.execute('PRAGMA application_id').fetchone()[0] != 0x42524452:
+                    raise ValueError('Ungültige Radar-Historie.')
+                row = db.execute('SELECT payload FROM radar_runs ORDER BY id DESC LIMIT 1').fetchone()
+            if not row or len(row[0]) > 2_000_000:
+                raise ValueError('Keine lesbare Auswertung.')
+            result = json.loads(row[0])
+            stamp = result.get('generated_at', '')
+            if not isinstance(stamp, str) or not re.fullmatch(r'[0-9T:+.Z-]{10,40}', stamp):
+                raise ValueError('Ungültiger Auswertungszeitpunkt.')
+            counts = [result.get(k) for k in ('imported', 'new', 'price_changes', 'hits')]
+            if any(type(n) is not int or not 0 <= n <= 1000000 for n in counts):
+                raise ValueError('Ungültige Auswertungszähler.')
+            lines += [f'Letzte lokale Auswertung: {stamp}',
+                      f'Importiert: {counts[0]}; neu: {counts[1]}; Preisänderungen: {counts[2]}; Treffer: {counts[3]}']
+            if config.get('category'):
+                observed_count = result.get('known_candidate_count')
+                events_count = result.get('candidate_events')
+                if (type(observed_count) is int and 0 <= observed_count <= 1000000 and
+                        type(events_count) is int and 0 <= events_count <= 1000000):
+                    lines.append(f'SACD: {events_count} Kandidatenereignisse dieser Auswertung; '
+                                 f'{observed_count} historisch beobachtete Kandidaten.')
+                else:
+                    lines.append('SACD-Kandidatenbestand im letzten Lauf nicht verfügbar.')
+            # Only fixed parser messages are displayed: exceptions can contain paths or secrets.
+            allowed = {
+                'Keine EML-Dateien; keine Angebote', 'Eindeutiger Absenderheader fehlt',
+                'Absenderheader passt nicht zu Kleinanzeigen (kein Echtheitsbeweis)',
+                'Eindeutiger Datumsheader fehlt', 'Ungültiger Datumsheader',
+                'Zeitangabe braucht Zeitzone', 'Mail ist alt, undatiert oder liegt in der Zukunft',
+                'Textlayout benötigt genau Titel, EUR-Preis, Direktlink',
+                'HTML-Layout mehrdeutig oder nicht unterstützt', 'Kein eindeutiger EUR-Festpreis (VB/Free ausgeschlossen)',
+                'Kein direkter sicherer Inseratlink; Tracking wird nicht aufgelöst',
+                'Defekt, Suchanzeige oder Zubehör statt Player', 'ND8006 unterstützt keine SACD-Disc-Wiedergabe',
+                'Explizite Silberangabe im Mailtitel fehlt', 'Keine eindeutige passende Produktgruppe/Modellzuordnung',
+                'Multipart-Zuordnung widersprüchlich oder leer', 'Anhänge/andere MIME-Inhalte nicht unterstützt',
+                'Kein positiver Festpreis', 'Nur reguläre EML-Dateien erlaubt', 'EML größer als 1 MB',
+                'Fehlerhafte oder zu komplexe MIME-Mail', 'MIME-Typ nicht unterstützt',
+                'Tonträger oder widersprüchliche SACD-Disc-Angabe',
+                'Unklare Angabe oder Tonträger statt Player',
+                'Defekt, Tonträger oder Zubehör statt eindeutigem Player',
+                'Widersprüchliche Farbe oder SACD-Angabe', 'Keine eindeutige SACD-Disc-Wiedergabe',
+                'SACD-Qualität belegt keine SACD-Disc-Wiedergabe',
+                'SACD-Disc-fähiger Player im Titel nicht plausibel benannt',
+            }
+            diagnostics = result.get('diagnostics', [])
+            if not isinstance(diagnostics, list):
+                raise ValueError('Ungültige Importdiagnostik.')
+            lines.append('Importdiagnostik:')
+            for entry in diagnostics[:100]:
+                reason = entry.get('reason') if isinstance(entry, dict) else None
+                if not isinstance(reason, str):
+                    reason = ''
+                if reason not in allowed and not re.fullmatch(r'[0-9]{1,6} alte EML-Dateien außerhalb des Zeitfensters ignoriert', reason):
+                    reason = 'Weitere Diagnose aus Datenschutzgründen nicht angezeigt.'
+                filename = entry.get('file', '') if isinstance(entry, dict) else ''
+                label = filename + ': ' if isinstance(filename, str) and re.fullmatch(r'[a-f0-9]{64}\.eml', filename) else ''
+                lines.append('- ' + label + reason)
+            if not diagnostics:
+                lines.append('- Keine Importdiagnosen.')
+            if len(diagnostics) > 100:
+                lines.append('- Weitere Diagnosen abgeschnitten.')
+        except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
+            lines.append('Letzte lokale Auswertung oder Importdiagnostik nicht lesbar.')
+        return '\n'.join(lines)
 
     def unit_content(self, profile: Path) -> dict[str, str]:
         self.load(profile)

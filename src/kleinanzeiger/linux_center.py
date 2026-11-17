@@ -226,7 +226,9 @@ class Center:
                 status = manager.watch(profile, "status")
                 action = self.dialog("--menu", status, "status", "Status anzeigen", "start", "Monitoring starten",
                                      "stop", "Monitoring stoppen")
-                if action in ("start", "stop", "status"):
+                if action == "status":
+                    self.text(manager.watch(profile, "status") + "\n\n" + manager.local_status(profile))
+                elif action in ("start", "stop"):
                     self.message(manager.watch(profile, action))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             # Plain text includes useful validation/systemd guidance without rich-text interpretation.

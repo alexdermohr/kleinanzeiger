@@ -299,6 +299,21 @@ class CenterTests(unittest.TestCase):
             self.center.bargains()
         self.assertIn("Modellbezeichnung", text.call_args.args[0])
 
+    def test_watch_status_uses_plaintext_with_local_details(self):
+        from mark_api.radar_watch import RadarWatch
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        manager.create_category()
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["0", "status"]
+        ), patch.object(manager, "watch", return_value="Monitoring gestoppt"), patch.object(
+            self.center, "text"
+        ) as text:
+            self.center.radar_monitoring("watch")
+        displayed = text.call_args.args[0]
+        self.assertIn("Monitoring gestoppt", displayed)
+        self.assertIn("Eingangsquelle nicht eingerichtet/nicht belegt", displayed)
+        self.assertIn("bericht.html", displayed)
+
     def test_choose_model_profile_and_import_local_eml(self):
         from mark_api.radar_watch import RadarWatch
         import hashlib
