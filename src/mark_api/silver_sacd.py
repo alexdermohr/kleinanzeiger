@@ -1,16 +1,34 @@
 """The single supported category: conservative title evidence, never model pricing."""
 import re
 
-from .bargain_hunter import _DAMAGED, _ACCESSORY
+from .bargain_hunter import _DAMAGED, _accessory_only
 
 CATEGORY = 'silver-sacd-players'
 LABEL = 'SACD-Player silber'
 SEARCH_URL = 'https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=SACD+Player+silber'
 
 
+def _extra_accessory_only(title: str) -> bool:
+    # Accessories supplied with (or missing from) a full SACD player do not
+    # turn the listing into an accessory-only sale.
+    extra = re.compile(
+        r'\b(?:fernbedien\w*|remote\w*|lautsprecher\w*|zubehör|kabel\w*|'
+        r'laser\w*|laufwerk\w*|anleitung\w*|sammlung\w*|album\w*|hybrid\w*)\b',
+        re.I,
+    )
+    for match in extra.finditer(title):
+        prefix = title[:match.start()]
+        if re.search(r'\b(?:mit|inkl(?:usive)?\.?|samt|und|ohne)\s*$', prefix, re.I):
+            continue
+        if re.search(r'\s\+\s*$', prefix):
+            continue
+        return True
+    return False
+
+
 def rejection(title: str) -> str | None:
     text = title.casefold()
-    if _DAMAGED.search(text) or _ACCESSORY.search(text):
+    if _DAMAGED.search(text) or _accessory_only(text) or _extra_accessory_only(text):
         return 'Defekt, Suchanzeige oder Zubehör statt Player'
     if re.search(r'\bnd[\s-]*8006\b', text):
         return 'ND8006 unterstützt keine SACD-Disc-Wiedergabe'
@@ -18,7 +36,7 @@ def rejection(title: str) -> str | None:
         return 'Tonträger oder widersprüchliche SACD-Disc-Angabe'
     if '?' in text or re.search(r'\b(?:möglicherweise|vielleicht|eventuell|vermutlich)\b|\b(?:disc|disk|scheibe)\s+für\b', text):
         return 'Unklare Angabe oder Tonträger statt Player'
-    if re.search(r'\b(defekt\w*|bastler\w*|ersatzteil\w*|fernbedien\w*|remote\w*|lautsprecher\w*|zubehör|kabel\w*|laser\w*|laufwerk\w*|anleitung\w*|sammlung\w*|album\w*|hybrid\w*)\b', text):
+    if re.search(r'\b(?:defekt\w*|bastler\w*|ersatzteil\w*)\b', text):
         return 'Defekt, Tonträger oder Zubehör statt eindeutigem Player'
     if re.search(r'\b(schwarz\w*|black\w*|unklar\w*)\b|\b(?:nicht|kein\w*|ohne)\s+(?:silber\w*|silver\w*|sacd)\b', text):
         return 'Widersprüchliche Farbe oder SACD-Angabe'

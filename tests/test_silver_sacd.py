@@ -78,6 +78,23 @@ class SilverSacdTests(unittest.TestCase):
             with self.subTest(rejected=title):
                 self.assertIsNotNone(rejection(title))
 
+    def test_player_with_included_or_missing_accessories(self):
+        for title in (
+            'Marantz SA-11S1 SACD-Player silber mit Fernbedienung',
+            'Marantz SA-11S1 SACD-Player silber ohne Fernbedienung',
+            'Marantz SA-11S1 SACD-Player silber inkl. Verpackung',
+            'T+A SADV 1245 R SACD-Player silber samt Kabel',
+        ):
+            with self.subTest(title=title):
+                self.assertIsNone(rejection(title))
+        for title in (
+            'Fernbedienung für Marantz SA-11S1 SACD-Player silber',
+            'Marantz SA-11S1 SACD-Player silber Zubehör',
+            'Marantz SA-11S1 SACD-Player silber mit Fernbedienung defekt',
+        ):
+            with self.subTest(rejected=title):
+                self.assertIsNotNone(rejection(title))
+
     def test_negative_titles(self):
         for title in ['Marantz ND8006 SACD Player silber', 'Marantz ND-8006 silber Qualität SACD Player',
                       'CD Player silber', 'DSD Stream-only SACD Player silber',
