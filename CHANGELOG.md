@@ -5,6 +5,8 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 
 ## [1.4.1] - 2026-11-17
 
+### Behoben
+
 - SACD-Bericht zeigt weiterhin historisch beobachtete Kandidaten mit ungeprüfter Verfügbarkeit.
 - KDE-Monitoring zeigt lokalen EML-Eingang, letzte Auswertung und Importdiagnosen; der SACD-Bericht lässt sich direkt aus dem Menü öffnen.
 
