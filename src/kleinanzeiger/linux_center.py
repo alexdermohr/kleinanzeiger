@@ -340,10 +340,14 @@ Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar über ein JSON-Profil oder b
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.2.0 · KDE-Kontrollzentrale
-Neue Linux-Bedienung mit externem kdialog, Konto-/Offline-Start und Client-Verwaltung.
-Geprüfte SQLite-Backup-CLI, Artikelvorschau mit bestätigtem hashgebundenem Import,
-lokaler Wochenbericht, Schnäppchenjäger, bereinigte Diagnose und dieses Handbuch.
+CHANGES = """Kleinanzeiger 1.4.1 · KDE-Kontrollzentrale
+Das SACD-Radar zeigt zuvor beobachtete Kandidaten weiterhin im Bericht.
+Die Verfügbarkeit solcher Angebote wird nicht erneut überprüft; echte Preisänderungen
+werden mit ihrem vorherigen und aktuellen Preis gekennzeichnet.
+Unter Schnäppchenjäger → Monitoring → Status anzeigen stehen der lokale
+EML-Eingang, letzte Auswertung, Kandidatenanzahl und Importdiagnosen.
+Eine gespeicherte Kleinanzeigen-Suche und die tatsächliche E-Mail-Zustellung
+müssen weiterhin im eigenen Konto beziehungsweise Mailprogramm eingerichtet sein.
 """
 
 

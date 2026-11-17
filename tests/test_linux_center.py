@@ -356,6 +356,7 @@ class CenterTests(unittest.TestCase):
         metadata = tomllib.loads((root / "pyproject.toml").read_text())
         self.assertRegex(metadata["project"]["version"], r"^\d+\.\d+\.\d+$")
         self.assertEqual(metadata["project"]["scripts"]["kleinanzeiger-center"], "kleinanzeiger.linux_center:main")
+        self.assertIn(f"Kleinanzeiger {metadata['project']['version']}", mod.CHANGES)
         desktop = (root / "docs" / "kleinanzeiger-center.desktop").read_text()
         self.assertIn("Exec=kleinanzeiger-center\n", desktop)
         self.assertNotIn("/home/", desktop)
