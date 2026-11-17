@@ -70,11 +70,20 @@ class RadarWatch:
                     history='history.sqlite', report='bericht.html', json_report='bericht.json',
                     min_peers=4, discount_pct=30, notify=True)
 
+    def create_category(self) -> Path:
+        from .silver_sacd import LABEL, CATEGORY, SEARCH_URL
+        config = self.config(LABEL)
+        config.update(category=CATEGORY, search_url=SEARCH_URL)
+        return self._create(LABEL, config, 'category:' + CATEGORY)
+
     def create(self, model: str) -> Path:
         model = self.model(model)
+        return self._create(model, self.config(model), model)
+
+    def _create(self, model: str, config: dict, identity: str) -> Path:
+        model = self.model(model)
         private_dir(self.data)
-        directory = self.data / hashlib.sha256(model.encode()).hexdigest()
-        config = self.config(model)
+        directory = self.data / hashlib.sha256(identity.encode()).hexdigest()
         try:
             directory.mkdir(mode=0o700)
         except FileExistsError:
@@ -99,8 +108,14 @@ class RadarWatch:
         config = json.loads(profile.read_text(encoding='utf-8'))
         if not isinstance(config, dict) or not isinstance(config.get('model'), str):
             raise ValueError('Kein eingerichtetes Radar-Profil.')
-        digest = hashlib.sha256(self.model(config['model']).encode()).hexdigest()
+        identity = self.model(config['model'])
         expected = self.config(config['model'])
+        if 'category' in config:
+            from .silver_sacd import LABEL, CATEGORY, SEARCH_URL
+            identity = 'category:' + CATEGORY
+            expected = self.config(LABEL)
+            expected.update(category=CATEGORY, search_url=SEARCH_URL)
+        digest = hashlib.sha256(identity.encode()).hexdigest()
         if profile != self.data / digest / 'profil.json' or config != expected:
             raise ValueError('Nur unveränderte, hier eingerichtete Profile sind für Monitoring zugelassen.')
         safe(profile.parent / 'suchmails', directory=True)
@@ -278,6 +293,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='action', required=True)
     commands.add_parser('create').add_argument('model')
+    commands.add_parser('create-silver-sacd')
     delivery = commands.add_parser('deliver')
     delivery.add_argument('profile', type=Path)
     delivery.add_argument('source', type=Path)
@@ -286,7 +302,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         manager = RadarWatch()
-        if args.action == 'create':
+        if args.action == 'create-silver-sacd':
+            print(manager.create_category())
+        elif args.action == 'create':
             print(manager.create(args.model))
         elif args.action == 'deliver':
             print(manager.deliver(args.profile.absolute(), args.source))

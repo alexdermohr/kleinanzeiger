@@ -3,6 +3,15 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.4.0] - 2026-11-17
+
+### Neu
+- Genau eine vordefinierte Käufer-Radar-Kategorie „SACD-Player silber“ für Deutschland ohne Preislimit: KDE-Knopf „Silberne SACD-Player beobachten“ und CLI `kleinanzeiger-radar create-silver-sacd`. Idempotente, getrennte Profilidentität; Start, Status und Stop bleiben bewusst gewählt.
+- Konservative Mailtitelprüfung auf SACD-Disc-Player und explizite Silberfarbe; ND8006, Defektanzeigen, Zubehör und unklare Angaben werden diagnostiziert. Foto und Funktion bleiben selbst zu prüfen.
+- Neue passende Geräte und echte Preisänderungen erscheinen einmalig in HTML/JSON und optional als Desktop-Hinweis. Kategorie ist immer „nicht bewertbar“ ohne Modellpreisvergleich; `hits=0`, zusätzlich `candidate_events` und `reference_type=category_unpriced`. Bestehende exakte Modellprofile behalten ihre Bewertung.
+- Offizielle Suchadresse und Erklärung zum nativen Suchauftrag im eigenen Konto. Kein Plattform- oder Mailboxzugriff, keine Aktivierung bei Erstellung. Strenger Ein-Angebot-Parser; echte Suchmailvorlagen und produktiver EML-Zulauf bleiben unverifiziert.
+- Windows-Release-, ZIP-, Manifest- und Installationsreferenzen konsistent auf 1.4.0 aktualisiert.
+
 ## [1.3.0] - 2026-11-17
 
 ### Neu

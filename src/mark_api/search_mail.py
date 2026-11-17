@@ -63,7 +63,10 @@ def body_row(text, kind):
     return dict(id=match[1], title=title, price_eur=str(amount), url=url)
 
 
-def load_search_mail(source: Path, model: str, *, max_age_hours=48, now=None):
+def load_search_mail(source: Path, model: str, *, max_age_hours=48, now=None, category=None):
+    from .silver_sacd import CATEGORY, rejection
+    if category is not None and category != CATEGORY:
+        raise DealInputError('Unbekannte Suchkategorie')
     if type(max_age_hours) is not int or not 1 <= max_age_hours <= 168:
         raise DealInputError('max_age_hours muss 1–168 sein')
     now = now or datetime.now(timezone.utc)
@@ -137,7 +140,11 @@ def load_search_mail(source: Path, model: str, *, max_age_hours=48, now=None):
             if not candidates or any(row != candidates[0] for row in candidates):
                 raise DealInputError('Multipart-Zuordnung widersprüchlich oder leer')
             row = candidates[0]
-            if not matches_model(row['title'], model):
+            if category:
+                reason = rejection(row['title'])
+                if reason:
+                    raise DealInputError(reason)
+            elif not matches_model(row['title'], model):
                 raise DealInputError('Keine eindeutige passende Produktgruppe/Modellzuordnung')
             row.update(observed_at=observed.isoformat(), source='Lokale Suchmail SHA256:' + digest)
             # Validate field limits and price/url semantics before leaving the

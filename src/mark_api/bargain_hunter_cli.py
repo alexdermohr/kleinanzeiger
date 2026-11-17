@@ -14,7 +14,7 @@ from pathlib import Path
 from .bargain_hunter import DealInputError, assess_offers, load_offers, search_url
 
 
-def render_report(model: str, offers: list[dict], *, generated_at: str) -> str:
+def render_report(model: str, offers: list[dict], *, generated_at: str, category=False) -> str:
     esc = lambda text: html.escape(str(text), quote=True)
     count = sum(r["classification"] == "auffällig günstig" for r in offers)
     rows = []
@@ -30,6 +30,15 @@ def render_report(model: str, offers: list[dict], *, generated_at: str) -> str:
         total = (r["comparison_price_eur"] + " €"
                  if r["comparison_price_eur"] is not None else "Unbekannt")
         label = "Treffer prüfen" if status == "auffällig günstig" else "Angebot öffnen"
+        if category:
+            rows.append(
+                "<article class='offer'><header><span class='classification'>nicht bewertbar</span>"
+                f"<h2>{esc(r['title'])}</h2></header><p>Angebotspreis: {esc(price)} · Versand: {esc(shipping)}</p>"
+                f"<p>{esc(r['reason'])}</p><p>{esc('; '.join(r['notes']))}</p>"
+                f"<p>Quelle: {esc(r['source'])} · Beobachtet: {esc(r['observed_at'])} · ID: {esc(r['id'])}</p>"
+                f"<a href='{esc(r['url'])}' target='_blank' rel='noopener noreferrer'>Originalanzeige prüfen</a></article>"
+            )
+            continue
         rows.append(
             "<article class='offer'><header>"
             f"<span class='classification'>{esc(status)}</span>"
@@ -51,6 +60,10 @@ def render_report(model: str, offers: list[dict], *, generated_at: str) -> str:
         "<p class='empty'>Keine Angebote passen eindeutig auf das gesuchte Modell. "
         "Modellbezeichnung oder Eingabedaten prüfen.</p>"
     )
+    heading = (f"{len(offers)} passende Geräteänderungen; keine Modellpreisbewertung." if category else
+               f"{len(offers)} passende Angebote, davon {count} auffällig günstig.")
+    if category and not offers:
+        body = "<p>Keine neuen passenden Geräte oder Preisänderungen.</p>"
     return f"""<!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kleinanzeiger – Schnäppchenjäger</title>
@@ -64,7 +77,7 @@ def render_report(model: str, offers: list[dict], *, generated_at: str) -> str:
 .empty{{padding:30px}}@media(max-width:600px){{main{{padding:12px}}}}
 </style></head><body><main><h1>Kleinanzeiger · Schnäppchenjäger</h1>
 <section class="info"><strong>{esc(model)}</strong>
-<p>{len(offers)} passende Angebote, davon {count} auffällig günstig.</p>
+<p>{heading}</p>
 <p><small>Erstellt: {esc(generated_at)}. Dies ist eine Auswertung von beobachteten <b>Angebotspreisen</b>,
 keine bestätigten Verkaufspreise und keine Garantie für Echtheit, Zustand oder Ersparnis.
 Bei fehlenden Vergleichsdaten gibt es ausdrücklich keine Schnäppchenwertung.</small></p></section>

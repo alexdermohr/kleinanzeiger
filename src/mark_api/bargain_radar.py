@@ -41,6 +41,10 @@ def run(config_path: Path) -> dict:
     model = config.get('model')
     if not isinstance(model, str) or not model.strip():
         raise DealInputError('Exaktes model im Profil erforderlich')
+    from .silver_sacd import CATEGORY, assess, rejection
+    category = config.get('category')
+    if category is not None and (category != CATEGORY or config.get('input_type') != 'eml'):
+        raise DealInputError('Kategorie benötigt EML und die vordefinierte Suchkategorie')
     base = config_path.resolve().parent
 
     def path(key):
@@ -67,7 +71,7 @@ def run(config_path: Path) -> dict:
         if json_report is None:
             raise DealInputError('Suchmail benötigt json_report')
         mail_rows, diagnostics = load_search_mail(source, model,
-            max_age_hours=config.get('max_age_hours', 48))
+            max_age_hours=config.get('max_age_hours', 48), category=category)
         files = []
     if not files and not mail_mode:
         raise DealInputError('Keine CSV-/JSON-Eingaben gefunden')
@@ -109,7 +113,8 @@ def run(config_path: Path) -> dict:
                 raise DealInputError('Zu viele Inserate im Eingang')
     min_peers = config.get('min_peers', 4)
     threshold = Decimal(str(config.get('discount_pct', 30))) / 100
-    assess_offers([], model, min_peers=min_peers, discount_threshold=threshold)
+    if not category:
+        assess_offers([], model, min_peers=min_peers, discount_threshold=threshold)
     # Existing databases must carry our identity before any schema mutation.
     try:
         with history.open('xb'):
@@ -129,6 +134,8 @@ def run(config_path: Path) -> dict:
             db.execute('BEGIN IMMEDIATE')
         db.execute('CREATE TABLE IF NOT EXISTS radar_profile (profile TEXT NOT NULL)')
         profile = json.dumps([model, config.get('min_peers', 4), str(config.get('discount_pct', 30))])
+        if category:
+            profile = json.dumps(['category', category, model])
         previous_profile = db.execute('SELECT profile FROM radar_profile').fetchone()
         if previous_profile and previous_profile[0] != profile:
             raise DealInputError('Geändertes Modell/Bewertungsprofil benötigt eigene Historie')
@@ -136,7 +143,7 @@ def run(config_path: Path) -> dict:
             db.execute('INSERT INTO radar_profile VALUES (?)', (profile,))
         db.execute('CREATE TABLE IF NOT EXISTS radar_current (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS radar_runs (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)')
-        if mail_mode:
+        if mail_mode and not category:
             # Incremental EML delivery may bring a cheap offer before there
             # are enough peers. Persist the last alerted asking-price version,
             # not a speculative estimate or a repeated arrival timestamp.
@@ -146,7 +153,7 @@ def run(config_path: Path) -> dict:
         current_offers = []
         for uid, offer in offers.items():
             # Profile-isolated history: unrelated or defective listings must not consume IDs.
-            if not matches_model(offer.title, model) or _DAMAGED.search(offer.condition):
+            if (rejection(offer.title) if category else not matches_model(offer.title, model)) or _DAMAGED.search(offer.condition):
                 continue
             current = json.loads(json.dumps(asdict(offer), default=str))
             payload = json.dumps(current, sort_keys=True)
@@ -168,7 +175,7 @@ def run(config_path: Path) -> dict:
             current_offers.append(offer)
             if stored is None or stored[0] != payload:
                 db.execute('INSERT OR REPLACE INTO radar_current VALUES (?, ?)', (uid, payload))
-        evaluated = assess_offers(current_offers, model, min_peers=min_peers,
+        evaluated = assess(current_offers) if category else assess_offers(current_offers, model, min_peers=min_peers,
                                   discount_threshold=threshold)
         events = []
         for item in evaluated:
@@ -203,16 +210,21 @@ def run(config_path: Path) -> dict:
                       price_changes=sum(v[0] == 'price_changed' for v in changed.values()),
                       hits=sum(e['classification'] == 'auffällig günstig' for e in events),
                       offers=events, diagnostics=diagnostics)
+        if category:
+            result.update(reference_type='category_unpriced', candidate_events=len(events))
         db.execute('INSERT INTO radar_runs(payload) VALUES (?)',
                    (json.dumps(result, ensure_ascii=False),))
         # Successful run results remain available in the isolated history.
         display = [dict(e, notes=[f"Radar: {e['event']}; vorher Angebot/Versand: "
                                  f"{e['previous_price_eur']}/{e['previous_shipping_eur']} EUR", *e['notes']])
                    for e in events]
-        page = render_report(model, display, generated_at=generated)
+        page = render_report(model, display, generated_at=generated, category=bool(category))
         summary = (f"<p>Radar: {result['new']} neue Inserate, {result['price_changes']} Preisänderungen, "
                    f"{result['hits']} neue auffällig günstige Treffer. Nur Änderungen dieses Laufs; "
                    "Vergleich aus aktuellen Eingabedateien. Keine Änderungen: keine neuen Treffer.</p>")
+        if category:
+            summary = (f"<p>Kategorie: {len(events)} neue passende silberne SACD-Player / Preisänderungen. "
+                       "Keine Modellpreisbewertung. Nur lokale EML-Eingänge.</p>")
         if diagnostics:
             page = page.replace('</main>', '<section class="info"><h2>Importdiagnostik</h2><pre>' +
                 html.escape(json.dumps(diagnostics, ensure_ascii=False, indent=2)) + '</pre></section></main>')
@@ -224,12 +236,13 @@ def run(config_path: Path) -> dict:
             atomic_report(json_report, json.dumps(result, ensure_ascii=False, indent=2))
         atomic_report(report, page)
     # History commits before delivery: no repeat spam; a crash can lose delivery.
-    if mail_mode and config.get('notify', False) and result['hits']:
+    if mail_mode and config.get('notify', False) and (result.get('candidate_events', 0) if category else result['hits']):
         executable = shutil.which('notify-send')
         if executable:
             try:
                 subprocess.run([executable, '--', 'Kleinanzeiger',
-                    f"{result['hits']} neue auffällig günstige Inserate. Bericht: {report}"],
+                    (f"{result['candidate_events']} neue passende silberne SACD-Player / Preisänderungen. Bericht: {report}"
+                     if category else f"{result['hits']} neue auffällig günstige Inserate. Bericht: {report}")],
                     check=True, timeout=10, capture_output=True)
             except (OSError, subprocess.SubprocessError):
                 pass  # Reports/history remain authoritative, never retry delivery.

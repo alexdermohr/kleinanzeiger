@@ -177,11 +177,18 @@ class Center:
         from mark_api.radar_watch import RadarWatch
         manager = RadarWatch()
         try:
-            if choice == "new":
-                model = self.dialog("--inputbox", "Exakte Modellbezeichnung (keine allgemeine Produktkategorie):")
+            if choice in ("new", "silver-sacd"):
+                model = "SACD-Player silber" if choice == "silver-sacd" else self.dialog("--inputbox", "Exakte Modellbezeichnung (keine allgemeine Produktkategorie):")
                 if model is None:
                     return
-                profile = manager.create(model)
+                profile = manager.create_category() if choice == "silver-sacd" else manager.create(model)
+                if choice == "silver-sacd":
+                    from mark_api.silver_sacd import SEARCH_URL
+                    self.text("Silberne Player für echte SACD-Discs, Deutschland, ohne Preislimit.\n"
+                              "Keine Modellpreisbewertung; Foto und Funktion in der Originalanzeige prüfen.\n"
+                              "Kleinanzeigen-Suche öffnen → Suchauftrag speichern (eigenes Konto erforderlich).\n"
+                              f"Offizielle Suchadresse: {SEARCH_URL}\n"
+                              "Ohne eigene echte EML-Zustellung keine laufende Marktbeobachtung.")
                 self.text(f"Profil: {profile}\nEingangsordner: {profile.parent / 'suchmails'}\n\n"
                           "Kleinanzeigen-Suche auf Website als Suchauftrag speichern und eigene EMLs "
                           "atomar in diesen Ordner zustellen.\n"
@@ -230,9 +237,10 @@ class Center:
                              "file", "Lokale CSV/JSON auswerten", "search", "Manuell im Browser suchen",
                              "radar", "Suchmail-/Datei-Radar aus Profil auswerten",
                              "new", "Neues Suchprofil einrichten",
+                             "silver-sacd", "Silberne SACD-Player beobachten",
                              "watch", "Monitoring: Status / Starten / Stoppen",
                              "import", "Gespeicherte E-Mail (.eml) in Suchprofil importieren")
-        if choice in ("new", "watch", "import"):
+        if choice in ("new", "silver-sacd", "watch", "import"):
             self.radar_monitoring(choice)
             return
         if choice not in ("file", "search", "radar"):
@@ -245,6 +253,10 @@ class Center:
             counts = (result.get("new"), result.get("price_changes"), result.get("hits"))
             if any(type(n) is not int or n < 0 for n in counts):
                 raise ValueError("invalid radar summary")
+            if result.get("reference_type") == "category_unpriced":
+                self.message(f"Kategorie geprüft: {result['candidate_events']} passende Geräteänderungen. "
+                             "Keine Modellpreisbewertung. Details im Radar-Bericht; nur lokale Eingaben.")
+                return
             self.message(f"Radar geprüft: {counts[0]} neue Inserate, {counts[1]} Preisänderungen, "
                          f"{counts[2]} auffällig günstige Treffer. Bericht und Details: im Radar-Profil. "
                          "Nur lokale Eingaben, keine Marktplatzabfrage.")

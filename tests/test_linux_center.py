@@ -259,6 +259,29 @@ class CenterTests(unittest.TestCase):
             self.center.bargains()
         watch.assert_called_once_with(profile, "start")
 
+    def test_silver_sacd_button_idempotent_opt_in_and_explanation(self):
+        from mark_api.radar_watch import RadarWatch
+        from mark_api.silver_sacd import SEARCH_URL
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        for consent in (None, ""):
+            with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+                self.center, "dialog", side_effect=["silver-sacd", consent]
+            ) as dialog, patch.object(self.center, "text") as text, patch.object(
+                self.center, "message"
+            ), patch.object(manager, "watch", return_value="Monitoring aktiv") as watch:
+                self.center.bargains()
+            self.assertIn("Silberne SACD-Player beobachten", dialog.call_args_list[0].args)
+            explanation = "\n".join(c.args[0] for c in text.call_args_list)
+            self.assertIn(SEARCH_URL, explanation)
+            self.assertIn("Suchauftrag speichern", explanation)
+            self.assertIn("echte SACD-Discs", explanation)
+            self.assertIn("Eingangsordner", explanation)
+            if consent is None:
+                watch.assert_not_called()
+            else:
+                watch.assert_called_once_with(manager.create_category(), "start")
+        self.assertEqual(len(manager.profiles()), 1)
+
     def test_watch_status_stop_and_invalid_prompt(self):
         from mark_api.radar_watch import RadarWatch
         manager = RadarWatch(self.root / "radars", self.root / "units")
