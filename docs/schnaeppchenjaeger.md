@@ -331,3 +331,53 @@ Ohne eigene gespeicherte Suche und EML-Zulauf gibt es **keine echten Alerts**. K
 Netzwerkzugriff, Scraping, Mailbox-Login, API-Schlüssel oder kostenpflichtiger Dienst.
 Echte Kleinanzeigen-Mailtemplates bleiben unbestätigt. Die oben dokumentierten
 Parsergrenzen und Mindestvergleichszahlen gelten unverändert.
+
+## Silberne SACD-Player (ab 1.4.0)
+
+Im KDE-Menü **Schnäppchenjäger → Silberne SACD-Player beobachten** oder per
+`kleinanzeiger-radar create-silver-sacd` einmalig das vordefinierte Profil
+**SACD-Player silber** anlegen. Deutschland, ohne Preislimit, ohne bestimmte
+Marke oder exaktes Modell. Wiederholen liefert denselben Profilpfad und erhält
+alle Dateien und die Historie. Ein exaktes Modellprofil mit demselben Label
+bleibt durch eine andere SHA-256-Identität getrennt.
+
+[Offizielle Suche: SACD Player silber](https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=SACD+Player+silber)
+öffnen → **Suchauftrag speichern**. Dies erfordert die echte Interaktion im
+eigenen Kleinanzeigen-Konto. Die native Funktion und Benachrichtigungen sind in
+[der offiziellen Hilfe](https://hilfe.kleinanzeigen.de/hc/de/articles/17102975598492)
+beschrieben; E-Mail-Mitteilungen verwaltet man unter
+[Suchaufträge](https://hilfe.kleinanzeigen.de/hc/de/articles/17105076741788).
+Die Anwendung meldet sich weder bei Kleinanzeigen noch bei einer Mailbox an.
+
+Der Dialog und das Profil nennen den privaten Inboxpfad `suchmails` neben
+`profil.json`. Eigene exportierte EMLs mit
+`kleinanzeiger-radar deliver /absoluter/pfad/profil.json /pfad/export.eml`
+atomar zustellen. Optional **Monitoring → Starten / Status / Stoppen** nutzen
+oder `kleinanzeiger-radar start|status|stop /absoluter/pfad/profil.json`
+(jeweils genau eine Aktion). Erstellung allein startet nichts. Linux nutzt das
+bestehende systemd.path-/oneshot-Paar ohne Polling. Stop erhält Dateien und DB.
+
+Die zusätzliche Titelprüfung verlangt einen plausiblen SACD-Player und explizit
+`silber…` oder `silver…`. Fehlende oder widersprüchliche Farbangaben erzeugen
+Diagnosen. Keine Hersteller-Whitelist und keine Bildfarberkennung. Tonträger,
+Zubehör, Lautsprecher und Defektanzeigen werden ausgeschlossen. ND8006 ist ein
+bewusster Negativfall: DSD-Dateiwiedergabe bedeutet keine SACD-Disc-Wiedergabe
+([Marantz-Datenblatt](https://www.marantz.com/on/demandware.static/-/Library-Sites-marantz_northamerica_shared/default/dw62bb25a8/archive-downloads/nd8006_product_info_sheet_en01.pdf)).
+Text ist kein Funktions- oder Fotobeweis: Originalanzeige selbst prüfen.
+
+Kategorieangebote erhalten immer **nicht bewertbar**, keinen Peer-Median und
+keinen Rabatt. `reference_type=category_unpriced`, `candidate_events` zählt neue
+Inserate und tatsächliche Preisänderungen, `hits` bleibt 0. HTML/JSON und die
+bestehende SQLite-Historie führen Änderungen einmalig; Wiederholungen erzeugen
+keinen neuen Hinweis. `notify=true` erlaubt einen optionalen KDE-Hinweis auf
+passende Geräte, ohne Ersparnisversprechen. Bei später erneut geändertem Preis
+gibt es ein neues Ereignis. Exakte Modellprofile behalten ihre Preisbewertung.
+
+Der Parser bleibt streng bei **einem Angebot je Mail** in den oben beschriebenen
+Layouts. Aktueller Date-/From-Header und direkter Inseratlink sind erforderlich;
+Header beweisen keine Echtheit, Tracking wird nicht aufgelöst. Echte offizielle
+Suchmailvorlagen sind noch nicht verifiziert. Ohne echten EML-Zulauf besteht
+keine laufende Marktbeobachtung; ein Mailboximport hat nicht stattgefunden.
+Nach Review und offizieller Veröffentlichung kann der Operator das Profil
+anlegen und optional den lokalen Watcher starten. Erst nach eigener gespeicherter
+Suche und eigenem EML-Transport lässt sich ein realer Alert prüfen.
