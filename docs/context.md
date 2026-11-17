@@ -16,7 +16,7 @@ Die Anzeige enthielt denselben Inhalt zusätzlich auf Englisch und Russisch.
 
 ## Erstkontakt
 
-Die technische Ansprechperson antwortete sinngemäß, dass sie keine professionelle API-Programmiererin sei, sich aber seit etwa zwei Jahren intensiv mit Vibe-Coding beschäftige und zuversichtlich sei, helfen zu können. Als Vergütungsmodell schlug sie sinngemäß vor: Problem zuerst lösen, danach bewertet der damalige Auftraggeber den Wert der Lösung.
+Die technische Ansprechperson antwortete sinngemäß, dass API-Programmierung nicht ihr Beruf sei, sich aber seit etwa zwei Jahren intensiv mit Vibe-Coding beschäftige und zuversichtlich sei, helfen zu können. Als Vergütungsmodell schlug sie sinngemäß vor: Problem zuerst lösen, danach bewertet der damalige Auftraggeber den Wert der Lösung.
 
 Der damalige Auftraggeber schlug daraufhin ein Telefonat vor. Das Gespräch fand am 23.09.2026 statt.
 
