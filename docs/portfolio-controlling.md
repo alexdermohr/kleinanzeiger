@@ -79,7 +79,6 @@ P4 ist **erst teilweise erledigt**: belastbare Live-Verkaufs-
 und Kontaktmetriken, experimentelle Titel-/Preisvorschläge,
 qualifizierte Kontakte, kontrollierte A/B-Tests und
 automatisch gespeicherte oder versendete Wochenberichte benötigen
-weitere Datenquellen und Prüfungen. Eine echte Kundenkonto-Abnahme
-bleibt offen; native Windows-CI, Release und tatsächlicher
-Kundeneinsatz sind getrennte Nachweise. Der Vaterrechner
-fotolabor bleibt unangetastet.
+weitere Datenquellen und Prüfungen. Reale Benutzertests mit einem eigenen Konto
+bleiben erforderlich; native Windows-CI, Release und tatsächlicher
+Benutzereinsatz sind getrennte Nachweise.

@@ -26,7 +26,7 @@ Diese Aufgabentrennung ist keine Zusicherung, dass eine bestimmte externe Nutzun
 
 ## 4. Dokumentation und Abnahme
 
-Projektberichte unterscheiden klar: **implementiert**, **synthetisch geprüft**, **in einen Release integriert** und **auf dem realen Kunden-PC sowie dem tatsächlichen Konto abgenommen**. Eine externe Genehmigung wird nicht als Voraussetzung für die ersten drei Stufen dargestellt. Die vierte Stufe kann nur durch tatsächlich durchgeführte Abnahme belegt werden.
+Projektberichte unterscheiden klar: **implementiert**, **synthetisch geprüft**, **in einen Release integriert** und **durch reale Benutzertests auf unterstützten Plattformen mit einem eigenen Konto abgenommen**. Eine externe Genehmigung wird nicht als Voraussetzung für die ersten drei Stufen dargestellt. Die vierte Stufe kann nur durch tatsächlich durchgeführte Abnahme belegt werden.
 
 Historische Entscheidungen und technische Befunde werden nicht nachträglich gelöscht oder umgedeutet. Soweit ältere Arbeitsaufträge eine *allgemeine* Plattformgenehmigung als pauschalen Entwicklungsstopp formulieren, gilt die vorstehende Aufgabenverteilung zusammen mit D-028/D-029. Konkrete ungeklärte Zugangs-, Sicherheitsschutz- und Betriebsfragen bleiben getrennt nachvollziehbar.
 

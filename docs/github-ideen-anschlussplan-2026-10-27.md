@@ -37,8 +37,7 @@ Dies ist ein **Plan**, keine Behauptung bereits ausgelieferter Features.
 - **Zielbild:** ein zentrales Windows-Produkt für 100 bis 10.000
   eigene Anzeigen mit klarer Vorschau, Fortschritt, überprüfbaren
   Änderungen und bedienbaren Fehlerzuständen.
-- Der Rechner `fotolabor` ist **nicht** der Kundenrechner und bleibt
-  unverändert. Keine stillen Plattformaktionen oder Kosten.
+- Keine stillen Plattformaktionen oder Kosten.
 
 ## 2. Konkrete Maßnahmen in Nutzenreihenfolge
 
@@ -89,7 +88,7 @@ passende synthetische Negativ- und Lasttests, eindeutige
 Quelldaten-/Kosten-/Aktionsnachweise, aktualisierte Kundenhilfe,
 native Windows-Prüfung auf dem exakt geänderten Lieferstand.
 Status ausdrücklich unterscheiden: geplant → implementiert →
-getestet → integriert → veröffentlicht → am echten Kunden-PC abgenommen.
+getestet → integriert → veröffentlicht → durch echte Benutzertests abgenommen.
 Die 10.000 synthetischen Fälle allein bestätigen weder den realen
 Kundenbestand noch produktive Plattformberechtigungen.
 

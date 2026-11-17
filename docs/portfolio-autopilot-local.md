@@ -56,7 +56,7 @@ die separaten bestehenden Prüf- und Bestätigungsschritte im jeweiligen Bereich
 Für echte automatisierte Plattform-Reads/-Writes fehlen weiterhin die
 externe Berechtigungsfreigabe (#111) sowie Teile des unabhängigen
 Recovery-/SQLite-Sicherheitsnachweises (#76); die reale Konto- und Windows-
-Endabnahme auf Marks Rechner bleibt offen. Es wurden ausschließlich lokale
+Endabnahme durch echte Benutzertests bleibt erforderlich. Es wurden ausschließlich lokale
 synthetische Tests durchgeführt, keine kostenpflichtigen KI-Aufrufe oder
 Kleinanzeigen-Aktionen.
 

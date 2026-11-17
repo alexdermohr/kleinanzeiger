@@ -15,7 +15,7 @@ Vor dem Start müssen ausdrücklich vorhanden sein:
 - bekannte Anzeigen-ID,
 - ein kontrollierter Gegenkontakt über ein eigenständiges legitimes Nutzerkonto einer anderen berechtigten Person für genau eine Testnachricht,
 - ein separates Browserprofil/Sessionverzeichnis,
-- keine produktiven Mark-Anzeigen im Testscope.
+- keine produktiven Benutzeranzeigen im Testscope.
 
 Secrets bleiben ausschließlich lokal außerhalb von Git, Issues und Testprotokollen.
 

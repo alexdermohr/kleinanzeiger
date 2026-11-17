@@ -4,7 +4,6 @@
 KI-Aufträge für bestätigte veröffentlichte Eigenanzeigen sind im Windows-Paket
 v0.1.18 enthalten. Erweiterungen dieses Arbeitszweigs erfordern nach dem Merge
 eine weitere versionierte Ausgabe und sind noch nicht in v0.1.18.
-Der Rechner fotolabor bleibt unverändert.
 
 ## Vorhandene Funktionen
 
@@ -98,8 +97,7 @@ einen unsicheren Vorschlag und erzeugt keine weitere KI-Anfrage.
   UNKNOWN-Gates fertigstellen. P3 Nachrichten/Verkäufe, P4
   Portfoliooptimierung und P5 regelbasierte Automatismen sind offen.
 - Keine realen Anzeigen und keine kostenpflichtigen Anbieteraufrufe
-  sind Teil der synthetischen Tests. Die native Abnahme auf dem
-  tatsächlichen Kunden-Windows-PC steht aus, nicht auf fotolabor.
+  sind Teil der synthetischen Tests. Die native Windows-Abnahme durch echte Benutzertests bleibt erforderlich.
 # KI-Optimierung bestehender eigener Anzeigen
 
 Neben lokalen CSV-Entwürfen unterstützt das Dashboard nun eine getrennte,
@@ -171,9 +169,8 @@ Seite vollständig durchlaufen werden. Providerkosten sind konservative lokale
 Schätzwerte, keine garantierte
 Rechnungsobergrenze. Titel (65 Zeichen) und Beschreibung (4.000 Zeichen) werden
 vor Speicherung begrenzt; Modellantworten werden strikt als Objekt mit genau
-`title` und `description` akzeptiert. Die native Abnahme auf dem tatsächlichen
-Kunden-Windows-PC bleibt zusätzlich zu den automatisierten Browserlogik- und
-HTTP-Tests erforderlich.
+`title` und `description` akzeptiert. Die native Windows-Abnahme durch echte Benutzertests bleibt zusätzlich zu den automatisierten
+Browserlogik- und HTTP-Tests erforderlich.
 
 ## Unterbrochene bestehende Anzeigen-KI-Aufträge nach Neustart klären
 
@@ -208,7 +205,7 @@ inflight oder unknown ein einklappbarer Bereich
 
 ## Zeitlich verteilte, budgetierte KI-Prüfung bestehender Eigenanzeigen
 
-Im laufenden Auftrag kann Mark bei **Budgetierten Autopilot freigeben** neben der
+Im laufenden Auftrag können Anwender bei **Budgetierten Autopilot freigeben** neben der
 maximalen Zahl kostenpflichtiger KI-Aufrufe einen Mindestabstand wählen:
 sofort, 1, 5 oder 15 Minuten, 1 oder 24 Stunden. Dieser Abstand wird für die
 unveränderte Freigabe und für Neustarts in SQLite gespeichert. Die erste Anfrage
