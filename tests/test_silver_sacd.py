@@ -54,6 +54,30 @@ class SilverSacdTests(unittest.TestCase):
         self.assertEqual(len(rows), 7)
         self.assertFalse(diagnostics)
 
+    def test_real_marketplace_title_forms_without_cross_model_pricing(self):
+        # Current public search-title shapes; they are not proof of
+        # actual playback, seller integrity, image colour or live availability.
+        accepted = [
+            'T+A T + A SADV 1245 R High End CD/SACD-Player in silber',
+            'Denon DCD 1700 ne SACD Silber',
+            'Denon DCD-3000NE SACD-Player Silber - B-Ware!',
+            'SACD-Player Yamaha CDS-3000 in silber.',
+            'SACD-Player Yamaha CDS-3000 mit CDs in silber',
+            'Marantz SA-15S2 SACD-Player silber/gold wie neu, OVP',
+            'Denon DVD-3910 - CD SACD Player - Fast High-End - Silber -',
+            'ONKYO DV-SP 503 E - hochwertiger DVD/CD/SACD Spieler - SILBER',
+        ]
+        for title in accepted:
+            with self.subTest(title=title):
+                self.assertIsNone(rejection(title))
+        for title in (
+            'Marantz ND8006 - CD- und Netzwerkplayer - SACD-Qualität - Silber',
+            'DCD-800 NE CD Player SACD-Qualität silber',
+            'Sony DSD Streaming DAC ohne SACD Player silber',
+        ):
+            with self.subTest(rejected=title):
+                self.assertIsNotNone(rejection(title))
+
     def test_negative_titles(self):
         for title in ['Marantz ND8006 SACD Player silber', 'Marantz ND-8006 silber Qualität SACD Player',
                       'CD Player silber', 'DSD Stream-only SACD Player silber',
