@@ -110,6 +110,24 @@ class RadarWatch:
                 safe(path)
         return config
 
+    def profiles(self) -> list[tuple[Path, str]]:
+        if not self.data.exists():
+            return []
+        safe(self.data, directory=True)
+        found = []
+        for directory in self.data.iterdir():
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            profile = directory / 'profil.json'
+            try:
+                config = self.load(profile)
+            except (ValueError, OSError):
+                continue
+            found.append((profile, config['model']))
+            if len(found) > 100:
+                raise ValueError('Mehr als 100 Suchprofile: Profilordner prüfen.')
+        return sorted(found, key=lambda entry: (entry[1].casefold(), str(entry[0])))
+
     def deliver(self, profile: Path, source: Path) -> Path:
         self.load(profile)
         # Export anywhere locally; never follow a symlink or read devices/FIFOs.

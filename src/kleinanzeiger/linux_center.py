@@ -194,10 +194,28 @@ class Center:
                     return
                 self.message(manager.watch(profile, "start"))
             else:
-                selected = self.dialog("--getopenfilename", str(manager.data), "*.json | Eingerichtetes Radar-Profil")
-                if not selected:
+                profiles = manager.profiles()
+                if not profiles:
+                    self.message("Noch keine Suchprofile vorhanden. Zuerst Neues Suchprofil einrichten wählen.")
                     return
-                profile = Path(selected).absolute()
+                entries = []
+                for index, (_profile, model) in enumerate(profiles):
+                    entries.extend((str(index), model))
+                selected = self.dialog("--menu", "Suchprofil nach Modell auswählen:", *entries)
+                if selected is None:
+                    return
+                if not selected.isdecimal() or not 0 <= int(selected) < len(profiles):
+                    raise ValueError("Ungültiges Suchprofil.")
+                profile = profiles[int(selected)][0]
+                if choice == "import":
+                    source = self.dialog("--getopenfilename", str(Path.home()), "*.eml | Gespeicherte E-Mail")
+                    if not source:
+                        return
+                    manager.deliver(profile, Path(source))
+                    self.message("EML-Datei atomar übernommen. Bei aktivem Monitoring wird sie automatisch "
+                                 "geprüft; sonst Suchmail-Radar aus Profil auswerten. "
+                                 "Unbekannte Mailformate erscheinen als Importdiagnose.")
+                    return
                 status = manager.watch(profile, "status")
                 action = self.dialog("--menu", status, "status", "Status anzeigen", "start", "Monitoring starten",
                                      "stop", "Monitoring stoppen")
@@ -212,8 +230,9 @@ class Center:
                              "file", "Lokale CSV/JSON auswerten", "search", "Manuell im Browser suchen",
                              "radar", "Suchmail-/Datei-Radar aus Profil auswerten",
                              "new", "Neues Suchprofil einrichten",
-                             "watch", "Monitoring: Status / Starten / Stoppen")
-        if choice in ("new", "watch"):
+                             "watch", "Monitoring: Status / Starten / Stoppen",
+                             "import", "Gespeicherte E-Mail (.eml) in Suchprofil importieren")
+        if choice in ("new", "watch", "import"):
             self.radar_monitoring(choice)
             return
         if choice not in ("file", "search", "radar"):

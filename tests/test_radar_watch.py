@@ -28,6 +28,16 @@ class RadarWatchTests(unittest.TestCase):
         self.manager = mod.RadarWatch(self.root / 'data', self.root / 'units')
         self.profile = self.manager.create('Testmodell 42')
 
+    def test_model_profiles_sorted_and_invalid_ignored(self):
+        self.assertEqual(self.manager.profiles(), [(self.profile, "Testmodell 42")])
+        second = self.manager.create("Anderes Modell 13")
+        self.assertEqual(self.manager.profiles(), [(second, "Anderes Modell 13"),
+                                                  (self.profile, "Testmodell 42")])
+        untrusted = self.manager.data / "unexpected"
+        untrusted.mkdir()
+        (untrusted / "profil.json").write_text('{"model":"Hacked"}')
+        self.assertEqual(len(self.manager.profiles()), 2)
+
     def test_create_existing_separate_and_private(self):
         before = self.profile.read_bytes()
         self.assertEqual(self.manager.create(' Testmodell 42 '), self.profile)

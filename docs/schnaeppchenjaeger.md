@@ -250,6 +250,8 @@ python -m unittest discover -s tests -p 'test_search_mail.py'
 
 Unter Windows 11 steht der Profilaufruf im Schnäppchenjäger-Fenster über die Schaltfläche Radar-Profil auswählen und auswerten bereit. Nach erfolgreicher Analyse öffnet sich der lokale HTML-Bericht. Auch dort ist dies nur ein lokaler Import, keine automatische Marktbeobachtung.
 
+In KDE werden Suchprofile beim Monitoring nach Modell und nicht nach Hash-Ordnern ausgewählt. Unter Schnäppchenjäger → Gespeicherte E-Mail (.eml) in Suchprofil importieren kann eine eigene exportierte Nachricht direkt per Dateidialog atomar in das Profil übernommen werden; die exportierte Originaldatei bleibt unverändert. Diese Funktion ersetzt keine Mailkontoeinrichtung.
+
 Unter Linux/KDE steht derselbe Profilaufruf zusätzlich unter Schnäppchenjäger → Suchmail-/Datei-Radar zur Verfügung. Die Kontrollzentrale zeigt neue Einträge, Preisänderungen und günstige Funde an, ohne Rohinhalte in Dialoge zu übernehmen.
 
 
