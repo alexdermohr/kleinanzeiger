@@ -232,8 +232,23 @@ def run(config_path: Path) -> dict:
                    f"{result['hits']} neue auffällig günstige Treffer. Nur Änderungen dieses Laufs; "
                    "Vergleich aus aktuellen Eingabedateien. Keine Änderungen: keine neuen Treffer.</p>")
         if category:
-            display = [dict(e, notes=['Historisch beobachtet; Verfügbarkeit nicht erneut geprüft.', *e['notes']])
-                       for e in known_candidates]
+            # Persistent candidate overview must not erase the current run's
+            # actual new/price-change explanation from the visible report.
+            event_by_id = {event['id']: event for event in events}
+            display = []
+            for candidate in known_candidates:
+                notes = ['Historisch beobachtet; Verfügbarkeit nicht erneut geprüft.']
+                change = event_by_id.get(candidate['id'])
+                if change and change['event'] == 'new':
+                    notes.insert(0, 'Im letzten Lauf als neuer Kandidat erkannt.')
+                elif change and change['event'] == 'price_changed':
+                    old_price = change['previous_price_eur'] or 'unbekannt'
+                    old_shipping = change['previous_shipping_eur'] or 'unbekannt'
+                    new_shipping = candidate['shipping_eur'] or 'unbekannt'
+                    notes.insert(0, f"Preis-/Versandänderung: zuvor Preis {old_price} EUR, "
+                                    f"Versand {old_shipping} EUR; jetzt Preis {candidate['price_eur']} EUR, "
+                                    f"Versand {new_shipping} EUR.")
+                display.append(dict(candidate, notes=[*notes, *candidate['notes']]))
             page = render_report(model, display, generated_at=generated, category=True)
             summary = (f"<p>Kategorie: {len(events)} neue passende silberne SACD-Player / Preisänderungen. "
                        "Historisch beobachtete Kandidaten; Verfügbarkeit nicht erneut geprüft. "
