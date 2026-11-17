@@ -136,6 +136,12 @@ def run(config_path: Path) -> dict:
             db.execute('INSERT INTO radar_profile VALUES (?)', (profile,))
         db.execute('CREATE TABLE IF NOT EXISTS radar_current (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS radar_runs (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)')
+        if mail_mode:
+            # Incremental EML delivery may bring a cheap offer before there
+            # are enough peers. Persist the last alerted asking-price version,
+            # not a speculative estimate or a repeated arrival timestamp.
+            db.execute('CREATE TABLE IF NOT EXISTS radar_alerted ('
+                       'id TEXT PRIMARY KEY, price_version TEXT NOT NULL)')
         changed = {}
         current_offers = []
         for uid, offer in offers.items():
@@ -166,10 +172,31 @@ def run(config_path: Path) -> dict:
                                   discount_threshold=threshold)
         events = []
         for item in evaluated:
-            if item['id'] in changed:
-                kind, previous_price, previous_shipping = changed[item['id']]
+            uid = item['id']
+            change = changed.get(uid)
+            cheap = item['classification'] == 'auffällig günstig'
+            should_alert = False
+            if mail_mode and cheap:
+                offer = offers[uid]
+                price_version = json.dumps(
+                    [str(offer.price_eur), str(offer.shipping_eur)], ensure_ascii=False
+                )
+                prior_alert = db.execute(
+                    'SELECT price_version FROM radar_alerted WHERE id=?', (uid,)
+                ).fetchone()
+                if prior_alert is None or prior_alert[0] != price_version:
+                    should_alert = True
+                    db.execute('INSERT OR REPLACE INTO radar_alerted VALUES (?, ?)',
+                               (uid, price_version))
+            if change:
+                kind, previous_price, previous_shipping = change
                 events.append(dict(item, event=kind, previous_price_eur=previous_price,
                                    previous_shipping_eur=previous_shipping))
+            elif should_alert:
+                # The source mail is not new, but only *now* has >=min_peers
+                # comparable observations arrived. Alert once per price version.
+                events.append(dict(item, event='newly_assessable',
+                                   previous_price_eur=None, previous_shipping_eur=None))
         generated = datetime.now(timezone.utc).isoformat()
         result = dict(model=model, generated_at=generated, reference_type='asking_prices',
                       imported=len(offers), new=sum(v[0] == 'new' for v in changed.values()),

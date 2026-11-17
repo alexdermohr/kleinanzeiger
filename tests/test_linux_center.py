@@ -241,6 +241,77 @@ class CenterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.center.bargains()
 
+    def test_new_radar_profile_explicit_watch_consent_and_cancel(self):
+        from mark_api.radar_watch import RadarWatch
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["new", "Testmodell 42", None]
+        ), patch.object(self.center, "text") as text, patch.object(manager, "watch") as watch:
+            self.center.bargains()
+        watch.assert_not_called()
+        self.assertIn("atomar", text.call_args.args[0])
+        profile = manager.create("Testmodell 42")
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["new", "Testmodell 42", ""]
+        ), patch.object(self.center, "text"), patch.object(self.center, "message"), patch.object(
+            manager, "watch", return_value="Monitoring aktiv"
+        ) as watch:
+            self.center.bargains()
+        watch.assert_called_once_with(profile, "start")
+
+    def test_watch_status_stop_and_invalid_prompt(self):
+        from mark_api.radar_watch import RadarWatch
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        profile = manager.create("Testmodell 42")
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["watch", "0", "stop"]
+        ), patch.object(manager, "watch", return_value="Monitoring gestoppt") as watch, patch.object(
+            self.center, "message"
+        ):
+            self.center.bargains()
+        self.assertEqual([c.args for c in watch.call_args_list], [(profile, "status"), (profile, "stop")])
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["new", " "]
+        ), patch.object(self.center, "text") as text:
+            self.center.bargains()
+        self.assertIn("Modellbezeichnung", text.call_args.args[0])
+
+    def test_choose_model_profile_and_import_local_eml(self):
+        from mark_api.radar_watch import RadarWatch
+        import hashlib
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        one = manager.create("Testmodell 42")
+        two = manager.create("Anderes Modell 13")
+        source = self.root / "export.eml"
+        source.write_bytes(b"synthetic local exported message")
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["import", "0", str(source)]
+        ) as dialog, patch.object(self.center, "message") as message:
+            self.center.bargains()
+        self.assertEqual(dialog.call_count, 3)
+        args = dialog.call_args_list[1].args
+        self.assertIn("Testmodell 42", args)
+        self.assertIn("Anderes Modell 13", args)
+        self.assertEqual(
+            [p.name for p in (two.parent / "suchmails").glob("*.eml")],
+            [hashlib.sha256(source.read_bytes()).hexdigest() + ".eml"],
+        )
+        self.assertFalse(list((one.parent / "suchmails").glob("*.eml")))
+        self.assertEqual(source.read_bytes(), b"synthetic local exported message")
+        self.assertIn("atomar übernommen", message.call_args.args[0])
+
+    def test_empty_profile_listing_does_not_start_monitor(self):
+        from mark_api.radar_watch import RadarWatch
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["watch"]
+        ), patch.object(self.center, "message") as message, patch.object(
+            manager, "watch"
+        ) as watcher:
+            self.center.bargains()
+        watcher.assert_not_called()
+        self.assertIn("keine Suchprofile", message.call_args.args[0])
+
     def test_entrypoint_version_and_desktop_file_match(self):
         import tomllib
         root = Path(__file__).resolve().parents[1]

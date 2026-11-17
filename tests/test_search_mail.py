@@ -43,6 +43,29 @@ class SearchMailTests(unittest.TestCase):
         name = f'{i}.eml'
         (self.root / 'suchmails' / name).write_bytes(raw)
 
+    def test_streaming_mail_delivery_rechecks_early_cheap_offer_once(self):
+        for mail in (self.root / 'suchmails').iterdir():
+            mail.unlink()
+        with patch('mark_api.bargain_radar.shutil.which', return_value=None):
+            for number in range(5):
+                self.mail(number, 100 if number == 0 else 300)
+                result = run(self.profile)
+                if number < 4:
+                    self.assertEqual(result['hits'], 0)
+                else:
+                    self.assertEqual(result['hits'], 1)
+                    self.assertTrue(any(
+                        event['id'] == '100' and event['event'] == 'newly_assessable'
+                        for event in result['offers']
+                    ), result)
+            self.assertEqual(run(self.profile)['hits'], 0)
+            self.now += timedelta(minutes=1)
+            self.mail(0, 80)
+            lowered = run(self.profile)
+            self.assertEqual(lowered['price_changes'], 1)
+            self.assertEqual(lowered['hits'], 1)
+            self.assertEqual(run(self.profile)['hits'], 0)
+
     def test_e2e_repeat_drop_notify_and_readonly(self):
         before = {p: p.read_bytes() for p in (self.root / 'suchmails').iterdir()}
         with patch('mark_api.bargain_radar.shutil.which', return_value='/usr/bin/notify-send'), patch('mark_api.bargain_radar.subprocess.run') as notify:
