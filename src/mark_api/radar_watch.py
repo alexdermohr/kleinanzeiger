@@ -174,8 +174,8 @@ class RadarWatch:
                 f'PathChanged={path_setting(profile.parent / "suchmails")}\n'
                 f'PathModified={path_setting(profile.parent / "suchmails")}\nUnit={name}.service\n'
                 '[Install]\nWantedBy=default.target\n',
-                name + '.service': '[Unit]\nDescription=Kleinanzeiger local radar\n[Service]\nType=oneshot\n'
-                'UMask=0077\nEnvironment="PATH=%h/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin"\n'
+                name + '.service': '[Unit]\nDescription=Kleinanzeiger local radar\nStartLimitIntervalSec=0\n[Service]\nType=oneshot\n'
+                'UMask=0077\nStandardOutput=null\nStandardError=journal\nEnvironment="PATH=%h/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin"\n'
                 f'ExecStart={command}\n'}
 
     @staticmethod
