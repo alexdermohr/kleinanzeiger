@@ -113,6 +113,24 @@ class SearchMailTests(unittest.TestCase):
         self.assertEqual(len(rows), 5)
         self.assertTrue(any(item['file'] == '9.eml' for item in diagnostics))
 
+    def test_mail_date_utc_overflow_diagnosed_without_blocking_valid_peers(self):
+        # Valid RFC date syntax may overflow when timezone offset is normalized
+        # into year 10000, before max_age_hours can reject it.
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["From"] = "alerts@kleinanzeigen.de"
+        msg["Date"] = "Fri, 31 Dec 9999 23:59:59 -0100"
+        msg.set_content(
+            "Lenovo ThinkPad T14 Gen 3\\n10 EUR\\n"
+            "https://www.kleinanzeigen.de/s-anzeige/thinkpad/9000"
+        )
+        (self.root / "suchmails" / "overflow.eml").write_bytes(msg.as_bytes())
+        result = run(self.profile)
+        self.assertEqual(result["new"], 5)
+        self.assertEqual(result["hits"], 1)
+        self.assertTrue(any(item["file"] == "overflow.eml" for item in result["diagnostics"]))
+        self.assertEqual(run(self.profile)["new"], 0)
+
     def test_deeply_nested_mime_is_diagnostic_without_suppressing_valid_mails(self):
         # A legal-sized message with excessive MIME nesting exceeds Python's
         # recursion depth in email.parser before its part-count limit is reached.

@@ -144,7 +144,7 @@ def load_search_mail(source: Path, model: str, *, max_age_hours=48, now=None):
             # per-EML exception handler; a single bad mail must not block peers.
             normalize_offer(row)
             rows.append(row)
-        except (ValueError, OSError, UnicodeError, LookupError, RecursionError) as exc:
+        except (ValueError, OSError, UnicodeError, LookupError, OverflowError, RecursionError) as exc:
             diagnostics.append(dict(file=file.name, reason=str(exc)))
     if not files:
         diagnostics.append(dict(file='', reason='Keine EML-Dateien; keine Angebote'))
