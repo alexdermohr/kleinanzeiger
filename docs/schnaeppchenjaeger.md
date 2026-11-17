@@ -131,6 +131,7 @@ Modell ein eigenes Profil mit eigener Historie und eigenen Berichten verwenden.
 steuern die unveränderte `assess_offers`-Bewertung.
 
 Der erste Lauf meldet neue Inserate, ein identischer Zweitlauf null neue Treffer.
+Im EML-Modus wird ein zuvor importiertes günstiges Angebot genau dann einmalig nachgemeldet, wenn später eintreffende aktuelle Vergleichsangebote erstmals eine belastbare Bewertung ermöglichen. Gleichbleibende Preisversionen werden nicht wiederholt alarmiert.
 Änderungen von Angebotspreis oder Versandkosten werden mit Vorwerten gemeldet.
 Reine Titel-/Quellenänderungen erzeugen keinen neuen Preistreffer. IDs sind die
 Identität; fehlende Inserate werden nicht als verkauft interpretiert. Auch Preissteigerungen

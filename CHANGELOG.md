@@ -7,6 +7,7 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 
 ### Neu
 - Linux/KDE: „Neues Suchprofil einrichten“ erstellt nach Eingabe eines exakten Modells einen privaten, getrennten EML-Eingang mit eigener Konfiguration, Historie und HTML-/JSON-Berichten. Wiederholen überschreibt keine vorhandene Konfiguration; andere Modelle erhalten eigene SHA-256-Identitäten.
+- Nachträglich beurteilbare Angebote werden im EML-Modus einmalig gemeldet, auch wenn das günstige Inserat vor den vier erforderlichen Vergleichsangeboten eingetroffen ist.
 - Optionales Monitoring über je ein systemd-User-Path/Service-Paar reagiert auf Dateiänderungen, ohne Timer oder Polling. Start erfolgt bewusst im Menü, Status und Stoppen sind dort erreichbar. Installierte Python-Umgebung und KDE-/Nix-PATH für notify-send werden berücksichtigt; Startfehler rollen die Einrichtung zurück.
 - Neue lokale CLI `kleinanzeiger-radar`: Profile auch ohne Desktop erstellen, vorhandene eigene exportierte EMLs atomar und anhand ihres Inhalts idempotent zustellen. Originale und unbekannte Mails bleiben erhalten.
 - Keine automatische Marktabfrage, Mailkonto-Anmeldung oder mitgeliefertes aktives Suchmodell. Der Nutzer muss die Suche auf der Website speichern und eigene EMLs zustellen. Der begrenzte Parser bleibt synthetisch getestet; echte Suchmailtemplates und ein produktiver Zulauf sind weiterhin nicht verifiziert. Windows behält die manuelle CLI-/GUI-Auswertung.
