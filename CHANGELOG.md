@@ -62,7 +62,7 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 ## [1.0.10] - 2026-11-08
 
 ### Verbessert
-- Falls Chrome oder die Browsersteuerung beim Start nicht verfügbar ist, kann Mark im lokalen Arbeitsbereich weiterhin Artikel vorbereiten, Verkaufsvermerke pflegen und lokale KI-Aufträge verwalten.
+- Falls Chrome oder die Browsersteuerung beim Start nicht verfügbar ist, können Anwender im lokalen Arbeitsbereich weiterhin Artikel vorbereiten, Verkaufsvermerke pflegen und lokale KI-Aufträge verwalten.
 - Der Offline-Arbeitsbereich ist auf die aktuelle Windows-Sitzung beschränkt. Plattform-Schreibaktionen und Kontoabgleich bleiben deaktiviert; frühere Programmversionen können weiterhin gestartet werden.
 
 ## [1.0.9] - 2026-11-08

@@ -8,7 +8,7 @@ Ausführliche Prüfprotokolle, Testresultate und Codepfade: `docs/poc-2026-09-24
 
 ## Ziel
 
-Für Marks Kleinanzeigen-Account soll der kleinste belastbare Integrationsweg gefunden werden für:
+Für eigene Kleinanzeigen-Accounts soll der kleinste belastbare Integrationsweg gefunden werden für:
 
 - Anzeigen erstellen, synchronisieren, ändern und löschen,
 - Pause/Aktivierung,
@@ -72,7 +72,7 @@ Der UI-Stats-Pfad liest `m-meine-anzeigen-verwalten.json` und modelliert:
 - `state`,
 - Aktivierungs- und Ablaufdatum.
 
-Das passt fachlich sehr gut zu Marks Analytics-Ziel.
+Das passt fachlich sehr gut zum Analytics-Ziel des Produkts.
 
 Aktuelle Schwäche: fehlende Session, HTTP-Fehler, Exceptions und echte leere Anzeigenlisten können alle zu `[]` werden; fehlende Zähler werden zu `0`. Das muss vor produktiver Statistiknutzung getrennt werden.
 
@@ -156,7 +156,7 @@ Konkrete private/mobile API-Pfade existieren für:
 
 Conversations enthalten `ad_id`.
 
-### Harte Lücken für Marks MVP
+### Harte Lücken für den technischen MVP
 
 **Kein in-place Inhaltsupdate gefunden.**
 
@@ -225,7 +225,7 @@ Vor Übernahme von Code muss deshalb konkret unterschieden werden zwischen bloß
 
 ## Offizieller ProSellers-Pfad
 
-Die offizielle API bleibt technisch relevant, ist für den dokumentierten privaten Account aber weiterhin kein vollständig belegter MVP-Pfad. Zusätzlich sind die für Marks Dashboard entscheidenden Views-/Inbox-Funktionen dort in der bislang geprüften öffentlichen Dokumentation nicht als entsprechendes Komplettpaket belegt.
+Die offizielle API bleibt technisch relevant, ist für den dokumentierten privaten Account aber weiterhin kein vollständig belegter MVP-Pfad. Zusätzlich sind die für das Dashboard entscheidenden Views-/Inbox-Funktionen dort in der bislang geprüften öffentlichen Dokumentation nicht als entsprechendes Komplettpaket belegt.
 
 ## Was jetzt nicht mehr sinnvoll ist
 

@@ -60,4 +60,3 @@ Sendefunktion, native Windows-Abnahme, Merge und
 Kundenrelease. Alle Tests nutzen synthetische Daten; es
 wurden keine echten Nachrichten gesendet, Anzeigen geändert
 oder kostenpflichtigen KI-Aufrufe ausgeführt.
-Der Vaterrechner fotolabor bleibt unberührt.

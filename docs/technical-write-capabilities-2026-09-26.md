@@ -161,7 +161,7 @@ Damit ist die lokale Transportlücke geschlossen. Der Browser bleibt für echte 
 - `update_ad` wird ausschließlich an den separaten `MonkrelPrivateHttpContentClient` delegiert,
 - der Content-Write-Client kann dadurch unabhängig mit `max_retries=1` betrieben werden,
 - unbekannte upstream-Methoden werden **nicht** über ein generisches Proxy/`__getattr__` exponiert,
-- `build_monkrel_private_http_adapter(...)` liefert direkt einen für Mark nutzbaren `MonkrelMobileApiAdapter` mit dieser Trennung.
+- `build_monkrel_private_http_adapter(...)` liefert direkt einen für Kleinanzeiger nutzbaren `MonkrelMobileApiAdapter` mit dieser Trennung.
 
 Die Runtime-Komposition ist lokal regressionsgetestet. Sie ändert nichts am Remote-Smoke-Gate.
 

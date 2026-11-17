@@ -190,7 +190,7 @@ $script:FakeOwnerPid = 779
 $script:FakeProcessPid = 779
 $script:ExpectedChrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 $script:FakeChrome = $script:ExpectedChrome
-$script:FakeProfile = 'C:\Users\Mark\AppData\Local\Kleinanzeiger\ChromeProfile'
+$script:FakeProfile = 'C:\Users\TestUser\AppData\Local\Kleinanzeiger\ChromeProfile'
 $script:FakeCommand = '"' + $script:FakeChrome + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="' + $script:FakeProfile + '" https://www.kleinanzeigen.de/'
 function Get-NetTCPConnection {
   [CmdletBinding()]

@@ -59,6 +59,5 @@ Noch offen für die vollständige P5-Reife: echte periodische
 Prüfaufträge, Nutzersteuerung der Ausführungszeit, kontrollierte
 und ausdrücklich autorisierte Aktionen, gesicherte
 Mehrkonten-Trennung, langfristige Wiederherstellungsabnahme
-und alle Release-/Kunden-PC-Gates. Die synthetischen Tests
+und alle Release- und Benutzertest-Gates. Die synthetischen Tests
 führen keine reale Anzeige oder bezahlte Anbieteraktion aus.
-Der Vaterrechner fotolabor bleibt unangetastet.

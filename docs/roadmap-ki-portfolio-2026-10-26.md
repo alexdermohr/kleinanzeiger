@@ -11,7 +11,7 @@ Er ergänzt P0–P5, ersetzt sie nicht und erklärt offene PRs nicht zu Releases
 
 ## 1. Produktziel und Leitplanken
 
-**Marks Ziel:** Hunderte bis Tausende eigener Anzeigen, perspektivisch bis
+**Produktziel:** Hunderte bis Tausende eigener Anzeigen, perspektivisch bis
 10.000 Datensätze, über eine **einfach bedienbare Windows-Anwendung** mit KI
 verwalten, auswerten und optimieren. Der Anwender erteilt Aufträge für
 Anzeigenbestände statt hunderte Einzelmasken manuell zu bedienen. Alle
@@ -35,8 +35,7 @@ irreführende Bilder, kein Blind-Retry unklarer Plattformwirkungen. Die
 bestehenden Owner-/CSRF-/Idempotenz-/Recovery-Grenzen bleiben erhalten.
 Keine kostenpflichtige KI-Aktion ohne vorherigen vom Anwender definierten
 Budget- und Zustimmungskontrakt. Plattform- und KI-Tests verwenden
-zustandsbehaftete synthetische Gegenstellen. Der Rechner `fotolabor`
-bleibt bis zu einer gesonderten Anweisung unverändert.
+zustandsbehaftete synthetische Gegenstellen.
 
 ## 2. Verifizierter Startzustand und Lücken
 
@@ -103,7 +102,7 @@ Neubau. Ein optionaler Meilenstein `v0.1.6` ist P0.
    unverändert durchlaufen lassen.
 5. Dokumentation und Windows-Handbuch um die neue Ansicht ergänzen.
    Prüfung auf exakt dem PR-HEAD, regulärer GitHub-Schutz-Merge und
-   eigenständiger Release, falls Version geändert. `fotolabor` nicht anfassen.
+   eigenständiger Release, falls Version geändert.
 
 ## 5. Produkt- und Qualitätskennzahlen
 
@@ -131,7 +130,7 @@ willkürlichen Standard.
   Windows-Bedienung, klare Handbuchfunktion; Endnutzer nicht mit internen
   Security-Protokollen belasten.
 - **Integration:** kein ungetesteter `main`-Push, keine Tag-Überschreibung,
-  kein Einsatz auf `fotolabor`; frühere v0.1.x-Releases bleiben verfügbar.
+  frühere v0.1.x-Releases bleiben verfügbar.
 
 **Arbeitsnachweis:** Fortschritte und noch offene Phasen werden in dieser
 Datei oder den dazu verknüpften Issues/PRs fortgeschrieben; Entwurf,
@@ -183,8 +182,7 @@ sind getrennte Zustände. Nur tatsächlich belegte Gates gelten als erfüllt.
   Release und P1-Abhängigkeit geklärt sind.
 - **Weiter offen:** Provider-Rechnungsnachweise/hartes Budget,
   echte autorisierte Plattform-Massenwrites, P3, P4, P5 sowie
-  Kunden-PC-Endabnahme. Siehe docs/portfolio-ki-auftraege.md.
-  Der Vaterrechner fotolabor bleibt unangetastet.
+  Endabnahme durch echte Benutzertests. Siehe docs/portfolio-ki-auftraege.md.
 
 - **P3 in Entwicklung:** Lokale manuelle Verkauf-/Reserviert-Vermerke,
   Lagerort, Erlös, bekannte Kosten und Teilgewinn sowie authentifizierte
