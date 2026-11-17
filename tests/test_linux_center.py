@@ -314,6 +314,39 @@ class CenterTests(unittest.TestCase):
         self.assertIn("Eingangsquelle nicht eingerichtet/nicht belegt", displayed)
         self.assertIn("bericht.html", displayed)
 
+    def test_monitoring_report_open_is_explicit_and_safe(self):
+        from mark_api.radar_watch import RadarWatch
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        profile = manager.create_category()
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["0", "report"]
+        ), patch.object(manager, "watch", return_value="Monitoring aktiv"), patch.object(
+            mod.subprocess, "run"
+        ) as opening, patch.object(self.center, "message") as message:
+            self.center.radar_monitoring("watch")
+        opening.assert_not_called()
+        self.assertIn("Noch kein Radarbericht", message.call_args.args[0])
+        report = profile.parent / "bericht.html"
+        report.write_text("<h1>SACD</h1>", encoding="utf-8")
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["0", "report"]
+        ), patch.object(manager, "watch", return_value="Monitoring aktiv"), patch.object(
+            mod.shutil, "which", return_value="/usr/bin/xdg-open"
+        ), patch.object(mod.subprocess, "run") as opening:
+            self.center.radar_monitoring("watch")
+        self.assertEqual(opening.call_args.args[0], ["/usr/bin/xdg-open", str(report)])
+        self.assertFalse(opening.call_args.kwargs["shell"])
+        report.unlink()
+        report.symlink_to(self.root / "outside.html")
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), patch.object(
+            self.center, "dialog", side_effect=["0", "report"]
+        ), patch.object(manager, "watch", return_value="Monitoring aktiv"), patch.object(
+            self.center, "message"
+        ) as warning, patch.object(mod.subprocess, "run") as opening:
+            self.center.radar_monitoring("watch")
+        opening.assert_not_called()
+        self.assertIn("keine Suchprofile", warning.call_args.args[0])
+
     def test_choose_model_profile_and_import_local_eml(self):
         from mark_api.radar_watch import RadarWatch
         import hashlib
