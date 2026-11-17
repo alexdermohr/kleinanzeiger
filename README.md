@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-**Version 1.2.0 · Windows 11 (64 Bit)**
+**Version 1.3.0 · Windows 11 (64 Bit)**
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
@@ -10,7 +10,7 @@ Kleinanzeigen-Suchen öffnen. Es werden keine Inserate automatisch abgerufen.
 
 ## In drei Schritten starten
 
-1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.2.0) und das ZIP **vollständig entpacken**.
+1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.3.0) und das ZIP **vollständig entpacken**.
 2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken, **Installieren / aktualisieren** wählen und danach **Kleinanzeiger starten** anklicken. Für die Installation werden benötigte Komponenten gegebenenfalls über das Internet geladen.
 3. **Kleinanzeigen-Konto öffnen**, im eigenen Kleinanzeiger-Chrome anmelden und gegebenenfalls bestätigen. Dann Kleinanzeiger starten und im Dashboard **Mit Kleinanzeigen abgleichen** wählen.
 
@@ -43,3 +43,10 @@ Bei Problemen im Kleinanzeiger-Fenster **Fehlerdetails anzeigen** oder **Diagnos
 Offline-Start, geprüften SQLite-Backups, bestätigtem CSV/XLSX-Artikelimport,
 Wochenbericht und Schnäppchenjäger. Externes `kdialog` erforderlich:
 [NixOS-Installation und Desktop-Eintrag](docs/linux-kde-center.md).
+
+Ab 1.3.0: **Schnäppchenjäger → Neues Suchprofil einrichten** legt nach Eingabe
+des exakten Modells einen eigenen Suchmail-Eingang an. Optional verarbeitet ein
+systemd-User-Path-Watch neue lokale EMLs automatisch; **Monitoring** bietet Status,
+Start und Stop. Keine automatische Marktabfrage oder Mailkonto-Anmeldung:
+Suchauftrag und atomare EML-Zustellung richtet der Nutzer selbst ein. Echte
+Mailtemplates sind noch nicht verifiziert. [Einrichtung und Grenzen](docs/schnaeppchenjaeger.md#linuxkde-automatische-lokale-verarbeitung-ab-130).

@@ -173,10 +173,49 @@ class Center:
             self.message("Wochenbericht im gewählten Ordner gespeichert.\n"
                          "Grundlage sind ausschließlich vorhandene lokale Daten.")
 
+    def radar_monitoring(self, choice):
+        from mark_api.radar_watch import RadarWatch
+        manager = RadarWatch()
+        try:
+            if choice == "new":
+                model = self.dialog("--inputbox", "Exakte Modellbezeichnung (keine allgemeine Produktkategorie):")
+                if model is None:
+                    return
+                profile = manager.create(model)
+                self.text(f"Profil: {profile}\nEingangsordner: {profile.parent / 'suchmails'}\n\n"
+                          "Kleinanzeigen-Suche auf Website als Suchauftrag speichern und eigene EMLs "
+                          "atomar in diesen Ordner zustellen.\n"
+                          "Keine Mailkonto-Anmeldung oder automatische Marktabfrage. "
+                          "Echte Mailtemplates sind noch nicht verifiziert.\n"
+                          "Berichte und Historie entstehen bei der ersten Auswertung im Profilordner.")
+                if self.dialog("--yesno", "Lokales Monitoring für dieses Profil jetzt aktivieren?\n"
+                               "Verarbeitet künftig nur EML-Dateiänderungen im angezeigten Eingang.\n"
+                               "Stoppen ist unter Monitoring möglich.") is None:
+                    return
+                self.message(manager.watch(profile, "start"))
+            else:
+                selected = self.dialog("--getopenfilename", str(manager.data), "*.json | Eingerichtetes Radar-Profil")
+                if not selected:
+                    return
+                profile = Path(selected).absolute()
+                status = manager.watch(profile, "status")
+                action = self.dialog("--menu", status, "status", "Status anzeigen", "start", "Monitoring starten",
+                                     "stop", "Monitoring stoppen")
+                if action in ("start", "stop", "status"):
+                    self.message(manager.watch(profile, action))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            # Plain text includes useful validation/systemd guidance without rich-text interpretation.
+            self.text(f"Radar konnte die Aktion nicht abschließen: {exc}")
+
     def bargains(self):
         choice = self.dialog("--menu", "Schnäppchenjäger: beobachtete Angebotspreise",
                              "file", "Lokale CSV/JSON auswerten", "search", "Manuell im Browser suchen",
-                             "radar", "Suchmail-/Datei-Radar aus Profil auswerten")
+                             "radar", "Suchmail-/Datei-Radar aus Profil auswerten",
+                             "new", "Neues Suchprofil einrichten",
+                             "watch", "Monitoring: Status / Starten / Stoppen")
+        if choice in ("new", "watch"):
+            self.radar_monitoring(choice)
+            return
         if choice not in ("file", "search", "radar"):
             return
         if choice == "radar":

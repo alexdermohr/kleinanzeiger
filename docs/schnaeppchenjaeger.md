@@ -179,8 +179,7 @@ niemals gerendert; Skripte, Bilder, Anhänge und komplexe Layouts werden abgewie
 
 `examples/search-mail-radar.json` in einen eigenen Profilordner kopieren, dort
 `suchmails` anlegen. Ausschließlich ausdrücklich erlaubte eigene lokale `.eml`
-hineinlegen. Keine Verkäufer-Datenbank verwenden. Kein Staging: Originaldateien
-werden ausschließlich gelesen. Für jedes Modell eigene Ordner, Profile, Historie
+hineinlegen. Keine Verkäufer-Datenbank verwenden. Originaldateien werden ausschließlich gelesen. Für jedes Modell eigene Ordner, Profile, Historie
 und Berichtspfade verwenden. Keine parallelen Profile mit gemeinsamen Ausgaben.
 
 Unterstützt ist genau **ein Angebot pro Mail**:
@@ -242,7 +241,7 @@ Berichte bleiben unabhängig vom Desktop lesbar. SQLite und HTML/JSON bilden kei
 gemeinsame atomare Einheit; jede Berichtsdatei wird einzeln atomar ersetzt. Bei
 Dateisperren (etwa Defender) Exitcode 2 und Rollback; ein bereits ersetzter Bericht
 kann dann vom Historienstand abweichen. Erneuter Lauf regeneriert die Berichte;
-erfolgreiche Laufbelege bleiben zusätzlich in `radar_runs`. Keine Hintergrundaktivierung.
+erfolgreiche Laufbelege bleiben zusätzlich in `radar_runs`. Keine Hintergrundaktivierung durch den manuellen Profilaufruf.
 
 ```sh
 python -m unittest discover -s tests -p 'test_search_mail.py'
@@ -251,3 +250,79 @@ python -m unittest discover -s tests -p 'test_search_mail.py'
 Unter Windows 11 steht der Profilaufruf im Schnäppchenjäger-Fenster über die Schaltfläche Radar-Profil auswählen und auswerten bereit. Nach erfolgreicher Analyse öffnet sich der lokale HTML-Bericht. Auch dort ist dies nur ein lokaler Import, keine automatische Marktbeobachtung.
 
 Unter Linux/KDE steht derselbe Profilaufruf zusätzlich unter Schnäppchenjäger → Suchmail-/Datei-Radar zur Verfügung. Die Kontrollzentrale zeigt neue Einträge, Preisänderungen und günstige Funde an, ohne Rohinhalte in Dialoge zu übernehmen.
+
+
+## Linux/KDE: automatische lokale Verarbeitung ab 1.3.0
+
+1. Installierten Kleinanzeiger als normalen Benutzer öffnen, **Schnäppchenjäger →
+   Neues Suchprofil einrichten** wählen und das selbst gesuchte **exakte Modell**
+   eingeben. Kein Modell ist vorbelegt oder bereits aktiv.
+2. Die Textansicht nennt Profil und Eingangsordner. Nächste Handlung:
+   **Kleinanzeigen-Suche auf Website als Suchauftrag speichern und eigene EMLs
+   atomar in diesen Ordner zustellen.** Die Menüoption „Manuell im Browser suchen“
+   hilft beim Öffnen der Suche; Speichern und Export/Zustellung bleiben beim Nutzer.
+3. Optional die Frage nach lokalem Monitoring bestätigen. Ein systemd-User-Path
+   beobachtet nur diesen Eingang; der gekoppelte Oneshot-Service führt den
+   installierten `mark_api.bargain_hunter_cli --radar <profil>` aus. Kein Timer,
+   kein Polling eines leeren Eingangs, keine neue App oder zusätzlicher Daemon.
+4. **Schnäppchenjäger → Monitoring: Status / Starten / Stoppen** und das eingerichtete
+   `profil.json` wählen. Stoppen deaktiviert den Path und stoppt den zugehörigen
+   Service; Ergebnisse und Eingänge bleiben erhalten. Erneutes Starten ist möglich.
+
+Speicherort: `$XDG_DATA_HOME/kleinanzeiger/schnaeppchenradar/`, standardmäßig
+`~/.local/share/kleinanzeiger/schnaeppchenradar/`. Erst der Einrichtungsauftrag
+legt einen Ordner pro SHA-256 der getrimmten Modellbezeichnung an. Darin liegen
+`profil.json` (`notify: true`), `suchmails/` und nach einer Auswertung
+`history.sqlite`, `bericht.html`, `bericht.json`. Groß-/Kleinschreibung und umbenannte
+Modelle erhalten getrennte Identitäten. Vorhandene abweichende Konfigurationen
+werden abgewiesen, fremde Datenbanken nicht übernommen. Keine Verkäuferdatenbank.
+Profile und Inbox sind privat; keine Ausführung mit sudo/root vorsehen.
+
+**Importvertrag:** Eine EML muss vollständig fertig geschrieben sein und dann
+**atomar** in den Eingang veröffentlicht werden (Rename innerhalb desselben
+Dateisystems oder der Zustellbefehl unten). Nicht direkt eine `.eml` im Eingang
+öffnen und langsam beschreiben: ein Path-Watch kann bereits beim ersten Schreiben
+auslösen. Angefangene Dateien außerhalb der Inbox halten. Unbekannte Formate bleiben
+liegen und werden diagnostiziert; keine automatische Löschung oder Mail-Einzelfreigabe.
+
+Die einzige neue CLI ist auch headless nutzbar:
+
+```sh
+kleinanzeiger-radar create 'EXAKTE EIGENE MODELLBEZEICHNUNG'
+# Ausgegebenen absoluten Profilpfad als PROFIL verwenden:
+kleinanzeiger-radar deliver "$PROFIL" /pfad/zum/eigenen/export.eml
+kleinanzeiger-radar start "$PROFIL"
+kleinanzeiger-radar status "$PROFIL"
+kleinanzeiger-radar stop "$PROFIL"
+```
+
+`create` aktiviert nichts. `deliver` liest eine bereits berechtigte lokale reguläre
+Datei (bis 1 MB), schreibt zunächst außerhalb der Inbox und veröffentlicht die
+fertige Kopie atomar unter `<Inhalts-SHA256>.eml`. Identischer Inhalt erzeugt keine
+neue Datei und kein erneutes Ereignis; gleicher Originalname mit anderem Inhalt
+bleibt getrennt. Originale werden nicht verändert. Die SHA ist eine interne
+Identität, keine Freigabe, die der Nutzer eingeben müsste. Unter Windows bleiben
+manuelle Radar-Auswertung und Berichte verfügbar; `start/status/stop` benötigen Linux.
+
+User-Units liegen in `$XDG_CONFIG_HOME/systemd/user/` (Standard `~/.config/systemd/user/`),
+unter `kleinanzeiger-radar-<Profil-SHA256>.path` und `.service`. Fremde oder geänderte
+Unit-Inhalte werden weder überschrieben noch gestoppt. Die Aktivierung verwendet
+`systemctl --user daemon-reload` und `enable --now`; kein `--no-block`. Danach wird
+der aktive Path-Status geprüft. Bei Startfehlern werden neu erstellte Units entfernt
+und ein neu aktivierter Watch zurückgerollt. Vorhandene Units bleiben erhalten.
+Ohne systemd-User-Session kann man Profile erstellen und den Radar manuell ausführen.
+
+Der Service verwendet genau die installierte Python-Umgebung der Einrichtung mit
+`-I`; ein reiner oder editable Quellcheckout genügt nicht. Nach Umzug/Entfernung dieser
+Umgebung müssen die Units nach Prüfung neu eingerichtet werden. Der PATH enthält
+`%h/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin`, damit ein vorhandenes
+`notify-send` auch in KDE/Nix gefunden wird. Benachrichtigungen benötigen eine laufende
+Desktop-Session und sind nicht garantiert. Der Status meldet auch einen fehlgeschlagenen
+Service; Details liefert `journalctl --user -u kleinanzeiger-radar-<Profil-SHA256>.service`.
+Die GUI darf nach Aktivierung geschlossen werden. Außerhalb einer User-Session wird
+keine Ausführung garantiert; es wird kein Linger aktiviert.
+
+Ohne eigene gespeicherte Suche und EML-Zulauf gibt es **keine echten Alerts**. Kein
+Netzwerkzugriff, Scraping, Mailbox-Login, API-Schlüssel oder kostenpflichtiger Dienst.
+Echte Kleinanzeigen-Mailtemplates bleiben unbestätigt. Die oben dokumentierten
+Parsergrenzen und Mindestvergleichszahlen gelten unverändert.
