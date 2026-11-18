@@ -3,6 +3,13 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.4.1] - 2026-11-17
+
+### Behoben
+
+- SACD-Bericht zeigt weiterhin historisch beobachtete Kandidaten mit ungeprüfter Verfügbarkeit.
+- KDE-Monitoring zeigt lokalen EML-Eingang, letzte Auswertung und Importdiagnosen; der SACD-Bericht lässt sich direkt aus dem Menü öffnen.
+
 ## [1.4.0] - 2026-11-17
 
 ### Neu

@@ -224,9 +224,26 @@ class Center:
                                  "Unbekannte Mailformate erscheinen als Importdiagnose.")
                     return
                 status = manager.watch(profile, "status")
-                action = self.dialog("--menu", status, "status", "Status anzeigen", "start", "Monitoring starten",
-                                     "stop", "Monitoring stoppen")
-                if action in ("start", "stop", "status"):
+                action = self.dialog("--menu", status, "status", "Status anzeigen",
+                                     "report", "Kandidatenbericht öffnen",
+                                     "start", "Monitoring starten", "stop", "Monitoring stoppen")
+                if action == "status":
+                    self.text(manager.watch(profile, "status") + "\n\n" + manager.local_status(profile))
+                elif action == "report":
+                    from mark_api.radar_watch import safe
+                    report = profile.parent / 'bericht.html'
+                    if not report.exists() and not report.is_symlink():
+                        self.message("Noch kein Radarbericht vorhanden. Zuerst eine Suchmail auswerten.")
+                        return
+                    safe(report)
+                    opener = shutil.which('xdg-open')
+                    if not opener:
+                        self.message("Kein Browser-Öffner verfügbar. Bitte den Bericht über die Dateiverwaltung öffnen.")
+                        return
+                    subprocess.run([opener, str(report)], shell=False, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=30, check=True)
+                elif action in ("start", "stop"):
                     self.message(manager.watch(profile, action))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             # Plain text includes useful validation/systemd guidance without rich-text interpretation.
@@ -338,10 +355,14 @@ Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar über ein JSON-Profil oder b
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.2.0 · KDE-Kontrollzentrale
-Neue Linux-Bedienung mit externem kdialog, Konto-/Offline-Start und Client-Verwaltung.
-Geprüfte SQLite-Backup-CLI, Artikelvorschau mit bestätigtem hashgebundenem Import,
-lokaler Wochenbericht, Schnäppchenjäger, bereinigte Diagnose und dieses Handbuch.
+CHANGES = """Kleinanzeiger 1.4.1 · KDE-Kontrollzentrale
+Das SACD-Radar zeigt zuvor beobachtete Kandidaten weiterhin im Bericht.
+Die Verfügbarkeit solcher Angebote wird nicht erneut überprüft; echte Preisänderungen
+werden mit ihrem vorherigen und aktuellen Preis gekennzeichnet.
+Unter Schnäppchenjäger → Monitoring stehen der lokale EML-Eingang, letzte
+Auswertung, Importdiagnosen und der direkt zu öffnende Kandidatenbericht.
+Eine gespeicherte Kleinanzeigen-Suche und die tatsächliche E-Mail-Zustellung
+müssen weiterhin im eigenen Konto beziehungsweise Mailprogramm eingerichtet sein.
 """
 
 
