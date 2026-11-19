@@ -26,6 +26,7 @@ from .bargain_radar import atomic_report, run as radar_run
 from .silver_sacd import CATEGORY, SEARCH_URL, rejection
 
 MAX_PAGE_BYTES = 1_250_000
+MIN_FETCH_INTERVAL_SECONDS = 30 * 60
 # The first argument remains a fixed, public page; only a same-host HTTPS
 # SEO redirect to another /s-... search page is allowed.
 BASE = "https://www.kleinanzeigen.de"
@@ -187,9 +188,37 @@ def _single_public_run(profile: Path):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise DealInputError("Öffentliche Suche läuft bereits") from exc
-        yield
+        yield fd
     finally:
         os.close(fd)
+
+
+
+def _attempt_time() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _enforce_fetch_interval(lock_fd: int) -> None:
+    """Persist the attempt *before* the network call, including failed requests.
+
+    Caller holds the same exclusive flock used by scheduled and manual scans.
+    """
+    now = _attempt_time()
+    os.lseek(lock_fd, 0, os.SEEK_SET)
+    prior = os.read(lock_fd, 80)
+    if prior:
+        try:
+            last = int(prior.decode("ascii").strip())
+        except (UnicodeError, ValueError) as exc:
+            raise DealInputError("Ungültiger letzter Abrufzeitpunkt") from exc
+        if now < last + MIN_FETCH_INTERVAL_SECONDS:
+            raise DealInputError("Öffentliche Suche höchstens alle 30 Minuten erlaubt")
+    payload = f"{now}\n".encode("ascii")
+    os.lseek(lock_fd, 0, os.SEEK_SET)
+    if os.write(lock_fd, payload) != len(payload):
+        raise OSError("Abrufzeitpunkt nicht vollständig geschrieben")
+    os.ftruncate(lock_fd, len(payload))
+    os.fsync(lock_fd)
 
 
 def run_public(profile: Path, *, fetcher=fetch_html) -> dict:
@@ -199,7 +228,8 @@ def run_public(profile: Path, *, fetcher=fetch_html) -> dict:
     config = manager.load(profile)
     if config.get("input_type") != "public" or config.get("category") != CATEGORY:
         raise DealInputError("Nur das separat eingerichtete öffentliche SACD-Profil ist erlaubt")
-    with _single_public_run(profile):
+    with _single_public_run(profile) as lock_fd:
+        _enforce_fetch_interval(lock_fd)
         page = fetcher(config["search_url"])
         rows, stats = parse_search_html(page)
         # Never update the snapshot or history on HTTP errors / invalid HTML.

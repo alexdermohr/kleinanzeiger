@@ -3,6 +3,7 @@
 No tests call Kleinanzeigen or modify real user systemd services.
 """
 import json
+from itertools import count
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,9 @@ class PublicSacdTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.manager = RadarWatch(self.root / "data", self.root / "units")
         self.profile = self.manager.create_public_category()
+        clock = patch('mark_api.public_sacd._attempt_time', side_effect=count(1800000000, 1801))
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def test_parser_decodes_prices_and_rejects_unwanted(self):
         html = page(card("1234567", GOOD, "1.250 €"),
@@ -160,6 +164,25 @@ class PublicSacdTests(unittest.TestCase):
                 _SameHostRedirect().redirect_request(request,None,302,"go",{},url)
         self.assertIsNotNone(_SameHostRedirect().redirect_request(request,None,302,"go",{},
                                "https://www.kleinanzeigen.de/s-sacd-player-silber/k0"))
+
+
+    def test_sequential_public_fetches_are_rate_limited(self):
+        good = page(card("1234567"))
+        calls = []
+        def fetch(_):
+            calls.append(1)
+            return good
+        with patch("mark_api.public_sacd._attempt_time",
+                   side_effect=[1800000000, 1800000001, 1800001801, 1800001802, 1800003602]):
+            run_public(self.profile, fetcher=fetch)
+            with self.assertRaisesRegex(DealInputError, "30 Minuten"):
+                run_public(self.profile, fetcher=fetch)
+            with self.assertRaisesRegex(DealInputError, "HTTP 403"):
+                run_public(self.profile, fetcher=lambda _: (_ for _ in ()).throw(DealInputError("HTTP 403")))
+            with self.assertRaisesRegex(DealInputError, "30 Minuten"):
+                run_public(self.profile, fetcher=fetch)
+            run_public(self.profile, fetcher=fetch)
+        self.assertEqual(calls, [1, 1])
 
     def test_timer_and_manual_scan_cannot_overlap(self):
         from mark_api.public_sacd import _single_public_run
