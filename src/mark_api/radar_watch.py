@@ -79,6 +79,13 @@ class RadarWatch:
         config.update(category=CATEGORY, search_url=SEARCH_URL)
         return self._create(LABEL, config, 'category:' + CATEGORY)
 
+    def create_public_category(self) -> Path:
+        from .silver_sacd import LABEL, CATEGORY, SEARCH_URL
+        config = self.config(LABEL)
+        config.update(input_type='public', input='angebote.json', category=CATEGORY,
+                      search_url=SEARCH_URL)
+        return self._create(LABEL + ' (direkte Suche)', config, 'public:' + CATEGORY)
+
     def create(self, model: str) -> Path:
         model = self.model(model)
         return self._create(model, self.config(model), model)
@@ -115,14 +122,17 @@ class RadarWatch:
         expected = self.config(config['model'])
         if 'category' in config:
             from .silver_sacd import LABEL, CATEGORY, SEARCH_URL
-            identity = 'category:' + CATEGORY
+            public_mode = config.get('input_type') == 'public'
+            identity = ('public:' if public_mode else 'category:') + CATEGORY
             expected = self.config(LABEL)
+            if public_mode:
+                expected.update(input_type='public', input='angebote.json')
             expected.update(category=CATEGORY, search_url=SEARCH_URL)
         digest = hashlib.sha256(identity.encode()).hexdigest()
         if profile != self.data / digest / 'profil.json' or config != expected:
             raise ValueError('Nur unveränderte, hier eingerichtete Profile sind für Monitoring zugelassen.')
         safe(profile.parent / 'suchmails', directory=True)
-        for name in ('history.sqlite', 'bericht.html', 'bericht.json'):
+        for name in ('history.sqlite', 'bericht.html', 'bericht.json', 'angebote.json'):
             path = profile.parent / name
             if path.exists() or path.is_symlink():
                 safe(path)
@@ -141,7 +151,7 @@ class RadarWatch:
                 config = self.load(profile)
             except (ValueError, OSError):
                 continue
-            found.append((profile, config['model']))
+            found.append((profile, config['model'] + (' (direkte Suche)' if config.get('input_type') == 'public' else '')))
             if len(found) > 100:
                 raise ValueError('Mehr als 100 Suchprofile: Profilordner prüfen.')
         return sorted(found, key=lambda entry: (entry[1].casefold(), str(entry[0])))
@@ -191,15 +201,24 @@ class RadarWatch:
                 count += 1
                 if count > 1000:
                     break
-        lines = [f'EML-Eingang: {inbox}',
-                 f'EML-Dateien: {count if count <= 1000 else "über 1000"}',
-                 'Eingangsquelle nicht belegt; kein neuer Marktplatzfeed.' if not count else
-                 'Lokale EML-Dateien vorhanden; automatische Herkunft nicht nachgewiesen.']
+        if config.get('input_type') == 'public':
+            snapshot = profile.parent / 'angebote.json'
+            lines = ['Quelle: öffentliche Kleinanzeigen-Suchseite (alle 30 Minuten).',
+                     'Letzte heruntergeladene Ergebnisliste vorhanden.' if snapshot.is_file() else
+                     'Noch keine erfolgreich heruntergeladene Ergebnisliste.',
+                     'Bei HTTP-/Parserfehlern bleibt der letzte Bericht erhalten.']
+        else:
+            lines = [f'EML-Eingang: {inbox}',
+                     f'EML-Dateien: {count if count <= 1000 else "über 1000"}',
+                     'Eingangsquelle nicht belegt; kein neuer Marktplatzfeed.' if not count else
+                     'Lokale EML-Dateien vorhanden; automatische Herkunft nicht nachgewiesen.']
         if config.get('category'):
             lines.append(f'SACD-Kandidatenbericht: {profile.parent / "bericht.html"}')
         history = profile.parent / 'history.sqlite'
         if not history.exists():
-            return '\n'.join(lines + ['Noch keine lokale Auswertung; Eingangsquelle nicht eingerichtet/nicht belegt.'])
+            missing = ('Noch kein erfolgreicher Seitenabruf.' if config.get('input_type') == 'public'
+                       else 'Noch keine lokale Auswertung; Eingangsquelle nicht eingerichtet/nicht belegt.')
+            return '\n'.join(lines + [missing])
         safe(history)
         try:
             with closing(sqlite3.connect(f'{history.as_uri()}?mode=ro', uri=True, timeout=1)) as db:
@@ -274,6 +293,16 @@ class RadarWatch:
         # ExecStart's executable is not subject to dollar expansion; arguments are.
         command = quoted(sys.executable) + ' ' + ' '.join(quoted(s, command=True) for s in
                            ('-I', '-m', 'mark_api.bargain_hunter_cli', '--radar', str(profile)))
+        if self.load(profile).get('input_type') == 'public':
+            command = quoted(sys.executable) + ' ' + ' '.join(quoted(s, command=True) for s in
+                                   ('-I', '-m', 'mark_api.public_sacd', '--profile', str(profile)))
+            return {name + '.timer': '[Unit]\nDescription=Kleinanzeiger öffentliche SACD-Suche\n[Timer]\n'
+                    'OnBootSec=3min\nOnUnitActiveSec=30min\nRandomizedDelaySec=2min\n'
+                    f'Unit={name}.service\n[Install]\nWantedBy=timers.target\n',
+                    name + '.service': '[Unit]\nDescription=Kleinanzeiger öffentliche SACD-Suche\n'
+                    '[Service]\nType=oneshot\nUMask=0077\nStandardOutput=journal\nStandardError=journal\n'
+                    'Environment="PATH=%h/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin"\n'
+                    f'ExecStart={command}\n'}
         return {name + '.path': '[Unit]\nDescription=Kleinanzeiger local radar inbox\n[Path]\n'
                 f'PathChanged={path_setting(profile.parent / "suchmails")}\n'
                 f'PathModified={path_setting(profile.parent / "suchmails")}\nUnit={name}.service\n'
@@ -375,7 +404,9 @@ class RadarWatch:
             if rollback_failed:
                 raise ValueError('Start fehlgeschlagen; systemd-Rollback unvollständig. Monitoring-Status und User-Session prüfen.') from exc
             raise
-        return 'Monitoring aktiv; wartet auf atomar zugestellte EML-Dateien.'
+        return ('Monitoring aktiv; öffentliche Suchseite wird automatisch alle 30 Minuten geprüft.'
+                if path_unit.endswith('.timer') else
+                'Monitoring aktiv; wartet auf atomar zugestellte EML-Dateien.')
 
 
 def main(argv=None) -> int:
@@ -383,6 +414,8 @@ def main(argv=None) -> int:
     commands = parser.add_subparsers(dest='action', required=True)
     commands.add_parser('create').add_argument('model')
     commands.add_parser('create-silver-sacd')
+    commands.add_parser('create-public-sacd')
+    commands.add_parser('run-public').add_argument('profile', type=Path)
     delivery = commands.add_parser('deliver')
     delivery.add_argument('profile', type=Path)
     delivery.add_argument('source', type=Path)
@@ -393,6 +426,12 @@ def main(argv=None) -> int:
         manager = RadarWatch()
         if args.action == 'create-silver-sacd':
             print(manager.create_category())
+        elif args.action == 'create-public-sacd':
+            print(manager.create_public_category())
+        elif args.action == 'run-public':
+            from .public_sacd import run_public
+            result = run_public(args.profile)
+            print(json.dumps({key: result[key] for key in ('candidate_events', 'known_candidate_count', 'price_changes')}, ensure_ascii=False))
         elif args.action == 'create':
             print(manager.create(args.model))
         elif args.action == 'deliver':

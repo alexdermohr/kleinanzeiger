@@ -177,11 +177,17 @@ class Center:
         from mark_api.radar_watch import RadarWatch
         manager = RadarWatch()
         try:
-            if choice in ("new", "silver-sacd"):
-                model = "SACD-Player silber" if choice == "silver-sacd" else self.dialog("--inputbox", "Exakte Modellbezeichnung (keine allgemeine Produktkategorie):")
+            if choice in ("new", "silver-sacd", "public-sacd"):
+                model = "SACD-Player silber" if choice in ("silver-sacd", "public-sacd") else self.dialog("--inputbox", "Exakte Modellbezeichnung (keine allgemeine Produktkategorie):")
                 if model is None:
                     return
-                profile = manager.create_category() if choice == "silver-sacd" else manager.create(model)
+                profile = (manager.create_public_category() if choice == "public-sacd" else
+                           manager.create_category() if choice == "silver-sacd" else manager.create(model))
+                if choice == "public-sacd":
+                    self.text('Öffentliche SACD-Suche in Deutschland, ohne E-Mail oder Anmeldung.\n'
+                              'Nur silberne und plausible SACD-Player; keine Schnäppchenwertung.\n'
+                              'Das Profil prüft die öffentliche Suchseite höchstens alle 30 Minuten.\n'
+                              'Bei Sperre oder Layoutänderung bleibt die letzte Auswertung erhalten.')
                 if choice == "silver-sacd":
                     from mark_api.silver_sacd import SEARCH_URL
                     self.text("Silberne Player für echte SACD-Discs, Deutschland, ohne Preislimit.\n"
@@ -189,15 +195,21 @@ class Center:
                               "Kleinanzeigen-Suche öffnen → Suchauftrag speichern (eigenes Konto erforderlich).\n"
                               f"Offizielle Suchadresse: {SEARCH_URL}\n"
                               "Ohne eigene echte EML-Zustellung keine laufende Marktbeobachtung.")
-                self.text(f"Profil: {profile}\nEingangsordner: {profile.parent / 'suchmails'}\n\n"
-                          "Kleinanzeigen-Suche auf Website als Suchauftrag speichern und eigene EMLs "
-                          "atomar in diesen Ordner zustellen.\n"
-                          "Keine Mailkonto-Anmeldung oder automatische Marktabfrage. "
-                          "Echte Mailtemplates sind noch nicht verifiziert.\n"
-                          "Berichte und Historie entstehen bei der ersten Auswertung im Profilordner.")
+                if choice == 'public-sacd':
+                    self.text(f"Profil: {profile}\nBericht: {profile.parent / 'bericht.html'}\n\n"
+                              "Abruf ausschließlich öffentlicher Suchseiten; kein Konto und keine E-Mails. "
+                              "Bei erster Abfrage nur Bestandsaufnahme, danach neue IDs/Preise prüfen.")
+                else:
+                    self.text(f"Profil: {profile}\nEingangsordner: {profile.parent / 'suchmails'}\n\n"
+                              "Kleinanzeigen-Suche auf Website als Suchauftrag speichern und eigene EMLs "
+                              "atomar in diesen Ordner zustellen.\n"
+                              "Keine Mailkonto-Anmeldung oder automatische Marktabfrage. "
+                              "Echte Mailtemplates sind noch nicht verifiziert.\n"
+                              "Berichte und Historie entstehen bei der ersten Auswertung im Profilordner.")
+                monitor_desc = ("Ruft die öffentliche Suchseite höchstens alle 30 Minuten ab.\n" if choice == 'public-sacd' else
+                                "Verarbeitet künftig nur EML-Dateiänderungen im angezeigten Eingang.\n")
                 if self.dialog("--yesno", "Lokales Monitoring für dieses Profil jetzt aktivieren?\n"
-                               "Verarbeitet künftig nur EML-Dateiänderungen im angezeigten Eingang.\n"
-                               "Stoppen ist unter Monitoring möglich.") is None:
+                               + monitor_desc + "Stoppen ist unter Monitoring möglich.") is None:
                     return
                 self.message(manager.watch(profile, "start"))
             else:
@@ -215,6 +227,9 @@ class Center:
                     raise ValueError("Ungültiges Suchprofil.")
                 profile = profiles[int(selected)][0]
                 if choice == "import":
+                    if manager.load(profile).get('input_type') == 'public':
+                        self.message('Direkte Suchprofile benötigen keinen E-Mail-Import.')
+                        return
                     source = self.dialog("--getopenfilename", str(Path.home()), "*.eml | Gespeicherte E-Mail")
                     if not source:
                         return
@@ -224,16 +239,19 @@ class Center:
                                  "Unbekannte Mailformate erscheinen als Importdiagnose.")
                     return
                 status = manager.watch(profile, "status")
-                action = self.dialog("--menu", status, "status", "Status anzeigen",
-                                     "report", "Kandidatenbericht öffnen",
-                                     "start", "Monitoring starten", "stop", "Monitoring stoppen")
+                direct = manager.load(profile).get('input_type') == 'public'
+                actions = ("status", "Status anzeigen", "report", "Kandidatenbericht öffnen",
+                           "start", "Monitoring starten", "stop", "Monitoring stoppen")
+                if direct:
+                    actions += ("fetch", "Öffentliche Suche jetzt ausführen")
+                action = self.dialog("--menu", status, *actions)
                 if action == "status":
                     self.text(manager.watch(profile, "status") + "\n\n" + manager.local_status(profile))
                 elif action == "report":
                     from mark_api.radar_watch import safe
                     report = profile.parent / 'bericht.html'
                     if not report.exists() and not report.is_symlink():
-                        self.message("Noch kein Radarbericht vorhanden. Zuerst eine Suchmail auswerten.")
+                        self.message("Noch kein Radarbericht vorhanden. Zuerst eine Auswertung starten.")
                         return
                     safe(report)
                     opener = shutil.which('xdg-open')
@@ -243,6 +261,13 @@ class Center:
                     subprocess.run([opener, str(report)], shell=False, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    timeout=30, check=True)
+                elif action == "fetch" and direct:
+                    from mark_api.public_sacd import run_public
+                    result = run_public(profile)
+                    self.message(f"Öffentliche Suche abgeschlossen: "
+                                 f"{result['known_candidate_count']} historisch beobachtete Kandidaten, "
+                                 f"{result['candidate_events']} neue Ereignisse. "
+                                 "Bericht über Monitoring öffnen.")
                 elif action in ("start", "stop"):
                     self.message(manager.watch(profile, action))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -255,9 +280,10 @@ class Center:
                              "radar", "Suchmail-/Datei-Radar aus Profil auswerten",
                              "new", "Neues Suchprofil einrichten",
                              "silver-sacd", "Silberne SACD-Player beobachten",
+                             "public-sacd", "Silberne SACD-Player direkt suchen (automatisch)",
                              "watch", "Monitoring: Status / Starten / Stoppen",
                              "import", "Gespeicherte E-Mail (.eml) in Suchprofil importieren")
-        if choice in ("new", "silver-sacd", "watch", "import"):
+        if choice in ("new", "silver-sacd", "public-sacd", "watch", "import"):
             self.radar_monitoring(choice)
             return
         if choice not in ("file", "search", "radar"):
@@ -355,14 +381,16 @@ Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar über ein JSON-Profil oder b
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.4.1 · KDE-Kontrollzentrale
-Das SACD-Radar zeigt zuvor beobachtete Kandidaten weiterhin im Bericht.
-Die Verfügbarkeit solcher Angebote wird nicht erneut überprüft; echte Preisänderungen
-werden mit ihrem vorherigen und aktuellen Preis gekennzeichnet.
-Unter Schnäppchenjäger → Monitoring stehen der lokale EML-Eingang, letzte
-Auswertung, Importdiagnosen und der direkt zu öffnende Kandidatenbericht.
-Eine gespeicherte Kleinanzeigen-Suche und die tatsächliche E-Mail-Zustellung
-müssen weiterhin im eigenen Konto beziehungsweise Mailprogramm eingerichtet sein.
+CHANGES = """Kleinanzeiger 1.5.0 · KDE-Kontrollzentrale
+Neu: Silberne SACD-Player direkt suchen (automatisch).
+Ein separater systemd-Benutzertimer prüft höchstens alle 30 Minuten die
+öffentliche Kleinanzeigen-Suchseite ohne E-Mail, API-Schlüssel oder Anmeldung.
+Neue Inserate und echte Preisänderungen werden nur einmal gemeldet.
+Der erste Lauf bildet einen Bestand, ohne Altangebote als neu zu melden.
+Historische Kandidaten erscheinen mit Preis und Original-Link im Bericht.
+Bei fehlgeschlagenen Abrufen bleiben Berichte und SQLite-Historie erhalten.
+Das bisherige EML-Radar bleibt unabhängig davon nutzbar.
+Fotos, SACD-Funktion und tatsächliche Verfügbarkeit selbst prüfen.
 """
 
 

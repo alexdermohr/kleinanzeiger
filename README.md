@@ -1,16 +1,18 @@
 # Kleinanzeiger
 
-**Version 1.4.1 · Windows 11 (64 Bit)**
+**Version 1.5.0 · Windows 11 (64 Bit)**
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
 **Schnäppchenjäger:** Über **Weitere Aktionen → Schnäppchenjäger** kann
 man selbst bereitgestellte Angebote (CSV/JSON) lokal bewerten und manuelle
-Kleinanzeigen-Suchen öffnen. Es werden keine Inserate automatisch abgerufen.
+Kleinanzeigen-Suchen öffnen. Unter Linux/KDE ist zusätzlich eine bewusst
+aktivierte öffentliche SACD-Suche möglich; Windows nutzt weiterhin die
+lokale CSV-/JSON-Auswertung.
 
 ## In drei Schritten starten
 
-1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.4.1) und das ZIP **vollständig entpacken**.
+1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.5.0) und das ZIP **vollständig entpacken**.
 2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken, **Installieren / aktualisieren** wählen und danach **Kleinanzeiger starten** anklicken. Für die Installation werden benötigte Komponenten gegebenenfalls über das Internet geladen.
 3. **Kleinanzeigen-Konto öffnen**, im eigenen Kleinanzeiger-Chrome anmelden und gegebenenfalls bestätigen. Dann Kleinanzeiger starten und im Dashboard **Mit Kleinanzeigen abgleichen** wählen.
 
@@ -38,6 +40,18 @@ KI benötigt einen eigenen Anbieterzugang und eine ausdrückliche Kostenfreigabe
 Bei Problemen im Kleinanzeiger-Fenster **Fehlerdetails anzeigen** oder **Diagnose kopieren** wählen. Profile, Datenbank und Backups nicht zur Fehlerbehebung löschen.
 
 ### Linux / KDE
+
+**Neu ab 1.5.0:** Im Schnäppchenjäger die Aktion
+**Silberne SACD-Player direkt suchen (automatisch)** auswählen.
+Ein separates Profil kann nach Bestätigung die öffentliche Suche höchstens
+alle 30 Minuten prüfen. Kein E-Mail-Schalter, kein Kleinanzeigen-Login,
+kein fremder API-Schlüssel erforderlich. Erster Abruf = Bestandsaufnahme;
+später nur neue Inserate und Preisänderungen melden. Ergebnisse und
+Beobachtungsunsicherheiten stehen im lokalen Bericht. Bei HTTP-Sperre oder
+geändertem HTML bleiben alte Daten erhalten. Die Nutzungsbedingungen
+verlangen für automatisierte Abrufe schriftliche Zustimmung: Der Betreiber
+muss die Berechtigung selbst sicherstellen. Die EML-Überwachung bleibt getrennt.
+Siehe Dokumentation zum Schnäppchenjäger.
 
 `kleinanzeiger-center` öffnet die deutsche KDE-Kontrollzentrale mit Konto- und
 Offline-Start, geprüften SQLite-Backups, bestätigtem CSV/XLSX-Artikelimport,

@@ -43,8 +43,8 @@ def run(config_path: Path) -> dict:
         raise DealInputError('Exaktes model im Profil erforderlich')
     from .silver_sacd import CATEGORY, assess, rejection
     category = config.get('category')
-    if category is not None and (category != CATEGORY or config.get('input_type') != 'eml'):
-        raise DealInputError('Kategorie benötigt EML und die vordefinierte Suchkategorie')
+    if category is not None and (category != CATEGORY or config.get('input_type') not in ('eml', 'public')):
+        raise DealInputError('Kategorie benötigt EML oder öffentliche Suche und die vordefinierte Suchkategorie')
     base = config_path.resolve().parent
 
     def path(key):
@@ -57,9 +57,10 @@ def run(config_path: Path) -> dict:
     json_report = path('json_report') if 'json_report' in config else None
     files = sorted(p for p in source.iterdir() if p.is_file() and
                    p.suffix.lower() in ('.csv', '.json')) if source.is_dir() else [source]
-    if config.get('input_type', 'exports') not in ('exports', 'eml'):
+    if config.get('input_type', 'exports') not in ('exports', 'eml', 'public'):
         raise DealInputError('Unbekannter input_type')
     mail_mode = config.get('input_type') == 'eml'
+    public_mode = config.get('input_type') == 'public'
     diagnostics = []
     mail_rows = []
     if mail_mode:
@@ -175,6 +176,9 @@ def run(config_path: Path) -> dict:
             current_offers.append(offer)
             if stored is None or stored[0] != payload:
                 db.execute('INSERT OR REPLACE INTO radar_current VALUES (?, ?)', (uid, payload))
+        # Initial public snapshot is a baseline, not proof of newly posted ads.
+        if category and public_mode and created:
+            changed.clear()
         evaluated = assess(current_offers) if category else assess_offers(current_offers, model, min_peers=min_peers,
                                   discount_threshold=threshold)
         events = []
@@ -252,7 +256,10 @@ def run(config_path: Path) -> dict:
             page = render_report(model, display, generated_at=generated, category=True)
             summary = (f"<p>Kategorie: {len(events)} neue passende silberne SACD-Player / Preisänderungen. "
                        "Historisch beobachtete Kandidaten; Verfügbarkeit nicht erneut geprüft. "
-                       "Keine Modellpreisbewertung. Nur lokale EML-Eingänge.</p>")
+                       "Keine Modellpreisbewertung. "
+                       + ('Öffentliche Suchseite; erster Abruf ist nur eine Bestandsaufnahme.' if public_mode and created else
+                          'Öffentliche Suchseite; kein vollständiger Marktüberblick.' if public_mode else
+                          'Nur lokale EML-Eingänge.') + '</p>')
         if diagnostics:
             page = page.replace('</main>', '<section class="info"><h2>Importdiagnostik</h2><pre>' +
                 html.escape(json.dumps(diagnostics, ensure_ascii=False, indent=2)) + '</pre></section></main>')
@@ -264,7 +271,7 @@ def run(config_path: Path) -> dict:
             atomic_report(json_report, json.dumps(result, ensure_ascii=False, indent=2))
         atomic_report(report, page)
     # History commits before delivery: no repeat spam; a crash can lose delivery.
-    if mail_mode and config.get('notify', False) and (result.get('candidate_events', 0) if category else result['hits']):
+    if (mail_mode or public_mode) and config.get('notify', False) and (result.get('candidate_events', 0) if category else result['hits']):
         executable = shutil.which('notify-send')
         if executable:
             try:
