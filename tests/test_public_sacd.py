@@ -9,11 +9,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from mark_api.bargain_hunter import DealInputError
-from mark_api.public_sacd import fetch_html, parse_search_html, run_public, _SameHostRedirect
+from mark_api.public_sacd import fetch_html, parse_search_html, run_public, _SameHostRedirect, _trusted_https_context
 from mark_api.radar_watch import RadarWatch
 
 GOOD = "Denon DCD-1700NE SACD Player silber"
@@ -43,6 +43,42 @@ class PublicSacdTests(unittest.TestCase):
         clock = patch('mark_api.public_sacd._attempt_time', side_effect=count(1800000000, 1801))
         clock.start()
         self.addCleanup(clock.stop)
+
+    def test_tls_keeps_existing_os_trust_store(self):
+        context = Mock()
+        context.get_ca_certs.return_value = [{"subject": "preinstalled trust"}]
+        with patch("mark_api.public_sacd.ssl.create_default_context", return_value=context), \
+             patch("mark_api.public_sacd.Path.is_file") as exists:
+            self.assertIs(_trusted_https_context(), context)
+        context.load_verify_locations.assert_not_called()
+        exists.assert_not_called()
+
+    def test_tls_uses_system_ca_when_isolated_python_lacks_it(self):
+        context = Mock()
+        context.get_ca_certs.side_effect = [[], [{"subject": "NixOS roots"}]]
+        with patch("mark_api.public_sacd.ssl.create_default_context", return_value=context), \
+             patch("mark_api.public_sacd.Path.is_file", return_value=True):
+            self.assertIs(_trusted_https_context(), context)
+        context.load_verify_locations.assert_called_once_with(
+            cafile="/etc/ssl/certs/ca-certificates.crt")
+
+    def test_tls_missing_system_ca_fails_closed(self):
+        context = Mock()
+        context.get_ca_certs.return_value = []
+        with patch("mark_api.public_sacd.ssl.create_default_context", return_value=context), \
+             patch("mark_api.public_sacd.Path.is_file", return_value=False), \
+             self.assertRaisesRegex(DealInputError, "Zertifikatsbündel"):
+            _trusted_https_context()
+        context.load_verify_locations.assert_not_called()
+
+    def test_tls_untrusted_bundle_still_fails_closed(self):
+        context = Mock()
+        context.get_ca_certs.return_value = []
+        with patch("mark_api.public_sacd.ssl.create_default_context", return_value=context), \
+             patch("mark_api.public_sacd.Path.is_file", return_value=True), \
+             self.assertRaisesRegex(DealInputError, "Zertifikatsbündel"):
+            _trusted_https_context()
+        context.load_verify_locations.assert_called_once()
 
     def test_parser_decodes_prices_and_rejects_unwanted(self):
         html = page(card("1234567", GOOD, "1.250 €"),

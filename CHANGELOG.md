@@ -3,6 +3,12 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.5.1] - 2026-11-19
+
+### Behoben
+
+- Öffentliche SACD-Suche nutzt unter NixOS mit isoliertem Python automatisch das vertrauenswürdige System-Zertifikatsbündel, falls die Python-Laufzeit keine CA-Zertifikate enthält. TLS-Hostname und Zertifikatprüfung bleiben aktiv; keine unsicheren HTTPS-Ausnahmen.
+
 ## [1.5.0] - 2026-11-19
 
 ### Neu
