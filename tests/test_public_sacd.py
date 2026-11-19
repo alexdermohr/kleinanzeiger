@@ -67,6 +67,7 @@ class PublicSacdTests(unittest.TestCase):
         context.get_ca_certs.return_value = []
         with patch("mark_api.public_sacd.ssl.create_default_context", return_value=context), \
              patch("mark_api.public_sacd.Path.is_file", return_value=False), \
+             patch("mark_api.public_sacd.Path.is_dir", return_value=False), \
              self.assertRaisesRegex(DealInputError, "Zertifikatsbündel"):
             _trusted_https_context()
         context.load_verify_locations.assert_not_called()
@@ -76,9 +77,33 @@ class PublicSacdTests(unittest.TestCase):
         context.get_ca_certs.return_value = []
         with patch("mark_api.public_sacd.ssl.create_default_context", return_value=context), \
              patch("mark_api.public_sacd.Path.is_file", return_value=True), \
+             patch("mark_api.public_sacd.Path.is_dir", return_value=False), \
              self.assertRaisesRegex(DealInputError, "Zertifikatsbündel"):
             _trusted_https_context()
         context.load_verify_locations.assert_called_once()
+
+    def test_tls_directory_only_store_defers_trust_to_verified_handshake(self):
+        # CA directory entries may be loaded lazily during a TLS handshake.
+        # A zero-count pre-handshake certificate list does not make that store invalid.
+        context = Mock()
+        context.get_ca_certs.return_value = []
+        with patch("mark_api.public_sacd.ssl.create_default_context", return_value=context), \
+             patch("mark_api.public_sacd.Path.is_file", return_value=False), \
+             patch("mark_api.public_sacd.Path.is_dir", return_value=True), \
+             patch("mark_api.public_sacd.ssl.get_default_verify_paths") as defaults:
+            defaults.return_value.capath = "/fake/openssl-hashed-ca-directory"
+            self.assertIs(_trusted_https_context(), context)
+        context.load_verify_locations.assert_not_called()
+
+    def test_tls_empty_default_and_missing_directory_rejected(self):
+        context = Mock()
+        context.get_ca_certs.return_value = []
+        with patch("mark_api.public_sacd.ssl.create_default_context", return_value=context), \
+             patch("mark_api.public_sacd.Path.is_file", return_value=False), \
+             patch("mark_api.public_sacd.ssl.get_default_verify_paths") as defaults, \
+             self.assertRaisesRegex(DealInputError, "Zertifikatsbündel"):
+            defaults.return_value.capath = None
+            _trusted_https_context()
 
     def test_parser_decodes_prices_and_rejects_unwanted(self):
         html = page(card("1234567", GOOD, "1.250 €"),

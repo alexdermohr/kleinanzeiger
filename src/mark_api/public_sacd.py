@@ -58,9 +58,15 @@ def _trusted_https_context() -> ssl.SSLContext:
     system_bundle = Path("/etc/ssl/certs/ca-certificates.crt")
     if system_bundle.is_file():
         context.load_verify_locations(cafile=str(system_bundle))
-    if not context.get_ca_certs():
-        raise DealInputError("Kein vertrauenswürdiges TLS-Zertifikatsbündel verfügbar")
-    return context
+    if context.get_ca_certs():
+        return context
+    # OpenSSL CA directories are lazy: get_ca_certs() can remain empty until
+    # the first verified handshake. Do not reject an existing directory store.
+    # Verification stays enabled; empty/invalid directories fail at handshake.
+    ca_dir = ssl.get_default_verify_paths().capath
+    if ca_dir and Path(ca_dir).is_dir():
+        return context
+    raise DealInputError("Kein vertrauenswürdiges TLS-Zertifikatsbündel verfügbar")
 
 
 def fetch_html(url: str = SEARCH_URL) -> str:
