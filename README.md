@@ -1,16 +1,18 @@
 # Kleinanzeiger
 
-**Version 1.4.1 · Windows 11 (64 Bit)**
+**Version 1.5.0 · Windows 11 (64 Bit)**
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
 **Schnäppchenjäger:** Über **Weitere Aktionen → Schnäppchenjäger** kann
 man selbst bereitgestellte Angebote (CSV/JSON) lokal bewerten und manuelle
-Kleinanzeigen-Suchen öffnen. Es werden keine Inserate automatisch abgerufen.
+Kleinanzeigen-Suchen öffnen. Unter Linux/KDE ist zusätzlich eine bewusst
+aktivierte öffentliche SACD-Suche möglich; Windows nutzt weiterhin die
+lokale CSV-/JSON-Auswertung.
 
 ## In drei Schritten starten
 
-1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.4.1) und das ZIP **vollständig entpacken**.
+1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.5.0) und das ZIP **vollständig entpacken**.
 2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken, **Installieren / aktualisieren** wählen und danach **Kleinanzeiger starten** anklicken. Für die Installation werden benötigte Komponenten gegebenenfalls über das Internet geladen.
 3. **Kleinanzeigen-Konto öffnen**, im eigenen Kleinanzeiger-Chrome anmelden und gegebenenfalls bestätigen. Dann Kleinanzeiger starten und im Dashboard **Mit Kleinanzeigen abgleichen** wählen.
 
@@ -39,6 +41,10 @@ Bei Problemen im Kleinanzeiger-Fenster **Fehlerdetails anzeigen** oder **Diagnos
 
 ### Linux / KDE
 
+**Neu ab 1.5.0:** Optionale öffentliche SACD-Suche (maximal alle 30 Minuten).
+Automatisierte Abrufe erfordern laut Nutzungsbedingungen schriftliche Zustimmung.
+[Einrichtung und Grenzen](docs/schnaeppchenjaeger.md).
+
 `kleinanzeiger-center` öffnet die deutsche KDE-Kontrollzentrale mit Konto- und
 Offline-Start, geprüften SQLite-Backups, bestätigtem CSV/XLSX-Artikelimport,
 Wochenbericht und Schnäppchenjäger. Externes `kdialog` erforderlich:
@@ -51,11 +57,7 @@ Start und Stop. Keine automatische Marktabfrage oder Mailkonto-Anmeldung:
 Suchauftrag und atomare EML-Zustellung richtet der Nutzer selbst ein. Echte
 Mailtemplates sind noch nicht verifiziert. [Einrichtung und Grenzen](docs/schnaeppchenjaeger.md#linuxkde-automatische-lokale-verarbeitung-ab-130).
 
-Ab **1.4.0** ergänzt **Silberne SACD-Player beobachten** genau eine Kategorie:
-echte SACD-Disc-Player in Silber, Deutschland, ohne Preislimit und ohne Markenwahl.
-Nur explizite SACD-Player-/Silberangaben im Mailtitel werden berücksichtigt;
-ND8006, Defektangebote, Zubehör und unklare Farbe werden ignoriert. Keine
-Modellpreisvergleiche: neue Geräte und tatsächliche Preisänderungen erscheinen
-einmalig als **nicht bewertbar**, `hits=0`. Foto und Funktion selbst prüfen.
-CLI: `kleinanzeiger-radar create-silver-sacd`. Erstellung ist idempotent und
-aktiviert keinen Dienst. [Suchadresse, Einrichtung und Grenzen](docs/schnaeppchenjaeger.md#silberne-sacd-player-ab-140).
+Ab **1.4.0:** **Silberne SACD-Player beobachten** per EML; nur explizit
+silberne SACD-Disc-Player in Deutschland, keine Preisbewertung.
+`kleinanzeiger-radar create-silver-sacd` erstellt ein inaktives Profil.
+[Filter und Einrichtung](docs/schnaeppchenjaeger.md#silberne-sacd-player-ab-140).

@@ -3,6 +3,14 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.5.0] - 2026-11-19
+
+### Neu
+
+- Linux/KDE: Eigene, öffentliche Suche nach silbernen SACD-Playern. Separates optionales Profil ohne E-Mail oder API-Schlüssel; systemd-Benutzertimer höchstens alle 30 Minuten.
+- Bestehende SACD-Titelprüfung, lokale SQLite-Historie und HTML-/JSON-Berichte erkennen neu erschienene IDs und spätere Festpreisänderungen einmalig. Erster Abruf ist eine Bestandsaufnahme ohne Altanzeigenalarm.
+- Technische Sperren und unbekannte Webseitenlayouts werden nicht umgangen; fehlgeschlagene Abrufe lassen letzte gültige Ergebnisse und das getrennte EML-Profil unverändert.
+
 ## [1.4.1] - 2026-11-17
 
 ### Behoben

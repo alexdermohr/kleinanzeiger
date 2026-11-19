@@ -80,9 +80,11 @@ der Unsicherheit. `--json` gibt dieselbe Bewertung maschinenlesbar aus.
 
 - Kleinanzeigen erlaubt gespeicherte Suchen und E-Mail-Benachrichtigungen.
   Ein begrenzter lokaler EML-Pfad ist unten beschrieben; echte Templates sind nicht verifiziert.
-- Die Nutzungsbedingungen untersagen das automatisierte Sammeln von
-  Inhalten ohne ausdrückliche schriftliche Zustimmung. Deshalb kein direkter
-  Crawler, keine fremden Login-Sitzungen und keine CAPTCHA-Umgehung.
+- Die Nutzungsbedingungen verlangen für Scraping die ausdrückliche
+  schriftliche Zustimmung von Kleinanzeigen. Die ab 1.5.0 separat
+  verfügbare eigene öffentliche Suche begründet keine Plattformgenehmigung.
+  Sie ist ausdrücklich optional, langsam, auf eine Suchseite begrenzt
+  und bricht bei Sperre ab; kein Login oder CAPTCHA-Umgehen.
 - Drittanbieter-APIs können JSON liefern, sofern deren Berechtigung,
   Vertragsbedingungen und Kosten vor Nutzung gesondert geklärt sind.
   Eine solche API ist **nicht** automatisch aktiviert und kein Key nötig.
@@ -381,3 +383,47 @@ keine laufende Marktbeobachtung; ein Mailboximport hat nicht stattgefunden.
 Nach Review und offizieller Veröffentlichung kann der Operator das Profil
 anlegen und optional den lokalen Watcher starten. Erst nach eigener gespeicherter
 Suche und eigenem EML-Transport lässt sich ein realer Alert prüfen.
+
+## Direkte silberne SACD-Suche (ab 1.5.0)
+
+Die native Linux/KDE-Kontrollzentrale bietet unter Schnäppchenjäger die
+Aktion **Silberne SACD-Player direkt suchen (automatisch)**. Ein neues,
+getrenntes Profil nutzt eine öffentlich erreichbare Ergebnisseite.
+Die bereits vorhandene EML-Suche wird weder verändert noch abgeschaltet.
+
+Einrichtung per Kommandozeile:
+
+- kleinanzeiger-radar create-public-sacd
+- kleinanzeiger-radar run-public /absoluter/pfad/profil.json
+- kleinanzeiger-radar start /absoluter/pfad/profil.json
+- kleinanzeiger-radar status /absoluter/pfad/profil.json
+- kleinanzeiger-radar stop /absoluter/pfad/profil.json
+
+Die Profilerstellung ist idempotent. Nur das bewusste Starten aktiviert
+einen systemd-User-Timer; dessen Intervall beträgt 30 Minuten. Der Dienst
+fragt je Lauf eine öffentliche Suchseite ab. Keine Chrome-Session,
+kein Konto, keine E-Mail, keine Drittanbieter-API, keine Proxies,
+keine Captcha-Lösung, keine Hintergrundretries.
+
+Der erste erfolgreiche Lauf ist nur eine Bestandsaufnahme. Weitere
+Abrufe prüfen neue IDs und wirkliche Änderungen des angebotenen
+Festpreises. VB-/Gratispreise, Defektgeräte, Zubehör, SACD-Discs,
+Marantz ND8006 und nicht eindeutig silberne Titel werden verworfen.
+Bei unterschiedlichem Modell wird kein Median und kein Rabatt berechnet.
+Nicht mehr angezeigte Inserate werden nicht automatisch als verkauft
+interpretiert. Versandkosten und technische Wiedergabefähigkeit bleiben
+ungeprüft.
+
+Daten liegen separat im Profilordner als angebote.json,
+history.sqlite, bericht.json und bericht.html. Bei HTTP-/Layoutfehler
+werden die vorherigen Daten nicht überschrieben. Historische Kandidaten
+sind keine bestätigte aktuelle Verfügbarkeit. Der Bericht öffnet den
+Original-Link zur eigenständigen Prüfung.
+
+**Grenzen und Verantwortung:** Kleinanzeigen untersagt in seinen
+Nutzungsbedingungen automatisiertes Datensammeln ohne ausdrückliche
+schriftliche Zustimmung. Dass eine öffentliche Seite technisch
+erreichbar ist, ersetzt diese nicht. Die eigene Nutzung sollte nur
+mit entsprechender Berechtigung stattfinden. Sperren und Zugangshürden
+werden nicht umgangen. Quelle:
+https://themen.kleinanzeigen.de/nutzungsbedingungen/
