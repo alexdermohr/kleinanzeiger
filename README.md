@@ -41,17 +41,9 @@ Bei Problemen im Kleinanzeiger-Fenster **Fehlerdetails anzeigen** oder **Diagnos
 
 ### Linux / KDE
 
-**Neu ab 1.5.0:** Im Schnäppchenjäger die Aktion
-**Silberne SACD-Player direkt suchen (automatisch)** auswählen.
-Ein separates Profil kann nach Bestätigung die öffentliche Suche höchstens
-alle 30 Minuten prüfen. Kein E-Mail-Schalter, kein Kleinanzeigen-Login,
-kein fremder API-Schlüssel erforderlich. Erster Abruf = Bestandsaufnahme;
-später nur neue Inserate und Preisänderungen melden. Ergebnisse und
-Beobachtungsunsicherheiten stehen im lokalen Bericht. Bei HTTP-Sperre oder
-geändertem HTML bleiben alte Daten erhalten. Die Nutzungsbedingungen
-verlangen für automatisierte Abrufe schriftliche Zustimmung: Der Betreiber
-muss die Berechtigung selbst sicherstellen. Die EML-Überwachung bleibt getrennt.
-Siehe Dokumentation zum Schnäppchenjäger.
+**Neu ab 1.5.0:** Optionale öffentliche SACD-Suche (maximal alle 30 Minuten).
+Automatisierte Abrufe erfordern laut Nutzungsbedingungen schriftliche Zustimmung.
+[Einrichtung und Grenzen](docs/schnaeppchenjaeger.md).
 
 `kleinanzeiger-center` öffnet die deutsche KDE-Kontrollzentrale mit Konto- und
 Offline-Start, geprüften SQLite-Backups, bestätigtem CSV/XLSX-Artikelimport,
@@ -65,11 +57,7 @@ Start und Stop. Keine automatische Marktabfrage oder Mailkonto-Anmeldung:
 Suchauftrag und atomare EML-Zustellung richtet der Nutzer selbst ein. Echte
 Mailtemplates sind noch nicht verifiziert. [Einrichtung und Grenzen](docs/schnaeppchenjaeger.md#linuxkde-automatische-lokale-verarbeitung-ab-130).
 
-Ab **1.4.0** ergänzt **Silberne SACD-Player beobachten** genau eine Kategorie:
-echte SACD-Disc-Player in Silber, Deutschland, ohne Preislimit und ohne Markenwahl.
-Nur explizite SACD-Player-/Silberangaben im Mailtitel werden berücksichtigt;
-ND8006, Defektangebote, Zubehör und unklare Farbe werden ignoriert. Keine
-Modellpreisvergleiche: neue Geräte und tatsächliche Preisänderungen erscheinen
-einmalig als **nicht bewertbar**, `hits=0`. Foto und Funktion selbst prüfen.
-CLI: `kleinanzeiger-radar create-silver-sacd`. Erstellung ist idempotent und
-aktiviert keinen Dienst. [Suchadresse, Einrichtung und Grenzen](docs/schnaeppchenjaeger.md#silberne-sacd-player-ab-140).
+Ab **1.4.0:** **Silberne SACD-Player beobachten** per EML; nur explizit
+silberne SACD-Disc-Player in Deutschland, keine Preisbewertung.
+`kleinanzeiger-radar create-silver-sacd` erstellt ein inaktives Profil.
+[Filter und Einrichtung](docs/schnaeppchenjaeger.md#silberne-sacd-player-ab-140).
