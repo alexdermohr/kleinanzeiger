@@ -176,8 +176,12 @@ def run(config_path: Path) -> dict:
             current_offers.append(offer)
             if stored is None or stored[0] != payload:
                 db.execute('INSERT OR REPLACE INTO radar_current VALUES (?, ?)', (uid, payload))
-        # Initial public snapshot is a baseline, not proof of newly posted ads.
-        if category and public_mode and created:
+        # A failed first report can leave a valid empty database file behind.
+        # Only *committed* radar_runs prove that a public baseline ever completed.
+        # Do not mistake its next retry for new market listings.
+        if category and public_mode and db.execute(
+                'SELECT 1 FROM radar_runs LIMIT 1'
+        ).fetchone() is None:
             changed.clear()
         evaluated = assess(current_offers) if category else assess_offers(current_offers, model, min_peers=min_peers,
                                   discount_threshold=threshold)

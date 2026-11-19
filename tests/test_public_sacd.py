@@ -89,6 +89,22 @@ class PublicSacdTests(unittest.TestCase):
         self.assertIn("keine modellpreisbewertung",report.casefold())
         self.assertEqual(json.loads((self.profile.parent/"bericht.json").read_text())["known_candidate_count"],2)
 
+    def test_failed_initial_report_does_not_raise_false_first_alert_on_retry(self):
+        # The database file survives a failure inside the first transaction,
+        # but no committed report/run history does; retry must still baseline.
+        original = page(card("1234567", GOOD, "350 €"))
+        with patch("mark_api.bargain_radar.atomic_report",
+                   side_effect=OSError("disk full")), patch(
+                       "mark_api.bargain_radar.shutil.which", return_value=None
+                   ), self.assertRaises(OSError):
+            run_public(self.profile, fetcher=lambda _: original)
+        self.assertTrue((self.profile.parent / "history.sqlite").is_file())
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            result = run_public(self.profile, fetcher=lambda _: original)
+        self.assertEqual((result["new"],result["candidate_events"],result["known_candidate_count"]),(0,0,1))
+        self.assertEqual(result["offers"],[])
+        self.assertEqual(result["hits"],0)
+
     def test_failures_retain_last_report_and_snapshot(self):
         data=page(card("1234567"))
         with patch("mark_api.bargain_radar.shutil.which", return_value=None):
