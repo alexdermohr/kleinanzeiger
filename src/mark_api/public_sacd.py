@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import re
+import ssl
 import stat
 import sys
 from contextlib import contextmanager
@@ -19,7 +20,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from .bargain_hunter import DealInputError, euro, normalize_offer
 from .bargain_radar import atomic_report, run as radar_run
@@ -45,6 +46,29 @@ class _SameHostRedirect(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _trusted_https_context() -> ssl.SSLContext:
+    """Use system CA roots when an isolated Python has no usable default store.
+
+    NixOS ships a system CA bundle independently of Python's OpenSSL defaults.
+    Keep full TLS hostname and certificate verification; never disable trust.
+    """
+    context = ssl.create_default_context()
+    if context.get_ca_certs():
+        return context
+    system_bundle = Path("/etc/ssl/certs/ca-certificates.crt")
+    if system_bundle.is_file():
+        context.load_verify_locations(cafile=str(system_bundle))
+    if context.get_ca_certs():
+        return context
+    # OpenSSL CA directories are lazy: get_ca_certs() can remain empty until
+    # the first verified handshake. Do not reject an existing directory store.
+    # Verification stays enabled; empty/invalid directories fail at handshake.
+    ca_dir = ssl.get_default_verify_paths().capath
+    if ca_dir and Path(ca_dir).is_dir():
+        return context
+    raise DealInputError("Kein vertrauenswürdiges TLS-Zertifikatsbündel verfügbar")
+
+
 def fetch_html(url: str = SEARCH_URL) -> str:
     """Exactly one request per invocation, no login, cookies, JS, retries or proxies."""
     if url != SEARCH_URL:
@@ -52,7 +76,7 @@ def fetch_html(url: str = SEARCH_URL) -> str:
     request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html"})
     # ProxyHandler({}) avoids unintended use of a proxy from the environment.
     from urllib.request import ProxyHandler
-    opener = build_opener(ProxyHandler({}), _SameHostRedirect)
+    opener = build_opener(ProxyHandler({}), HTTPSHandler(context=_trusted_https_context()), _SameHostRedirect)
     try:
         with opener.open(request, timeout=20) as response:
             actual = urlsplit(response.url)

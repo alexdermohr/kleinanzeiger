@@ -381,7 +381,9 @@ Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar über ein JSON-Profil oder b
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.5.0 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.5.1 · KDE-Kontrollzentrale
+Behoben: Öffentlicher SACD-Abruf kann unter NixOS jetzt das System-
+Zertifikatsbündel für die verifizierte HTTPS-Verbindung nutzen.
 Neu: Silberne SACD-Player direkt suchen (automatisch).
 Ein separater systemd-Benutzertimer prüft höchstens alle 30 Minuten die
 öffentliche Kleinanzeigen-Suchseite ohne E-Mail, API-Schlüssel oder Anmeldung.

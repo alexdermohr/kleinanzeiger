@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-**Version 1.5.0 · Windows 11 (64 Bit)**
+**Version 1.5.1 · Windows 11 (64 Bit)**
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
@@ -12,7 +12,7 @@ lokale CSV-/JSON-Auswertung.
 
 ## In drei Schritten starten
 
-1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.5.0) und das ZIP **vollständig entpacken**.
+1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.5.1) und das ZIP **vollständig entpacken**.
 2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken, **Installieren / aktualisieren** wählen und danach **Kleinanzeiger starten** anklicken. Für die Installation werden benötigte Komponenten gegebenenfalls über das Internet geladen.
 3. **Kleinanzeigen-Konto öffnen**, im eigenen Kleinanzeiger-Chrome anmelden und gegebenenfalls bestätigen. Dann Kleinanzeiger starten und im Dashboard **Mit Kleinanzeigen abgleichen** wählen.
 
@@ -41,7 +41,7 @@ Bei Problemen im Kleinanzeiger-Fenster **Fehlerdetails anzeigen** oder **Diagnos
 
 ### Linux / KDE
 
-**Neu ab 1.5.0:** Optionale öffentliche SACD-Suche (maximal alle 30 Minuten).
+**Neu ab 1.5.1:** Optionale öffentliche SACD-Suche (maximal alle 30 Minuten).
 Automatisierte Abrufe erfordern laut Nutzungsbedingungen schriftliche Zustimmung.
 [Einrichtung und Grenzen](docs/schnaeppchenjaeger.md).
 
