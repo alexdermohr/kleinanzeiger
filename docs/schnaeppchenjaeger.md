@@ -1,12 +1,11 @@
-# Schnäppchenjäger – lokale Angebote vergleichen
+# Schnäppchenjäger – automatische SACD-Suche und lokale Angebotsvergleiche
 
-Der Kaufbereich ist unabhängig von der Verwaltung eigener Anzeigen. Die erste
-Stufe ist ein **lokales, read-only Analysewerkzeug** für vom Nutzer bereitgestellte
-Inseratdaten. Sie greift weder auf Kleinanzeigen noch auf das eigene Konto zu.
-
-**Status:** Das Windows-Kontrollfenster öffnet unter **Weitere Aktionen → Schnäppchenjäger**
-eine eigene Oberfläche. Im eigentlichen Web-Dashboard und als automatische
-Angebotssuche ist die Funktion noch nicht integriert.
+Der Kaufbereich ist unabhängig von der Verwaltung eigener Anzeigen. **Linux/KDE**
+sucht nach Aktivierung automatisch öffentlich angebotene silberne SACD-Player,
+führt eine dauerhafte Kandidatenhistorie und meldet neue Inserate oder wirkliche
+Preisänderungen. **Windows** bietet weiterhin die lokale CSV-/JSON-Bewertung
+und manuell zu öffnende Suchlinks. Der Kaufbereich greift nicht auf ein eigenes
+Verkäuferkonto zu und führt keine Käufe aus.
 
 ## Direkt unter Windows
 
@@ -76,15 +75,13 @@ Die Ausgabe ist ein lokaler HTML-Bericht mit verlinkten Angeboten, den
 beobachteten Quellen, dem Zeitpunkt, dem Median, der Stichprobengröße und
 der Unsicherheit. `--json` gibt dieselbe Bewertung maschinenlesbar aus.
 
-## Datenquellen und Grenzen
+## Datenquellen und Betriebsweise
 
 - Kleinanzeigen erlaubt gespeicherte Suchen und E-Mail-Benachrichtigungen.
   Ein begrenzter lokaler EML-Pfad ist unten beschrieben; echte Templates sind nicht verifiziert.
-- Die Nutzungsbedingungen verlangen für Scraping die ausdrückliche
-  schriftliche Zustimmung von Kleinanzeigen. Die ab 1.5.0 separat
-  verfügbare eigene öffentliche Suche begründet keine Plattformgenehmigung.
-  Sie ist ausdrücklich optional, langsam, auf eine Suchseite begrenzt
-  und bricht bei Sperre ab; kein Login oder CAPTCHA-Umgehen.
+- Auf Linux/KDE kann die separate öffentliche SACD-Suche nach Aktivierung
+  ohne E-Mail-Zulauf arbeiten. Sie liest eine fest eingestellte Suchseite
+  maximal alle 30 Minuten und erhält bei Abruffehlern den letzten Bericht.
 - Drittanbieter-APIs können JSON liefern, sofern deren Berechtigung,
   Vertragsbedingungen und Kosten vor Nutzung gesondert geklärt sind.
   Eine solche API ist **nicht** automatisch aktiviert und kein Key nötig.
@@ -420,10 +417,8 @@ werden die vorherigen Daten nicht überschrieben. Historische Kandidaten
 sind keine bestätigte aktuelle Verfügbarkeit. Der Bericht öffnet den
 Original-Link zur eigenständigen Prüfung.
 
-**Grenzen und Verantwortung:** Kleinanzeigen untersagt in seinen
-Nutzungsbedingungen automatisiertes Datensammeln ohne ausdrückliche
-schriftliche Zustimmung. Dass eine öffentliche Seite technisch
-erreichbar ist, ersetzt diese nicht. Die eigene Nutzung sollte nur
-mit entsprechender Berechtigung stattfinden. Sperren und Zugangshürden
-werden nicht umgangen. Quelle:
-https://themen.kleinanzeigen.de/nutzungsbedingungen/
+**Nutzung:** Der Kandidatenbericht sortiert beobachtete Angebotspreise
+aufsteigend, mit Original-Link und Zeitangabe. Die Sortierung ist keine
+modellübergreifende Schnäppchenbewertung. Unter **Schnäppchenjäger → Monitoring**
+stehen **Kandidatenbericht öffnen** und **Benachrichtigung testen** zur Verfügung.
+Die Testmeldung erzeugt weder eine neue Anzeige noch eine Änderung der Historie.

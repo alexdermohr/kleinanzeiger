@@ -282,6 +282,24 @@ class CenterTests(unittest.TestCase):
                 watch.assert_called_once_with(manager.create_category(), "start")
         self.assertEqual(len(manager.profiles()), 1)
 
+    def test_public_notification_test_uses_desktop_without_fake_history(self):
+        from mark_api.radar_watch import RadarWatch
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        profile = manager.create_public_category()
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), \
+             patch.object(self.center, "dialog", side_effect=["0", "notify-test"]), \
+             patch.object(manager, "watch", return_value="Monitoring aktiv"), \
+             patch.object(mod.shutil, "which", return_value="/usr/bin/notify-send"), \
+             patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as sent, \
+             patch.object(self.center, "message") as message:
+            self.center.radar_monitoring("watch")
+        argv = sent.call_args.args[0]
+        self.assertEqual(argv[0], "/usr/bin/notify-send")
+        self.assertIn("Funktionstest", argv[-1])
+        self.assertFalse(sent.call_args.kwargs["shell"])
+        self.assertIn("keine Marktänderung", message.call_args.args[0])
+        self.assertFalse((profile.parent / "history.sqlite").exists())
+
     def test_watch_status_stop_and_invalid_prompt(self):
         from mark_api.radar_watch import RadarWatch
         manager = RadarWatch(self.root / "radars", self.root / "units")

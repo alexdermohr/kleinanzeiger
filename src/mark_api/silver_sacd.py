@@ -64,4 +64,4 @@ def assess(offers):
                  discount_pct=None, classification='nicht bewertbar',
                  reason='Kategorie ohne Modellpreisvergleich',
                  notes=['SACD-Disc-Wiedergabe und Silber nur anhand des Titels plausibel.',
-                        'Foto, Funktion und Originalanzeige selbst prüfen.']) for o in offers]
+                        'Foto, Funktion und Originalanzeige selbst prüfen.']) for o in sorted(offers, key=lambda item: (item.price_eur, item.title.casefold(), item.uid))]
