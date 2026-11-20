@@ -407,8 +407,10 @@ Einrichtung per Kommandozeile:
 
 Die Profilerstellung ist idempotent. Nur das bewusste Starten aktiviert
 einen systemd-User-Timer; dessen Intervall beträgt 30 Minuten. Seit 1.6.0
-rotieren drei feste öffentliche Suchanfragen: allgemeine silberne SACD-Player,
-SACD plus Silber und Marantz SACD Silber. **Je Timerlauf findet genau ein Abruf**
+rotieren drei feste öffentliche Suchanfragen; seit 1.7.0 sind es
+**SACD Player silber**, **SACD silber** und die breitere Suche **SACD Player**.
+Die dritte Suchvariante ersetzt die zuvor ergebnisarme Marantz-Silber-Abfrage.
+**Je Timerlauf findet genau ein Abruf**
 statt, nicht drei parallele Abfragen. Keine Chrome-Session,
 kein Konto, keine E-Mail, keine Drittanbieter-API, keine Proxies,
 keine Captcha-Lösung, keine Hintergrundretries.
@@ -416,15 +418,24 @@ keine Captcha-Lösung, keine Hintergrundretries.
 Der erste erfolgreiche Lauf ist nur eine Bestandsaufnahme. Weitere
 Abrufe prüfen neue IDs und wirkliche Änderungen des angebotenen
 Festpreises. VB-/Gratispreise, Defektgeräte, Zubehör, SACD-Discs,
-Marantz ND8006 und nicht eindeutig silberne Titel werden verworfen.
-Ein Median ist ausschließlich bei mindestens vier frischen weiteren Inseraten
-desselben Modells verfügbar. Sonst gibt es bewusst keine Schnäppchenwertung.
+Marantz ND8006 und ausdrücklich schwarze Titel werden verworfen.
+Plausible SACD-Modelle mit **fehlender Silberangabe** erscheinen seit 1.7.0
+ausschließlich unter **Farbe prüfen** im Kandidatenbericht: nur zur Prüfung
+des Originalfotos, ohne Einstufung als silbernes Gerät, ohne SQLite-Kandidaten
+und ohne automatische Marktbenachrichtigung. CD-only, Zubehör und defekte
+Geräte gelangen auch dort nicht hinein.
+Ein Angebotsmedian ist ausschließlich bei mindestens vier frischen weiteren
+Inseraten desselben Modells verfügbar. Sonst gibt es keine statistische
+Schnäppchenwertung.
 Nicht mehr angezeigte Inserate werden nicht automatisch als verkauft
 interpretiert. Versandkosten und technische Wiedergabefähigkeit bleiben
 ungeprüft.
 
 Daten liegen separat im Profilordner als angebote.json,
-history.sqlite, bericht.json und bericht.html. Bei HTTP-/Layoutfehler
+history.sqlite, bericht.json und bericht.html. Persönliche Preisziele
+werden zusätzlich als **preisziele.json** atomar und nur für den Benutzer
+gespeichert; das unveränderte Profil und die Angebotsdatenbank bleiben bestehen.
+Bei HTTP-/Layoutfehler
 werden die vorherigen Daten nicht überschrieben. Historische Kandidaten
 sind keine bestätigte aktuelle Verfügbarkeit. Der Bericht öffnet den
 Original-Link zur eigenständigen Prüfung.
@@ -432,5 +443,24 @@ Original-Link zur eigenständigen Prüfung.
 **Nutzung:** Der Kandidatenbericht sortiert beobachtete Angebotspreise
 aufsteigend, mit Original-Link und Zeitangabe. Die Sortierung ist keine
 modellübergreifende Schnäppchenbewertung. Unter **Schnäppchenjäger → Monitoring**
-stehen **Kandidatenbericht öffnen** und **Benachrichtigung testen** zur Verfügung.
+stehen **Kandidatenbericht öffnen**, **Benachrichtigung testen** und
+**Persönliches Modellpreisziel setzen / löschen** zur Verfügung.
+
+### Eigenes Modellpreisziel statt unbelegtem Vergleichspreis (ab 1.7.0)
+
+1. Im KDE-Schnäppchenjäger das öffentliche SACD-Profil unter **Monitoring**
+   auswählen und **Persönliches Modellpreisziel setzen / löschen** öffnen.
+2. Eines der tatsächlich im Bericht erkannten Herstellermodelle auswählen
+   und den gewünschten Höchstpreis in EUR eingeben (beispielsweise 250).
+   Das leere Eingabefeld entfernt dieses Ziel. Weitere Modellziele bleiben bestehen.
+3. Ab dem nächsten erfolgreichen regulären Suchlauf erscheinen frische
+   Festpreisangebote innerhalb des Limits als **persönliches Preisziel erreicht**.
+   Bei einem neu erreichten Ziel wird genau eine Meldung je Angebots- und
+   Zielpreisversion erzeugt. Der erste Lauf einer neuen Suche bleibt wie bisher
+   eine stille Bestandsaufnahme.
+
+Das ist **deine persönliche Kaufgrenze**, kein ermittelter Marktwert und kein
+bewiesener Rabatt. Die Modellpreis-Medianwertung mit vier fremden frischen
+Inseraten bleibt unabhängig erhalten. Stale Inserate werden nicht neu
+als Zieltreffer alarmiert. Versandkosten und Gerätezustand bitte am Link prüfen.
 Die Testmeldung erzeugt weder eine neue Anzeige noch eine Änderung der Historie.

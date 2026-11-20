@@ -113,6 +113,22 @@ class SilverSacdTests(unittest.TestCase):
         )
         self.assertTrue(all(row["peer_count"] == 0 for row in assessed))
 
+    def test_discount_boundary_uses_unrounded_percentage(self):
+        from mark_api.bargain_hunter import normalize_offer
+        at = datetime.now(timezone.utc).isoformat()
+        title = "Denon DCD-1700NE SACD Player silber"
+        def entry(number, amount):
+            return normalize_offer(dict(
+                id=str(6600000 + number), title=title, price_eur=str(amount),
+                url=f"https://www.kleinanzeigen.de/s-anzeige/player/{6600000 + number}",
+                observed_at=at, source="offline fixture", condition="unbekannt"))
+        peers = [entry(i, 1000) for i in range(2, 6)]
+        rounded_to_30 = assess([entry(1, "700.04"), *peers])[0]
+        self.assertEqual(rounded_to_30["discount_pct"], "30.0")
+        self.assertEqual(rounded_to_30["classification"], "preislich nicht auffällig")
+        actual_30 = assess([entry(1, "700.00"), *peers])[0]
+        self.assertEqual(actual_30["classification"], "auffällig günstig")
+
     def test_price_reference_excludes_old_or_different_model_peers(self):
         from mark_api.bargain_hunter import normalize_offer
         now = datetime.now(timezone.utc).replace(microsecond=0)

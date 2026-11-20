@@ -49,6 +49,32 @@ class RadarWatchTests(unittest.TestCase):
         self.assertEqual(list((self.profile.parent / 'suchmails').iterdir()), [])
         self.assertFalse((self.profile.parent / 'history.sqlite').exists())
 
+    def test_personal_targets_are_atomic_private_removable_and_preserve_profile(self):
+        profile = self.manager.create_public_category()
+        original = profile.read_bytes()
+        self.assertEqual(self.manager.price_targets(profile), {})
+        self.assertEqual(self.manager.set_price_target(profile, "denon:DCD1700NE", "250,00"),
+                         {"denon:DCD1700NE": "250.00"})
+        self.assertEqual(self.manager.set_price_target(profile, "yamaha:CDS1000", "800"),
+                         {"denon:DCD1700NE": "250.00", "yamaha:CDS1000": "800.00"})
+        self.assertEqual(self.manager.create_public_category(), profile)
+        self.assertEqual(profile.read_bytes(), original)
+        target = profile.parent / "preisziele.json"
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(target.read_text())["targets"], self.manager.price_targets(profile))
+        self.assertEqual(self.manager.set_price_target(profile, "denon:DCD1700NE", None),
+                         {"yamaha:CDS1000": "800.00"})
+        unchanged = target.read_bytes()
+        for value in ("0", "-5", "NaN", "1e5", "100001", "abc", ""):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.manager.set_price_target(profile, "yamaha:CDS1000", value)
+            self.assertEqual(target.read_bytes(), unchanged)
+        with self.assertRaises(ValueError):
+            self.manager.set_price_target(profile, "invalid-model", "200")
+        self.assertEqual(target.read_bytes(), unchanged)
+        with self.assertRaises(ValueError):
+            self.manager.set_price_target(self.profile, "yamaha:CDS1000", "200")
+
     def test_existing_config_and_sqlite_never_overwritten(self):
         self.profile.write_text('{}')
         with self.assertRaises(ValueError):

@@ -10,7 +10,7 @@ SEARCH_URL = 'https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=SACD+Play
 # Rotating queries broaden coverage without increasing requests per timer run.
 SEARCH_URLS = (SEARCH_URL,
                'https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=SACD+silber',
-               'https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=Marantz+SACD+silber')
+               'https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=SACD+Player')
 
 
 def _extra_accessory_only(title: str) -> bool:
@@ -95,12 +95,13 @@ def _fresh(observed_at: str, now: datetime) -> bool:
     return instant.tzinfo is not None and 0 <= age <= _FRESH_SECONDS
 
 
-def assess(offers):
-    """Use only fresh same-model asking prices; never infer cross-model savings."""
+def assess(offers, *, price_targets=None):
+    """Fresh same-model asking-price peers and separate user-defined price limits."""
     from bisect import bisect_left
     from datetime import datetime, timezone
     from decimal import Decimal
     now = datetime.now(timezone.utc)
+    price_targets = price_targets or {}
     groups: dict[tuple[str, str], list[Decimal]] = {}
     keys: dict[str, tuple[str, str]] = {}
     for offer in offers:
@@ -121,7 +122,8 @@ def assess(offers):
                    comparison_price_eur=None, peer_median_eur=None, peer_count=0,
                    discount_pct=None, classification='nicht bewertbar',
                    reason='Weniger als vier frische Vergleichsangebote desselben Modells',
-                   model_key=model,
+                   model_key=model, personal_price_target_eur=None,
+                   personal_price_met=False,
                    notes=['SACD-Disc-Wiedergabe und Silber nur anhand des Titels plausibel.',
                           'Foto, Funktion und Originalanzeige selbst prüfen.'])
         group = keys.get(o.uid)
@@ -134,12 +136,28 @@ def assess(offers):
                 middle = peer_count // 2
                 median = at(middle) if peer_count % 2 else (at(middle - 1) + at(middle)) / 2
                 if median > 0:
-                    discount = (Decimal(100) * (median - o.price_eur) / median).quantize(Decimal('0.1'))
+                    raw_discount = Decimal(100) * (median - o.price_eur) / median
+                    discount = raw_discount.quantize(Decimal('0.1'))
                     row.update(peer_count=peer_count,
                                peer_median_eur=f'{median:.2f}',
                                discount_pct=f'{discount:.1f}',
-                               classification='auffällig günstig' if discount >= 30 else 'preislich nicht auffällig',
+                               classification='auffällig günstig' if raw_discount >= 30 else 'preislich nicht auffällig',
                                reason='Median frischer Angebotspreise desselben Herstellers und Modells')
                     row['notes'].append('Referenz sind andere aktuelle Inserate, keine erzielten Verkaufspreise; Versand unbekannt.')
+        target = price_targets.get(model) if model else None
+        if target is not None:
+            # Only a fresh, known listing can meet a personal price limit.
+            amount = Decimal(target)
+            row['personal_price_target_eur'] = f'{amount:.2f}'
+            if o.price_eur is not None and _fresh(o.observed_at, now) and o.price_eur <= amount:
+                row['personal_price_met'] = True
+                if row['classification'] != 'auffällig günstig':
+                    row['classification'] = 'persönliches Preisziel erreicht'
+                    row['reason'] = 'Eigenes Preislimit erfüllt, kein statistischer Marktpreisbeleg'
+                row['notes'].append(
+                    'Persönliches Preislimit, keine Marktpreisreferenz oder bestätigte Ersparnis.')
+            elif not _fresh(o.observed_at, now):
+                row['notes'].append(
+                    'Der letzte beobachtete Preis ist für einen aktuellen Preiszielalarm zu alt.')
         output.append(row)
     return output

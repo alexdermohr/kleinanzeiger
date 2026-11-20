@@ -3,6 +3,15 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.7.0] - 2026-11-20
+
+### Neu
+
+- **Mehr Suchabdeckung bei unveränderter Abruffrequenz:** Die bisher kaum ertragreiche Marantz-Silber-Suche wird durch „SACD Player“ ersetzt. Alle drei Suchvarianten rotieren weiterhin mit genau einem Abruf je 30 Minuten.
+- **Farbe prüfen:** Plausible SACD-Modelle ohne Silberangabe im Titel stehen nur auf einer getrennten Foto-Prüfliste im HTML-/JSON-Bericht. Sie werden nicht als silberne Treffer, neue Inserate oder Schnäppchen gemeldet. Schwarze, defekte, Zubehör- und reine CD-Geräte bleiben ausgeschlossen.
+- **Persönliche Preisziele pro erkanntem Modell:** Im Linux/KDE-Schnäppchenjäger unter Monitoring ein eigenes EUR-Maximum setzen oder löschen. Ein frischer Angebotsfestpreis unter der Grenze wird einmalig als **persönliches Preisziel erreicht** gemeldet – getrennt von modellbezogenen Marktmedianen. Ohne Preisziel oder vier echte Modellpeers wird kein Marktwert behauptet.
+- Preisziele liegen atomar in einer gesonderten privaten Datei; bestehende Suchprofile, EML-Radar, SQLite-Historie, systemd-Timer und Rückfallmöglichkeit bleiben erhalten.
+
 ## [1.6.0] - 2026-11-20
 
 ### Neu

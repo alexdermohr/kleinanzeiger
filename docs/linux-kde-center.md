@@ -70,10 +70,14 @@ Anbieter. Das lokale Menü ist unabhängig vom Windows-Installer.
 - **Schnäppchenjäger** wertet eigene CSV/JSON aus, öffnet eine manuelle Suche
   oder überwacht öffentlich angebotene silberne SACD-Player automatisch per
   separatem systemd-User-Timer. Der Kandidatenbericht zeigt Preis, Zeitpunkt und
-  Original-Link, aufsteigend nach Angebotspreis. Der Timer rotiert ab 1.6.0
-  drei feste Suchbegriffe mit genau einem Abruf alle 30 Minuten. Ein Modellmedian
-  wird erst bei vier frischen Vergleichsanzeigen desselben Gerätemodells angezeigt. Unter **Monitoring** sind Status, Bericht und eine
-  **Testbenachrichtigung** erreichbar. [Schnäppchenjäger](schnaeppchenjaeger.md).
+  Original-Link, aufsteigend nach Angebotspreis. Drei Suchbegriffe rotieren
+  mit genau einem Abruf alle 30 Minuten; seit 1.7.0 ist der dritte breiter
+  („SACD Player“). Angebote ohne belegte Silberfarbe stehen nur zur manuellen
+  Fotoprüfung und lösen keine Alarme aus. Ein echter Modellmedian braucht vier
+  frische Vergleichsanzeigen. Unter **Monitoring** lassen sich persönliche
+  EUR-Preislimits je beobachtetem Modell setzen/löschen (keine Marktpreisannahme),
+  Berichte öffnen und **Testbenachrichtigungen** auslösen.
+  [Schnäppchenjäger](schnaeppchenjaeger.md).
 - Diagnose zeigt nur Paketversion, Dialogverfügbarkeit, Client-Prozessstatus und
   ein festes Aktionsergebnis. Keine Pfade, Umgebungsvariablen, Tokens, Rohfehler
   oder Backend-Ausgaben werden übernommen. Importvorschauen enthalten dagegen

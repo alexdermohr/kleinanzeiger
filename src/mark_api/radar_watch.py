@@ -132,11 +132,122 @@ class RadarWatch:
         if profile != self.data / digest / 'profil.json' or config != expected:
             raise ValueError('Nur unveränderte, hier eingerichtete Profile sind für Monitoring zugelassen.')
         safe(profile.parent / 'suchmails', directory=True)
-        for name in ('history.sqlite', 'bericht.html', 'bericht.json', 'angebote.json'):
+        for name in ('history.sqlite', 'bericht.html', 'bericht.json', 'angebote.json', 'preisziele.json'):
             path = profile.parent / name
             if path.exists() or path.is_symlink():
                 safe(path)
         return config
+
+    @staticmethod
+    def _price_target_key(value: str) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r'[a-z0-9+]+:[A-Z0-9]{2,25}', value):
+            raise ValueError('Eindeutiger Hersteller-/Modellschlüssel erforderlich.')
+        return value
+
+    @staticmethod
+    def _price_target_value(value: str) -> str:
+        from .bargain_hunter import euro
+        if not isinstance(value, str):
+            raise ValueError('Persönlicher Maximalpreis muss ein EUR-Wert sein.')
+        try:
+            amount = euro(value, required=True)
+        except ValueError as exc:
+            raise ValueError('Ungültiger persönlicher Maximalpreis in EUR.') from exc
+        if amount <= 0 or amount > 100000:
+            raise ValueError('Persönlicher Maximalpreis muss zwischen 0,01 und 100000 EUR liegen.')
+        return f'{amount:.2f}'
+
+    def price_targets(self, profile: Path) -> dict[str, str]:
+        from .silver_sacd import CATEGORY
+        config = self.load(profile)
+        if config.get('input_type') != 'public' or config.get('category') != CATEGORY:
+            raise ValueError('Persönliche Preisziele nur für direkte öffentliche SACD-Profile.')
+        path = profile.parent / 'preisziele.json'
+        if not path.exists() and not path.is_symlink():
+            return {}
+        safe(path)
+        if path.stat().st_size > 8192:
+            raise ValueError('Preisziel-Datei zu groß.')
+        try:
+            payload = json.loads(path.read_text(encoding='utf-8'))
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError('Preisziele sind kein gültiges UTF-8-JSON.') from exc
+        if (not isinstance(payload, dict) or set(payload) != {'version', 'targets'}
+                or payload['version'] != 1 or not isinstance(payload['targets'], dict)
+                or len(payload['targets']) > 50):
+            raise ValueError('Ungültige Preisziel-Datei; bestehende Werte bleiben unverändert.')
+        verified = {}
+        for key, value in payload['targets'].items():
+            self._price_target_key(key)
+            canonical = self._price_target_value(value)
+            if value != canonical:
+                raise ValueError('Preisziel-Datei muss kanonische EUR-Werte enthalten.')
+            verified[key] = canonical
+        return verified
+
+    def set_price_target(self, profile: Path, model_key: str, maximum_eur: str | None) -> dict[str, str]:
+        from .silver_sacd import CATEGORY
+        if self.load(profile).get('input_type') != 'public' or self.load(profile).get('category') != CATEGORY:
+            raise ValueError('Persönliche Preisziele nur für die direkte SACD-Suche.')
+        key = self._price_target_key(model_key)
+        targets = self.price_targets(profile)
+        if maximum_eur is None:
+            targets.pop(key, None)
+        else:
+            targets[key] = self._price_target_value(maximum_eur)
+        if len(targets) > 50:
+            raise ValueError('Höchstens 50 persönliche Modellpreisziele.')
+        directory = profile.parent
+        private_dir(directory)
+        target = directory / 'preisziele.json'
+        if target.exists() or target.is_symlink():
+            safe(target)
+        fd, temp = tempfile.mkstemp(prefix='.price-target-', dir=directory)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as output:
+                json.dump({'version': 1, 'targets': dict(sorted(targets.items()))},
+                          output, ensure_ascii=False, indent=2)
+                output.write(chr(10))
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temp, target)
+            fd_dir = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd_dir)
+            finally:
+                os.close(fd_dir)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+        return targets
+
+    def price_target_models(self, profile: Path) -> dict[str, str]:
+        from .silver_sacd import CATEGORY
+        if self.load(profile).get('category') != CATEGORY or self.load(profile).get('input_type') != 'public':
+            raise ValueError('Preisziel-Modelle benötigen ein öffentliches SACD-Profil.')
+        report = profile.parent / 'bericht.json'
+        if not report.exists() or report.is_symlink():
+            return {}
+        safe(report)
+        if report.stat().st_size > 2_000_000:
+            raise ValueError('Preisziel-Modellübersicht zu groß.')
+        document = json.loads(report.read_text(encoding='utf-8'))
+        rows = document.get('known_candidates') if isinstance(document, dict) else None
+        if not isinstance(rows, list) or len(rows) > 10000:
+            raise ValueError('Kandidatenbericht nicht lesbar.')
+        options = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = row.get('model_key')
+            if not isinstance(key, str):
+                continue
+            try:
+                self._price_target_key(key)
+            except ValueError:
+                continue
+            options[key] = key + ' · Angebotspreis ' + str(row.get('price_eur', '?')) + ' EUR'
+        return dict(sorted(options.items()))
 
     def profiles(self) -> list[tuple[Path, str]]:
         if not self.data.exists():

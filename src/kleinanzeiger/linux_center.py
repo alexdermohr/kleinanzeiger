@@ -186,7 +186,7 @@ class Center:
                 if choice == "public-sacd":
                     self.text('Öffentliche SACD-Suche in Deutschland, ohne E-Mail oder Anmeldung.\n'
                               'Nur silberne und plausible SACD-Player; keine modellübergreifende Schnäppchenwertung.\n'
-                              'Das Profil rotiert drei öffentliche Suchanfragen bei nur einem Abruf alle 30 Minuten.\n'
+                              'Das Profil rotiert drei öffentliche Suchanfragen, darunter eine breitere SACD-Player-Suche, bei nur einem Abruf alle 30 Minuten.\n'
                               'Bei Sperre oder Layoutänderung bleibt die letzte Auswertung erhalten.')
                 if choice == "silver-sacd":
                     from mark_api.silver_sacd import SEARCH_URL
@@ -245,7 +245,8 @@ class Center:
                            "start", "Monitoring starten", "stop", "Monitoring stoppen")
                 if direct:
                     actions += ("fetch", "Öffentliche Suche jetzt ausführen",
-                                "notify-test", "Benachrichtigung testen")
+                                "notify-test", "Benachrichtigung testen",
+                                "price-target", "Persönliches Modellpreisziel setzen / löschen")
                 action = self.dialog("--menu", status, *actions)
                 if action == "status":
                     self.text(manager.watch(profile, "status") + "\n\n" + manager.local_status(profile))
@@ -263,6 +264,37 @@ class Center:
                     subprocess.run([opener, str(report)], shell=False, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    timeout=30, check=True)
+                elif action == "price-target" and direct:
+                    options = manager.price_target_models(profile)
+                    if not options:
+                        self.message("Noch keine erkannten Modellnummern im Radarbericht. "
+                                     "Zuerst die automatische Suche und den Bericht prüfen.")
+                        return
+                    targets = manager.price_targets(profile)
+                    entries = []
+                    for key, label in options.items():
+                        existing = targets.get(key)
+                        entries.extend((key, label + (
+                            " · Ziel " + existing + " EUR" if existing is not None else "")))
+                    selected = self.dialog("--menu",
+                        "Persönliches Preislimit für ein bereits erkanntes Modell auswählen:", *entries)
+                    if selected is None:
+                        return
+                    if selected not in options:
+                        raise ValueError("Unbekannter Modellschlüssel.")
+                    value = self.dialog("--inputbox",
+                        "Maximaler Angebotspreis in EUR. Leer lassen entfernt das Preisziel. "
+                        "Dies ist dein eigener Grenzwert, kein Marktwert.",
+                        targets.get(selected, ""))
+                    if value is None:
+                        return
+                    result = manager.set_price_target(profile, selected, value.strip() or None)
+                    if selected in result:
+                        self.message(f"Persönliches Preislimit für {selected}: {result[selected]} EUR. "
+                                     "Wirksam beim nächsten regulären Suchlauf; kein Marktpreisvergleich.")
+                    else:
+                        self.message(f"Persönliches Preislimit für {selected} entfernt. "
+                                     "Andere Modellziele bleiben erhalten.")
                 elif action == "notify-test" and direct:
                     notifier = shutil.which("notify-send")
                     if not notifier:
@@ -392,15 +424,21 @@ XLSX benötigt das optionale Paket openpyxl (private-web Extra).
 Backup: vorhandene Datenbank, neue Zieldatei in vorhandenem Ordner wählen.
 Wochenbericht: Zielordner wählen; vorhandener Bericht desselben UTC-Tages wird ersetzt.
 Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar und automatische öffentliche SACD-Suche.
-Der getrennte SACD-Timer rotiert drei feste Suchbegriffe bei einem Abruf höchstens alle 30 Minuten.
-Monitoring zeigt Status und Kandidatenbericht und erlaubt eine Testbenachrichtigung.
+Der SACD-Timer rotiert drei Suchbegriffe (auch SACD Player) bei höchstens einem Abruf alle 30 Minuten.
+Monitoring erlaubt persönliche Modellpreislimits, Status, Kandidatenbericht und Testbenachrichtigung.
 Kandidaten erscheinen aufsteigend nach beobachtetem Angebotspreis. Erst vier
 weitere frische Inserate desselben Modells ermöglichen einen Vergleichsmedian.
+Persönliche Preislimits sind keine Marktwerte. Angebote ohne Silberangabe erscheinen nur zur Fotoprüfung, ohne Alarm.
 Tatsächliche Verkaufspreise und Funktionsfähigkeit sind nicht belegt.
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.6.0 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.7.0 · KDE-Kontrollzentrale
+Neu: Breitere dritte SACD-Abfrage bei unverändert einem Abruf je 30 Minuten.
+Farbzweifelhafte Titel erscheinen getrennt zur manuellen Fotoprüfung, ohne Alarm.
+Persönliche EUR-Preislimits je Modell sind unter Monitoring editierbar und
+lösen einmalige Zieltreffermeldungen aus, unabhängig vom Marktpreis-Median.
+Keine persönliche Preisgrenze wird als belegter Marktwert bezeichnet.
 Neu: Drei öffentliche SACD-Suchbegriffe rotieren bei nur einem Abruf je 30 Minuten.
 Preisprüfung: Vier weitere, frische Angebote desselben Herstellermodells
 liefern einen Angebotsmedian und erlauben eine konservative Schnäppchenwertung.
