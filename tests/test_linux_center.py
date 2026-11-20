@@ -282,6 +282,31 @@ class CenterTests(unittest.TestCase):
                 watch.assert_called_once_with(manager.create_category(), "start")
         self.assertEqual(len(manager.profiles()), 1)
 
+    def test_public_personal_price_target_menu_edits_only_private_settings(self):
+        from mark_api.radar_watch import RadarWatch
+        manager = RadarWatch(self.root / "radars", self.root / "units")
+        profile = manager.create_public_category()
+        code = "denon:DCD1700NE"
+        models = {code: code + " · Angebotspreis 350.00 EUR"}
+        before = profile.read_bytes()
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), \
+             patch.object(self.center, "dialog", side_effect=["0", "price-target", code, "300"]), \
+             patch.object(manager, "watch", return_value="Monitoring aktiv"), \
+             patch.object(manager, "price_target_models", return_value=models), \
+             patch.object(self.center, "message") as message:
+            self.center.radar_monitoring("watch")
+        self.assertEqual(manager.price_targets(profile), {code: "300.00"})
+        self.assertEqual(before, profile.read_bytes())
+        self.assertIn("kein Marktpreisvergleich", message.call_args.args[0])
+        with patch("mark_api.radar_watch.RadarWatch", return_value=manager), \
+             patch.object(self.center, "dialog", side_effect=["0", "price-target", code, ""]), \
+             patch.object(manager, "watch", return_value="Monitoring aktiv"), \
+             patch.object(manager, "price_target_models", return_value=models), \
+             patch.object(self.center, "message") as message:
+            self.center.radar_monitoring("watch")
+        self.assertEqual(manager.price_targets(profile), {})
+        self.assertIn("entfernt", message.call_args.args[0])
+
     def test_public_notification_test_uses_desktop_without_fake_history(self):
         from mark_api.radar_watch import RadarWatch
         manager = RadarWatch(self.root / "radars", self.root / "units")

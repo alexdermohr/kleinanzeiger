@@ -24,7 +24,7 @@ from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_ope
 
 from .bargain_hunter import DealInputError, euro, normalize_offer
 from .bargain_radar import atomic_report, run as radar_run
-from .silver_sacd import CATEGORY, SEARCH_URL, SEARCH_URLS, rejection
+from .silver_sacd import CATEGORY, SEARCH_URL, SEARCH_URLS, rejection, model_key
 
 MAX_PAGE_BYTES = 1_250_000
 MIN_FETCH_INTERVAL_SECONDS = 30 * 60
@@ -33,7 +33,7 @@ MIN_FETCH_INTERVAL_SECONDS = 30 * 60
 BASE = "https://www.kleinanzeigen.de"
 AD_PATH = re.compile(r"/s-anzeige/[a-zA-Z0-9._%-]+/([1-9][0-9]{5,19})(?:-[0-9]+-[0-9]+)?\Z")
 NUMERIC_PRICE = re.compile(r"([0-9]{1,3}(?:\.[0-9]{3})*|[0-9]+)(?:,([0-9]{1,2}))?\s*€\Z")
-USER_AGENT = "Kleinanzeiger/1.6 (private, low-frequency public-offer monitoring)"
+USER_AGENT = "Kleinanzeiger/1.7 (private, low-frequency public-offer monitoring)"
 
 
 class _SameHostRedirect(HTTPRedirectHandler):
@@ -145,7 +145,8 @@ class _Cards(HTMLParser):
             self.price = False
 
 
-def parse_search_html(page: str, *, observed_at: str | None = None) -> tuple[list[dict], dict]:
+def parse_search_html(page: str, *, observed_at: str | None = None,
+                      review_missing_color: bool = False) -> tuple[list[dict], dict]:
     """Fail on unexpected layouts; ignore VB/free listings, accessories and black players."""
     if not isinstance(page, str) or len(page) > MAX_PAGE_BYTES:
         raise DealInputError("Ungültige Suchseite")
@@ -161,6 +162,7 @@ def parse_search_html(page: str, *, observed_at: str | None = None) -> tuple[lis
         raise DealInputError("Keine eindeutigen Inseratskarten; letzte Daten bleiben erhalten")
     stamp = observed_at or datetime.now(timezone.utc).isoformat()
     rows: list[dict] = []
+    color_review: list[dict] = []
     ids: set[str] = set()
     ignored = 0
     for card in parser.cards:
@@ -176,7 +178,14 @@ def parse_search_html(page: str, *, observed_at: str | None = None) -> tuple[lis
         value = " ".join(card["price"].split())
         if not title or len(title) > 350 or not value:
             raise DealInputError("Inseratskarte ohne Titel oder Preis")
-        if rejection(title):
+        reason = rejection(title)
+        # A known SACD model without a colour claim is worth manual photo
+        # inspection, but is NEVER an accepted silver candidate or an alert.
+        check_color = (review_missing_color
+                       and reason == 'Explizite Silberangabe im Mailtitel fehlt'
+                       and model_key(title) is not None
+                       and rejection(title + ' silber') is None)
+        if reason and not check_color:
             ignored += 1
             continue
         match_price = NUMERIC_PRICE.fullmatch(value)
@@ -193,9 +202,16 @@ def parse_search_html(page: str, *, observed_at: str | None = None) -> tuple[lis
                "observed_at": stamp, "shipping_eur": None,
                "condition": "unbekannt"}
         normalize_offer(row)
-        rows.append(row)
-    return rows, {"visible_cards": len(parser.cards), "accepted_fixed_price": len(rows),
-                  "ignored_or_unpriced": ignored}
+        if check_color:
+            color_review.append(row)
+            ignored += 1
+        else:
+            rows.append(row)
+    stats = {"visible_cards": len(parser.cards), "accepted_fixed_price": len(rows),
+             "ignored_or_unpriced": ignored}
+    if review_missing_color:
+        stats.update(color_review_count=len(color_review), color_review=color_review)
+    return rows, stats
 
 
 @contextmanager
@@ -264,10 +280,14 @@ def run_public(profile: Path, *, fetcher=fetch_html) -> dict:
     config = manager.load(profile)
     if config.get("input_type") != "public" or config.get("category") != CATEGORY:
         raise DealInputError("Nur das separat eingerichtete öffentliche SACD-Profil ist erlaubt")
+    # An invalid price-target file must never consume the fetch slot or
+    # overwrite a successful previous public snapshot.
+    manager.price_targets(profile)
     with _single_public_run(profile) as lock_fd:
         slot = _enforce_fetch_interval(lock_fd)
         page = fetcher(SEARCH_URLS[slot])
-        rows, stats = parse_search_html(page)
+        rows, stats = parse_search_html(page, review_missing_color=True)
+        color_review = stats.pop('color_review', [])
         stats.update(query_index=slot + 1, query_total=len(SEARCH_URLS),
                      query_url=SEARCH_URLS[slot])
         # Never update the snapshot or history on HTTP errors / invalid HTML.
@@ -275,7 +295,7 @@ def run_public(profile: Path, *, fetcher=fetch_html) -> dict:
         if target.exists() or target.is_symlink():
             safe(target)
         atomic_report(target, json.dumps(rows, ensure_ascii=False, indent=2))
-        result = radar_run(profile)
+        result = radar_run(profile, color_review=color_review, public_search=stats)
         return {**result, "public_search": stats}
 
 

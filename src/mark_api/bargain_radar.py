@@ -33,7 +33,8 @@ def atomic_report(path: Path, text: str) -> None:
             os.unlink(name)
 
 
-def run(config_path: Path) -> dict:
+def run(config_path: Path, *, color_review: list[dict] | None = None,
+        public_search: dict | None = None) -> dict:
     """One transaction per run, including report generation; fail closed on locks."""
     config = json.loads(config_path.read_text(encoding='utf-8-sig'))
     if not isinstance(config, dict):
@@ -61,6 +62,13 @@ def run(config_path: Path) -> dict:
         raise DealInputError('Unbekannter input_type')
     mail_mode = config.get('input_type') == 'eml'
     public_mode = config.get('input_type') == 'public'
+    # A separate private file preserves the immutable identity of existing
+    # public profiles; manual price limits never become market-price evidence.
+    targets = {}
+    if category and public_mode:
+        from .radar_watch import RadarWatch
+        targets = RadarWatch(config_path.parent.parent).price_targets(config_path)
+    color_review = color_review or []
     diagnostics = []
     mail_rows = []
     if mail_mode:
@@ -144,6 +152,9 @@ def run(config_path: Path) -> dict:
             db.execute('INSERT INTO radar_profile VALUES (?)', (profile,))
         db.execute('CREATE TABLE IF NOT EXISTS radar_current (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS radar_runs (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)')
+        if public_mode and category:
+            db.execute('CREATE TABLE IF NOT EXISTS radar_target_alerted ('
+                       'id TEXT PRIMARY KEY, price_version TEXT NOT NULL)')
         if mail_mode or category:
             # Later exact-model peers can make an existing SACD offer assessable.
             # Persist the last alerted asking-price version,
@@ -193,7 +204,7 @@ def run(config_path: Path) -> dict:
                 offer = normalize_offer(row)
                 if not rejection(offer.title) and not _DAMAGED.search(offer.condition):
                     known.append(offer)
-            known_candidates = assess(known)
+            known_candidates = assess(known, price_targets=targets)
             evaluated = known_candidates
         else:
             evaluated = assess_offers(current_offers, model, min_peers=min_peers,
@@ -219,14 +230,31 @@ def run(config_path: Path) -> dict:
                     should_alert = True
                     db.execute('INSERT OR REPLACE INTO radar_alerted VALUES (?, ?)',
                                (uid, price_version))
+            target_hit = bool(public_mode and category and item.get('personal_price_met'))
+            target_alert = False
+            if target_hit:
+                # This is a user budget signal, NOT a claimed market discount.
+                target_version = json.dumps([item['price_eur'], item['shipping_eur'],
+                                             item['personal_price_target_eur']])
+                previous_target = db.execute(
+                    'SELECT price_version FROM radar_target_alerted WHERE id=?', (uid,)
+                ).fetchone()
+                if previous_target is None or previous_target[0] != target_version:
+                    target_alert = True
+                    db.execute('INSERT OR REPLACE INTO radar_target_alerted VALUES (?, ?)',
+                               (uid, target_version))
             if first_public_baseline:
                 # A complete first run acknowledges existing bargains without
                 # notifying about listings that predate the initial baseline.
                 should_alert = False
+                target_alert = False
             if change:
                 kind, previous_price, previous_shipping = change
                 events.append(dict(item, event=kind, previous_price_eur=previous_price,
                                    previous_shipping_eur=previous_shipping))
+            elif target_alert and not should_alert:
+                events.append(dict(item, event='personal_price_target',
+                                   previous_price_eur=None, previous_shipping_eur=None))
             elif should_alert:
                 # The source mail is not new, but only *now* has >=min_peers
                 # comparable observations arrived. Alert once per price version.
@@ -242,7 +270,13 @@ def run(config_path: Path) -> dict:
             assessment_type = ('category_asking_prices' if any(
                 item['peer_count'] >= 4 for item in known_candidates) else 'category_unpriced')
             result.update(reference_type=assessment_type, candidate_events=len(events),
-                          known_candidates=known_candidates, known_candidate_count=len(known_candidates))
+                          known_candidates=known_candidates, known_candidate_count=len(known_candidates),
+                          personal_price_targets=len(targets),
+                          personal_price_hits=sum(bool(event.get('personal_price_met')) for event in events),
+                          color_review=color_review if public_mode else [],
+                          color_review_count=len(color_review) if public_mode else 0)
+            if public_mode and public_search is not None:
+                result['public_search'] = public_search
         db.execute('INSERT INTO radar_runs(payload) VALUES (?)',
                    (json.dumps(result, ensure_ascii=False),))
         # Successful run results remain available in the isolated history.
@@ -271,8 +305,10 @@ def run(config_path: Path) -> dict:
                                     f"Versand {old_shipping} EUR; jetzt Preis {candidate['price_eur']} EUR, "
                                     f"Versand {new_shipping} EUR.")
                 display.append(dict(candidate, notes=[*notes, *candidate['notes']]))
-            page = render_report(model, display, generated_at=generated, category=True)
-            summary = (f"<p>Kategorie: {len(events)} neue passende silberne SACD-Player / Preisänderungen. "
+            page = render_report(model, display, generated_at=generated, category=True,
+                                 color_review=color_review)
+            summary = (f"<p>Kategorie: {len(events)} neue oder preiszielbezogene SACD-Ereignisse; "
+                       f"{result['personal_price_hits']} unter persönlichem Modellpreislimit. "
                        "Historisch beobachtete Kandidaten; Verfügbarkeit nicht erneut geprüft. "
                        + ('Modellpreisvergleich nur bei mindestens vier frischen Angeboten desselben Modells. '
                           if assessment_type == 'category_asking_prices' else 'Keine Modellpreisbewertung. ')
@@ -295,8 +331,10 @@ def run(config_path: Path) -> dict:
         if executable:
             try:
                 subprocess.run([executable, '--', 'Kleinanzeiger',
-                    (f"{result['candidate_events']} SACD-Ereignisse; davon {result['hits']} nach Modellvergleich auffällig günstig. Bericht: {report}"
-                     if category and result['hits'] else
+                    (f"{result['candidate_events']} SACD-Ereignisse; "
+                     f"{result['hits']} nach Modellvergleich auffällig günstig, "
+                     f"{result['personal_price_hits']} innerhalb eigener Modellpreisziele. Bericht: {report}"
+                     if category and public_mode else
                      f"{result['candidate_events']} neue passende silberne SACD-Player / Preisänderungen. Bericht: {report}"
                      if category else f"{result['hits']} neue auffällig günstige Inserate. Bericht: {report}")],
                     check=True, timeout=10, capture_output=True)

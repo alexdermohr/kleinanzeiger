@@ -14,7 +14,8 @@ from pathlib import Path
 from .bargain_hunter import DealInputError, assess_offers, load_offers, search_url
 
 
-def render_report(model: str, offers: list[dict], *, generated_at: str, category=False) -> str:
+def render_report(model: str, offers: list[dict], *, generated_at: str,
+                  category=False, color_review: list[dict] | None = None) -> str:
     esc = lambda text: html.escape(str(text), quote=True)
     count = sum(r["classification"] == "auffällig günstig" for r in offers)
     rows = []
@@ -31,6 +32,14 @@ def render_report(model: str, offers: list[dict], *, generated_at: str, category
                  if r["comparison_price_eur"] is not None else "Unbekannt")
         label = "Treffer prüfen" if status == "auffällig günstig" else "Angebot öffnen"
         if category:
+            target = r.get('personal_price_target_eur')
+            target_note = (
+                f"<p>Persönliches Preislimit: {esc(target)} € · "
+                + ("bei der jüngsten Beobachtung erreicht" if r.get('personal_price_met')
+                   else "nicht erreicht oder Beobachtung zu alt")
+                + ". Kein belegter Marktvergleich.</p>"
+                if target is not None else ""
+            )
             reference = (
                 f"<p>Modellvergleich: {esc(median)} Median aus {int(r['peer_count'])} "
                 f"anderen frischen Angeboten desselben Herstellermodells; "
@@ -41,7 +50,7 @@ def render_report(model: str, offers: list[dict], *, generated_at: str, category
             rows.append(
                 f"<article class='offer'><header><span class='classification'>{esc(status)}</span>"
                 f"<h2>{esc(r['title'])}</h2></header><p>Angebotspreis: {esc(price)} · Versand: {esc(shipping)}</p>"
-                f"{reference}<p>{esc(r['reason'])}</p><p>{esc('; '.join(r['notes']))}</p>"
+                f"{reference}{target_note}<p>{esc(r['reason'])}</p><p>{esc('; '.join(r['notes']))}</p>"
                 f"<p>Quelle: {esc(r['source'])} · Beobachtet: {esc(r['observed_at'])} · ID: {esc(r['id'])}</p>"
                 f"<a href='{esc(r['url'])}' target='_blank' rel='noopener noreferrer'>Originalanzeige prüfen</a></article>"
             )
@@ -68,12 +77,32 @@ def render_report(model: str, offers: list[dict], *, generated_at: str, category
         "Modellbezeichnung oder Eingabedaten prüfen.</p>"
     )
     comparable = sum(r.get('peer_count', 0) >= 4 for r in offers)
+    personal = sum(bool(r.get('personal_price_met')) for r in offers)
     heading = (f"{len(offers)} historisch beobachtete Kandidaten; "
                + (f"{comparable} mit Vergleich desselben Modells; {count} davon auffällig günstig."
                   if comparable else "keine Modellpreisbewertung.")
                if category else f"{len(offers)} passende Angebote, davon {count} auffällig günstig.")
+    if category and personal:
+        heading += f" {personal} innerhalb selbst gesetzter Preislimits (keine Marktpreiswertung)."
     if category and not offers:
         body = "<p>Keine neuen passenden Geräte oder Preisänderungen.</p>"
+    review_section = ""
+    if category and color_review:
+        # A colour-unverified listing never enters the silver-only radar state
+        # or notification stream; display safe original offers for photo review.
+        preview = "".join(
+            "<article class='offer'>"
+            f"<h2>{esc(row['title'])}</h2>"
+            f"<p>Beobachteter Festpreis: {esc(row['price_eur'])} € · Silberfarbe im Titel nicht belegt.</p>"
+            f"<a href='{esc(row['url'])}' target='_blank' rel='noopener noreferrer'>"
+            "Foto und Originalanzeige selbst prüfen</a></article>"
+            for row in color_review
+        )
+        review_section = (
+            f"<section class='info'><h2>Farbe prüfen · {len(color_review)} weitere mögliche SACD-Player</h2>"
+            "<p>Keine bestätigten silbernen Geräte; keine Preiswertung und keine automatischen "
+            "Marktalarme. Titel und Fotos beim Anbieter prüfen.</p></section>" + preview
+        )
     return f"""<!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kleinanzeiger – Schnäppchenjäger</title>
@@ -91,7 +120,7 @@ def render_report(model: str, offers: list[dict], *, generated_at: str, category
 <p><small>Erstellt: {esc(generated_at)}. Dies ist eine Auswertung von beobachteten <b>Angebotspreisen</b>,
 keine bestätigten Verkaufspreise und keine Garantie für Echtheit, Zustand oder Ersparnis.
 Bei fehlenden Vergleichsdaten gibt es ausdrücklich keine Schnäppchenwertung.</small></p></section>
-{body}</main></body></html>"""
+{body}{review_section}</main></body></html>"""
 
 
 def main(argv: list[str] | None = None) -> int:

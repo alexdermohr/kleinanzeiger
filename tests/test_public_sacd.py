@@ -291,6 +291,85 @@ class PublicSacdTests(unittest.TestCase):
                                "https://www.kleinanzeigen.de/s-sacd-player-silber/k0"))
 
 
+    def test_broad_search_keeps_missing_silver_in_unverified_photo_review_only(self):
+        uncertain = "Denon DCD-1700NE SACD Player &lt;S1&gt;"
+        html = page(card("1234567", GOOD, "500 €"),
+                    card("1234568", uncertain, "210 €"),
+                    card("1234569", "Denon DCD-1700NE SACD Player schwarz", "100 €"),
+                    card("1234570", "Marantz ND8006 SACD-Qualität Player", "30 €"))
+        rows, stats = parse_search_html(html, review_missing_color=True)
+        self.assertEqual([row["id"] for row in rows], ["1234567"])
+        self.assertEqual(stats["color_review_count"], 1)
+        self.assertEqual([row["id"] for row in stats["color_review"]], ["1234568"])
+        self.assertEqual(stats["ignored_or_unpriced"], 3)
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            result = run_public(self.profile, fetcher=lambda _: html)
+        self.assertEqual(result["color_review_count"], 1)
+        self.assertEqual(result["known_candidate_count"], 1)
+        self.assertEqual(result["candidate_events"], 0)
+        self.assertTrue(all(row["id"] != "1234568" for row in result["known_candidates"]))
+        saved = json.loads((self.profile.parent / "bericht.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["color_review_count"], 1)
+        self.assertEqual(saved["public_search"]["color_review_count"], 1)
+        rendered = (self.profile.parent / "bericht.html").read_text(encoding="utf-8")
+        self.assertIn("Farbe prüfen", rendered)
+        self.assertIn("Foto und Originalanzeige", rendered)
+        self.assertIn("&lt;S1&gt;", rendered)
+        self.assertNotIn("<S1>", rendered)
+
+    def test_personal_model_price_target_is_not_market_median_and_alerts_once(self):
+        html = page(card("1234567", GOOD, "350 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value="/mock/notify-send"), \
+             patch("mark_api.bargain_radar.subprocess.run") as notify:
+            baseline = run_public(self.profile, fetcher=lambda _: html)
+            self.assertEqual(baseline["candidate_events"], 0)
+            self.assertEqual(self.manager.set_price_target(
+                self.profile, "denon:DCD1700NE", "400"), {"denon:DCD1700NE": "400.00"})
+            self.assertEqual(self.manager.create_public_category(), self.profile)
+            self.assertEqual(len(self.manager.price_target_models(self.profile)), 1)
+            enriched = run_public(self.profile, fetcher=lambda _: html)
+            self.assertEqual(enriched["candidate_events"], 1)
+            self.assertEqual(enriched["hits"], 0)
+            self.assertEqual(enriched["personal_price_hits"], 1)
+            self.assertEqual(enriched["reference_type"], "category_unpriced")
+            self.assertEqual(enriched["offers"][0]["event"], "personal_price_target")
+            self.assertEqual(enriched["offers"][0]["classification"], "persönliches Preisziel erreicht")
+            self.assertIsNone(enriched["offers"][0]["peer_median_eur"])
+            notify.assert_called_once()
+            self.assertIn("innerhalb eigener Modellpreisziele", notify.call_args.args[0][-1])
+            page_html = (self.profile.parent / "bericht.html").read_text()
+            self.assertIn("Persönliches Preislimit: 400.00 €", page_html)
+            self.assertIn("Kein belastbarer Vergleichspreis", page_html)
+            unchanged = run_public(self.profile, fetcher=lambda _: html)
+            self.assertEqual(unchanged["candidate_events"], 0)
+            self.assertEqual(unchanged["personal_price_hits"], 0)
+            self.assertEqual(notify.call_count, 1)
+
+    def test_personal_price_targets_before_first_scan_do_not_alert_baseline(self):
+        self.manager.set_price_target(self.profile, "denon:DCD1700NE", "400")
+        with patch("mark_api.bargain_radar.shutil.which", return_value="/mock/notify-send"), \
+             patch("mark_api.bargain_radar.subprocess.run") as notify:
+            first = run_public(self.profile, fetcher=lambda _: page(card("1234567", GOOD, "350 €")))
+            self.assertEqual((first["candidate_events"], first["personal_price_hits"]), (0, 0))
+            second = run_public(self.profile, fetcher=lambda _: page(card("1234567", GOOD, "350 €")))
+            self.assertEqual((second["candidate_events"], second["personal_price_hits"]), (0, 0))
+            notify.assert_not_called()
+
+    def test_corrupt_target_data_stops_before_http_and_keeps_last_report(self):
+        html = page(card("1234567", GOOD, "500 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            run_public(self.profile, fetcher=lambda _: html)
+        before = (self.profile.parent / "bericht.json").read_bytes()
+        old_lock = (self.profile.parent / ".public-sacd.lock").read_bytes()
+        target = self.profile.parent / "preisziele.json"
+        target.write_text('{"version":1,"targets":{"denon:DCD1700NE":"nan"}}')
+        with patch("mark_api.public_sacd.fetch_html") as fetcher, \
+             self.assertRaises(ValueError):
+            run_public(self.profile, fetcher=fetcher)
+        fetcher.assert_not_called()
+        self.assertEqual(before, (self.profile.parent / "bericht.json").read_bytes())
+        self.assertEqual(old_lock, (self.profile.parent / ".public-sacd.lock").read_bytes())
+
     def test_three_public_search_terms_rotate_with_one_request_per_run(self):
         urls = []
         html = page(card("1234567"))
