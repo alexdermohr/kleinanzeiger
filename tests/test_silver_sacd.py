@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from mark_api import radar_watch
 from mark_api.bargain_radar import run
 from mark_api.search_mail import load_search_mail
-from mark_api.silver_sacd import CATEGORY, LABEL, SEARCH_URL, rejection
+from mark_api.silver_sacd import CATEGORY, LABEL, SEARCH_URL, rejection, model_key, assess
 
 MODELS = ['Marantz SA-11S1', 'T+A D 1260 R', 'Denon DCD-1500AE',
           'Yamaha CD-S1000', 'Onkyo C-S5VL', 'Sony SCD-XB790', 'Pioneer PD-50']
@@ -77,6 +77,42 @@ class SilverSacdTests(unittest.TestCase):
         ):
             with self.subTest(rejected=title):
                 self.assertIsNotNone(rejection(title))
+
+    def test_model_keys_conservatively_normalize_known_hifi_variants(self):
+        self.assertEqual(model_key("Denon DCD 1700 NE SACD Silber"), "denon:DCD1700NE")
+        self.assertEqual(model_key("Denon DCD-1700NE SACD Player silber"), "denon:DCD1700NE")
+        self.assertNotEqual(model_key("Denon DCD-1700AE SACD Player silber"),
+                            model_key("Denon DCD-1700NE SACD Player silber"))
+        self.assertEqual(model_key("ONKYO DV-SP 503 E SACD Spieler SILBER"), "onkyo:DVSP503E")
+        self.assertEqual(model_key("Yamaha CD-S1000 SACD silber"), "yamaha:CDS1000")
+        self.assertEqual(model_key("Yamaha CDS-3000 SACD silber"), "yamaha:CDS3000")
+        self.assertIsNone(model_key("SACD Player silber, Modell unbekannt"))
+
+    def test_price_reference_excludes_old_or_different_model_peers(self):
+        from mark_api.bargain_hunter import normalize_offer
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        def offer(index, title, price, observed=now):
+            return normalize_offer(dict(
+                id=str(8800000 + index), title=title, price_eur=str(price),
+                url=f"https://www.kleinanzeigen.de/s-anzeige/player/{8800000 + index}",
+                source="offline fixture", observed_at=observed.isoformat(),
+                condition="unbekannt"))
+        cheap = offer(1, "Denon DCD-1700NE SACD Player silber", 400)
+        same = [offer(i, "Denon DCD 1700 NE SACD Player silber", 1000 + 100*i)
+                for i in range(2, 6)]
+        old_peer = offer(6, "Denon DCD-1700NE SACD Player silber", 2500,
+                         now - timedelta(days=5))
+        different_variant = offer(7, "Denon DCD-1700AE SACD Player silber", 9000)
+        other_maker = offer(8, "Marantz DCD-1700NE SACD Player silber", 8000)
+        all_rows = assess([cheap, *same, old_peer, different_variant, other_maker])
+        result = next(item for item in all_rows if item["id"] == cheap.uid)
+        self.assertEqual(result["classification"], "auffällig günstig")
+        self.assertEqual(result["peer_count"], 4)
+        self.assertEqual(result["peer_median_eur"], "1350.00")
+        self.assertEqual(result["model_key"], "denon:DCD1700NE")
+        self.assertEqual(next(item for item in all_rows if item["id"] == old_peer.uid)["peer_count"], 0)
+        self.assertEqual(next(item for item in all_rows if item["id"] == different_variant.uid)["peer_count"], 0)
+        self.assertEqual(next(item for item in all_rows if item["id"] == other_maker.uid)["peer_count"], 0)
 
     def test_player_with_included_or_missing_accessories(self):
         for title in (

@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-**Version 1.5.2 · Windows 11 (64 Bit)**
+**Version 1.6.0 · Windows 11 (64 Bit)**
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
@@ -12,7 +12,7 @@ lokale CSV-/JSON-Auswertung.
 
 ## In drei Schritten starten
 
-1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.5.2) und das ZIP **vollständig entpacken**.
+1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.6.0) und das ZIP **vollständig entpacken**.
 2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken, **Installieren / aktualisieren** wählen und danach **Kleinanzeiger starten** anklicken. Für die Installation werden benötigte Komponenten gegebenenfalls über das Internet geladen.
 3. **Kleinanzeigen-Konto öffnen**, im eigenen Kleinanzeiger-Chrome anmelden und gegebenenfalls bestätigen. Dann Kleinanzeiger starten und im Dashboard **Mit Kleinanzeigen abgleichen** wählen.
 
@@ -41,7 +41,7 @@ Bei Problemen im Kleinanzeiger-Fenster **Fehlerdetails anzeigen** oder **Diagnos
 
 ### Linux / KDE
 
-**Linux/KDE ab 1.5.2:** Automatische öffentliche Suche nach silbernen SACD-Playern (alle 30 Minuten). Der Kandidatenbericht zeigt echte Inserate mit Preis und Original-Link, aufsteigend nach Angebotspreis. Neue Inserate und Preisänderungen werden einmalig gemeldet. Unter **Schnäppchenjäger → Monitoring** lassen sich Berichte öffnen und Desktop-Benachrichtigungen testen.
+**Linux/KDE ab 1.6.0:** Öffentliche SACD-Suche: drei Suchbegriffe rotieren mit einem Abruf je 30 Minuten. Kandidaten erscheinen nach Preis sortiert mit Original-Link. Nur vier frische Angebote desselben Modells erlauben eine Schnäppchenwertung; neue Angebote und Preisänderungen werden einmalig gemeldet. Unter **Schnäppchenjäger → Monitoring**: Bericht öffnen und Desktop-Benachrichtigung testen.
 [Einrichtung der Schnäppchensuche](docs/schnaeppchenjaeger.md).
 
 `kleinanzeiger-center` öffnet die deutsche KDE-Kontrollzentrale mit Konto- und
@@ -57,6 +57,6 @@ Suchauftrag und atomare EML-Zustellung richtet der Nutzer selbst ein. Echte
 Mailtemplates sind noch nicht verifiziert. [Einrichtung und Grenzen](docs/schnaeppchenjaeger.md#linuxkde-automatische-lokale-verarbeitung-ab-130).
 
 Ab **1.4.0:** **Silberne SACD-Player beobachten** per EML; nur explizit
-silberne SACD-Disc-Player in Deutschland, keine Preisbewertung.
+silberne SACD-Disc-Player in Deutschland; Modellpreisbewertung nur mit vier frischen Peers.
 `kleinanzeiger-radar create-silver-sacd` erstellt ein inaktives Profil.
 [Filter und Einrichtung](docs/schnaeppchenjaeger.md#silberne-sacd-player-ab-140).

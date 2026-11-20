@@ -3,6 +3,15 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.6.0] - 2026-11-20
+
+### Neu
+
+- Die öffentliche Linux/KDE-SACD-Suche rotiert drei feste Suchbegriffe (allgemeine silberne SACD-Player, SACD plus Silber, Marantz SACD Silber). Pro systemd-Lauf erfolgt weiterhin genau eine HTTPS-Abfrage, höchstens alle 30 Minuten. Bestehende Zeitstempel-Sperrdateien werden ohne Verlust der Abrufsperre gelesen.
+- **Konservativer Modellpreisvergleich:** Erst bei vier anderen, höchstens 72 Stunden alten Anzeigen desselben identifizierbaren Herstellermodells und Zustands wird ein Angebotsmedian gebildet. 30 Prozent unter diesem Median gelten als auffällig günstig; andere Modelle, ältere Preise und unerkannte Varianten bleiben unbewertet.
+- Neu oder erst später bewertbare auffällig günstige SACD-Angebote erhalten einmalige, preisversionsgebundene Meldungen; der erste öffentliche Lauf bleibt ohne Altanzeigenalarm. Keine Doppelmeldungen bei identischen wiederholten Abfragen.
+- HTML und JSON unterscheiden Kandidaten ohne Vergleichsgrundlage von konservativ bewerteten Angeboten und zeigen Anzahl der Modellpeers sowie den Median nur, wenn die Grundlage ausreicht. Kein Anspruch auf bestätigte Verkaufspreise oder geprüften Gerätezustand.
+
 ## [1.5.2] - 2026-11-19
 
 ### Verbessert

@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from mark_api.bargain_hunter import DealInputError
 from mark_api.public_sacd import fetch_html, parse_search_html, run_public, _SameHostRedirect, _trusted_https_context
+from mark_api.silver_sacd import SEARCH_URLS
 from mark_api.radar_watch import RadarWatch
 
 GOOD = "Denon DCD-1700NE SACD Player silber"
@@ -164,6 +165,39 @@ class PublicSacdTests(unittest.TestCase):
         self.assertLess(page_html.index(GOOD2), page_html.index(GOOD3))
         self.assertLess(page_html.index(GOOD3), page_html.index(GOOD))
 
+    def test_same_model_price_median_becomes_assessable_and_alerts_once(self):
+        # The cheap offer predates four peers. It must not notify on baseline,
+        # but must be noticed once as soon as enough same-model peers arrive.
+        first_html = page(card("1234567", GOOD, "400 €"))
+        peers_html = page(card("1234568", GOOD, "1000 €"),
+                          card("1234569", GOOD, "1100 €"),
+                          card("1234570", GOOD, "1200 €"),
+                          card("1234571", GOOD, "1300 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value="/mock/notify-send"), \
+             patch("mark_api.bargain_radar.subprocess.run") as notify:
+            baseline = run_public(self.profile, fetcher=lambda _: first_html)
+            self.assertEqual((baseline["new"], baseline["hits"], baseline["candidate_events"]), (0, 0, 0))
+            self.assertEqual(baseline["reference_type"], "category_unpriced")
+            notify.assert_not_called()
+            enriched = run_public(self.profile, fetcher=lambda _: peers_html)
+            cheap = next(x for x in enriched["known_candidates"] if x["id"] == "1234567")
+            self.assertEqual(enriched["reference_type"], "category_asking_prices")
+            self.assertEqual((cheap["peer_count"], cheap["peer_median_eur"]), (4, "1150.00"))
+            self.assertEqual(cheap["classification"], "auffällig günstig")
+            self.assertEqual(enriched["hits"], 1)
+            self.assertEqual(
+                [(x["id"], x["event"]) for x in enriched["offers"] if x["id"] == "1234567"],
+                [("1234567", "newly_assessable")],
+            )
+            notify.assert_called_once()
+            self.assertIn("auffällig günstig", notify.call_args.args[0][-1])
+            report = (self.profile.parent / "bericht.html").read_text(encoding="utf-8")
+            self.assertIn("Modellvergleich:", report)
+            self.assertIn("1150.00", report)
+            repeated = run_public(self.profile, fetcher=lambda _: peers_html)
+            self.assertEqual((repeated["candidate_events"], repeated["hits"]), (0, 0))
+            self.assertEqual(notify.call_count, 1)
+
     def test_failed_initial_report_does_not_raise_false_first_alert_on_retry(self):
         # The database file survives a failure inside the first transaction,
         # but no committed report/run history does; retry must still baseline.
@@ -256,6 +290,42 @@ class PublicSacdTests(unittest.TestCase):
         self.assertIsNotNone(_SameHostRedirect().redirect_request(request,None,302,"go",{},
                                "https://www.kleinanzeigen.de/s-sacd-player-silber/k0"))
 
+
+    def test_three_public_search_terms_rotate_with_one_request_per_run(self):
+        urls = []
+        html = page(card("1234567"))
+        for index in range(5):
+            result = run_public(self.profile, fetcher=lambda url: (urls.append(url), html)[1])
+            self.assertEqual(result["public_search"]["query_index"], index % len(SEARCH_URLS) + 1)
+            self.assertEqual(result["public_search"]["query_total"], len(SEARCH_URLS))
+        self.assertEqual(urls, [*SEARCH_URLS, *SEARCH_URLS[:2]])
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(self.manager.load(self.profile)["search_url"], SEARCH_URLS[0])
+
+    def test_query_rotation_advances_on_http_error_without_losing_report(self):
+        urls = []
+        html = page(card("1234567"))
+        run_public(self.profile, fetcher=lambda url: (urls.append(url), html)[1])
+        original = (self.profile.parent / "bericht.json").read_bytes()
+        with self.assertRaises(DealInputError):
+            run_public(self.profile, fetcher=lambda url: (urls.append(url), (_ for _ in ()).throw(DealInputError("HTTP 403")))[1])
+        self.assertEqual((self.profile.parent / "bericht.json").read_bytes(), original)
+        next_run = run_public(self.profile, fetcher=lambda url: (urls.append(url), html)[1])
+        self.assertEqual(next_run["public_search"]["query_index"], 3)
+        self.assertEqual(urls, list(SEARCH_URLS))
+
+    def test_legacy_timestamp_lock_migrates_without_extra_fetch(self):
+        html = page(card("1234567"))
+        run_public(self.profile, fetcher=lambda _: html)
+        old_lock = self.profile.parent / ".public-sacd.lock"
+        old_lock.write_text("1800000000\n", encoding="ascii")
+        # The next invocation remains a single regular request and the old
+        # timestamp-only format is upgraded to the rotating format.
+        seen = []
+        scan = run_public(self.profile, fetcher=lambda url: (seen.append(url), html)[1])
+        self.assertEqual(scan["public_search"]["query_index"], 1)
+        self.assertEqual(seen, [SEARCH_URLS[0]])
+        self.assertEqual(len(old_lock.read_text().split()), 2)
 
     def test_sequential_public_fetches_are_rate_limited(self):
         good = page(card("1234567"))
