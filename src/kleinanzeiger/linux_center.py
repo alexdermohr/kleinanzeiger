@@ -186,12 +186,12 @@ class Center:
                 if choice == "public-sacd":
                     self.text('Öffentliche SACD-Suche in Deutschland, ohne E-Mail oder Anmeldung.\n'
                               'Nur silberne und plausible SACD-Player; keine modellübergreifende Schnäppchenwertung.\n'
-                              'Das Profil prüft die öffentliche Suchseite höchstens alle 30 Minuten.\n'
+                              'Das Profil rotiert drei öffentliche Suchanfragen bei nur einem Abruf alle 30 Minuten.\n'
                               'Bei Sperre oder Layoutänderung bleibt die letzte Auswertung erhalten.')
                 if choice == "silver-sacd":
                     from mark_api.silver_sacd import SEARCH_URL
                     self.text("Silberne Player für echte SACD-Discs, Deutschland, ohne Preislimit.\n"
-                              "Keine Modellpreisbewertung; Foto und Funktion in der Originalanzeige prüfen.\n"
+                              "Modellpreisbewertung nur mit vier frischen Vergleichsanzeigen; Foto und Funktion selbst prüfen.\n"
                               "Kleinanzeigen-Suche öffnen → Suchauftrag speichern (eigenes Konto erforderlich).\n"
                               f"Offizielle Suchadresse: {SEARCH_URL}\n"
                               "Ohne eigene echte EML-Zustellung keine laufende Marktbeobachtung.")
@@ -309,9 +309,10 @@ class Center:
             counts = (result.get("new"), result.get("price_changes"), result.get("hits"))
             if any(type(n) is not int or n < 0 for n in counts):
                 raise ValueError("invalid radar summary")
-            if result.get("reference_type") == "category_unpriced":
-                self.message(f"Kategorie geprüft: {result['candidate_events']} passende Geräteänderungen. "
-                             "Keine Modellpreisbewertung. Details im Radar-Bericht; nur lokale Eingaben.")
+            if result.get("reference_type") in ("category_unpriced", "category_asking_prices"):
+                self.message(f"SACD-Kategorie geprüft: {result['candidate_events']} neue oder neu bewertbare Geräteereignisse, "
+                             f"{result['hits']} modellbezogen auffällig günstige Angebote. "
+                             "Modellpreiswertung nur mit mindestens vier frischen Peers. Details im Radar-Bericht.")
                 return
             self.message(f"Radar geprüft: {counts[0]} neue Inserate, {counts[1]} Preisänderungen, "
                          f"{counts[2]} auffällig günstige Treffer. Bericht und Details: im Radar-Profil. "
@@ -391,14 +392,19 @@ XLSX benötigt das optionale Paket openpyxl (private-web Extra).
 Backup: vorhandene Datenbank, neue Zieldatei in vorhandenem Ordner wählen.
 Wochenbericht: Zielordner wählen; vorhandener Bericht desselben UTC-Tages wird ersetzt.
 Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar und automatische öffentliche SACD-Suche.
-Der getrennte SACD-Timer kontrolliert die Suchseite höchstens alle 30 Minuten.
+Der getrennte SACD-Timer rotiert drei feste Suchbegriffe bei einem Abruf höchstens alle 30 Minuten.
 Monitoring zeigt Status und Kandidatenbericht und erlaubt eine Testbenachrichtigung.
-Kandidaten erscheinen aufsteigend nach beobachtetem Angebotspreis; das ersetzt
-keinen Vergleich desselben Modells und belegt keine tatsächlichen Verkaufspreise.
+Kandidaten erscheinen aufsteigend nach beobachtetem Angebotspreis. Erst vier
+weitere frische Inserate desselben Modells ermöglichen einen Vergleichsmedian.
+Tatsächliche Verkaufspreise und Funktionsfähigkeit sind nicht belegt.
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.5.2 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.6.0 · KDE-Kontrollzentrale
+Neu: Drei öffentliche SACD-Suchbegriffe rotieren bei nur einem Abruf je 30 Minuten.
+Preisprüfung: Vier weitere, frische Angebote desselben Herstellermodells
+liefern einen Angebotsmedian und erlauben eine konservative Schnäppchenwertung.
+Ohne Vergleichsangebote erscheinen Kandidaten ausdrücklich unbewertet.
 Verbessert: SACD-Kandidaten erscheinen nach beobachtetem Preis sortiert.
 Monitoring: Benachrichtigungen per Testmeldung direkt überprüfen.
 Keine Testmeldung erzeugt eine neue Anzeige oder Preisänderung.

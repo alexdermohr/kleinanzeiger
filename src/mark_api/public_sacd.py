@@ -24,7 +24,7 @@ from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_ope
 
 from .bargain_hunter import DealInputError, euro, normalize_offer
 from .bargain_radar import atomic_report, run as radar_run
-from .silver_sacd import CATEGORY, SEARCH_URL, rejection
+from .silver_sacd import CATEGORY, SEARCH_URL, SEARCH_URLS, rejection
 
 MAX_PAGE_BYTES = 1_250_000
 MIN_FETCH_INTERVAL_SECONDS = 30 * 60
@@ -33,7 +33,7 @@ MIN_FETCH_INTERVAL_SECONDS = 30 * 60
 BASE = "https://www.kleinanzeigen.de"
 AD_PATH = re.compile(r"/s-anzeige/[a-zA-Z0-9._%-]+/([1-9][0-9]{5,19})(?:-[0-9]+-[0-9]+)?\Z")
 NUMERIC_PRICE = re.compile(r"([0-9]{1,3}(?:\.[0-9]{3})*|[0-9]+)(?:,([0-9]{1,2}))?\s*€\Z")
-USER_AGENT = "Kleinanzeiger/1.5 (private, low-frequency public-offer monitoring)"
+USER_AGENT = "Kleinanzeiger/1.6 (private, low-frequency public-offer monitoring)"
 
 
 class _SameHostRedirect(HTTPRedirectHandler):
@@ -71,8 +71,8 @@ def _trusted_https_context() -> ssl.SSLContext:
 
 def fetch_html(url: str = SEARCH_URL) -> str:
     """Exactly one request per invocation, no login, cookies, JS, retries or proxies."""
-    if url != SEARCH_URL:
-        raise DealInputError("Nur die feste öffentliche SACD-Suche ist zugelassen")
+    if url not in SEARCH_URLS:
+        raise DealInputError("Nur fest vorgesehene öffentliche SACD-Suchen sind zugelassen")
     request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html"})
     # ProxyHandler({}) avoids unintended use of a proxy from the environment.
     from urllib.request import ProxyHandler
@@ -222,27 +222,39 @@ def _attempt_time() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
 
-def _enforce_fetch_interval(lock_fd: int) -> None:
-    """Persist the attempt *before* the network call, including failed requests.
+def _enforce_fetch_interval(lock_fd: int) -> int:
+    """Persist time and query rotation before the single network request.
 
-    Caller holds the same exclusive flock used by scheduled and manual scans.
+    The old one-line timestamp format remains readable during upgrades.
+    Failed queries also advance the rotation, so a broken term cannot trap it.
+    Caller holds the exclusive systemd/manual-run flock.
     """
     now = _attempt_time()
     os.lseek(lock_fd, 0, os.SEEK_SET)
     prior = os.read(lock_fd, 80)
+    previous_slot = -1
     if prior:
         try:
-            last = int(prior.decode("ascii").strip())
+            fields = prior.decode("ascii").split()
+            if len(fields) not in (1, 2):
+                raise ValueError("invalid lock fields")
+            last = int(fields[0])
+            if len(fields) == 2:
+                previous_slot = int(fields[1])
+            if previous_slot < -1 or previous_slot >= len(SEARCH_URLS):
+                raise ValueError("invalid query slot")
         except (UnicodeError, ValueError) as exc:
             raise DealInputError("Ungültiger letzter Abrufzeitpunkt") from exc
         if now < last + MIN_FETCH_INTERVAL_SECONDS:
             raise DealInputError("Öffentliche Suche höchstens alle 30 Minuten erlaubt")
-    payload = f"{now}\n".encode("ascii")
+    slot = (previous_slot + 1) % len(SEARCH_URLS)
+    payload = f"{now} {slot}\n".encode("ascii")
     os.lseek(lock_fd, 0, os.SEEK_SET)
     if os.write(lock_fd, payload) != len(payload):
         raise OSError("Abrufzeitpunkt nicht vollständig geschrieben")
     os.ftruncate(lock_fd, len(payload))
     os.fsync(lock_fd)
+    return slot
 
 
 def run_public(profile: Path, *, fetcher=fetch_html) -> dict:
@@ -253,9 +265,11 @@ def run_public(profile: Path, *, fetcher=fetch_html) -> dict:
     if config.get("input_type") != "public" or config.get("category") != CATEGORY:
         raise DealInputError("Nur das separat eingerichtete öffentliche SACD-Profil ist erlaubt")
     with _single_public_run(profile) as lock_fd:
-        _enforce_fetch_interval(lock_fd)
-        page = fetcher(config["search_url"])
+        slot = _enforce_fetch_interval(lock_fd)
+        page = fetcher(SEARCH_URLS[slot])
         rows, stats = parse_search_html(page)
+        stats.update(query_index=slot + 1, query_total=len(SEARCH_URLS),
+                     query_url=SEARCH_URLS[slot])
         # Never update the snapshot or history on HTTP errors / invalid HTML.
         target = profile.parent / "angebote.json"
         if target.exists() or target.is_symlink():

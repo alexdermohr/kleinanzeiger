@@ -364,22 +364,31 @@ bewusster Negativfall: DSD-Dateiwiedergabe bedeutet keine SACD-Disc-Wiedergabe
 ([Marantz-Datenblatt](https://www.marantz.com/on/demandware.static/-/Library-Sites-marantz_northamerica_shared/default/dw62bb25a8/archive-downloads/nd8006_product_info_sheet_en01.pdf)).
 Text ist kein Funktions- oder Fotobeweis: Originalanzeige selbst prüfen.
 
-Kategorieangebote erhalten immer **nicht bewertbar**, keinen Peer-Median und
-keinen Rabatt. `reference_type=category_unpriced`, `candidate_events` zählt neue
-Inserate und tatsächliche Preisänderungen, `hits` bleibt 0. HTML/JSON und die
-bestehende SQLite-Historie führen Änderungen einmalig; Wiederholungen erzeugen
-keinen neuen Hinweis. `notify=true` erlaubt einen optionalen KDE-Hinweis auf
-passende Geräte, ohne Ersparnisversprechen. Bei später erneut geändertem Preis
-gibt es ein neues Ereignis. Exakte Modellprofile behalten ihre Preisbewertung.
+Kategorieangebote sind **normalerweise nicht bewertbar**. Erst wenn mindestens
+**vier weitere unterschiedliche Inserate desselben belegbaren Herstellermodells**
+mit gleichem Zustandsfeld innerhalb von 72 Stunden beobachtet wurden, erhält ein
+Kandidat einen Median dieser **Angebotspreise** und einen dazu berechneten Rabatt.
+Ab 30 Prozent unter diesem Modellmedian gilt er als `auffällig günstig`.
+Verschiedene Modelle, alte Beobachtungen und ungeklärte Modellbezeichnungen
+werden nicht als Preispeers zusammengerechnet. Versand, Funktion und echte
+Verfügbarkeit sind damit nicht belegt.
+
+`reference_type=category_unpriced` bedeutet weiterhin fehlende Vergleichsdaten;
+bei ausreichend Vergleichsdaten lautet es `category_asking_prices`.
+`candidate_events` zählt neue Inserate, Preisänderungen und erstmalig bewertbare
+auffällige Angebote; `hits` zählt nur nach Modellvergleich auffällig günstige
+Ereignisse. SQLite-Historie, HTML/JSON und die Desktop-Benachrichtigung
+deduplizieren je Angebotspreisversion. Der erste öffentliche Lauf bildet
+ausschließlich eine Bestandsaufnahme. Exakte Modellprofile bleiben unabhängig.
 
 Der Parser bleibt streng bei **einem Angebot je Mail** in den oben beschriebenen
 Layouts. Aktueller Date-/From-Header und direkter Inseratlink sind erforderlich;
 Header beweisen keine Echtheit, Tracking wird nicht aufgelöst. Echte offizielle
 Suchmailvorlagen sind noch nicht verifiziert. Ohne echten EML-Zulauf besteht
 keine laufende Marktbeobachtung; ein Mailboximport hat nicht stattgefunden.
-Nach Review und offizieller Veröffentlichung kann der Operator das Profil
-anlegen und optional den lokalen Watcher starten. Erst nach eigener gespeicherter
-Suche und eigenem EML-Transport lässt sich ein realer Alert prüfen.
+Das separate EML-Profil kann unter Linux/KDE eingerichtet und überwacht werden.
+Ohne eigene gespeicherte Suche und tatsächlichen EML-Transport entstehen daraus
+keine neuen Marktangebote. Für die direkte öffentliche Suche ist kein EML-Zulauf nötig.
 
 ## Direkte silberne SACD-Suche (ab 1.5.0)
 
@@ -397,8 +406,10 @@ Einrichtung per Kommandozeile:
 - kleinanzeiger-radar stop /absoluter/pfad/profil.json
 
 Die Profilerstellung ist idempotent. Nur das bewusste Starten aktiviert
-einen systemd-User-Timer; dessen Intervall beträgt 30 Minuten. Der Dienst
-fragt je Lauf eine öffentliche Suchseite ab. Keine Chrome-Session,
+einen systemd-User-Timer; dessen Intervall beträgt 30 Minuten. Seit 1.6.0
+rotieren drei feste öffentliche Suchanfragen: allgemeine silberne SACD-Player,
+SACD plus Silber und Marantz SACD Silber. **Je Timerlauf findet genau ein Abruf**
+statt, nicht drei parallele Abfragen. Keine Chrome-Session,
 kein Konto, keine E-Mail, keine Drittanbieter-API, keine Proxies,
 keine Captcha-Lösung, keine Hintergrundretries.
 
@@ -406,7 +417,8 @@ Der erste erfolgreiche Lauf ist nur eine Bestandsaufnahme. Weitere
 Abrufe prüfen neue IDs und wirkliche Änderungen des angebotenen
 Festpreises. VB-/Gratispreise, Defektgeräte, Zubehör, SACD-Discs,
 Marantz ND8006 und nicht eindeutig silberne Titel werden verworfen.
-Bei unterschiedlichem Modell wird kein Median und kein Rabatt berechnet.
+Ein Median ist ausschließlich bei mindestens vier frischen weiteren Inseraten
+desselben Modells verfügbar. Sonst gibt es bewusst keine Schnäppchenwertung.
 Nicht mehr angezeigte Inserate werden nicht automatisch als verkauft
 interpretiert. Versandkosten und technische Wiedergabefähigkeit bleiben
 ungeprüft.
