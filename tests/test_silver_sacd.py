@@ -88,6 +88,31 @@ class SilverSacdTests(unittest.TestCase):
         self.assertEqual(model_key("Yamaha CDS-3000 SACD silber"), "yamaha:CDS3000")
         self.assertIsNone(model_key("SACD Player silber, Modell unbekannt"))
 
+    def test_spaced_s1_and_s2_generations_never_share_price_peers(self):
+        from mark_api.bargain_hunter import normalize_offer
+        now = datetime.now(timezone.utc).isoformat()
+        s1 = "Marantz SA-15 S1 SACD Player silber"
+        s2 = "Marantz SA-15 S2 SACD Player silber"
+        self.assertEqual(model_key(s1), "marantz:SA15S1")
+        self.assertEqual(model_key("Marantz SA-15S1 SACD Player silber"), model_key(s1))
+        self.assertEqual(model_key(s2), "marantz:SA15S2")
+        self.assertNotEqual(model_key(s1), model_key(s2))
+        observed = [
+            normalize_offer(dict(
+                id=str(9900000 + i), title=s1 if i == 0 else s2,
+                price_eur=str(400 if i == 0 else 1000),
+                url=f"https://www.kleinanzeigen.de/s-anzeige/player/{9900000 + i}",
+                source="offline fixture", observed_at=now, condition="unbekannt"
+            )) for i in range(5)
+        ]
+        assessed = assess(observed)
+        self.assertEqual(len(assessed), 5)
+        self.assertEqual(
+            next(row for row in assessed if row["id"] == "9900000")["classification"],
+            "nicht bewertbar",
+        )
+        self.assertTrue(all(row["peer_count"] == 0 for row in assessed))
+
     def test_price_reference_excludes_old_or_different_model_peers(self):
         from mark_api.bargain_hunter import normalize_offer
         now = datetime.now(timezone.utc).replace(microsecond=0)

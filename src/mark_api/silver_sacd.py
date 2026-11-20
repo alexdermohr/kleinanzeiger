@@ -66,7 +66,7 @@ def rejection(title: str) -> str | None:
 # Unknown models never inherit category-wide reference prices.
 _BRAND = re.compile(r'(?<!\w)(marantz|denon|yamaha|pioneer|sony|philips|onkyo|oppo|teac|accuphase|esoteric|luxman|nad|arcam|technics|t\+a)(?!\w)', re.I)
 _MODEL = re.compile(r'\b(?:SCD(?:[\s-]?(?:XA|XB|XE))?|DV[\s-]?SP|DCD|DVD|DVP|CD[\s-]?S|CDS|SADV|BDP|PD|SA|UD|D)[\s-]?\d{2,5}[A-Z0-9]{0,4}\b', re.I)
-_SUFFIX = re.compile(r'^[\s-]+(NE|AE|ES|E|R)\b', re.I)
+_SUFFIX = re.compile(r'^[\s-]+(NE|AE|ES|E|R|S[1-9][0-9]?)\b', re.I)
 _FRESH_SECONDS = 72 * 3600
 
 
