@@ -3,6 +3,13 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.7.1] - 2026-11-20
+
+### Behoben
+
+- Die getrennte **Farbe prüfen**-Liste bleibt nach einem Suchlauf mit SACD-Angeboten ohne belegte Silberfarbe auch bei den folgenden rotierenden Suchbegriffen sichtbar. Die letzten sechs erfolgreichen Berichte werden dafür wiederverwendet, höchstens 72 Stunden alte Beobachtungen.
+- Der Bericht nennt den **zuletzt beobachteten Zeitpunkt** und behauptet keine aktuelle Verfügbarkeit. Bereits als silberne SACD-Player bestätigte Inserats-IDs verschwinden aus der Foto-Prüfliste. Es entstehen weiterhin weder zusätzliche Netzabrufe noch automatische Farb- oder Schnäppchenalarme.
+
 ## [1.7.0] - 2026-11-20
 
 ### Neu

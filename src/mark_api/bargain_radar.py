@@ -33,6 +33,51 @@ def atomic_report(path: Path, text: str) -> None:
             os.unlink(name)
 
 
+def recent_color_review(db: sqlite3.Connection, incoming: list[dict],
+                        known_ids: set[str]) -> list[dict]:
+    """Keep recent photo-review offers visible across rotating search terms.
+
+    Only the most recent six successful run reports are considered. These
+    records are *never* added to silver candidates or notification events.
+    """
+    from .silver_sacd import _fresh, model_key, rejection
+    now = datetime.now(timezone.utc)
+    latest: dict[str, dict] = {}
+
+    def add(row: object) -> None:
+        if not isinstance(row, dict) or len(latest) >= 200:
+            return
+        try:
+            offer = normalize_offer(row)
+        except (DealInputError, ValueError, TypeError):
+            return
+        if (offer.uid in known_ids or offer.uid in latest
+                or not _fresh(offer.observed_at, now)
+                or rejection(offer.title) != 'Explizite Silberangabe im Mailtitel fehlt'
+                or model_key(offer.title) is None
+                or rejection(offer.title + ' silber') is not None):
+            return
+        latest[offer.uid] = row
+
+    for row in incoming:
+        add(row)
+    for (payload,) in db.execute(
+            'SELECT payload FROM radar_runs ORDER BY id DESC LIMIT 6'):
+        if len(payload) > 2_000_000:
+            continue
+        try:
+            prior = json.loads(payload)
+        except ValueError:
+            continue
+        rows = prior.get('color_review', []) if isinstance(prior, dict) else []
+        if isinstance(rows, list):
+            for row in rows[:200]:
+                add(row)
+    return sorted(latest.values(), key=lambda row: (
+        Decimal(str(row['price_eur'])), str(row['title']).casefold(), str(row['id'])
+    ))
+
+
 def run(config_path: Path, *, color_review: list[dict] | None = None,
         public_search: dict | None = None) -> dict:
     """One transaction per run, including report generation; fail closed on locks."""
@@ -209,6 +254,9 @@ def run(config_path: Path, *, color_review: list[dict] | None = None,
         else:
             evaluated = assess_offers(current_offers, model, min_peers=min_peers,
                                       discount_threshold=threshold)
+        if public_mode and category:
+            color_review = recent_color_review(
+                db, color_review, {item['id'] for item in known_candidates})
         events = []
         for item in evaluated:
             uid = item['id']

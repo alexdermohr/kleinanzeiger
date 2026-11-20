@@ -1,10 +1,10 @@
 # Kleinanzeiger – Windows 11
 
-**Version 1.7.0 · Windows 11 (64 Bit) · ohne WSL**
+**Version 1.7.1 · Windows 11 (64 Bit) · ohne WSL**
 
 ## Erste Einrichtung
 
-1. Das offizielle `Kleinanzeiger-v1.7.0-Windows.zip` von [GitHub Releases](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.7.0) herunterladen und **vollständig entpacken**.
+1. Das offizielle `Kleinanzeiger-v1.7.1-Windows.zip` von [GitHub Releases](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.7.1) herunterladen und **vollständig entpacken**.
 2. `Kleinanzeiger.cmd` doppelklicken. `START-HIER.html` bietet eine kurze Einführung.
 3. Im Kontrollfenster **Installieren / aktualisieren** wählen. Zur Installation werden bei Bedarf Python, Chrome und Python-Paketabhängigkeiten über das Internet eingerichtet.
 4. **Kleinanzeigen-Konto öffnen**: Im eigens gestarteten Chrome anmelden und gegebenenfalls die Sicherheitsbestätigung durchführen.
