@@ -67,9 +67,12 @@ Anbieter. Das lokale Menü ist unabhängig vom Windows-Installer.
 - **Wochenbericht** schreibt HTML in den gewählten Ordner. Ein Bericht desselben
   UTC-Tages wird durch die bestehende Berichtsfunktion ersetzt. Es handelt sich
   um lokale Daten, nicht um einen vollständigen Plattform-Posteingang.
-- **Schnäppchenjäger** wertet eigene CSV/JSON aus oder öffnet eine bewusst
-  angeforderte manuelle Suche im Standardbrowser. Es gibt kein Scraping und keine
-  bestätigten Verkaufspreise. Format: [Schnäppchenjäger](schnaeppchenjaeger.md).
+- **Schnäppchenjäger** wertet eigene CSV/JSON aus, öffnet eine manuelle Suche
+  oder überwacht öffentlich angebotene silberne SACD-Player automatisch per
+  separatem systemd-User-Timer. Der Kandidatenbericht zeigt Preis, Zeitpunkt und
+  Original-Link, aufsteigend nach Angebotspreis; Modellpreis-Vergleiche werden
+  nicht erfunden. Unter **Monitoring** sind Status, Bericht und eine
+  **Testbenachrichtigung** erreichbar. [Schnäppchenjäger](schnaeppchenjaeger.md).
 - Diagnose zeigt nur Paketversion, Dialogverfügbarkeit, Client-Prozessstatus und
   ein festes Aktionsergebnis. Keine Pfade, Umgebungsvariablen, Tokens, Rohfehler
   oder Backend-Ausgaben werden übernommen. Importvorschauen enthalten dagegen

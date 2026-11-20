@@ -3,6 +3,14 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.5.2] - 2026-11-19
+
+### Verbessert
+
+- SACD-Kandidatenbericht zeigt die tatsächlich beobachteten Festpreisangebote aufsteigend nach Preis, mit Original-Links. Unterschiedliche Modelle werden nicht als vergleichbare Schnäppchen gewertet.
+- KDE: Im Schnäppchenjäger unter Monitoring kann die Desktop-Benachrichtigung mit einer klar gekennzeichneten Testmeldung überprüft werden – ohne fiktive Anzeigen und ohne Änderung der SQLite-Historie.
+- Anleitung und Kontrollzentrale beschreiben die bereits produktive automatische SACD-Suche statt veralteter gegenteiliger Hinweise. Die öffentliche Suche bleibt getrennt vom EML-Radar.
+
 ## [1.5.1] - 2026-11-19
 
 ### Behoben

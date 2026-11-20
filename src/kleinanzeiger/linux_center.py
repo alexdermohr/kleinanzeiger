@@ -185,7 +185,7 @@ class Center:
                            manager.create_category() if choice == "silver-sacd" else manager.create(model))
                 if choice == "public-sacd":
                     self.text('Öffentliche SACD-Suche in Deutschland, ohne E-Mail oder Anmeldung.\n'
-                              'Nur silberne und plausible SACD-Player; keine Schnäppchenwertung.\n'
+                              'Nur silberne und plausible SACD-Player; keine modellübergreifende Schnäppchenwertung.\n'
                               'Das Profil prüft die öffentliche Suchseite höchstens alle 30 Minuten.\n'
                               'Bei Sperre oder Layoutänderung bleibt die letzte Auswertung erhalten.')
                 if choice == "silver-sacd":
@@ -198,7 +198,8 @@ class Center:
                 if choice == 'public-sacd':
                     self.text(f"Profil: {profile}\nBericht: {profile.parent / 'bericht.html'}\n\n"
                               "Abruf ausschließlich öffentlicher Suchseiten; kein Konto und keine E-Mails. "
-                              "Bei erster Abfrage nur Bestandsaufnahme, danach neue IDs/Preise prüfen.")
+                              "Bei erster Abfrage nur Bestandsaufnahme, danach neue IDs/Preise prüfen.\n"
+                              "Der Kandidatenbericht zeigt die beobachteten Preise aufsteigend.")
                 else:
                     self.text(f"Profil: {profile}\nEingangsordner: {profile.parent / 'suchmails'}\n\n"
                               "Kleinanzeigen-Suche auf Website als Suchauftrag speichern und eigene EMLs "
@@ -243,7 +244,8 @@ class Center:
                 actions = ("status", "Status anzeigen", "report", "Kandidatenbericht öffnen",
                            "start", "Monitoring starten", "stop", "Monitoring stoppen")
                 if direct:
-                    actions += ("fetch", "Öffentliche Suche jetzt ausführen")
+                    actions += ("fetch", "Öffentliche Suche jetzt ausführen",
+                                "notify-test", "Benachrichtigung testen")
                 action = self.dialog("--menu", status, *actions)
                 if action == "status":
                     self.text(manager.watch(profile, "status") + "\n\n" + manager.local_status(profile))
@@ -261,6 +263,17 @@ class Center:
                     subprocess.run([opener, str(report)], shell=False, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    timeout=30, check=True)
+                elif action == "notify-test" and direct:
+                    notifier = shutil.which("notify-send")
+                    if not notifier:
+                        raise OSError("Desktop-Benachrichtigungsdienst nicht verfügbar.")
+                    subprocess.run([notifier, "--app-name=Kleinanzeiger", "--",
+                                    "Kleinanzeiger · Testmeldung",
+                                    "SACD-Radar: Dies ist ein Funktionstest, kein neues Angebot."],
+                                   shell=False, stdin=subprocess.DEVNULL,
+                                   capture_output=True, timeout=10, check=True)
+                    self.message("Testmeldung an den Desktop-Benachrichtigungsdienst übergeben. "
+                                 "Es wurde keine Marktänderung erzeugt.")
                 elif action == "fetch" and direct:
                     from mark_api.public_sacd import run_public
                     result = run_public(profile)
@@ -377,11 +390,18 @@ Importiert werden lokale Entwürfe. Änderungen der Datei nach der Vorschau werd
 XLSX benötigt das optionale Paket openpyxl (private-web Extra).
 Backup: vorhandene Datenbank, neue Zieldatei in vorhandenem Ordner wählen.
 Wochenbericht: Zielordner wählen; vorhandener Bericht desselben UTC-Tages wird ersetzt.
-Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar über ein JSON-Profil oder bewusste Browser-Suche, kein Scraping.
+Schnäppchenjäger: lokale CSV/JSON, Suchmail-Radar und automatische öffentliche SACD-Suche.
+Der getrennte SACD-Timer kontrolliert die Suchseite höchstens alle 30 Minuten.
+Monitoring zeigt Status und Kandidatenbericht und erlaubt eine Testbenachrichtigung.
+Kandidaten erscheinen aufsteigend nach beobachtetem Angebotspreis; das ersetzt
+keinen Vergleich desselben Modells und belegt keine tatsächlichen Verkaufspreise.
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.5.1 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.5.2 · KDE-Kontrollzentrale
+Verbessert: SACD-Kandidaten erscheinen nach beobachtetem Preis sortiert.
+Monitoring: Benachrichtigungen per Testmeldung direkt überprüfen.
+Keine Testmeldung erzeugt eine neue Anzeige oder Preisänderung.
 Behoben: Öffentlicher SACD-Abruf kann unter NixOS jetzt das System-
 Zertifikatsbündel für die verifizierte HTTPS-Verbindung nutzen.
 Neu: Silberne SACD-Player direkt suchen (automatisch).

@@ -150,6 +150,20 @@ class PublicSacdTests(unittest.TestCase):
         self.assertIn("keine modellpreisbewertung",report.casefold())
         self.assertEqual(json.loads((self.profile.parent/"bericht.json").read_text())["known_candidate_count"],2)
 
+    def test_report_lists_lowest_observed_asking_price_first(self):
+        html = page(card("1234567", GOOD, "950 €"),
+                    card("1234568", GOOD2, "200 €"),
+                    card("1234569", GOOD3, "450 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            result = run_public(self.profile, fetcher=lambda _: html)
+        self.assertEqual([row["id"] for row in result["known_candidates"]],
+                         ["1234568", "1234569", "1234567"])
+        self.assertEqual(result["hits"], 0)
+        self.assertTrue(all(row["peer_median_eur"] is None for row in result["known_candidates"]))
+        page_html = (self.profile.parent / "bericht.html").read_text()
+        self.assertLess(page_html.index(GOOD2), page_html.index(GOOD3))
+        self.assertLess(page_html.index(GOOD3), page_html.index(GOOD))
+
     def test_failed_initial_report_does_not_raise_false_first_alert_on_retry(self):
         # The database file survives a failure inside the first transaction,
         # but no committed report/run history does; retry must still baseline.
