@@ -93,7 +93,8 @@ def render_report(model: str, offers: list[dict], *, generated_at: str,
         preview = "".join(
             "<article class='offer'>"
             f"<h2>{esc(row['title'])}</h2>"
-            f"<p>Beobachteter Festpreis: {esc(row['price_eur'])} € · Silberfarbe im Titel nicht belegt.</p>"
+            f"<p>Zuletzt beobachtet: {esc(row['observed_at'])} · Festpreis: {esc(row['price_eur'])} € · "
+            "Silberfarbe im Titel nicht belegt; derzeitige Verfügbarkeit unbekannt.</p>"
             f"<a href='{esc(row['url'])}' target='_blank' rel='noopener noreferrer'>"
             "Foto und Originalanzeige selbst prüfen</a></article>"
             for row in color_review

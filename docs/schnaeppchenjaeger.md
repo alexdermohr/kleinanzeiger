@@ -423,7 +423,14 @@ Plausible SACD-Modelle mit **fehlender Silberangabe** erscheinen seit 1.7.0
 ausschließlich unter **Farbe prüfen** im Kandidatenbericht: nur zur Prüfung
 des Originalfotos, ohne Einstufung als silbernes Gerät, ohne SQLite-Kandidaten
 und ohne automatische Marktbenachrichtigung. CD-only, Zubehör und defekte
-Geräte gelangen auch dort nicht hinein.
+Geräte gelangen auch dort nicht hinein. Ab 1.7.1 bleiben kürzlich
+beobachtete Prüfangebote über die nächsten Suchvarianten hinweg sichtbar,
+soweit sie in den letzten sechs erfolgreichen Radarläufen und höchstens
+72 Stunden zuvor beobachtet wurden. Zuletzt beobachtete Angebote sind
+nicht als aktuell verfügbar bestätigt; wird dieselbe ID später als silberner
+SACD-Player erkannt oder ausdrücklich als schwarz beziehungsweise ungeeignet
+widerlegt, verschwindet sie auch bei den folgenden rotierenden Suchläufen
+aus der getrennten Prüfliste.
 Ein Angebotsmedian ist ausschließlich bei mindestens vier frischen weiteren
 Inseraten desselben Modells verfügbar. Sonst gibt es keine statistische
 Schnäppchenwertung.

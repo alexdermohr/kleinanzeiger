@@ -1,6 +1,6 @@
 # Kleinanzeiger
 
-**Version 1.7.0 · Windows 11 (64 Bit)**
+**Version 1.7.1 · Windows 11 (64 Bit)**
 
 Kleinanzeiger hilft dir, eigene Anzeigen zu verwalten, Ergebnisse auszuwerten und mit KI neue Entwürfe vorzubereiten. Was veröffentlicht oder geändert wird, entscheidest du.
 
@@ -12,7 +12,7 @@ lokale CSV-/JSON-Auswertung.
 
 ## In drei Schritten starten
 
-1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.7.0) und das ZIP **vollständig entpacken**.
+1. [Kleinanzeiger für Windows herunterladen](https://github.com/alexdermohr/kleinanzeiger/releases/tag/v1.7.1) und das ZIP **vollständig entpacken**.
 2. Im entpackten Ordner **Kleinanzeiger.cmd** doppelklicken, **Installieren / aktualisieren** wählen und danach **Kleinanzeiger starten** anklicken. Für die Installation werden benötigte Komponenten gegebenenfalls über das Internet geladen.
 3. **Kleinanzeigen-Konto öffnen**, im eigenen Kleinanzeiger-Chrome anmelden und gegebenenfalls bestätigen. Dann Kleinanzeiger starten und im Dashboard **Mit Kleinanzeigen abgleichen** wählen.
 
@@ -41,7 +41,7 @@ Bei Problemen im Kleinanzeiger-Fenster **Fehlerdetails anzeigen** oder **Diagnos
 
 ### Linux / KDE
 
-**Linux/KDE ab 1.7.0:** Drei öffentliche SACD-Suchen wechseln alle 30 Minuten. Silberne Geräte mit Preis/Link; fehlender Farbbeleg erscheint getrennt zur Fotoprüfung, ohne Alarm. Modellmedian nur mit vier frischen Peers. Alternativ eigene EUR-Preislimits unter **Schnäppchenjäger → Monitoring** setzen: persönliche Ziele, keine Marktwerte. Dort auch Bericht und Benachrichtigungstest.
+**Linux/KDE ab 1.7.1:** Drei öffentliche SACD-Suchen wechseln alle 30 Minuten. Silberne Geräte mit Preis/Link; fehlender Farbbeleg erscheint getrennt zur Fotoprüfung, ohne Alarm. Modellmedian nur mit vier frischen Peers. Alternativ eigene EUR-Preislimits unter **Schnäppchenjäger → Monitoring** setzen: persönliche Ziele, keine Marktwerte. Dort auch Bericht und Benachrichtigungstest.
 [Einrichtung der Schnäppchensuche](docs/schnaeppchenjaeger.md).
 
 `kleinanzeiger-center` öffnet die deutsche KDE-Kontrollzentrale mit Konto- und

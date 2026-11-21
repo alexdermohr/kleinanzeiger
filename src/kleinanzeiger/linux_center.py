@@ -433,7 +433,11 @@ Tatsächliche Verkaufspreise und Funktionsfähigkeit sind nicht belegt.
 Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
 Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
 """
-CHANGES = """Kleinanzeiger 1.7.0 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.7.1 · KDE-Kontrollzentrale
+Behoben: Die manuelle Farbfotoprüfliste bleibt auch bei den folgenden
+abwechselnden SACD-Suchen sichtbar, soweit die letzte Sichtung höchstens
+72 Stunden zurückliegt. Zeitstempel und unbestätigte Farbe bleiben kenntlich.
+
 Neu: Breitere dritte SACD-Abfrage bei unverändert einem Abruf je 30 Minuten.
 Farbzweifelhafte Titel erscheinen getrennt zur manuellen Fotoprüfung, ohne Alarm.
 Persönliche EUR-Preislimits je Modell sind unter Monitoring editierbar und

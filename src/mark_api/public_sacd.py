@@ -210,7 +210,8 @@ def parse_search_html(page: str, *, observed_at: str | None = None,
     stats = {"visible_cards": len(parser.cards), "accepted_fixed_price": len(rows),
              "ignored_or_unpriced": ignored}
     if review_missing_color:
-        stats.update(color_review_count=len(color_review), color_review=color_review)
+        stats.update(color_review_count=len(color_review), color_review=color_review,
+                     _seen_ids=tuple(sorted(ids)))
     return rows, stats
 
 
@@ -288,6 +289,8 @@ def run_public(profile: Path, *, fetcher=fetch_html) -> dict:
         page = fetcher(SEARCH_URLS[slot])
         rows, stats = parse_search_html(page, review_missing_color=True)
         color_review = stats.pop('color_review', [])
+        # Private per-fetch IDs; do not persist unrelated rejected listings.
+        seen_ids = set(stats.pop('_seen_ids', ()))
         stats.update(query_index=slot + 1, query_total=len(SEARCH_URLS),
                      query_url=SEARCH_URLS[slot])
         # Never update the snapshot or history on HTTP errors / invalid HTML.
@@ -295,7 +298,8 @@ def run_public(profile: Path, *, fetcher=fetch_html) -> dict:
         if target.exists() or target.is_symlink():
             safe(target)
         atomic_report(target, json.dumps(rows, ensure_ascii=False, indent=2))
-        result = radar_run(profile, color_review=color_review, public_search=stats)
+        result = radar_run(profile, color_review=color_review, public_search=stats,
+                           public_seen_ids=seen_ids)
         return {**result, "public_search": stats}
 
 

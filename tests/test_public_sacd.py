@@ -317,6 +317,114 @@ class PublicSacdTests(unittest.TestCase):
         self.assertIn("&lt;S1&gt;", rendered)
         self.assertNotIn("<S1>", rendered)
 
+    def test_color_photo_review_survives_other_search_terms_without_silver_alert(self):
+        unseen = "Denon DCD-1700NE SACD Player"
+        first = page(card("1234567", GOOD, "500 €"),
+                     card("1234568", unseen, "210 €"))
+        other = page(card("1234567", GOOD, "500 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            initial = run_public(self.profile, fetcher=lambda _: first)
+            self.assertEqual(initial["color_review_count"], 1)
+            next_scan = run_public(self.profile, fetcher=lambda _: other)
+            self.assertEqual(next_scan["public_search"]["color_review_count"], 0)
+            self.assertEqual(next_scan["color_review_count"], 1)
+            self.assertEqual(next_scan["candidate_events"], 0)
+            self.assertEqual(next_scan["known_candidate_count"], 1)
+            self.assertEqual(next_scan["color_review"][0]["id"], "1234568")
+            self.assertIn(unseen, (self.profile.parent / "bericht.html").read_text())
+            repeated = run_public(self.profile, fetcher=lambda _: other)
+            self.assertEqual(repeated["color_review_count"], 1)
+            self.assertEqual(repeated["candidate_events"], 0)
+
+    def test_explicit_black_title_removes_previous_photo_review(self):
+        ambiguous = 'Denon DCD-1700NE SACD Player'
+        first = page(card('1234567', GOOD, '500 €'),
+                     card('1234568', ambiguous, '210 €'))
+        clarified = page(card('1234567', GOOD, '500 €'),
+                         card('1234568', ambiguous + ' schwarz', '210 €'))
+        with patch('mark_api.bargain_radar.shutil.which', return_value=None):
+            self.assertEqual(run_public(self.profile, fetcher=lambda _: first)
+                             ['color_review_count'], 1)
+            result = run_public(self.profile, fetcher=lambda _: clarified)
+        self.assertEqual(result['public_search']['color_review_count'], 0)
+        self.assertEqual(result['color_review_count'], 0)
+        self.assertEqual(result['known_candidate_count'], 1)
+        self.assertEqual(result['candidate_events'], 0)
+        self.assertNotIn('Farbe prüfen',
+                         (self.profile.parent / 'bericht.html').read_text())
+        self.assertNotIn('_seen_ids', result['public_search'])
+        self.assertEqual(result['color_review_retired_ids'], ['1234568'])
+        # Repeated rotations no longer see the black listing. The historic
+        # ambiguous row must not reappear after this negative observation.
+        third = run_public(self.profile, fetcher=lambda _: first.replace(
+            card('1234568', ambiguous, '210 €'), ''))
+        self.assertEqual(third['public_search']['color_review_count'], 0)
+        self.assertEqual(third['color_review_count'], 0)
+        self.assertEqual(third['candidate_events'], 0)
+        self.assertEqual(third['known_candidate_count'], 1)
+        self.assertEqual(third['color_review_retired_ids'], [])
+        self.assertNotIn('Farbe prüfen', (self.profile.parent / 'bericht.html').read_text())
+        fourth = run_public(self.profile, fetcher=lambda _: page(card('1234567', GOOD, '500 €')))
+        self.assertEqual(fourth['color_review_count'], 0)
+
+    def test_current_unverified_title_can_supersede_older_black_disqualification(self):
+        ambiguous = "Denon DCD-1700NE SACD Player"
+        first = page(card("1234567", GOOD, "500 €"),
+                     card("1234568", ambiguous, "210 €"))
+        black = page(card("1234567", GOOD, "500 €"),
+                     card("1234568", ambiguous + " schwarz", "210 €"))
+        other = page(card("1234567", GOOD, "500 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            run_public(self.profile, fetcher=lambda _: first)
+            removed = run_public(self.profile, fetcher=lambda _: black)
+            self.assertEqual(removed["color_review_count"], 0)
+            still_removed = run_public(self.profile, fetcher=lambda _: other)
+            self.assertEqual(still_removed["color_review_count"], 0)
+            # Newer current positive photo-review evidence is allowed again,
+            # while the older disqualification still blocks older snapshots.
+            reinstated = run_public(self.profile, fetcher=lambda _: first)
+            self.assertEqual(reinstated["color_review_count"], 1)
+            next_scan = run_public(self.profile, fetcher=lambda _: other)
+        self.assertEqual(next_scan["color_review_count"], 1)
+        self.assertEqual(next_scan["candidate_events"], 0)
+        self.assertEqual(next_scan["known_candidate_count"], 1)
+        self.assertEqual(next_scan["color_review"][0]["id"], "1234568")
+
+    def test_color_review_moves_to_silver_candidate_when_color_confirmed(self):
+        unknown = "Denon DCD-1700NE SACD Player"
+        first = page(card("1234567", GOOD, "500 €"), card("1234568", unknown, "210 €"))
+        confirmed = page(card("1234567", GOOD, "500 €"),
+                         card("1234568", "Denon DCD-1700NE SACD Player silber", "210 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            run_public(self.profile, fetcher=lambda _: first)
+            result = run_public(self.profile, fetcher=lambda _: confirmed)
+        self.assertEqual(result["known_candidate_count"], 2)
+        self.assertEqual(result["color_review_count"], 0)
+        self.assertEqual(result["new"], 1)
+        self.assertEqual(result["candidate_events"], 1)
+        self.assertNotIn("Farbe prüfen", (self.profile.parent / "bericht.html").read_text())
+
+    def test_color_review_older_than_72_hours_is_not_carried_forward(self):
+        import sqlite3
+        unknown = "Denon DCD-1700NE SACD Player"
+        first = page(card("1234567", GOOD, "500 €"),
+                     card("1234568", unknown, "210 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            run_public(self.profile, fetcher=lambda _: first)
+            db = self.profile.parent / "history.sqlite"
+            with sqlite3.connect(db) as conn, conn:
+                key, payload = conn.execute(
+                    "SELECT id, payload FROM radar_runs ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                report = json.loads(payload)
+                report["color_review"][0]["observed_at"] = "2025-01-01T00:00:00+00:00"
+                conn.execute("UPDATE radar_runs SET payload=? WHERE id=?",
+                             (json.dumps(report), key))
+            result = run_public(self.profile, fetcher=lambda _: page(card("1234567", GOOD, "500 €")))
+        self.assertEqual(result["color_review_count"], 0)
+        self.assertEqual(result["known_candidate_count"], 1)
+        self.assertNotIn("Farbe prüfen", (self.profile.parent / "bericht.html").read_text())
+
     def test_personal_model_price_target_is_not_market_median_and_alerts_once(self):
         html = page(card("1234567", GOOD, "350 €"))
         with patch("mark_api.bargain_radar.shutil.which", return_value="/mock/notify-send"), \
