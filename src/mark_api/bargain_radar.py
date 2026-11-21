@@ -34,33 +34,17 @@ def atomic_report(path: Path, text: str) -> None:
 
 
 def recent_color_review(db: sqlite3.Connection, incoming: list[dict],
-                        known_ids: set[str]) -> list[dict]:
-    """Keep recent photo-review offers visible across rotating search terms.
+                        known_ids: set[str], disqualified_ids: set[str]
+                        ) -> tuple[list[dict], list[str]]:
+    """Retain photo reviews across queries, but not after later disqualification.
 
-    Only the most recent six successful run reports are considered. These
-    records are *never* added to silver candidates or notification events.
+    A rejected ID is remembered only when it previously had a photo-review
+    listing, and only inside the existing bounded successful-run history.
     """
     from .silver_sacd import _fresh, model_key, rejection
     now = datetime.now(timezone.utc)
     latest: dict[str, dict] = {}
-
-    def add(row: object) -> None:
-        if not isinstance(row, dict) or len(latest) >= 200:
-            return
-        try:
-            offer = normalize_offer(row)
-        except (DealInputError, ValueError, TypeError):
-            return
-        if (offer.uid in known_ids or offer.uid in latest
-                or not _fresh(offer.observed_at, now)
-                or rejection(offer.title) != 'Explizite Silberangabe im Mailtitel fehlt'
-                or model_key(offer.title) is None
-                or rejection(offer.title + ' silber') is not None):
-            return
-        latest[offer.uid] = row
-
-    for row in incoming:
-        add(row)
+    history = []
     for (payload,) in db.execute(
             'SELECT payload FROM radar_runs ORDER BY id DESC LIMIT 6'):
         if len(payload) > 2_000_000:
@@ -69,13 +53,52 @@ def recent_color_review(db: sqlite3.Connection, incoming: list[dict],
             prior = json.loads(payload)
         except ValueError:
             continue
-        rows = prior.get('color_review', []) if isinstance(prior, dict) else []
+        if isinstance(prior, dict):
+            history.append(prior)
+
+    # Do not persist IDs for unrelated rejected search results. Only a card
+    # already present in a recent photo-review result can be retired.
+    historical_photo_ids = {
+        row.get('id')
+        for prior in history
+        for row in (prior.get('color_review', [])[:200]
+                    if isinstance(prior.get('color_review'), list) else [])
+        if isinstance(row, dict) and isinstance(row.get('id'), str)
+    }
+    newly_retired = sorted(disqualified_ids & historical_photo_ids)
+    blocked = set(newly_retired)
+
+    def add(row: object) -> None:
+        if not isinstance(row, dict) or len(latest) >= 200:
+            return
+        try:
+            offer = normalize_offer(row)
+        except (DealInputError, ValueError, TypeError):
+            return
+        if (offer.uid in known_ids or offer.uid in blocked
+                or offer.uid in latest or not _fresh(offer.observed_at, now)
+                or rejection(offer.title) != 'Explizite Silberangabe im Mailtitel fehlt'
+                or model_key(offer.title) is None
+                or rejection(offer.title + ' silber') is not None):
+            return
+        latest[offer.uid] = row
+
+    # Current fresh positive evidence takes precedence over *older* negative
+    # observations. Retirements apply only to rows older than that event.
+    for row in incoming:
+        add(row)
+    for prior in history:
+        retired = prior.get('color_review_retired_ids', [])
+        if isinstance(retired, list):
+            blocked.update(uid for uid in retired[:200]
+                           if isinstance(uid, str) and 1 <= len(uid) <= 80)
+        rows = prior.get('color_review', [])
         if isinstance(rows, list):
             for row in rows[:200]:
                 add(row)
-    return sorted(latest.values(), key=lambda row: (
+    return (sorted(latest.values(), key=lambda row: (
         Decimal(str(row['price_eur'])), str(row['title']).casefold(), str(row['id'])
-    ))
+    )), newly_retired)
 
 
 def run(config_path: Path, *, color_review: list[dict] | None = None,
@@ -115,6 +138,7 @@ def run(config_path: Path, *, color_review: list[dict] | None = None,
         from .radar_watch import RadarWatch
         targets = RadarWatch(config_path.parent.parent).price_targets(config_path)
     color_review = color_review or []
+    color_review_retired_ids: list[str] = []
     diagnostics = []
     mail_rows = []
     if mail_mode:
@@ -261,9 +285,9 @@ def run(config_path: Path, *, color_review: list[dict] | None = None,
             not_reviewable = (public_seen_ids or set()) - {
                 row.get('id') for row in color_review if isinstance(row, dict)
             }
-            color_review = recent_color_review(
-                db, color_review,
-                {item['id'] for item in known_candidates} | not_reviewable)
+            color_review, color_review_retired_ids = recent_color_review(
+                db, color_review, {item['id'] for item in known_candidates},
+                not_reviewable)
         events = []
         for item in evaluated:
             uid = item['id']
@@ -329,7 +353,8 @@ def run(config_path: Path, *, color_review: list[dict] | None = None,
                           personal_price_targets=len(targets),
                           personal_price_hits=sum(bool(event.get('personal_price_met')) for event in events),
                           color_review=color_review if public_mode else [],
-                          color_review_count=len(color_review) if public_mode else 0)
+                          color_review_count=len(color_review) if public_mode else 0,
+                          color_review_retired_ids=color_review_retired_ids if public_mode else [])
             if public_mode and public_search is not None:
                 result['public_search'] = public_search
         db.execute('INSERT INTO radar_runs(payload) VALUES (?)',

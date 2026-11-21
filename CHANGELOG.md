@@ -8,7 +8,7 @@ Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im K
 ### Behoben
 
 - Die getrennte **Farbe prüfen**-Liste bleibt nach einem Suchlauf mit SACD-Angeboten ohne belegte Silberfarbe auch bei den folgenden rotierenden Suchbegriffen sichtbar. Die letzten sechs erfolgreichen Berichte werden dafür wiederverwendet, höchstens 72 Stunden alte Beobachtungen.
-- Der Bericht nennt den **zuletzt beobachteten Zeitpunkt** und behauptet keine aktuelle Verfügbarkeit. Bereits als silberne SACD-Player bestätigte Inserats-IDs verschwinden aus der Foto-Prüfliste. Es entstehen weiterhin weder zusätzliche Netzabrufe noch automatische Farb- oder Schnäppchenalarme.
+- Der Bericht nennt den **zuletzt beobachteten Zeitpunkt** und behauptet keine aktuelle Verfügbarkeit. Bereits als silbern bestätigte Inserats-IDs sowie Anzeigen, die bei einer neueren Sichtung ausdrücklich schwarz oder anderweitig ungeeignet sind, verschwinden auch über folgende Suchläufe hinweg aus der Fotoprüfliste. Es entstehen weder zusätzliche Netzabrufe noch automatische Farb- oder Schnäppchenalarme.
 
 ## [1.7.0] - 2026-11-20
 

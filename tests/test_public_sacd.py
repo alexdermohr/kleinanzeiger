@@ -353,6 +353,42 @@ class PublicSacdTests(unittest.TestCase):
         self.assertNotIn('Farbe prüfen',
                          (self.profile.parent / 'bericht.html').read_text())
         self.assertNotIn('_seen_ids', result['public_search'])
+        self.assertEqual(result['color_review_retired_ids'], ['1234568'])
+        # Repeated rotations no longer see the black listing. The historic
+        # ambiguous row must not reappear after this negative observation.
+        third = run_public(self.profile, fetcher=lambda _: first.replace(
+            card('1234568', ambiguous, '210 €'), ''))
+        self.assertEqual(third['public_search']['color_review_count'], 0)
+        self.assertEqual(third['color_review_count'], 0)
+        self.assertEqual(third['candidate_events'], 0)
+        self.assertEqual(third['known_candidate_count'], 1)
+        self.assertEqual(third['color_review_retired_ids'], [])
+        self.assertNotIn('Farbe prüfen', (self.profile.parent / 'bericht.html').read_text())
+        fourth = run_public(self.profile, fetcher=lambda _: page(card('1234567', GOOD, '500 €')))
+        self.assertEqual(fourth['color_review_count'], 0)
+
+    def test_current_unverified_title_can_supersede_older_black_disqualification(self):
+        ambiguous = "Denon DCD-1700NE SACD Player"
+        first = page(card("1234567", GOOD, "500 €"),
+                     card("1234568", ambiguous, "210 €"))
+        black = page(card("1234567", GOOD, "500 €"),
+                     card("1234568", ambiguous + " schwarz", "210 €"))
+        other = page(card("1234567", GOOD, "500 €"))
+        with patch("mark_api.bargain_radar.shutil.which", return_value=None):
+            run_public(self.profile, fetcher=lambda _: first)
+            removed = run_public(self.profile, fetcher=lambda _: black)
+            self.assertEqual(removed["color_review_count"], 0)
+            still_removed = run_public(self.profile, fetcher=lambda _: other)
+            self.assertEqual(still_removed["color_review_count"], 0)
+            # Newer current positive photo-review evidence is allowed again,
+            # while the older disqualification still blocks older snapshots.
+            reinstated = run_public(self.profile, fetcher=lambda _: first)
+            self.assertEqual(reinstated["color_review_count"], 1)
+            next_scan = run_public(self.profile, fetcher=lambda _: other)
+        self.assertEqual(next_scan["color_review_count"], 1)
+        self.assertEqual(next_scan["candidate_events"], 0)
+        self.assertEqual(next_scan["known_candidate_count"], 1)
+        self.assertEqual(next_scan["color_review"][0]["id"], "1234568")
 
     def test_color_review_moves_to_silver_candidate_when_color_confirmed(self):
         unknown = "Denon DCD-1700NE SACD Player"

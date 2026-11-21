@@ -428,7 +428,9 @@ beobachtete Prüfangebote über die nächsten Suchvarianten hinweg sichtbar,
 soweit sie in den letzten sechs erfolgreichen Radarläufen und höchstens
 72 Stunden zuvor beobachtet wurden. Zuletzt beobachtete Angebote sind
 nicht als aktuell verfügbar bestätigt; wird dieselbe ID später als silberner
-SACD-Player erkannt, verschwindet sie aus der getrennten Prüfliste.
+SACD-Player erkannt oder ausdrücklich als schwarz beziehungsweise ungeeignet
+widerlegt, verschwindet sie auch bei den folgenden rotierenden Suchläufen
+aus der getrennten Prüfliste.
 Ein Angebotsmedian ist ausschließlich bei mindestens vier frischen weiteren
 Inseraten desselben Modells verfügbar. Sonst gibt es keine statistische
 Schnäppchenwertung.
