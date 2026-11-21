@@ -500,7 +500,11 @@ Bei Start prüft die Kontrollzentrale im Hintergrund auf offizielle neue Version
 Unter Updates lassen sich verfügbare Versionshinweise im Browser öffnen.
 Die Installation erfolgt nicht automatisch. Bei Netzfehlern bleibt der Betrieb erhalten.
 """
-CHANGES = """Kleinanzeiger 1.7.1 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.8.0 · KDE-Kontrollzentrale
+Neu: Beim Start prüft die KDE-Zentrale im Hintergrund nach offiziellen
+stabilen Updates, zeigt eine neuere Version direkt im Menü und öffnet
+nur nach Bestätigung die offizielle GitHub-Release-Seite im Browser.
+Keine automatische Installation, keine Konto- oder Marktplatzmutation.
 Behoben: Die manuelle Farbfotoprüfliste bleibt auch bei den folgenden
 abwechselnden SACD-Suchen sichtbar, soweit die letzte Sichtung höchstens
 72 Stunden zurückliegt. Zeitstempel und unbestätigte Farbe bleiben kenntlich.
