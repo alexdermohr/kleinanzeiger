@@ -3,6 +3,13 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.8.0] - 2026-11-21
+
+### Neu
+
+- **Linux/KDE zeigt offizielle Updates automatisch an:** Die Kontrollzentrale prüft bei jedem Start einmal im Hintergrund die neueste stabile Veröffentlichung auf GitHub. Neuere Versionsnummern erscheinen im Aktionsmenü und in der Diagnose, ohne andere Funktionen bei langsamer oder fehlender Internetverbindung aufzuhalten.
+- **Versionshinweise auf Wunsch öffnen:** Unter **Updates / Version prüfen** lässt sich die offizielle Release-Seite nach ausdrücklicher Bestätigung im Browser öffnen. Der Vergleich ist numerisch, die GitHub-Weiterleitung auf genau dieses Repository begrenzt und vorläufige Versionen werden nicht als stabiles Update dargestellt. Linux-Updates werden nicht automatisch installiert; lokale Daten, SACD-Timer und bestehende Programmversionen bleiben erhalten.
+
 ## [1.7.1] - 2026-11-20
 
 ### Behoben
