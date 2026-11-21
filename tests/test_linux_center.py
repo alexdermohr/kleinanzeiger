@@ -475,6 +475,45 @@ class CenterTests(unittest.TestCase):
             self.assertEqual(mod.main(), 2)
             spawn.assert_not_called()
 
+    def test_background_release_check_offline_and_available(self):
+        with patch.object(mod.linux_release_check, "latest_release", return_value="1.8.0") as lookup, \
+             patch.object(mod, "version", return_value="1.7.1"):
+            self.center.begin_release_check()
+            self.center._release_thread.join(timeout=2)
+            self.assertTrue(self.center._release_checked)
+            self.assertIn("1.8.0", self.center._update_caption())
+            self.center.begin_release_check()
+            lookup.assert_called_once()
+
+    def test_updates_open_official_release_only_on_user_yes(self):
+        self.center._release_checked = True
+        self.center._release_latest = "1.8.0"
+        with patch.object(mod, "version", return_value="1.7.1"), \
+             patch.object(self.center, "dialog", return_value=None), \
+             patch.object(mod.subprocess, "run") as launch:
+            self.center.show_updates()
+        launch.assert_not_called()
+        with patch.object(mod, "version", return_value="1.7.1"), \
+             patch.object(self.center, "dialog", return_value=""), \
+             patch.object(mod.shutil, "which", return_value="/usr/bin/xdg-open"), \
+             patch.object(mod.subprocess, "run") as launch:
+            self.center.show_updates()
+        self.assertEqual(launch.call_args.args[0][-1],
+                         mod.linux_release_check.release_url("1.8.0"))
+        self.assertFalse(launch.call_args.kwargs["shell"])
+
+    def test_update_check_does_not_block_offline_operations(self):
+        self.center._release_checked = True
+        self.center._release_latest = None
+        with patch.object(mod, "version", return_value="1.7.1"), patch.object(
+            self.center, "message"
+        ) as display:
+            self.center.show_updates()
+        self.assertIn("nicht möglich", display.call_args.args[0])
+        self.assertIn("\n", display.call_args.args[0])
+        self.assertIn("Schnäppchenjäger", mod.MANUAL)
+        self.assertIn("Hintergrund", mod.MANUAL)
+
 
 if __name__ == "__main__":
     unittest.main()

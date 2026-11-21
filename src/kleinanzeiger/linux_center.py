@@ -13,9 +13,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
 
-from . import linux_launcher
+from . import linux_launcher, linux_release_check
 
 
 @contextmanager
@@ -47,6 +48,60 @@ class Center:
         self.db = db
         self.client = None
         self.last_status = "Bereit"
+        self._release_checked = False
+        self._release_latest = None
+        self._release_thread = None
+
+    def begin_release_check(self) -> None:
+        """Start one read-only check without slowing the first KDE dialog."""
+        if self._release_thread is not None:
+            return
+        self._release_thread = threading.Thread(
+            target=self._release_check_worker, name="kleinanzeiger-release-check", daemon=True
+        )
+        self._release_thread.start()
+
+    def _release_check_worker(self) -> None:
+        try:
+            self._release_latest = linux_release_check.latest_release()
+        except Exception:
+            self._release_latest = None
+        finally:
+            self._release_checked = True
+
+    def _update_caption(self) -> str:
+        latest = self._release_latest
+        if self._release_checked and linux_release_check.newer(version("kleinanzeiger"), latest):
+            return f"Neue Version {latest} – Versionshinweise"
+        return "Updates / Version prüfen"
+
+    def show_updates(self) -> None:
+        installed = version("kleinanzeiger")
+        if not self._release_checked:
+            self.message("Die automatische Suche nach neuen Versionen läuft im Hintergrund.\n"
+                         "Updates später erneut öffnen.")
+            return
+        latest = self._release_latest
+        if latest is None:
+            self.message("Aktuelle Version: " + installed + "\n"
+                         "Offizielle Release-Abfrage derzeit nicht möglich.\n"
+                         "Der normale Betrieb bleibt unverändert.")
+        elif linux_release_check.newer(installed, latest):
+            if self.dialog("--yesno", f"Version {latest} ist verfügbar (installiert: {installed}).\n"
+                           "Offizielle Versionshinweise und Downloads im Browser öffnen?\n"
+                           "Installation erfolgt nicht automatisch.") is not None:
+                opener = shutil.which("xdg-open")
+                if not opener:
+                    raise OSError("browser opener unavailable")
+                subprocess.run(
+                    [opener, linux_release_check.release_url(latest)],
+                    shell=False, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=30, check=True,
+                )
+        else:
+            self.message(f"Kleinanzeiger {installed} ist aktuell.\n"
+                         f"Neueste offizielle Version: {latest}")
 
     def dialog(self, *args: str) -> str | None:
         result = subprocess.run(
@@ -379,7 +434,15 @@ class Center:
         if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", installed):
             installed = "unbekannt"
         # Only allowlisted values; never paths, environment, child output or exceptions.
-        self.text("Kleinanzeiger " + installed + "\nKDE-Dialoge: verfügbar\n"
+        status = (
+            "Prüfung läuft" if not self._release_checked else
+            "nicht verfügbar" if self._release_latest is None else
+            f"neuer als installiert: {self._release_latest}" if
+            linux_release_check.newer(installed, self._release_latest) else
+            f"aktuell: {self._release_latest}"
+        )
+        self.text("Kleinanzeiger " + installed + "\nUpdateprüfung: " + status
+                  + "\nKDE-Dialoge: verfügbar\n"
                   "Client: " + ("läuft" if self.client and self.client.poll() is None else "beendet")
                   + "\nLetzte Aktion: " + self.last_status)
 
@@ -388,15 +451,16 @@ class Center:
             "konto": lambda: self.start("konto"), "offline": lambda: self.start("offline"),
             "stop": self.stop, "backup": self.backup, "articles": self.articles,
             "weekly": self.weekly, "bargains": self.bargains, "diagnostics": self.diagnostics,
+            "updates": self.show_updates,
             "manual": lambda: self.text(MANUAL), "changes": lambda: self.text(CHANGES),
         }
-        menu = ("konto", "Konto / Dashboard starten", "offline", "Offline-Dashboard starten",
-                "stop", "Client beenden", "backup", "SQLite-Backup erstellen",
-                "articles", "Artikel CSV/XLSX: Vorschau und Import", "weekly", "Wochenbericht",
-                "bargains", "Schnäppchenjäger", "diagnostics", "Diagnose",
-                "manual", "Handbuch", "changes", "Änderungen")
         try:
             while True:
+                menu = ("konto", "Konto / Dashboard starten", "offline", "Offline-Dashboard starten",
+                        "stop", "Client beenden", "backup", "SQLite-Backup erstellen",
+                        "articles", "Artikel CSV/XLSX: Vorschau und Import", "weekly", "Wochenbericht",
+                        "bargains", "Schnäppchenjäger", "updates", self._update_caption(),
+                        "diagnostics", "Diagnose", "manual", "Handbuch", "changes", "Änderungen")
                 choice = self.dialog("--menu", "Aktion wählen (Abbrechen beendet den Client):", *menu)
                 if choice is None:
                     return 0
@@ -430,8 +494,11 @@ Kandidaten erscheinen aufsteigend nach beobachtetem Angebotspreis. Erst vier
 weitere frische Inserate desselben Modells ermöglichen einen Vergleichsmedian.
 Persönliche Preislimits sind keine Marktwerte. Angebote ohne Silberangabe erscheinen nur zur Fotoprüfung, ohne Alarm.
 Tatsächliche Verkaufspreise und Funktionsfähigkeit sind nicht belegt.
-Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung, E-Mail-Import und
-Updates erfolgen nicht über diese Oberfläche. Updates über die eigene Paketverwaltung.
+Die bisherige KI-Funktion bleibt unverändert. Wiederherstellung und
+E-Mail-Import erfolgen nicht über diese Oberfläche.
+Bei Start prüft die Kontrollzentrale im Hintergrund auf offizielle neue Versionen.
+Unter Updates lassen sich verfügbare Versionshinweise im Browser öffnen.
+Die Installation erfolgt nicht automatisch. Bei Netzfehlern bleibt der Betrieb erhalten.
 """
 CHANGES = """Kleinanzeiger 1.7.1 · KDE-Kontrollzentrale
 Behoben: Die manuelle Farbfotoprüfliste bleibt auch bei den folgenden
@@ -481,6 +548,7 @@ def main() -> int:
             if not acquired:
                 center.message("Die Kontrollzentrale ist bereits geöffnet.")
                 return 1
+            center.begin_release_check()
             return center.run()
     except KeyboardInterrupt:
         return 130
