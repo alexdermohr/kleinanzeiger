@@ -336,6 +336,24 @@ class PublicSacdTests(unittest.TestCase):
             self.assertEqual(repeated["color_review_count"], 1)
             self.assertEqual(repeated["candidate_events"], 0)
 
+    def test_explicit_black_title_removes_previous_photo_review(self):
+        ambiguous = 'Denon DCD-1700NE SACD Player'
+        first = page(card('1234567', GOOD, '500 €'),
+                     card('1234568', ambiguous, '210 €'))
+        clarified = page(card('1234567', GOOD, '500 €'),
+                         card('1234568', ambiguous + ' schwarz', '210 €'))
+        with patch('mark_api.bargain_radar.shutil.which', return_value=None):
+            self.assertEqual(run_public(self.profile, fetcher=lambda _: first)
+                             ['color_review_count'], 1)
+            result = run_public(self.profile, fetcher=lambda _: clarified)
+        self.assertEqual(result['public_search']['color_review_count'], 0)
+        self.assertEqual(result['color_review_count'], 0)
+        self.assertEqual(result['known_candidate_count'], 1)
+        self.assertEqual(result['candidate_events'], 0)
+        self.assertNotIn('Farbe prüfen',
+                         (self.profile.parent / 'bericht.html').read_text())
+        self.assertNotIn('_seen_ids', result['public_search'])
+
     def test_color_review_moves_to_silver_candidate_when_color_confirmed(self):
         unknown = "Denon DCD-1700NE SACD Player"
         first = page(card("1234567", GOOD, "500 €"), card("1234568", unknown, "210 €"))

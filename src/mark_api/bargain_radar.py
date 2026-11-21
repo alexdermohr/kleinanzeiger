@@ -79,7 +79,8 @@ def recent_color_review(db: sqlite3.Connection, incoming: list[dict],
 
 
 def run(config_path: Path, *, color_review: list[dict] | None = None,
-        public_search: dict | None = None) -> dict:
+        public_search: dict | None = None,
+        public_seen_ids: set[str] | None = None) -> dict:
     """One transaction per run, including report generation; fail closed on locks."""
     config = json.loads(config_path.read_text(encoding='utf-8-sig'))
     if not isinstance(config, dict):
@@ -255,8 +256,14 @@ def run(config_path: Path, *, color_review: list[dict] | None = None,
             evaluated = assess_offers(current_offers, model, min_peers=min_peers,
                                       discount_threshold=threshold)
         if public_mode and category:
+            # A newly seen listing that no longer qualifies for photo
+            # review (e.g. explicitly black) supersedes its older snapshot.
+            not_reviewable = (public_seen_ids or set()) - {
+                row.get('id') for row in color_review if isinstance(row, dict)
+            }
             color_review = recent_color_review(
-                db, color_review, {item['id'] for item in known_candidates})
+                db, color_review,
+                {item['id'] for item in known_candidates} | not_reviewable)
         events = []
         for item in evaluated:
             uid = item['id']
