@@ -110,7 +110,10 @@ class Center:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-        if result.returncode == 1:  # Cancel / No / window close
+        # Real kdialog returns 1 for menu Escape/No and 2 for Escape in
+        # yes/no and message dialogs. A failed invocation can also return 1,
+        # but reports the error on stderr; never silently treat that as No.
+        if result.returncode in (1, 2) and not (result.stderr or "").strip():
             return None
         raise OSError("dialog failed")
 
@@ -500,7 +503,11 @@ Bei Start prüft die Kontrollzentrale im Hintergrund auf offizielle neue Version
 Unter Updates lassen sich verfügbare Versionshinweise im Browser öffnen.
 Die Installation erfolgt nicht automatisch. Bei Netzfehlern bleibt der Betrieb erhalten.
 """
-CHANGES = """Kleinanzeiger 1.8.1 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.8.2 · KDE-Kontrollzentrale
+Behoben: Escape schließt auch Ja/Nein- und Hinweisdialoge normal.
+Echte KDialog-Aufruffehler bleiben als Fehler erkennbar.
+Keine Änderungen an Daten oder Plattformfunktionen.
+
 Behoben: Ein zu früher Timerlauf nach einem Neustart wird wegen der
 fortgeltenden 30-Minuten-Abrufsperre als übersprungen gemeldet,
 nicht mehr als fehlgeschlagener Dienst. Keine neuen HTTP-Abfragen,
