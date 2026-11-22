@@ -21,14 +21,22 @@ class CenterTests(unittest.TestCase):
         self.center = mod.Center("/fake/kdialog", self.db)
 
     def test_dialog_cancel_error_and_literal_argv(self):
-        for code, expected in ((0, "x"), (1, None)):
-            with patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], code, "x\n")) as run:
+        # Native Qt KDialog on Heim-PC: yes/no Escape and msgbox Escape
+        # return 2, whereas menu Escape returns 1.
+        for code, expected in ((0, "x"), (1, None), (2, None)):
+            with patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], code, "x\n" if code == 0 else "", "")) as run:
                 self.assertEqual(self.center.dialog("--inputbox", "$(touch nope); `false`"), expected)
                 self.assertFalse(run.call_args.kwargs["shell"])
                 self.assertEqual(run.call_args.args[0][-1], "$(touch nope); `false`")
-        with patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, "")):
-            with self.assertRaises(OSError):
-                self.center.dialog("--msgbox", "test")
+        # A real invalid KDialog option exits 1 with diagnostic stderr.
+        # Genuine dialog failures must not be mistaken for user cancellation.
+        for code, stderr in ((1, "kdialog: Unbekannte Option."),
+                             (2, "qt: dialog failure"), (3, "")):
+            with patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], code, "", stderr)):
+                with self.assertRaisesRegex(OSError, "dialog failed"):
+                    self.center.dialog("--msgbox", "test")
 
     def test_single_instance_and_release(self):
         with mod.instance_lock(self.root) as first:

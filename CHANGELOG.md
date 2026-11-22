@@ -3,6 +3,14 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.8.2] - 2026-11-22
+
+### Behoben
+
+- KDE: Escape in Ja/Nein- und Hinweisdialogen wird korrekt als Abbruch behandelt. Die native KDialog-Rückgabe 2 führte bisher fälschlich zu einer Fehlermeldung.
+- Fehlerhafte KDialog-Aufrufe mit Diagnose auf stderr werden nicht mehr als normaler Abbruch verschluckt, auch wenn deren Rückgabecode 1 lautet.
+- Bei Abbruch keine Änderungen an Anzeigen, SQLite, SACD-Suche, Kundendaten oder Abruffrequenz.
+
 ## [1.8.1] - 2026-11-22
 
 ### Behoben
