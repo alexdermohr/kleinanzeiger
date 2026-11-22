@@ -266,6 +266,8 @@ def _enforce_fetch_interval(lock_fd: int) -> int:
                 raise ValueError("invalid query slot")
         except (UnicodeError, ValueError) as exc:
             raise DealInputError("Ungültiger letzter Abrufzeitpunkt") from exc
+        if last > now:
+            raise DealInputError("Letzter Abrufzeitpunkt liegt in der Zukunft")
         if now < last + MIN_FETCH_INTERVAL_SECONDS:
             raise PublicFetchDeferred("Öffentliche Suche höchstens alle 30 Minuten erlaubt")
     slot = (previous_slot + 1) % len(SEARCH_URLS)
