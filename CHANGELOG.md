@@ -3,6 +3,13 @@
 Hier steht, was sich für Nutzerinnen und Nutzer mit jeder veröffentlichten Version ändert.
 Die wichtigsten Änderungen erscheinen bei einem verfügbaren Update direkt im Kontrollfenster.
 
+## [1.8.1] - 2026-11-22
+
+### Behoben
+
+- **Automatischer SACD-Suchlauf nach einem Neustart:** Wenn der systemd-Timer früher als 30 Minuten nach dem letzten erfolgreichen Abruf startet, wird dieser erwartete Leerlauf ausdrücklich als „übersprungen (Cooldown)“ protokolliert und nicht länger fälschlich als fehlgeschlagene Suche angezeigt.
+- **Abrufschutz unverändert:** Ein übersprungener Lauf fragt weder Kleinanzeigen ab noch verändert er Suchzeitpunkt, rotierenden Suchbegriff, gespeicherte Inserate, Berichte oder SQLite-Historie. Echte Fehler wie beschädigte Daten, parallele Abrufe oder HTTP-/Layout-Probleme werden weiterhin mit Fehlerstatus gemeldet. Der reguläre 30-Minuten-Timer bleibt bestehen.
+
 ## [1.8.0] - 2026-11-21
 
 ### Neu

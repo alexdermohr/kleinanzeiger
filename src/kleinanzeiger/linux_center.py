@@ -500,7 +500,13 @@ Bei Start prüft die Kontrollzentrale im Hintergrund auf offizielle neue Version
 Unter Updates lassen sich verfügbare Versionshinweise im Browser öffnen.
 Die Installation erfolgt nicht automatisch. Bei Netzfehlern bleibt der Betrieb erhalten.
 """
-CHANGES = """Kleinanzeiger 1.8.0 · KDE-Kontrollzentrale
+CHANGES = """Kleinanzeiger 1.8.1 · KDE-Kontrollzentrale
+Behoben: Ein zu früher Timerlauf nach einem Neustart wird wegen der
+fortgeltenden 30-Minuten-Abrufsperre als übersprungen gemeldet,
+nicht mehr als fehlgeschlagener Dienst. Keine neuen HTTP-Abfragen,
+kein Zurücksetzen des Suchzählers, kein Überschreiben der Berichte.
+Echte HTTP-, Daten- und Sperrfehler bleiben ausdrücklich Fehler.
+
 Neu: Beim Start prüft die KDE-Zentrale im Hintergrund nach offiziellen
 stabilen Updates, zeigt eine neuere Version direkt im Menü und öffnet
 nur nach Bestätigung die offizielle GitHub-Release-Seite im Browser.
