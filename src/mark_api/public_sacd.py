@@ -36,6 +36,10 @@ NUMERIC_PRICE = re.compile(r"([0-9]{1,3}(?:\.[0-9]{3})*|[0-9]+)(?:,([0-9]{1,2}))
 USER_AGENT = "Kleinanzeiger/1.7 (private, low-frequency public-offer monitoring)"
 
 
+class PublicFetchDeferred(DealInputError):
+    """Expected no-op when a boot/restart timer fires before the fetch interval."""
+
+
 class _SameHostRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urlsplit(newurl)
@@ -262,8 +266,10 @@ def _enforce_fetch_interval(lock_fd: int) -> int:
                 raise ValueError("invalid query slot")
         except (UnicodeError, ValueError) as exc:
             raise DealInputError("Ungültiger letzter Abrufzeitpunkt") from exc
+        if last > now:
+            raise DealInputError("Letzter Abrufzeitpunkt liegt in der Zukunft")
         if now < last + MIN_FETCH_INTERVAL_SECONDS:
-            raise DealInputError("Öffentliche Suche höchstens alle 30 Minuten erlaubt")
+            raise PublicFetchDeferred("Öffentliche Suche höchstens alle 30 Minuten erlaubt")
     slot = (previous_slot + 1) % len(SEARCH_URLS)
     payload = f"{now} {slot}\n".encode("ascii")
     os.lseek(lock_fd, 0, os.SEEK_SET)
@@ -309,6 +315,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         result = run_public(args.profile)
+    except PublicFetchDeferred:
+        # OnBootSec can fire before the 30-minute minimum after a reboot.
+        # No HTTP request, fetch-slot advancement or report mutation occurred.
+        # This is a skipped timer tick, not a failed public search.
+        print(json.dumps({"status": "skipped", "reason": "cooldown"}))
+        return 0
     except (ValueError, OSError) as exc:
         print(f"Öffentliche SACD-Suche: {exc}", file=sys.stderr)
         return 2

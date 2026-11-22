@@ -532,6 +532,78 @@ class PublicSacdTests(unittest.TestCase):
             run_public(self.profile, fetcher=fetch)
         self.assertEqual(calls, [1, 1])
 
+    def test_cli_expected_boot_cooldown_is_clean_skip_without_any_writes(self):
+        from contextlib import redirect_stdout, redirect_stderr
+        from io import StringIO
+        from mark_api import public_sacd
+
+        offered = page(card("1234567"))
+        fetches = []
+        def fake_fetch(url):
+            fetches.append(url)
+            return offered
+        with patch("mark_api.public_sacd._attempt_time", side_effect=[1800000000, 1800000001]):
+            run_public(self.profile, fetcher=fake_fetch)
+            tracked = ("profil.json", "angebote.json", "bericht.json",
+                       "bericht.html", "history.sqlite", ".public-sacd.lock")
+            before = {name: (self.profile.parent / name).read_bytes()
+                      for name in tracked}
+            out, err = StringIO(), StringIO()
+            with patch.object(
+                public_sacd, "run_public",
+                side_effect=lambda profile: run_public(profile, fetcher=fake_fetch)
+            ), redirect_stdout(out), redirect_stderr(err):
+                code = public_sacd.main(["--profile", str(self.profile)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue()), {"status": "skipped", "reason": "cooldown"})
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(fetches, [SEARCH_URLS[0]])
+        self.assertEqual(before, {name: (self.profile.parent / name).read_bytes()
+                                  for name in tracked})
+
+    def test_cli_future_last_fetch_is_real_failure_not_cooldown(self):
+        from contextlib import redirect_stdout, redirect_stderr
+        from io import StringIO
+        from mark_api import public_sacd
+
+        offered = page(card("1234567"))
+        fetches = []
+        def fake_fetch(url):
+            fetches.append(url)
+            return offered
+        with patch("mark_api.public_sacd._attempt_time",
+                   side_effect=[1800000000, 1799999999]):
+            run_public(self.profile, fetcher=fake_fetch)
+            snapshot = (self.profile.parent / "bericht.json").read_bytes()
+            lock = (self.profile.parent / ".public-sacd.lock").read_bytes()
+            out, err = StringIO(), StringIO()
+            with (patch.object(public_sacd, "run_public",
+                               side_effect=lambda profile: run_public(profile, fetcher=fake_fetch)),
+                  redirect_stdout(out), redirect_stderr(err)):
+                status = public_sacd.main(["--profile", str(self.profile)])
+        self.assertEqual(status, 2)
+        self.assertIn("Zukunft", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(fetches, [SEARCH_URLS[0]])
+        self.assertEqual(snapshot, (self.profile.parent / "bericht.json").read_bytes())
+        self.assertEqual(lock, (self.profile.parent / ".public-sacd.lock").read_bytes())
+
+    def test_cli_real_failure_is_still_nonzero(self):
+        from contextlib import redirect_stdout, redirect_stderr
+        from io import StringIO
+        from mark_api import public_sacd
+
+        for error in ("HTTP 403", "Öffentliche Suche läuft bereits",
+                      "Ungültiger letzter Abrufzeitpunkt"):
+            with self.subTest(error=error):
+                out, err = StringIO(), StringIO()
+                with patch.object(public_sacd, "run_public", side_effect=DealInputError(error)), \
+                     redirect_stdout(out), redirect_stderr(err):
+                    code = public_sacd.main(["--profile", str(self.profile)])
+                self.assertEqual(code, 2)
+                self.assertEqual(out.getvalue(), "")
+                self.assertIn(error, err.getvalue())
+
     def test_timer_and_manual_scan_cannot_overlap(self):
         from mark_api.public_sacd import _single_public_run
         from mark_api.bargain_hunter import DealInputError
